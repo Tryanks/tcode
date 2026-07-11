@@ -8,10 +8,10 @@ mod ui;
 
 use std::borrow::Cow;
 
-use gpui::{AppContext as _, KeyBinding, WindowBounds, WindowOptions, px, size};
-use gpui_component::{
-    ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry, TitleBar,
+use gpui::{
+    AppContext as _, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
+use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry};
 
 const TCODE_THEME: &str = include_str!("../themes/tcode.json");
 
@@ -31,6 +31,11 @@ fn main() {
     // launch so those surfaces can be screenshotted headlessly.
     let open_settings = std::env::args().any(|arg| arg == "--open-settings");
     let open_palette = std::env::args().any(|arg| arg == "--open-palette");
+    // Hidden dev flag: open a draft thread for a project (by id or name) so the
+    // draft state can be screenshotted headlessly.
+    let open_draft = std::env::args()
+        .skip_while(|arg| arg != "--open-draft")
+        .nth(1);
     let store = store::SessionStore::open_default().expect("failed to open tcode data directory");
 
     gpui_platform::application()
@@ -75,7 +80,13 @@ fn main() {
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
                 window_min_size: Some(size(px(900.), px(600.))),
-                titlebar: Some(TitleBar::title_bar_options()),
+                // Seamless titlebar: transparent, with the traffic lights nudged
+                // down to sit vertically centered in the 52px top strip.
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.), px(18.))),
+                }),
                 ..Default::default()
             };
 
@@ -108,7 +119,12 @@ fn main() {
 
                 if let Some(spec) = smoke_spec {
                     let _ = cx.update(|cx| smoke::drive(spec, app_state, cx));
-                } else if open_latest || open_terminal || open_settings || open_palette {
+                } else if open_latest
+                    || open_terminal
+                    || open_settings
+                    || open_palette
+                    || open_draft.is_some()
+                {
                     let _ = app_state.update(cx, |state, cx| {
                         if open_latest || open_terminal {
                             state.open_latest_session(cx);
@@ -124,6 +140,16 @@ fn main() {
                         }
                         if open_palette {
                             state.open_palette(cx);
+                        }
+                        if let Some(key) = &open_draft {
+                            if let Some(project) = state
+                                .projects
+                                .iter()
+                                .find(|p| p.id == *key || p.name == *key)
+                                .cloned()
+                            {
+                                state.start_draft(project.id, project.root, cx);
+                            }
                         }
                     });
                 }

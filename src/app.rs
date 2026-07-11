@@ -9,7 +9,7 @@ use agent::{
 use gpui::{Context, EventEmitter, Task};
 
 use crate::session::Timeline;
-use crate::settings::{Settings, SettingsStore};
+use crate::settings::{ProjectSort, Settings, SettingsStore};
 use crate::store::{Project, SessionMeta, SessionStore, now_millis, now_secs};
 
 const TITLE_MAX_CHARS: usize = 40;
@@ -22,8 +22,12 @@ pub struct ProjectGroup {
 }
 
 /// Group `sessions` under their `projects`, ordering sessions newest-activity
-/// first within each group and groups by their most recent activity.
-pub fn group_sessions(projects: &[Project], sessions: &[SessionMeta]) -> Vec<ProjectGroup> {
+/// first within each group and groups per `sort`.
+pub fn group_sessions(
+    projects: &[Project],
+    sessions: &[SessionMeta],
+    sort: ProjectSort,
+) -> Vec<ProjectGroup> {
     let mut groups: Vec<ProjectGroup> = projects
         .iter()
         .map(|project| {
@@ -40,17 +44,28 @@ pub fn group_sessions(projects: &[Project], sessions: &[SessionMeta]) -> Vec<Pro
         })
         .collect();
 
-    // Groups ordered by newest activity (falling back to project creation).
-    groups.sort_by(|a, b| {
-        let activity = |g: &ProjectGroup| {
-            g.sessions
-                .iter()
-                .map(|s| s.updated_at)
-                .max()
-                .unwrap_or(g.project.created_at)
-        };
-        activity(b).cmp(&activity(a))
-    });
+    match sort {
+        // Groups ordered by newest activity (falling back to project creation).
+        ProjectSort::RecentActivity => groups.sort_by(|a, b| {
+            let activity = |g: &ProjectGroup| {
+                g.sessions
+                    .iter()
+                    .map(|s| s.updated_at)
+                    .max()
+                    .unwrap_or(g.project.created_at)
+            };
+            activity(b).cmp(&activity(a))
+        }),
+        // Groups ordered by project name, case-insensitive A-Z.
+        ProjectSort::NameAsc => {
+            groups.sort_by(|a, b| {
+                a.project
+                    .name
+                    .to_lowercase()
+                    .cmp(&b.project.name.to_lowercase())
+            });
+        }
+    }
     groups
 }
 
@@ -58,6 +73,8 @@ pub fn group_sessions(projects: &[Project], sessions: &[SessionMeta]) -> Vec<Pro
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Error(String),
+    /// A success/info notice (e.g. a branch checkout succeeded).
+    Notice(String),
 }
 
 /// The top-level window route: the chat workspace or the full-page settings.
@@ -83,6 +100,12 @@ pub struct ActiveSession {
     pub timeline: Timeline,
     /// Git branch of the session cwd, if it is a git repo (display-only).
     pub git_branch: Option<String>,
+    /// Local branches for the checkout-row picker, loaded lazily when the
+    /// popover opens (empty until then / when not a git repo).
+    pub branches: Vec<String>,
+    /// A draft thread: set up (provider/model/cwd) but not yet persisted or
+    /// started. Materialized into a real session on the first send.
+    pub draft: bool,
     runtime: Runtime,
     /// The model the live provider process was actually started with. When the
     /// user picks a different model we compare against this to decide whether a
@@ -401,7 +424,19 @@ impl AppState {
 
     /// Sessions grouped by project for the sidebar.
     pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
-        group_sessions(&self.projects, &self.sessions)
+        group_sessions(&self.projects, &self.sessions, self.settings.project_sort)
+    }
+
+    /// The current sidebar sort mode (for the sort button tooltip/label).
+    pub fn project_sort(&self) -> ProjectSort {
+        self.settings.project_sort
+    }
+
+    /// Cycle the sidebar PROJECTS ordering and persist it.
+    pub fn cycle_project_sort(&mut self, cx: &mut Context<Self>) {
+        let mut settings = self.settings.clone();
+        settings.project_sort = settings.project_sort.next();
+        self.update_settings(settings, cx);
     }
 
     /// Create a project rooted at `root` (native picker feeds this).
@@ -493,6 +528,8 @@ impl AppState {
             meta,
             timeline: Timeline::default(),
             git_branch,
+            branches: Vec::new(),
+            draft: false,
             runtime: Runtime::Idle,
             live_model: None,
             pending_sends: Vec::new(),
@@ -507,6 +544,78 @@ impl AppState {
         });
         self.ensure_started(cx);
         cx.notify();
+    }
+
+    // -- draft threads ------------------------------------------------------
+
+    /// Build a draft `ActiveSession` for `cwd` under `project_id`: set up but
+    /// not persisted or started (see `commit_draft`). Pure (no store/cx) so the
+    /// draft flow is unit-testable.
+    fn build_draft_session(
+        project_id: String,
+        cwd: PathBuf,
+        provider: ProviderKind,
+        model: Option<String>,
+    ) -> ActiveSession {
+        let mut meta = SessionMeta::new(provider, cwd, model);
+        meta.project_id = Some(project_id);
+        let git_branch = read_git_branch(&meta.cwd);
+        ActiveSession {
+            meta,
+            timeline: Timeline::default(),
+            git_branch,
+            branches: Vec::new(),
+            draft: true,
+            runtime: Runtime::Idle,
+            live_model: None,
+            pending_sends: Vec::new(),
+            turn_in_flight: false,
+            diff_open: false,
+            diff_expanded: false,
+            diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
+            _pump: None,
+        }
+    }
+
+    /// The provider + model a new draft should start with: the most recently
+    /// used session's, else the Claude default.
+    fn draft_defaults(&self) -> (ProviderKind, Option<String>) {
+        match self.sessions.first() {
+            Some(meta) => (meta.provider, meta.model.clone()),
+            None => (ProviderKind::ClaudeCode, None),
+        }
+    }
+
+    /// Switch the main area into a draft for `project_id` (rooted at `cwd`): an
+    /// empty timeline with a focused, functional composer. The session is
+    /// created lazily on the first send (see `send_turn`/`commit_draft`).
+    pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
+        self.shutdown_active();
+        let (provider, model) = self.draft_defaults();
+        self.active = Some(Self::build_draft_session(project_id, cwd, provider, model));
+        cx.notify();
+    }
+
+    /// Whether the active thread is an unsent draft.
+    pub fn active_is_draft(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.draft)
+    }
+
+    /// Persist the active draft as a real session (no cx; caller notifies).
+    /// The session id is preserved, so its already-recorded events line up.
+    fn commit_draft(&mut self) -> std::io::Result<()> {
+        if let Some(active) = self.active.as_mut() {
+            if active.draft {
+                active.draft = false;
+                let meta = active.meta.clone();
+                self.store.upsert_meta(&meta)?;
+                self.sessions = self.store.load_index();
+            }
+        }
+        Ok(())
     }
 
     /// Make a stored session active: replay its JSONL log only. The provider
@@ -535,6 +644,8 @@ impl AppState {
             meta,
             timeline,
             git_branch,
+            branches: Vec::new(),
+            draft: false,
             runtime: Runtime::Idle,
             live_model: None,
             pending_sends: Vec::new(),
@@ -561,6 +672,15 @@ impl AppState {
 
     /// Submit a user turn. Starts the provider lazily if needed.
     pub fn send_turn(&mut self, text: String, cx: &mut Context<Self>) {
+        // The first send on a draft materializes it into a real (persisted)
+        // session so the sidebar row appears; the provider then starts below.
+        if self.active_is_draft() {
+            if let Err(err) = self.commit_draft() {
+                self.report_error(format!("failed to persist session: {err}"), cx);
+                return;
+            }
+        }
+
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -638,6 +758,20 @@ impl AppState {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        // In a draft the model picker also selects the provider (the picker is
+        // the provider selection): infer it from the chosen model. The draft is
+        // in-memory only, so update it without persisting to the index.
+        if active.draft {
+            if active.meta.model == model {
+                return;
+            }
+            if let Some(provider) = provider_for_model(model.as_deref()) {
+                active.meta.provider = provider;
+            }
+            active.meta.model = model;
+            cx.notify();
+            return;
+        }
         if active.meta.model == model {
             return;
         }
@@ -645,6 +779,68 @@ impl AppState {
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
+    }
+
+    // -- git branch picker (checkout row) -----------------------------------
+
+    /// Load the local branches for the active session's cwd in the background
+    /// (called when the checkout-row popover opens).
+    pub fn load_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let cwd = active.meta.cwd.clone();
+        let session_id = active.meta.id.clone();
+        cx.spawn(async move |this, cx| {
+            let branches = smol::unblock(move || list_git_branches(&cwd)).await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(active) = state.active.as_mut() {
+                    if active.meta.id == session_id {
+                        active.branches = branches;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Check out `branch` in the active session's cwd, if the working tree is
+    /// clean. Runs git off the main thread; reports success/failure as an
+    /// `AppEvent` the chat view turns into a notification.
+    pub fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        if active.timeline.turn_running {
+            return;
+        }
+        let cwd = active.meta.cwd.clone();
+        let session_id = active.meta.id.clone();
+        let branch_for_task = branch.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || checkout_if_clean(&cwd, &branch_for_task)).await;
+            let _ = this.update(cx, |state, cx| {
+                match result {
+                    Ok(()) => {
+                        if let Some(active) = state.active.as_mut() {
+                            if active.meta.id == session_id {
+                                active.git_branch = read_git_branch(&active.meta.cwd);
+                            }
+                        }
+                        cx.emit(AppEvent::Notice(format!("Switched to {branch}")));
+                    }
+                    Err(CheckoutError::Dirty) => {
+                        cx.emit(AppEvent::Error(
+                            "Working tree has uncommitted changes".into(),
+                        ));
+                    }
+                    Err(CheckoutError::Git(message)) => cx.emit(AppEvent::Error(message)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Whether the live provider is running a different model than the one now
@@ -964,6 +1160,81 @@ fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Map a model id to its provider, for the draft model-picker → provider link.
+/// `None` (the "Default" row, a Claude entry) and the Claude model ids map to
+/// Claude; the `gpt-*` ids to Codex. Unknown custom ids leave it unchanged.
+fn provider_for_model(model: Option<&str>) -> Option<ProviderKind> {
+    match model {
+        None => Some(ProviderKind::ClaudeCode),
+        Some("opus" | "sonnet" | "haiku") => Some(ProviderKind::ClaudeCode),
+        Some(m) if m.starts_with("gpt") => Some(ProviderKind::Codex),
+        Some(_) => None,
+    }
+}
+
+/// Parse `git for-each-ref` output into a list of branch names (blank lines
+/// dropped, whitespace trimmed).
+fn parse_branch_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// List local git branches for `cwd` (empty when not a repo / git fails).
+fn list_git_branches(cwd: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["for-each-ref", "refs/heads", "--format=%(refname:short)"])
+        .current_dir(cwd)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => parse_branch_list(&String::from_utf8_lossy(&out.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// Why a `git checkout` was refused.
+enum CheckoutError {
+    /// The working tree has uncommitted changes.
+    Dirty,
+    /// git failed (spawn error or non-zero checkout).
+    Git(String),
+}
+
+/// Check out `branch` in `cwd` iff the working tree is clean.
+fn checkout_if_clean(cwd: &std::path::Path, branch: &str) -> Result<(), CheckoutError> {
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| CheckoutError::Git(format!("git status failed: {e}")))?;
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        return Err(CheckoutError::Git(format!(
+            "git status failed: {}",
+            stderr.trim()
+        )));
+    }
+    if !status.stdout.is_empty() {
+        return Err(CheckoutError::Dirty);
+    }
+    let checkout = std::process::Command::new("git")
+        .args(["checkout", branch])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| CheckoutError::Git(format!("git checkout failed: {e}")))?;
+    if !checkout.status.success() {
+        let stderr = String::from_utf8_lossy(&checkout.stderr);
+        return Err(CheckoutError::Git(format!(
+            "git checkout failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
     let binary_path = match meta.provider {
         ProviderKind::Codex => settings.codex_binary.clone(),
@@ -1028,7 +1299,7 @@ mod tests {
             session_in("p-old", 20),
         ];
 
-        let groups = group_sessions(&projects, &sessions);
+        let groups = group_sessions(&projects, &sessions, ProjectSort::RecentActivity);
         // p-new (activity 100), p-old (activity 20), p-empty (created_at 15, no sessions).
         assert_eq!(groups[0].project.id, "p-new");
         assert_eq!(groups[1].project.id, "p-old");
@@ -1037,6 +1308,60 @@ mod tests {
         assert_eq!(groups[0].sessions[0].updated_at, 100);
         assert_eq!(groups[0].sessions[1].updated_at, 50);
         assert!(groups[2].sessions.is_empty());
+
+        // Name A-Z ordering ignores activity: Empty, New, Old (case-insensitive).
+        let by_name = group_sessions(&projects, &sessions, ProjectSort::NameAsc);
+        assert_eq!(by_name[0].project.name, "Empty");
+        assert_eq!(by_name[1].project.name, "New");
+        assert_eq!(by_name[2].project.name, "Old");
+    }
+
+    #[test]
+    fn draft_send_creates_session_with_project_cwd() {
+        let root = std::env::temp_dir().join(format!("tcode-draft-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let project = Project::from_root(PathBuf::from("/tmp/tcode-draft-proj"));
+        // Persist the project so the draft's project_id survives index migration.
+        store.upsert_project(&project).unwrap();
+        let mut state = AppState::new(store);
+        // A draft is set up (cwd = project root) but not yet persisted.
+        let draft = AppState::build_draft_session(
+            project.id.clone(),
+            project.root.clone(),
+            ProviderKind::ClaudeCode,
+            None,
+        );
+        assert!(draft.draft);
+        assert_eq!(draft.meta.cwd, project.root);
+        assert_eq!(draft.meta.project_id.as_deref(), Some(project.id.as_str()));
+        assert!(matches!(draft.runtime, Runtime::Idle));
+        let draft_id = draft.meta.id.clone();
+        state.active = Some(draft);
+        // Not in the index until the first send materializes it.
+        assert!(!state.sessions.iter().any(|m| m.id == draft_id));
+
+        // The first send commits the draft: it becomes a real session whose
+        // cwd is the project root and shows up in the sidebar index.
+        state.commit_draft().unwrap();
+        assert!(!state.active.as_ref().unwrap().draft);
+        let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
+        assert_eq!(created.cwd, project.root);
+        assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn branch_list_parser_filters_blank_lines() {
+        let out = "main\nfeature/x\n\n  \nrelease-1.0\n";
+        assert_eq!(
+            parse_branch_list(out),
+            vec![
+                "main".to_string(),
+                "feature/x".to_string(),
+                "release-1.0".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1070,6 +1395,8 @@ mod tests {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
             git_branch: None,
+            branches: Vec::new(),
+            draft: false,
             runtime: Runtime::Live(commands),
             live_model: None,
             pending_sends: Vec::new(),
@@ -1097,6 +1424,8 @@ mod tests {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
             git_branch: None,
+            branches: Vec::new(),
+            draft: false,
             runtime: Runtime::Live(commands),
             live_model: None,
             pending_sends: vec!["first".into(), "second".into()],
@@ -1135,6 +1464,8 @@ mod tests {
             meta,
             timeline: Timeline::default(),
             git_branch: None,
+            branches: Vec::new(),
+            draft: false,
             runtime: Runtime::Starting { generation: 2 },
             live_model: None,
             pending_sends: Vec::new(),
@@ -1163,6 +1494,8 @@ mod tests {
             meta,
             timeline: Timeline::default(),
             git_branch: None,
+            branches: Vec::new(),
+            draft: false,
             runtime: Runtime::Live(commands),
             // Process was started on "opus"; the user has since picked "sonnet".
             live_model: Some("opus".into()),

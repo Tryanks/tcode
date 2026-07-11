@@ -14,6 +14,36 @@ pub enum ThemeMode {
     System,
 }
 
+/// How the sidebar's PROJECTS groups are ordered. Cycled by the sort button
+/// next to the "PROJECTS" header and persisted in settings.json.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSort {
+    /// Newest session activity first (default; the original behavior).
+    #[default]
+    RecentActivity,
+    /// Project name, case-insensitive A-Z.
+    NameAsc,
+}
+
+impl ProjectSort {
+    /// The next mode in the cycle (RecentActivity → NameAsc → RecentActivity).
+    pub fn next(self) -> Self {
+        match self {
+            ProjectSort::RecentActivity => ProjectSort::NameAsc,
+            ProjectSort::NameAsc => ProjectSort::RecentActivity,
+        }
+    }
+
+    /// A human label for the sort button's tooltip.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProjectSort::RecentActivity => "Recent activity",
+            ProjectSort::NameAsc => "Name A-Z",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +68,9 @@ pub struct Settings {
     /// the top and are shown first under the star filter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub favorite_models: Vec<String>,
+    /// Sidebar PROJECTS ordering (cycled by the sort button).
+    #[serde(default)]
+    pub project_sort: ProjectSort,
 }
 
 #[derive(Debug, Clone)]
@@ -92,11 +125,36 @@ mod tests {
             skip_delete_confirmation: true,
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
+            project_sort: ProjectSort::NameAsc,
         };
 
         store.save(&expected).unwrap();
 
         assert_eq!(store.load(), expected);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_sort_defaults_and_cycles() {
+        // Legacy files (field absent) default to recent-activity ordering.
+        assert_eq!(ProjectSort::default(), ProjectSort::RecentActivity);
+        // The button cycles RecentActivity → NameAsc → RecentActivity.
+        assert_eq!(ProjectSort::RecentActivity.next(), ProjectSort::NameAsc);
+        assert_eq!(ProjectSort::NameAsc.next(), ProjectSort::RecentActivity);
+    }
+
+    #[test]
+    fn project_sort_persists() {
+        let root = std::env::temp_dir()
+            .join(format!("tcode-settings-sort-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+        let settings = Settings {
+            project_sort: ProjectSort::NameAsc,
+            ..Settings::default()
+        };
+        store.save(&settings).unwrap();
+        assert_eq!(store.load().project_sort, ProjectSort::NameAsc);
         let _ = fs::remove_dir_all(root);
     }
 

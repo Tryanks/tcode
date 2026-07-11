@@ -1,22 +1,16 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
 
-use agent::ProviderKind;
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions,
+    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputState},
-    notification::Notification,
-    radio::{Radio, RadioGroup},
     scroll::ScrollableElement as _,
-    select::{SearchableVec, Select, SelectState},
     v_flex,
 };
 
@@ -66,7 +60,11 @@ impl SessionsSidebar {
                 if let Some(path) = paths.pop() {
                     let _ = this.update(cx, |this, cx| {
                         this.app_state.update(cx, |state, cx| {
-                            state.create_project(path, cx);
+                            // Create the project, then drop into a draft thread
+                            // for it (composer focused, empty timeline).
+                            if let Some(project_id) = state.create_project(path.clone(), cx) {
+                                state.start_draft(project_id, path, cx);
+                            }
                         });
                     });
                 }
@@ -174,6 +172,7 @@ impl SessionsSidebar {
     }
 
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sort_label = self.app_state.read(cx).project_sort().label();
         h_flex()
             .flex_none()
             .h(px(28.))
@@ -196,7 +195,12 @@ impl SessionsSidebar {
                             .xsmall()
                             .compact()
                             .icon(IconName::SortAscending)
-                            .tooltip("Sort"),
+                            .tooltip(format!("Sort: {sort_label}"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.app_state.update(cx, |state, cx| {
+                                    state.cycle_project_sort(cx);
+                                });
+                            })),
                     )
                     .child(
                         Button::new("add-project")
@@ -291,15 +295,13 @@ impl SessionsSidebar {
                                 .compact()
                                 .icon(IconName::Plus)
                                 .tooltip("Create new thread")
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    open_new_session_dialog(
-                                        this.app_state.clone(),
-                                        Some(plus_cwd.clone()),
-                                        Some(plus_project_id.clone()),
-                                        window,
-                                        cx,
-                                    );
+                                    let cwd = plus_cwd.clone();
+                                    let project_id = plus_project_id.clone();
+                                    this.app_state.update(cx, |state, cx| {
+                                        state.start_draft(project_id, cwd, cx);
+                                    });
                                 })),
                         ),
                 ),
@@ -621,215 +623,5 @@ fn humanize_ago(secs: u64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86_400)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// New-session dialog (shared by the sidebar plus-button and the ⌘K palette)
-// ---------------------------------------------------------------------------
-
-/// Open the "New thread" dialog, optionally preset to a project's directory.
-/// Shared entry point so the command palette can start a thread too.
-pub(crate) fn open_new_session_dialog(
-    app_state: Entity<AppState>,
-    preset_cwd: Option<PathBuf>,
-    project_id: Option<String>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let form = cx.new(|cx| NewSessionForm::new(preset_cwd, window, cx));
-    window.open_dialog(cx, move |dialog, _, _| {
-        let form = form.clone();
-        let app_state = app_state.clone();
-        let project_id = project_id.clone();
-        dialog
-            .title("New thread")
-            .w(px(480.))
-            .content({
-                let form = form.clone();
-                move |content, _, _| content.child(form.clone())
-            })
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text("Create")
-                    .show_cancel(true),
-            )
-            .on_ok(move |_, window, cx| {
-                let (provider, cwd, model) = form.read(cx).values(cx);
-                if cwd.as_os_str().is_empty() || !cwd.is_dir() {
-                    window.push_notification(
-                        Notification::error(format!(
-                            "Working directory does not exist: {}",
-                            cwd.display()
-                        )),
-                        cx,
-                    );
-                    return false;
-                }
-                let project_id = project_id.clone();
-                app_state.update(cx, |state, cx| {
-                    state.create_session(provider, cwd, model, project_id, cx);
-                });
-                true
-            })
-    });
-}
-
-// ---------------------------------------------------------------------------
-// New-session dialog form
-// ---------------------------------------------------------------------------
-
-const PROVIDERS: [ProviderKind; 2] = [ProviderKind::Codex, ProviderKind::ClaudeCode];
-const CODEX_MODELS: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-sol-mini", "gpt-5.5-codex"];
-const CLAUDE_MODELS: [&str; 4] = ["Provider default", "opus", "sonnet", "haiku"];
-
-struct NewSessionForm {
-    provider_index: usize,
-    cwd_input: Entity<InputState>,
-    model_select: Entity<SelectState<SearchableVec<&'static str>>>,
-    custom_model_input: Entity<InputState>,
-}
-
-impl NewSessionForm {
-    fn new(preset_cwd: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let default_cwd = preset_cwd
-            .map(|p| p.display().to_string())
-            .or_else(|| dirs::home_dir().map(|p| p.display().to_string()))
-            .unwrap_or_default();
-        let cwd_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("/path/to/project");
-            state.set_value(default_cwd, window, cx);
-            state
-        });
-        let model_select = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(CODEX_MODELS.to_vec()),
-                Some(IndexPath::default()),
-                window,
-                cx,
-            )
-            .searchable(true)
-        });
-        let custom_model_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Optional custom model ID"));
-        Self {
-            provider_index: 0,
-            cwd_input,
-            model_select,
-            custom_model_input,
-        }
-    }
-
-    fn values(&self, cx: &gpui::App) -> (ProviderKind, PathBuf, Option<String>) {
-        let provider = PROVIDERS[self.provider_index.min(PROVIDERS.len() - 1)];
-        let cwd = PathBuf::from(self.cwd_input.read(cx).value().trim().to_string());
-        let custom = self.custom_model_input.read(cx).value().trim().to_string();
-        let model = if !custom.is_empty() {
-            Some(custom)
-        } else {
-            self.model_select
-                .read(cx)
-                .selected_value()
-                .copied()
-                .filter(|model| *model != "Provider default")
-                .map(str::to_string)
-        };
-        (provider, cwd, model)
-    }
-
-    fn select_provider(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.provider_index = index.min(PROVIDERS.len() - 1);
-        let models = if self.provider_index == 0 {
-            CODEX_MODELS.to_vec()
-        } else {
-            CLAUDE_MODELS.to_vec()
-        };
-        self.model_select.update(cx, |state, cx| {
-            state.set_items(SearchableVec::new(models), window, cx);
-            state.set_selected_index(Some(IndexPath::default()), window, cx);
-        });
-        self.custom_model_input.update(cx, |state, cx| {
-            state.set_value(String::new(), window, cx);
-        });
-        cx.notify();
-    }
-
-    fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select working directory".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = rx.await {
-                if let Some(path) = paths.pop() {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.cwd_input.update(cx, |state, cx| {
-                            state.set_value(path.display().to_string(), window, cx);
-                        });
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-}
-
-impl Render for NewSessionForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .gap_4()
-            .py_2()
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().text_sm().font_medium().child("Provider"))
-                    .child(
-                        RadioGroup::horizontal("new-session-provider")
-                            .selected_index(Some(self.provider_index))
-                            .child(Radio::new("provider-codex").label("Codex"))
-                            .child(Radio::new("provider-claude").label("Claude Code"))
-                            .on_click(cx.listener(|this, index: &usize, window, cx| {
-                                this.select_provider(*index, window, cx);
-                            })),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().text_sm().font_medium().child("Working directory"))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().flex_1().min_w_0().child(Input::new(&self.cwd_input)))
-                            .child(
-                                Button::new("browse-cwd")
-                                    .outline()
-                                    .icon(IconName::FolderOpen)
-                                    .tooltip("Choose a directory")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.browse(window, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().text_sm().font_medium().child("Model"))
-                    .child(
-                        Select::new(&self.model_select)
-                            .search_placeholder("Search models")
-                            .w_full(),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Or enter a custom model ID"),
-                    )
-                    .child(Input::new(&self.custom_model_input)),
-            )
     }
 }

@@ -390,13 +390,121 @@ impl Composer {
     // -- below-card + approval ---------------------------------------------
 
     fn render_checkout_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let branch = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .and_then(|a| a.git_branch.clone())?;
+        let (branch, branches, turn_running) = {
+            let state = self.app_state.read(cx);
+            let active = state.active.as_ref()?;
+            let branch = active.git_branch.clone()?;
+            (branch, active.branches.clone(), active.timeline.turn_running)
+        };
         let muted = cx.theme().muted_foreground;
+
+        // The branch chip: a popover listing local branches. While a turn runs
+        // the selector is disabled (it just shows a "wait" tooltip).
+        let right: AnyElement = if turn_running {
+            Button::new("branch-picker")
+                .ghost()
+                .compact()
+                .tooltip("Wait for the current turn")
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .child(Icon::empty().path("icons/git-branch.svg").xsmall())
+                        .child(branch),
+                )
+                .into_any_element()
+        } else {
+            let app_open = self.app_state.clone();
+            let app_content = self.app_state.clone();
+            let current = branch.clone();
+            let trigger = Button::new("branch-picker").ghost().compact().child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(Icon::empty().path("icons/git-branch.svg").xsmall())
+                    .child(branch)
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(muted),
+                    ),
+            );
+            Popover::new("branch-popover")
+                .anchor(Anchor::BottomRight)
+                .trigger(trigger)
+                .on_open_change(move |open, _window, cx| {
+                    // Load branches lazily each time the popover opens.
+                    if *open {
+                        app_open.update(cx, |state, cx| state.load_branches(cx));
+                    }
+                })
+                .content(move |_state, _window, cx| {
+                    let branches = branches.clone();
+                    let current = current.clone();
+                    let popover = cx.entity();
+                    let muted = cx.theme().muted_foreground;
+                    let mut col = v_flex()
+                        .w(px(220.))
+                        .max_h(px(280.))
+                        .overflow_hidden()
+                        .p_1()
+                        .gap_0p5();
+                    if branches.is_empty() {
+                        col = col.child(
+                            div()
+                                .px_2()
+                                .py_1p5()
+                                .text_size(px(13.))
+                                .text_color(muted)
+                                .child("Loading…"),
+                        );
+                    } else {
+                        for (index, name) in branches.iter().enumerate() {
+                            let is_current = *name == current;
+                            let branch_name = name.clone();
+                            let app_pick = app_content.clone();
+                            let pop = popover.clone();
+                            col = col.child(
+                                h_flex()
+                                    .id(("branch-row", index))
+                                    .w_full()
+                                    .px_2()
+                                    .py_1p5()
+                                    .gap_2()
+                                    .items_center()
+                                    .rounded(px(6.))
+                                    .cursor_pointer()
+                                    .text_size(px(13.))
+                                    .hover(|s| s.bg(cx.theme().muted))
+                                    .child(
+                                        div().flex_1().min_w_0().overflow_hidden().child(name.clone()),
+                                    )
+                                    .when(is_current, |this| {
+                                        this.child(
+                                            Icon::new(IconName::Check)
+                                                .xsmall()
+                                                .text_color(cx.theme().primary),
+                                        )
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        let branch_name = branch_name.clone();
+                                        app_pick.update(cx, |state, cx| {
+                                            state.checkout_branch(branch_name, cx);
+                                        });
+                                        pop.update(cx, |st, cx| st.dismiss(window, cx));
+                                    }),
+                            );
+                        }
+                    }
+                    col.into_any_element()
+                })
+                .into_any_element()
+        };
+
         Some(
             h_flex()
                 .w_full()
@@ -413,13 +521,7 @@ impl Composer {
                         .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
                         .child("Local checkout"),
                 )
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .child(Icon::empty().path("icons/git-branch.svg").xsmall())
-                        .child(branch),
-                )
+                .child(right)
                 .into_any_element(),
         )
     }
