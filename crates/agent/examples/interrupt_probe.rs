@@ -32,6 +32,7 @@ fn main() {
             approval_mode: Default::default(),
             option_selections: Vec::new(),
             interaction_mode: Default::default(),
+            mcp_server: None,
         };
         let handle = start_session(provider, opts).await.expect("start session");
         handle

@@ -3,6 +3,7 @@ mod composer;
 mod diff_panel;
 mod palette;
 mod plan_panel;
+mod preview_panel;
 mod settings_page;
 mod sidebar;
 mod terminal_drawer;
@@ -20,10 +21,11 @@ use gpui_component::{
 use chat::ChatView;
 use diff_panel::DiffPanel;
 use palette::CommandPalette;
+use preview_panel::PreviewPanel;
 use settings_page::SettingsPage;
 use sidebar::SessionsSidebar;
 
-use crate::app::{AppState, Route};
+use crate::app::{AppState, RightTab, Route};
 
 actions!(tcode, [TogglePalette]);
 
@@ -83,6 +85,7 @@ pub struct AppShell {
     sidebar: Entity<SessionsSidebar>,
     chat: Entity<ChatView>,
     diff: Entity<DiffPanel>,
+    preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
     /// Tracks the palette's open state across frames so it can be focused on the
@@ -105,10 +108,35 @@ impl AppShell {
             window.set_window_title(&window_title(state.read(cx)));
             cx.notify();
         });
+        let preview = cx.new(|cx| PreviewPanel::new(app_state.clone(), window, cx));
+
+        // Pump preview automation requests from the MCP server into the live
+        // WebView. The receiver is taken once; requests are resolved on the gpui
+        // main thread (WKWebView `evaluate_script` must run there).
+        let requests = app_state.update(cx, |state, _| state.preview_requests.take());
+        if let Some(requests) = requests {
+            let preview = preview.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                while let Ok(request) = requests.recv().await {
+                    let preview_mcp::BrokerRequest { op, reply } = request;
+                    if preview
+                        .update_in(cx, |panel, window, cx| {
+                            panel.handle_op(op, reply, window, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
         Self {
             sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx)),
             chat: cx.new(|cx| ChatView::new(app_state.clone(), window, cx)),
             diff: cx.new(|cx| DiffPanel::new(app_state.clone(), cx)),
+            preview,
             settings_page: cx.new(|cx| SettingsPage::new(app_state.clone(), window, cx)),
             palette: cx.new(|cx| CommandPalette::new(app_state.clone(), window, cx)),
             app_state,
@@ -142,7 +170,11 @@ impl Render for AppShell {
         self.palette_was_open = palette_open;
         let collapsed = self.app_state.read(cx).sidebar_collapsed;
         let diff_open = self.app_state.read(cx).diff_panel_open();
-        let diff_expanded = self.app_state.read(cx).diff_panel_expanded();
+        let right_tab = self.app_state.read(cx).right_tab();
+        // "Expanded" (full-width) is a diff-only affordance; the preview tab
+        // always shares the split so the webview keeps a stable size.
+        let diff_expanded =
+            self.app_state.read(cx).diff_panel_expanded() && right_tab != RightTab::Preview;
 
         // The full-page settings route replaces the chat workspace entirely.
         if route == Route::Settings {
@@ -158,13 +190,23 @@ impl Render for AppShell {
                 .children(notification_layer);
         }
 
-        // The chat column: chat alone, chat split with the diff panel, or the
+        // Which entity fills the right panel: the Preview tab shows the embedded
+        // browser; Diff/Plan share the DiffPanel container.
+        let right_panel = |shell: &Self| -> AnyElement {
+            if right_tab == RightTab::Preview {
+                shell.preview.clone().into_any_element()
+            } else {
+                shell.diff.clone().into_any_element()
+            }
+        };
+
+        // The chat column: chat alone, chat split with the right panel, or the
         // diff panel full-width when expanded.
         let chat_region: AnyElement = if diff_open && diff_expanded {
             div()
                 .size_full()
                 .min_w_0()
-                .child(self.diff.clone())
+                .child(right_panel(self))
                 .into_any_element()
         } else if diff_open {
             h_resizable("chat-diff-panels")
@@ -173,7 +215,7 @@ impl Render for AppShell {
                     resizable_panel()
                         .size(px(560.))
                         .size_range(px(320.)..px(1400.))
-                        .child(self.diff.clone()),
+                        .child(right_panel(self)),
                 )
                 .into_any_element()
         } else {

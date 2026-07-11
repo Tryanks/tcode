@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent", "crates/term"]
+members = ["crates/agent", "crates/term", "crates/preview-mcp"]
 
 [package]
 name = "tcode"
@@ -9,10 +9,15 @@ edition = "2024"
 [dependencies]
 agent = { path = "crates/agent" }
 term = { path = "crates/term" }
+preview-mcp = { path = "crates/preview-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
+wry = { version = "0.53.3", package = "lb-wry" }
+raw-window-handle = { version = "0.6", features = ["std"] }
+base64 = "0.22"
 log = "0.4"
 dirs = "5"
 uuid = { version = "1", features = ["v4", "serde"] }

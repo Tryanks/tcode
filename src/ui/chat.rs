@@ -894,6 +894,7 @@ impl ChatView {
             state.diff_panel_open() && state.right_tab() == crate::app::RightTab::Diff
         };
         let plan_showing = self.app_state.read(cx).plan_panel_showing();
+        let preview_showing = self.app_state.read(cx).preview_panel_showing();
         let terminal_open = self.app_state.read(cx).terminal_panel_open();
         window_drag_area("chat-header-drag", base, window, cx)
             .child(title_el)
@@ -928,6 +929,19 @@ impl ChatView {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.app_state
                                             .update(cx, |state, cx| state.toggle_plan_panel(cx));
+                                    })),
+                            )
+                            .child(
+                                Button::new("preview-panel")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::Globe)
+                                    .selected(preview_showing)
+                                    .tooltip(rust_i18n::t!("chat.toggle_preview"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.app_state
+                                            .update(cx, |state, cx| state.toggle_preview_panel(cx));
                                     })),
                             )
                             .child(
