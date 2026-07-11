@@ -1,9 +1,12 @@
 //! Persisted application settings.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use agent::ProviderKind;
 
 pub const LANGUAGE_ENGLISH: &str = "en";
 pub const LANGUAGE_SIMPLIFIED_CHINESE: &str = "zh-CN";
@@ -68,11 +71,132 @@ impl ProjectSort {
     }
 }
 
+/// The settings-file key for a provider ("codex" / "claude"). Stable: it keys
+/// both `settings.json`'s `providers` map and `secrets.json`.
+pub fn provider_key(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Codex => "codex",
+        ProviderKind::ClaudeCode => "claude",
+    }
+}
+
+/// The provider's short, T3-style display name (the card title / picker label).
+pub fn provider_label(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Codex => "Codex",
+        ProviderKind::ClaudeCode => "Claude",
+    }
+}
+
+/// The six accent presets offered by the provider card (T3 §2).
+pub const ACCENT_PRESETS: [&str; 6] = [
+    "#2563eb", "#16a34a", "#ea580c", "#dc2626", "#7c3aed", "#0891b2",
+];
+
+/// One `KEY=VALUE` pair passed into a provider's child processes.
+///
+/// Sensitive rows never store their value here: it lives in `secrets.json`
+/// (0600) and is never handed back to the UI, which renders the "Stored secret"
+/// placeholder instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvVar {
+    pub name: String,
+    /// Plaintext value for non-sensitive rows; always empty when `sensitive`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    #[serde(default)]
+    pub sensitive: bool,
+}
+
+/// Per-provider configuration (Settings → Providers card).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    /// Whether the provider may be used for new sessions.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Optional label shown in the provider list (falls back to the driver name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// `#rrggbb` accent tinting the provider glyph in picker rails / model lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_color: Option<String>,
+    /// Environment variables merged into every child process for this provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvVar>,
+    /// Override for the CLI binary (`None` = resolve from PATH).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<PathBuf>,
+    /// Claude: `HOME` override. Codex: `CODEX_HOME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_path: Option<PathBuf>,
+    /// Codex only: account-specific `CODEX_HOME` (takes precedence over `home_path`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_home_path: Option<PathBuf>,
+    /// Claude only: extra CLI arguments appended on session start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_args: Option<String>,
+    /// Model slugs added by hand in the Models section.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_models: Vec<String>,
+    /// Model ids hidden from the composer's model picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_models: Vec<String>,
+    /// Explicit ordering (ids listed here come first, in this order; anything
+    /// else keeps its catalog order behind them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_order: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            display_name: None,
+            accent_color: None,
+            env: Vec::new(),
+            binary_path: None,
+            home_path: None,
+            shadow_home_path: None,
+            launch_args: None,
+            custom_models: Vec::new(),
+            hidden_models: Vec::new(),
+            model_order: Vec::new(),
+        }
+    }
+}
+
+impl ProviderSettings {
+    /// Claude's `Launch arguments` field, split on whitespace.
+    pub fn extra_args(&self) -> Vec<String> {
+        self.launch_args
+            .as_deref()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// The home directory this provider's children should run against
+    /// (`shadow_home_path` wins for Codex; `None` = inherit).
+    pub fn effective_home(&self) -> Option<PathBuf> {
+        self.shadow_home_path
+            .clone()
+            .or_else(|| self.home_path.clone())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    /// Per-provider cards (Settings → Providers), keyed by [`provider_key`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderSettings>,
+    /// Legacy (pre-`providers`) binary overrides. Read once and migrated into
+    /// `providers` on load; never written back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_binary: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,15 +244,61 @@ pub struct Settings {
     pub last_visited: std::collections::HashMap<String, u64>,
 }
 
+impl Settings {
+    /// This provider's card settings (defaults when never configured).
+    pub fn provider(&self, provider: ProviderKind) -> ProviderSettings {
+        self.providers
+            .get(provider_key(provider))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Mutable access, inserting defaults on first write.
+    pub fn provider_mut(&mut self, provider: ProviderKind) -> &mut ProviderSettings {
+        self.providers
+            .entry(provider_key(provider).to_string())
+            .or_default()
+    }
+
+    /// The provider's card title: trimmed display-name override, else its label.
+    pub fn provider_display_name(&self, provider: ProviderKind) -> String {
+        let settings = self.provider(provider);
+        settings
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| provider_label(provider).to_string())
+    }
+
+    /// Fold the pre-`providers` binary overrides into the map (once, on load).
+    fn migrate_legacy(&mut self) {
+        for (provider, legacy) in [
+            (ProviderKind::Codex, self.codex_binary.take()),
+            (ProviderKind::ClaudeCode, self.claude_binary.take()),
+        ] {
+            if let Some(path) = legacy {
+                let entry = self.provider_mut(provider);
+                if entry.binary_path.is_none() {
+                    entry.binary_path = Some(path);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
+    secrets_path: PathBuf,
 }
 
 impl SettingsStore {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             path: data_dir.join("settings.json"),
+            secrets_path: data_dir.join("secrets.json"),
         }
     }
 
@@ -136,13 +306,67 @@ impl SettingsStore {
         let Ok(bytes) = fs::read(&self.path) else {
             return Settings::default();
         };
-        match serde_json::from_slice(&bytes) {
-            Ok(settings) => settings,
+        match serde_json::from_slice::<Settings>(&bytes) {
+            Ok(mut settings) => {
+                settings.migrate_legacy();
+                settings
+            }
             Err(err) => {
                 log::warn!("failed to parse settings.json: {err}");
                 Settings::default()
             }
         }
+    }
+
+    // -- sensitive env values (secrets.json, 0600) --------------------------
+
+    /// Every stored secret, keyed by provider key then variable name.
+    pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
+        fs::read(&self.secrets_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// The sensitive env values for one provider (used only when spawning).
+    pub fn provider_secrets(&self, provider: ProviderKind) -> BTreeMap<String, String> {
+        self.load_secrets()
+            .remove(provider_key(provider))
+            .unwrap_or_default()
+    }
+
+    /// Store (`Some`) or clear (`None`) one provider secret. Written 0600 and
+    /// never returned to the settings UI.
+    pub fn set_secret(
+        &self,
+        provider: ProviderKind,
+        name: &str,
+        value: Option<&str>,
+    ) -> std::io::Result<()> {
+        let mut all = self.load_secrets();
+        let entry = all.entry(provider_key(provider).to_string()).or_default();
+        match value {
+            Some(value) => {
+                entry.insert(name.to_string(), value.to_string());
+            }
+            None => {
+                entry.remove(name);
+            }
+        }
+        if entry.is_empty() {
+            all.remove(provider_key(provider));
+        }
+        self.write_secrets(&all)
+    }
+
+    fn write_secrets(&self, all: &BTreeMap<String, BTreeMap<String, String>>) -> std::io::Result<()> {
+        let data = serde_json::to_vec_pretty(all)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tmp = self.secrets_path.with_extension("json.tmp");
+        fs::write(&tmp, data)?;
+        restrict_permissions(&tmp)?;
+        fs::rename(&tmp, &self.secrets_path)?;
+        restrict_permissions(&self.secrets_path)
     }
 
     pub fn save(&self, settings: &Settings) -> std::io::Result<()> {
@@ -152,6 +376,17 @@ impl SettingsStore {
         fs::write(&tmp, data)?;
         fs::rename(tmp, &self.path)
     }
+}
+
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -164,10 +399,47 @@ mod tests {
             std::env::temp_dir().join(format!("tcode-settings-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let store = SettingsStore::new(root.clone());
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "codex".to_string(),
+            ProviderSettings {
+                enabled: false,
+                display_name: Some("Work Codex".into()),
+                accent_color: Some("#2563eb".into()),
+                env: vec![
+                    EnvVar {
+                        name: "BASE_URL".into(),
+                        value: "https://example.test".into(),
+                        sensitive: false,
+                    },
+                    EnvVar {
+                        name: "OPENAI_API_KEY".into(),
+                        value: String::new(),
+                        sensitive: true,
+                    },
+                ],
+                binary_path: Some(PathBuf::from("/opt/tools/codex")),
+                home_path: Some(PathBuf::from("/tmp/codex-home")),
+                shadow_home_path: Some(PathBuf::from("/tmp/codex-shadow")),
+                launch_args: None,
+                custom_models: vec!["gpt-6.7-codex".into()],
+                hidden_models: vec!["gpt-5".into()],
+                model_order: vec!["gpt-6".into(), "gpt-5".into()],
+            },
+        );
+        providers.insert(
+            "claude".to_string(),
+            ProviderSettings {
+                binary_path: Some(PathBuf::from("/opt/tools/claude")),
+                launch_args: Some("--chrome".into()),
+                ..ProviderSettings::default()
+            },
+        );
         let expected = Settings {
             language: Some(LANGUAGE_SIMPLIFIED_CHINESE.into()),
-            codex_binary: Some(PathBuf::from("/opt/tools/codex")),
-            claude_binary: Some(PathBuf::from("/opt/tools/claude")),
+            providers,
+            codex_binary: None,
+            claude_binary: None,
             theme_mode: ThemeMode::Dark,
             sidebar_collapsed: true,
             word_wrap_diffs: true,
@@ -211,9 +483,10 @@ mod tests {
     }
 
     #[test]
-    fn loads_legacy_file_without_new_fields() {
-        // A settings.json written before the word-wrap / delete-confirmation
-        // fields existed must still parse, with the new fields defaulting off.
+    fn loads_legacy_file_and_migrates_binary_paths() {
+        // A settings.json written before the `providers` map existed must still
+        // parse: its flat binary overrides migrate into the per-provider card,
+        // and the newer fields default off / enabled.
         let root =
             std::env::temp_dir().join(format!("tcode-settings-legacy-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -225,13 +498,106 @@ mod tests {
         .unwrap();
 
         let loaded = store.load();
-        assert_eq!(loaded.claude_binary, Some(PathBuf::from("/usr/bin/claude")));
+        assert_eq!(
+            loaded.provider(ProviderKind::ClaudeCode).binary_path,
+            Some(PathBuf::from("/usr/bin/claude"))
+        );
+        // The legacy keys are consumed, not echoed back.
+        assert_eq!(loaded.claude_binary, None);
         assert_eq!(loaded.theme_mode, ThemeMode::Light);
         assert_eq!(loaded.favorite_models, vec!["opus".to_string()]);
+        // Never-configured providers default to enabled with no overrides.
+        let codex = loaded.provider(ProviderKind::Codex);
+        assert!(codex.enabled);
+        assert_eq!(codex.binary_path, None);
         // New fields tolerantly default to off.
         assert!(!loaded.word_wrap_diffs);
         assert!(!loaded.skip_delete_confirmation);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sensitive_values_live_in_secrets_json_only() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-secret-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+
+        let mut settings = Settings::default();
+        settings.provider_mut(ProviderKind::ClaudeCode).env = vec![EnvVar {
+            name: "ANTHROPIC_API_KEY".into(),
+            // Sensitive rows carry no value in settings.json.
+            value: String::new(),
+            sensitive: true,
+        }];
+        store.save(&settings).unwrap();
+        store
+            .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", Some("sk-live"))
+            .unwrap();
+
+        // settings.json never contains the secret; the reloaded row keeps its
+        // name + sensitive flag and an empty value (nothing to echo back).
+        let raw = fs::read_to_string(&store.path).unwrap();
+        assert!(!raw.contains("sk-live"));
+        let loaded = store.load();
+        let env = loaded.provider(ProviderKind::ClaudeCode).env;
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].name, "ANTHROPIC_API_KEY");
+        assert!(env[0].sensitive);
+        assert!(env[0].value.is_empty());
+
+        // The value is only reachable through the secrets store, which is 0600.
+        let secrets = store.provider_secrets(ProviderKind::ClaudeCode);
+        assert_eq!(secrets.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-live"));
+        assert!(store.provider_secrets(ProviderKind::Codex).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&store.secrets_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // Clearing removes the entry (and the now-empty provider bucket).
+        store
+            .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", None)
+            .unwrap();
+        assert!(store.provider_secrets(ProviderKind::ClaudeCode).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn display_name_falls_back_to_driver_label() {
+        let mut settings = Settings::default();
+        assert_eq!(
+            settings.provider_display_name(ProviderKind::ClaudeCode),
+            "Claude"
+        );
+        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
+        // A blank override is treated as "no override".
+        settings.provider_mut(ProviderKind::Codex).display_name = Some("   ".into());
+        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
+        settings.provider_mut(ProviderKind::Codex).display_name = Some("Work".into());
+        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Work");
+    }
+
+    #[test]
+    fn launch_arguments_split_on_whitespace() {
+        let settings = ProviderSettings {
+            launch_args: Some("  --chrome  --verbose ".into()),
+            ..ProviderSettings::default()
+        };
+        assert_eq!(settings.extra_args(), vec!["--chrome", "--verbose"]);
+        assert!(ProviderSettings::default().extra_args().is_empty());
+    }
+
+    #[test]
+    fn shadow_home_wins_over_home() {
+        let settings = ProviderSettings {
+            home_path: Some(PathBuf::from("/a")),
+            shadow_home_path: Some(PathBuf::from("/b")),
+            ..ProviderSettings::default()
+        };
+        assert_eq!(settings.effective_home(), Some(PathBuf::from("/b")));
     }
 }
 

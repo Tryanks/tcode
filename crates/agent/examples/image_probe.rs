@@ -121,6 +121,8 @@ fn main() {
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::Build,
             mcp_server: None,
+            launch_env: Default::default(),
+            extra_args: Vec::new(),
         };
         let handle = match start_session(provider, opts).await {
             Ok(handle) => handle,

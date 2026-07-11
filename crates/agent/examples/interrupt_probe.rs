@@ -33,6 +33,8 @@ fn main() {
             option_selections: Vec::new(),
             interaction_mode: Default::default(),
             mcp_server: None,
+            launch_env: Default::default(),
+            extra_args: Vec::new(),
         };
         let handle = start_session(provider, opts).await.expect("start session");
         handle
