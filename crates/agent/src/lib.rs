@@ -52,6 +52,59 @@ pub struct SessionOptions {
     /// Build (default) vs Plan interaction mode. Codex applies this per turn via
     /// `collaborationMode`; Claude via `--permission-mode plan` / restore.
     pub interaction_mode: InteractionMode,
+    /// The in-process preview MCP server to register with this session, if it
+    /// came up. Each provider injects it at spawn time (Claude: `--mcp-config`;
+    /// Codex: `-c mcp_servers.tcode_preview=…`) so the agent can drive the
+    /// embedded preview browser. `None` = don't register any preview tooling.
+    pub mcp_server: Option<McpRegistration>,
+}
+
+/// Connection details for the tcode preview MCP server (a streamable-HTTP
+/// endpoint on loopback, guarded by a bearer token). Provider-agnostic; each
+/// provider maps it onto its native MCP-server config shape.
+#[derive(Debug, Clone)]
+pub struct McpRegistration {
+    /// Streamable-HTTP endpoint, e.g. `http://127.0.0.1:53211/mcp`.
+    pub url: String,
+    /// Bearer token presented on every request (`Authorization: Bearer <token>`).
+    pub bearer_token: String,
+}
+
+impl McpRegistration {
+    /// The MCP server name registered with agents (also the tool namespace).
+    pub const SERVER_NAME: &'static str = "tcode_preview";
+
+    /// Claude Code `--mcp-config` JSON: a single `mcpServers` map entry for an
+    /// HTTP server carrying the bearer token as an `Authorization` header.
+    /// Verified shape for `claude` 2.1.x (`.mcp.json` `type: "http"`).
+    pub fn claude_mcp_config_json(&self) -> String {
+        let value = serde_json::json!({
+            "mcpServers": {
+                Self::SERVER_NAME: {
+                    "type": "http",
+                    "url": self.url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", self.bearer_token),
+                    }
+                }
+            }
+        });
+        value.to_string()
+    }
+
+    /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
+    /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
+    /// rides in `http_headers.Authorization` instead (verified against
+    /// codex `config/src/mcp_types.rs`). Returns the full `key=value` argument.
+    pub fn codex_config_override(&self) -> String {
+        // TOML basic strings; our url/token are ASCII with no quotes/backslashes.
+        format!(
+            "mcp_servers.{name}={{url=\"{url}\",http_headers={{Authorization=\"Bearer {token}\"}}}}",
+            name = Self::SERVER_NAME,
+            url = self.url,
+            token = self.bearer_token,
+        )
+    }
 }
 
 /// One model a provider offers, with its selectable options (T3-style descriptors).
@@ -461,4 +514,43 @@ pub struct TokenUsage {
     /// Total context currently in use, if the provider reports it.
     pub used_tokens: Option<u64>,
     pub context_window: Option<u64>,
+}
+
+#[cfg(test)]
+mod mcp_registration_tests {
+    use super::*;
+
+    fn reg() -> McpRegistration {
+        McpRegistration {
+            url: "http://127.0.0.1:53211/mcp".into(),
+            bearer_token: "abc123".into(),
+        }
+    }
+
+    #[test]
+    fn claude_mcp_config_json_shape() {
+        let json: serde_json::Value =
+            serde_json::from_str(&reg().claude_mcp_config_json()).unwrap();
+        let server = &json["mcpServers"]["tcode_preview"];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:53211/mcp");
+        assert_eq!(server["headers"]["Authorization"], "Bearer abc123");
+    }
+
+    #[test]
+    fn codex_config_override_is_valid_toml_streamable_http() {
+        let arg = reg().codex_config_override();
+        let (key, value) = arg.split_once('=').unwrap();
+        assert_eq!(key, "mcp_servers.tcode_preview");
+        // The value must parse as a TOML inline table with url + auth header,
+        // and must NOT use a literal bearer_token (codex rejects that for HTTP).
+        let doc: toml::Value = toml::from_str(&format!("v = {value}")).unwrap();
+        let table = &doc["v"];
+        assert_eq!(table["url"].as_str(), Some("http://127.0.0.1:53211/mcp"));
+        assert_eq!(
+            table["http_headers"]["Authorization"].as_str(),
+            Some("Bearer abc123")
+        );
+        assert!(table.get("bearer_token").is_none());
+    }
 }

@@ -131,6 +131,7 @@ fn main() {
             approval_mode,
             option_selections,
             interaction_mode,
+            mcp_server: None,
         };
         let handle = match start_session(provider, opts).await {
             Ok(handle) => handle,
