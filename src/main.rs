@@ -1,7 +1,12 @@
+// Windows: run as a GUI app so launching tcode does not open a console window.
+// Debug builds keep the console so `RUST_LOG` output stays visible.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod assets;
 mod checkpoints;
 mod git;
+mod process;
 mod provider_models;
 mod provider_status;
 mod session;

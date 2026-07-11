@@ -67,7 +67,7 @@ pub fn list_workspace(cwd: &Path) -> Vec<PathEntry> {
 /// of parent directories as folder entries. Returns `None` when not a repo or
 /// git is unavailable.
 fn list_from_git(cwd: &Path) -> Option<Vec<PathEntry>> {
-    let output = std::process::Command::new("git")
+    let output = crate::process::command("git")
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
         .current_dir(cwd)
         .output()

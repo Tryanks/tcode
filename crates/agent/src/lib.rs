@@ -8,6 +8,7 @@
 
 pub mod claude;
 pub mod codex;
+mod process;
 
 use std::path::PathBuf;
 

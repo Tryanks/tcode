@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use agent::{FileChange, FileChangeKind};
 use gpui::{
@@ -132,7 +131,7 @@ struct GitDiffResult {
 }
 
 fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
-    Command::new("git")
+    crate::process::command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -2194,7 +2193,7 @@ diff --git a/util.py b/util.py
         let root = std::env::temp_dir().join(format!("tcode-diff-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            let output = Command::new("git")
+            let output = crate::process::command("git")
                 .args(args)
                 .current_dir(&root)
                 .output()

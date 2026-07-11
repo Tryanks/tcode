@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 
 use async_channel::{Receiver, Sender};
 use futures_lite::future;
@@ -514,7 +514,7 @@ fn spawn_server(
 ) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>), AgentError> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
-    let mut cmd = Command::new(&binary);
+    let mut cmd = crate::process::command(&binary);
     cmd.arg("app-server")
         .args(extra_args)
         .stdin(Stdio::piped())
@@ -1527,7 +1527,7 @@ mod tests {
     use super::*;
 
     fn test_actor() -> (Actor, Receiver<AgentEvent>) {
-        let mut child = Command::new("cat")
+        let mut child = crate::process::command("cat")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
