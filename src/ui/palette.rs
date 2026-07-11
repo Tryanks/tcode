@@ -191,7 +191,10 @@ impl CommandPalette {
         let actions_only = raw.trim_start().starts_with('>');
         // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
         let query = if actions_only {
-            raw.trim_start().trim_start_matches('>').trim_start().to_string()
+            raw.trim_start()
+                .trim_start_matches('>')
+                .trim_start()
+                .to_string()
         } else {
             raw
         };

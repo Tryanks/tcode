@@ -65,16 +65,14 @@ impl ProviderCard {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = app_state.read(cx).provider_settings(provider);
-        let text_input = |placeholder: String,
-                          value: String,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-            cx.new(|cx| {
-                let mut input = InputState::new(window, cx).placeholder(placeholder);
-                input.set_value(value, window, cx);
-                input
-            })
-        };
+        let text_input =
+            |placeholder: String, value: String, window: &mut Window, cx: &mut Context<Self>| {
+                cx.new(|cx| {
+                    let mut input = InputState::new(window, cx).placeholder(placeholder);
+                    input.set_value(value, window, cx);
+                    input
+                })
+            };
 
         let display_name = text_input(
             crate::settings::provider_label(provider).to_string(),
@@ -125,15 +123,13 @@ impl ProviderCard {
                 _ => {}
             }));
         }
-        subscriptions.push(cx.subscribe_in(
-            &custom_model,
-            window,
-            |this, _, event, window, cx| {
+        subscriptions.push(
+            cx.subscribe_in(&custom_model, window, |this, _, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
                     this.add_custom_model(window, cx);
                 }
-            },
-        ));
+            }),
+        );
 
         let mut card = Self {
             app_state,
@@ -231,7 +227,15 @@ impl ProviderCard {
                 let mut input = InputState::new(window, cx)
                     .placeholder(placeholder)
                     .masked(var.sensitive);
-                input.set_value(if var.sensitive { String::new() } else { var.value.clone() }, window, cx);
+                input.set_value(
+                    if var.sensitive {
+                        String::new()
+                    } else {
+                        var.value.clone()
+                    },
+                    window,
+                    cx,
+                );
                 input
             });
             for input in [&name, &value] {
@@ -361,7 +365,9 @@ impl ProviderCard {
         self.update(move |s| s.env = env, cx);
         if !name.is_empty() {
             let provider = self.provider;
-            let secret = becoming_sensitive.then_some(plaintext).filter(|v| !v.is_empty());
+            let secret = becoming_sensitive
+                .then_some(plaintext)
+                .filter(|v| !v.is_empty());
             self.app_state.update(cx, |state, cx| {
                 state.set_provider_secret(provider, &name, secret.as_deref(), cx);
             });
@@ -478,12 +484,7 @@ impl ProviderCard {
         let mut title = h_flex()
             .gap_2()
             .items_center()
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .font_semibold()
-                    .child(name.clone()),
-            )
+            .child(div().text_size(px(14.)).font_semibold().child(name.clone()))
             .when_some(version, |this, version| {
                 this.child(
                     div()
@@ -517,7 +518,10 @@ impl ProviderCard {
                     .ghost()
                     .xsmall()
                     .icon(IconName::ChevronDown)
-                    .tooltip(rust_i18n::t!("providers.toggle_details", name = name.clone()))
+                    .tooltip(rust_i18n::t!(
+                        "providers.toggle_details",
+                        name = name.clone()
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.expanded = !this.expanded;
                         cx.notify();
@@ -753,11 +757,9 @@ impl ProviderCard {
                     .tooltip({
                         let hex = hex.clone();
                         move |window, cx| {
-                            let label = rust_i18n::t!(
-                                "providers.accent_select",
-                                color = hex.clone()
-                            )
-                            .into_owned();
+                            let label =
+                                rust_i18n::t!("providers.accent_select", color = hex.clone())
+                                    .into_owned();
                             gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                         }
                     })
@@ -864,30 +866,27 @@ impl ProviderCard {
         let rows = state.resolved_models(self.provider);
         let muted = cx.theme().muted_foreground;
 
-        let mut block = v_flex()
-            .w_full()
-            .px_4()
-            .py_3()
-            .gap_1()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(rust_i18n::t!("providers.models.title")),
-            )
-            .child(
-                div()
-                    .pb_1()
-                    .text_size(px(12.))
-                    .text_color(muted)
-                    .child(if rows.len() == 1 {
+        let mut block =
+            v_flex()
+                .w_full()
+                .px_4()
+                .py_3()
+                .gap_1()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_medium()
+                        .child(rust_i18n::t!("providers.models.title")),
+                )
+                .child(div().pb_1().text_size(px(12.)).text_color(muted).child(
+                    if rows.len() == 1 {
                         rust_i18n::t!("providers.models.count_one", count = 1).into_owned()
                     } else {
                         rust_i18n::t!("providers.models.count", count = rows.len()).into_owned()
-                    }),
-            );
+                    },
+                ));
 
         for (index, row) in rows.iter().enumerate() {
             block = block.child(self.render_model_row(&rows, index, row, cx));
@@ -900,7 +899,12 @@ impl ProviderCard {
                 .pt_2()
                 .gap_2()
                 .items_center()
-                .child(div().flex_1().min_w_0().child(Input::new(&self.custom_model)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.custom_model)),
+                )
                 .child(
                     Button::new("add-custom-model")
                         .outline()
@@ -941,10 +945,16 @@ impl ProviderCard {
 
         let mut tags = h_flex().gap_1().items_center();
         if row.custom {
-            tags = tags.child(tag(rust_i18n::t!("providers.models.custom").into_owned(), cx));
+            tags = tags.child(tag(
+                rust_i18n::t!("providers.models.custom").into_owned(),
+                cx,
+            ));
         }
         if hidden {
-            tags = tags.child(tag(rust_i18n::t!("providers.models.hidden").into_owned(), cx));
+            tags = tags.child(tag(
+                rust_i18n::t!("providers.models.hidden").into_owned(),
+                cx,
+            ));
         }
 
         let fav_id = row.id.clone();
@@ -1060,12 +1070,16 @@ impl ProviderCard {
         let provider = self.provider;
         v_flex()
             .w_full()
-            .child(self.field_block(
-                rust_i18n::t!("providers.display_name").into_owned().into(),
-                rust_i18n::t!("providers.display_name_help").into_owned().into(),
-                Input::new(&self.display_name).into_any_element(),
-                cx,
-            ))
+            .child(
+                self.field_block(
+                    rust_i18n::t!("providers.display_name").into_owned().into(),
+                    rust_i18n::t!("providers.display_name_help")
+                        .into_owned()
+                        .into(),
+                    Input::new(&self.display_name).into_any_element(),
+                    cx,
+                ),
+            )
             .child(self.field_block(
                 rust_i18n::t!("providers.accent").into_owned().into(),
                 rust_i18n::t!("providers.accent_help").into_owned().into(),
@@ -1073,17 +1087,19 @@ impl ProviderCard {
                 cx,
             ))
             .child(self.render_env(cx))
-            .child(self.field_block(
-                rust_i18n::t!("providers.binary_path").into_owned().into(),
-                rust_i18n::t!(
-                    "providers.binary_path_help",
-                    name = crate::settings::provider_label(provider)
-                )
-                .into_owned()
-                .into(),
-                Input::new(&self.binary).into_any_element(),
-                cx,
-            ))
+            .child(
+                self.field_block(
+                    rust_i18n::t!("providers.binary_path").into_owned().into(),
+                    rust_i18n::t!(
+                        "providers.binary_path_help",
+                        name = crate::settings::provider_label(provider)
+                    )
+                    .into_owned()
+                    .into(),
+                    Input::new(&self.binary).into_any_element(),
+                    cx,
+                ),
+            )
             .child(self.field_block(
                 home_label(provider).into(),
                 home_help(provider).into(),

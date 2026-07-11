@@ -352,8 +352,7 @@ impl ActiveSession {
     /// deliberately exceed T3 here and dispatch immediately even while a turn is
     /// in flight. Codex keeps the strict one-turn-at-a-time queue.
     fn supports_steering(&self) -> bool {
-        matches!(self.runtime, Runtime::Live(_))
-            && self.meta.provider == ProviderKind::ClaudeCode
+        matches!(self.runtime, Runtime::Live(_)) && self.meta.provider == ProviderKind::ClaudeCode
     }
 
     /// Dispatch at most one queued send, preserving FIFO order. A turn already in
@@ -907,8 +906,11 @@ impl AppState {
         }
         status.updating = true;
         cx.emit(AppEvent::Notice(
-            rust_i18n::t!("notice.updating_provider", provider = provider.display_name())
-                .into_owned(),
+            rust_i18n::t!(
+                "notice.updating_provider",
+                provider = provider.display_name()
+            )
+            .into_owned(),
         ));
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -927,11 +929,8 @@ impl AppState {
                     state.check_provider_versions(cx);
                 } else {
                     state.report_error(
-                        rust_i18n::t!(
-                            "errors.update_failed",
-                            provider = provider.display_name()
-                        )
-                        .into_owned(),
+                        rust_i18n::t!("errors.update_failed", provider = provider.display_name())
+                            .into_owned(),
                         cx,
                     );
                 }
@@ -1306,7 +1305,9 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if let Some(center) = &self.toast_center {
-            center.update(cx, |c, cx| c.update(id, kind, title, detail.map(Into::into), cx));
+            center.update(cx, |c, cx| {
+                c.update(id, kind, title, detail.map(Into::into), cx)
+            });
         }
     }
 
@@ -2455,7 +2456,12 @@ impl AppState {
     }
 
     /// Submit a user turn. Starts the provider lazily if needed.
-    pub fn send_turn(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut Context<Self>) {
+    pub fn send_turn(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        cx: &mut Context<Self>,
+    ) {
         // Group C: a draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
         if let Some(active) = self.active.as_ref() {
@@ -3518,11 +3524,7 @@ async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
 }
 
 /// [`run_capture`] with extra environment variables applied to the child.
-async fn run_capture_env(
-    program: &str,
-    args: &[&str],
-    env: &[(String, String)],
-) -> Option<String> {
+async fn run_capture_env(program: &str, args: &[&str], env: &[(String, String)]) -> Option<String> {
     let mut cmd = crate::process::async_command(program);
     cmd.args(args)
         .env_remove("CLAUDECODE")
@@ -4041,9 +4043,7 @@ mod tests {
 
         let launch_env = LaunchEnv {
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
-            home: settings
-                .provider(ProviderKind::ClaudeCode)
-                .effective_home(),
+            home: settings.provider(ProviderKind::ClaudeCode).effective_home(),
         };
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
         let opts = session_options(&meta, &settings, launch_env, None);
@@ -4051,7 +4051,10 @@ mod tests {
         assert_eq!(
             opts.launch_env.pairs(ProviderKind::ClaudeCode),
             vec![
-                ("ANTHROPIC_BASE_URL".to_string(), "https://proxy.test".to_string()),
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "https://proxy.test".to_string()
+                ),
                 ("HOME".to_string(), "/tmp/claude-home".to_string()),
             ]
         );

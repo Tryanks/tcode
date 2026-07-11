@@ -145,9 +145,7 @@ pub fn summarize(snapshot: Option<&ProviderSnapshot>, enabled: bool) -> StatusSu
 
     let auth = snapshot.auth.as_ref();
     let email = auth.and_then(|a| a.email.clone()).filter(|e| !e.is_empty());
-    let label = auth
-        .and_then(|a| a.label.clone())
-        .filter(|l| !l.is_empty());
+    let label = auth.and_then(|a| a.label.clone()).filter(|l| !l.is_empty());
 
     match auth.map(|a| a.status) {
         Some(AuthStatus::Authenticated) => {
@@ -282,7 +280,12 @@ pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
 
 /// Normalize Claude's `subscriptionType` to its display plan name.
 fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
-    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
         "max" => Some("Max"),
         "max_5x" | "max5x" => Some("Max 5x"),
         "max_20x" | "max20x" => Some("Max 20x"),
@@ -359,7 +362,12 @@ pub fn parse_codex_auth(json: &str) -> Option<ProviderAuth> {
 
 /// Normalize `chatgpt_plan_type` to its T3 display plan name.
 fn normalize_chatgpt_plan(raw: &str) -> Option<&'static str> {
-    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
         "free" => Some("Free"),
         "go" => Some("Go"),
         "plus" => Some("Plus"),
@@ -566,7 +574,10 @@ mod tests {
             message: Some("custom diagnostic".into()),
             ..snapshot()
         };
-        assert_eq!(summarize(Some(&with_message), true).detail, "custom diagnostic");
+        assert_eq!(
+            summarize(Some(&with_message), true).detail,
+            "custom diagnostic"
+        );
     }
 
     #[test]

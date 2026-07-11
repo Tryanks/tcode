@@ -160,7 +160,10 @@ fn main() {
                     }
                 }
                 AgentEvent::ProviderCommands { commands } => {
-                    eprintln!("image_probe: provider reported {} command(s)", commands.len());
+                    eprintln!(
+                        "image_probe: provider reported {} command(s)",
+                        commands.len()
+                    );
                 }
                 AgentEvent::Error { message, fatal } => {
                     eprintln!("image_probe: provider error (fatal={fatal}): {message}");

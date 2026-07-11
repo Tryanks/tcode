@@ -127,11 +127,7 @@ pub fn picker_models(
 /// boundary of its group.
 pub fn move_target(rows: &[ResolvedModel], index: usize, up: bool) -> Option<usize> {
     let row = rows.get(index)?;
-    let candidate = if up {
-        index.checked_sub(1)?
-    } else {
-        index + 1
-    };
+    let candidate = if up { index.checked_sub(1)? } else { index + 1 };
     let neighbour = rows.get(candidate)?;
     (neighbour.favorite == row.favorite).then_some(candidate)
 }
@@ -161,9 +157,7 @@ impl SlugError {
     pub fn message(&self) -> String {
         match self {
             SlugError::Empty => rust_i18n::t!("providers.models.err_empty").into_owned(),
-            SlugError::AlreadyBuiltIn => {
-                rust_i18n::t!("providers.models.err_builtin").into_owned()
-            }
+            SlugError::AlreadyBuiltIn => rust_i18n::t!("providers.models.err_builtin").into_owned(),
             SlugError::TooLong => {
                 rust_i18n::t!("providers.models.err_too_long", limit = MAX_SLUG_LEN).into_owned()
             }
@@ -209,7 +203,11 @@ mod tests {
     }
 
     fn catalog() -> Vec<ModelSpec> {
-        vec![spec("opus", "Opus"), spec("sonnet", "Sonnet"), spec("haiku", "Haiku")]
+        vec![
+            spec("opus", "Opus"),
+            spec("sonnet", "Sonnet"),
+            spec("haiku", "Haiku"),
+        ]
     }
 
     #[test]
@@ -342,7 +340,10 @@ mod tests {
             custom_models: vec!["already".into()],
             ..ProviderSettings::default()
         };
-        assert_eq!(validate_slug("  ", &catalog(), &settings), Err(SlugError::Empty));
+        assert_eq!(
+            validate_slug("  ", &catalog(), &settings),
+            Err(SlugError::Empty)
+        );
         assert_eq!(
             validate_slug("opus", &catalog(), &settings),
             Err(SlugError::AlreadyBuiltIn)

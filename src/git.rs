@@ -101,11 +101,21 @@ pub struct QuickAction {
 
 impl QuickAction {
     fn run(action: GitAction, label_key: &'static str) -> Self {
-        Self { action: Some(action), label_key, hint_key: None, disabled: false }
+        Self {
+            action: Some(action),
+            label_key,
+            hint_key: None,
+            disabled: false,
+        }
     }
 
     fn hint(label_key: &'static str, hint_key: &'static str) -> Self {
-        Self { action: None, label_key, hint_key: Some(hint_key), disabled: true }
+        Self {
+            action: None,
+            label_key,
+            hint_key: Some(hint_key),
+            disabled: true,
+        }
     }
 }
 
@@ -295,7 +305,8 @@ pub fn included_paths(all: &[GitFileEntry], excluded: &HashSet<String>) -> Optio
 /// `sanitizeBranchFragment`): strip quotes, collapse separators, cap at 48
 /// chars. Falls back to `"update"` when empty.
 pub fn sanitize_branch_fragment(raw: &str) -> String {
-    let is_valid = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '_' | '-');
+    let is_valid =
+        |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '_' | '-');
     let is_edge_trim = |c: char| matches!(c, '.' | '/' | '_' | '-' | ' ' | '\t' | '\n' | '\r');
 
     // Trim, lowercase, drop quotes, then trim separator-ish edges.
@@ -395,7 +406,12 @@ pub fn sanitize_commit_message(raw: &str) -> String {
     let Some(subject_raw) = lines.next() else {
         return String::new();
     };
-    let subject: String = subject_raw.trim().trim_end_matches('.').chars().take(72).collect();
+    let subject: String = subject_raw
+        .trim()
+        .trim_end_matches('.')
+        .chars()
+        .take(72)
+        .collect();
     let subject = subject.trim().to_string();
     let body: Vec<&str> = lines.collect();
     let body = body.join("\n");
@@ -463,14 +479,20 @@ pub fn parse_status(
         }
     }
 
-    let numstat_map: std::collections::HashMap<&str, (u32, u32)> =
-        numstat.iter().map(|(p, i, d)| (p.as_str(), (*i, *d))).collect();
+    let numstat_map: std::collections::HashMap<&str, (u32, u32)> = numstat
+        .iter()
+        .map(|(p, i, d)| (p.as_str(), (*i, *d)))
+        .collect();
     paths.sort();
     let changed_files = paths
         .into_iter()
         .map(|path| {
             let (insertions, deletions) = numstat_map.get(path.as_str()).copied().unwrap_or((0, 0));
-            GitFileEntry { path, insertions, deletions }
+            GitFileEntry {
+                path,
+                insertions,
+                deletions,
+            }
         })
         .collect();
 
@@ -575,9 +597,18 @@ pub fn read_status(cwd: &Path) -> GitStatus {
         .unwrap_or(false);
     let default_branch = run_git(cwd, &["symbolic-ref", "refs/remotes/origin/HEAD"])
         .ok()
-        .map(|s| s.trim().trim_start_matches("refs/remotes/origin/").to_string())
+        .map(|s| {
+            s.trim()
+                .trim_start_matches("refs/remotes/origin/")
+                .to_string()
+        })
         .filter(|s| !s.is_empty());
-    parse_status(&porcelain, &numstat, default_branch.as_deref(), has_origin_remote)
+    parse_status(
+        &porcelain,
+        &numstat,
+        default_branch.as_deref(),
+        has_origin_remote,
+    )
 }
 
 /// Combined staged + unstaged numstat for `cwd` (path, insertions, deletions).
@@ -639,7 +670,11 @@ pub fn commit_diff_context(cwd: &Path, included: Option<&[String]>) -> (String, 
 /// Run `claude -p <prompt>` headlessly in `cwd` and return its stdout. Used to
 /// generate a commit message (provider fixed to Claude for v1). `binary` is the
 /// configured claude path, falling back to `claude` on `PATH`.
-pub fn run_claude_headless(binary: Option<&Path>, cwd: &Path, prompt: &str) -> Result<String, String> {
+pub fn run_claude_headless(
+    binary: Option<&Path>,
+    cwd: &Path,
+    prompt: &str,
+) -> Result<String, String> {
     let bin = binary
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "claude".to_string());
@@ -697,7 +732,9 @@ pub fn perform_action(
             let branch = feature_branch
                 .or(current_branch)
                 .ok_or_else(|| "no current branch to publish".to_string())?;
-            Ok(run_git(cwd, &["push", "-u", "origin", branch])?.trim().to_string())
+            Ok(run_git(cwd, &["push", "-u", "origin", branch])?
+                .trim()
+                .to_string())
         }
     }
 }
@@ -750,12 +787,18 @@ mod tests {
 
     #[test]
     fn quick_action_dirty_with_upstream_is_commit_push() {
-        assert_eq!(quick_action(&dirty_upstream(), false).action, Some(GitAction::CommitPush));
+        assert_eq!(
+            quick_action(&dirty_upstream(), false).action,
+            Some(GitAction::CommitPush)
+        );
     }
 
     #[test]
     fn quick_action_dirty_without_upstream_is_commit() {
-        let s = GitStatus { has_upstream: false, ..dirty_upstream() };
+        let s = GitStatus {
+            has_upstream: false,
+            ..dirty_upstream()
+        };
         assert_eq!(quick_action(&s, false).action, Some(GitAction::Commit));
     }
 
@@ -800,12 +843,19 @@ mod tests {
             has_origin_remote: true,
             ..dirty_upstream()
         };
-        assert_eq!(quick_action(&s, false).action, Some(GitAction::PublishBranch));
+        assert_eq!(
+            quick_action(&s, false).action,
+            Some(GitAction::PublishBranch)
+        );
     }
 
     #[test]
     fn quick_action_detached_is_disabled() {
-        let s = GitStatus { is_repo: true, detached: true, ..Default::default() };
+        let s = GitStatus {
+            is_repo: true,
+            detached: true,
+            ..Default::default()
+        };
         let qa = quick_action(&s, false);
         assert!(qa.disabled);
         assert_eq!(qa.hint_key, Some("git.hint.detached"));
@@ -834,19 +884,33 @@ mod tests {
             ..Default::default()
         };
         let items = menu_items(&s, false);
-        let commit = items.iter().find(|i| i.action == GitAction::Commit).unwrap();
+        let commit = items
+            .iter()
+            .find(|i| i.action == GitAction::Commit)
+            .unwrap();
         assert!(commit.disabled && commit.hint_key == Some("git.hint.no_changes"));
         let push = items.iter().find(|i| i.action == GitAction::Push).unwrap();
         assert!(push.disabled && push.hint_key == Some("git.hint.no_upstream"));
-        let publish = items.iter().find(|i| i.action == GitAction::PublishBranch).unwrap();
+        let publish = items
+            .iter()
+            .find(|i| i.action == GitAction::PublishBranch)
+            .unwrap();
         assert!(!publish.disabled);
     }
 
     #[test]
     fn included_paths_none_when_nothing_excluded() {
         let all = vec![
-            GitFileEntry { path: "a.rs".into(), insertions: 1, deletions: 0 },
-            GitFileEntry { path: "b.rs".into(), insertions: 0, deletions: 2 },
+            GitFileEntry {
+                path: "a.rs".into(),
+                insertions: 1,
+                deletions: 0,
+            },
+            GitFileEntry {
+                path: "b.rs".into(),
+                insertions: 0,
+                deletions: 2,
+            },
         ];
         assert_eq!(included_paths(&all, &HashSet::new()), None);
     }
@@ -854,9 +918,21 @@ mod tests {
     #[test]
     fn included_paths_excludes_unchecked() {
         let all = vec![
-            GitFileEntry { path: "a.rs".into(), insertions: 1, deletions: 0 },
-            GitFileEntry { path: "b.rs".into(), insertions: 0, deletions: 2 },
-            GitFileEntry { path: "c.rs".into(), insertions: 3, deletions: 3 },
+            GitFileEntry {
+                path: "a.rs".into(),
+                insertions: 1,
+                deletions: 0,
+            },
+            GitFileEntry {
+                path: "b.rs".into(),
+                insertions: 0,
+                deletions: 2,
+            },
+            GitFileEntry {
+                path: "c.rs".into(),
+                insertions: 3,
+                deletions: 3,
+            },
         ];
         let excluded: HashSet<String> = ["b.rs".to_string()].into_iter().collect();
         assert_eq!(
@@ -867,13 +943,22 @@ mod tests {
 
     #[test]
     fn slug_generation() {
-        assert_eq!(sanitize_branch_fragment("Add: Feature!! Foo"), "add-feature-foo");
+        assert_eq!(
+            sanitize_branch_fragment("Add: Feature!! Foo"),
+            "add-feature-foo"
+        );
         // Underscores are preserved (T3 semantics); separator edges are trimmed.
-        assert_eq!(sanitize_branch_fragment("  --Weird__Name--  "), "weird__name");
+        assert_eq!(
+            sanitize_branch_fragment("  --Weird__Name--  "),
+            "weird__name"
+        );
         assert_eq!(sanitize_branch_fragment("feat/thing bar"), "feat/thing-bar");
         assert_eq!(sanitize_branch_fragment("feat//a///b"), "feat/a/b");
         assert_eq!(sanitize_branch_fragment("***"), "update");
-        assert_eq!(feature_branch_name("Fix the parser"), "tcode/fix-the-parser");
+        assert_eq!(
+            feature_branch_name("Fix the parser"),
+            "tcode/fix-the-parser"
+        );
         assert_eq!(
             feature_branch_name("feat: add toast system!"),
             "tcode/feat-add-toast-system"
@@ -882,7 +967,10 @@ mod tests {
 
     #[test]
     fn commit_message_sanitizer() {
-        assert_eq!(sanitize_commit_message("feat: do the thing."), "feat: do the thing");
+        assert_eq!(
+            sanitize_commit_message("feat: do the thing."),
+            "feat: do the thing"
+        );
         assert_eq!(
             sanitize_commit_message("```\nfix: bug\n\nbody line\n```"),
             "fix: bug\n\nbody line"
@@ -910,7 +998,11 @@ mod tests {
         assert_eq!((s.ahead, s.behind), (2, 1));
         assert!(!s.is_default_branch);
         assert_eq!(s.changed_files.len(), 2);
-        let app = s.changed_files.iter().find(|f| f.path == "src/app.rs").unwrap();
+        let app = s
+            .changed_files
+            .iter()
+            .find(|f| f.path == "src/app.rs")
+            .unwrap();
         assert_eq!((app.insertions, app.deletions), (5, 3));
     }
 

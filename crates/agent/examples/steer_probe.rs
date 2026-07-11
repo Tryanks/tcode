@@ -121,9 +121,7 @@ fn main() {
                     return match (status, steered) {
                         (TurnStatus::Completed, true) => 0,
                         (status, steered) => {
-                            eprintln!(
-                                "steer_probe: FAILED (status={status:?}, steered={steered})"
-                            );
+                            eprintln!("steer_probe: FAILED (status={status:?}, steered={steered})");
                             1
                         }
                     };

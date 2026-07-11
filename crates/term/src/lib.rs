@@ -166,7 +166,9 @@ fn shell_label(shell: &str) -> String {
         .next()
         .filter(|name| !name.is_empty())
         .unwrap_or("shell");
-    name.rsplit_once('.').map_or(name, |(stem, _)| stem).to_string()
+    name.rsplit_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .to_string()
 }
 
 impl Terminal {
@@ -294,7 +296,10 @@ impl Terminal {
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = |(row, col): (usize, usize)| {
-            Point::new(Line(row as i32 - offset), Column(col.min(term.columns() - 1)))
+            Point::new(
+                Line(row as i32 - offset),
+                Column(col.min(term.columns() - 1)),
+            )
         };
         let mut selection = Selection::new(SelectionType::Simple, point(start), Side::Left);
         selection.update(point(end), Side::Right);
@@ -544,7 +549,10 @@ mod tests {
 
     #[test]
     fn derives_command_label_from_argv0() {
-        assert_eq!(derive_command_label("  /usr/bin/cargo test --workspace"), Some("cargo".into()));
+        assert_eq!(
+            derive_command_label("  /usr/bin/cargo test --workspace"),
+            Some("cargo".into())
+        );
         assert_eq!(derive_command_label("   "), None);
     }
 
@@ -553,8 +561,16 @@ mod tests {
     fn programmatic_selection_returns_grid_text() {
         let term = command("printf 'alpha\\nbeta\\n'; sleep 1");
         let state = wait_until(&term, |state| state.text().contains("beta"));
-        let alpha_row = state.text().lines().position(|line| line.contains("alpha")).unwrap();
-        let beta_row = state.text().lines().position(|line| line.contains("beta")).unwrap();
+        let alpha_row = state
+            .text()
+            .lines()
+            .position(|line| line.contains("alpha"))
+            .unwrap();
+        let beta_row = state
+            .text()
+            .lines()
+            .position(|line| line.contains("beta"))
+            .unwrap();
         term.select((alpha_row, 0), (beta_row, 3));
         let selected = term.selected_text().unwrap();
         assert_eq!(selected.text, "alpha\nbeta");

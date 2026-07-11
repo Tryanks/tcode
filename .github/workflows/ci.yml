@@ -21,16 +21,11 @@ jobs:
         include:
           - name: macOS arm64
             os: macos-14
-            x2_deferred: false
-          # TODO(X2): remove continue-on-error after cross-platform fixes land.
-          - name: Linux x64 (X2 deferred)
+          - name: Linux x64
             os: ubuntu-24.04
-            x2_deferred: true
-          - name: Windows x64 (X2 deferred)
+          - name: Windows x64
             os: windows-2022
-            x2_deferred: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.x2_deferred }}
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
@@ -65,15 +60,10 @@ jobs:
               libgtk-3-dev libwebkit2gtk-4.1-dev
           fi
 
-      # TODO: make this blocking once the existing workspace is formatted by
-      # current stable rustfmt. Kept visible so new drift is never silent.
-      - name: Check formatting (temporarily non-blocking)
-        continue-on-error: true
+      - name: Check formatting
         run: cargo fmt --all --check
 
-      # TODO: make this blocking after the existing warning backlog is cleared.
-      - name: Run Clippy (temporarily non-blocking)
-        continue-on-error: true
+      - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run workspace tests (Linux under Xvfb)

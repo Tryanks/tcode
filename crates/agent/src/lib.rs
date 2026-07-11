@@ -157,7 +157,7 @@ pub struct ModelSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OptionDescriptor {
     Select {
-        id: String, // "reasoningEffort" | "contextWindow" | "serviceTier" ...
+        id: String,    // "reasoningEffort" | "contextWindow" | "serviceTier" ...
         label: String, // "Reasoning" | "Context Window" | "Service Tier"
         options: Vec<SelectOption>,
         default_value: Option<String>,
@@ -682,9 +682,7 @@ pub enum ApprovalKind {
     /// A read-only file/search operation (Claude's `file_read_approval` family:
     /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary
     /// (see the S2 §1.3 "Approval detail" rules).
-    FileRead {
-        detail: String,
-    },
+    FileRead { detail: String },
     FileChange {
         changes: Vec<FileChange>,
         reason: Option<String>,
@@ -912,6 +910,11 @@ mod resolve_binary_tests {
 
     /// The real Windows shape: `claude` only ever exists as `claude.cmd`, so the
     /// bare join the old resolver did found nothing.
+    // Relies on the Windows filesystem being case-insensitive: PATHEXT is
+    // upper-case while npm writes `claude.cmd`. On a case-sensitive FS the
+    // join cannot match, so this is a Windows-only behavior test. The
+    // case-independent ordering/fallback logic is covered below on every OS.
+    #[cfg(windows)]
     #[test]
     fn windows_resolves_a_cmd_shim_for_a_bare_name() {
         let dir = temp_dir("win-cmd");
@@ -922,6 +925,7 @@ mod resolve_binary_tests {
     }
 
     /// PATHEXT order decides: `.EXE` beats `.CMD` when both exist.
+    #[cfg(windows)]
     #[test]
     fn windows_honors_pathext_order_and_falls_back_to_the_bare_name() {
         let dir = temp_dir("win-order");
@@ -962,7 +966,78 @@ mod resolve_binary_tests {
     fn windows_pathext_defaults_when_unset() {
         // On a real Windows host PATHEXT is always set, but the default must be
         // the documented one when it is not.
-        assert!(path_extensions().iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")));
-        assert!(path_extensions().iter().any(|ext| ext.eq_ignore_ascii_case(".CMD")));
+        assert!(
+            path_extensions()
+                .iter()
+                .any(|ext| ext.eq_ignore_ascii_case(".EXE"))
+        );
+        assert!(
+            path_extensions()
+                .iter()
+                .any(|ext| ext.eq_ignore_ascii_case(".CMD"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod pathext_logic_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The PATHEXT candidate order (and the bare-name fallback) is pure logic:
+    /// assert it on every OS, independent of filesystem case rules.
+    #[test]
+    fn pathext_candidates_are_tried_in_order_then_the_bare_name() {
+        let pathext: Vec<String> = [".COM", ".EXE", ".BAT", ".CMD"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            candidate_names("codex", &pathext),
+            vec![
+                "codex.COM".to_string(),
+                "codex.EXE".to_string(),
+                "codex.BAT".to_string(),
+                "codex.CMD".to_string(),
+                "codex".to_string(),
+            ]
+        );
+    }
+
+    /// A name that already carries an extension is used as-is (no PATHEXT sweep).
+    #[test]
+    fn an_explicit_extension_is_not_expanded() {
+        let pathext: Vec<String> = vec![".EXE".to_string(), ".CMD".to_string()];
+        assert_eq!(
+            candidate_names("claude.cmd", &pathext),
+            vec!["claude.cmd".to_string()]
+        );
+    }
+
+    /// Exact-case fixtures, so the search behaves identically on a
+    /// case-sensitive filesystem: the first PATHEXT hit wins.
+    #[test]
+    fn first_matching_candidate_wins_on_any_filesystem() {
+        let dir = std::env::temp_dir().join(format!("tcode-pathext-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tool.CMD"), "").unwrap();
+        std::fs::write(dir.join("tool.EXE"), "").unwrap();
+        let pathext: Vec<String> = vec![".EXE".to_string(), ".CMD".to_string()];
+        let found = find_in_dirs([dir.clone()], "tool", &pathext, |p: &std::path::Path| {
+            p.is_file()
+        });
+        assert_eq!(
+            found.and_then(|p: PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+            Some("tool.EXE".to_string())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn uuid_like() -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }

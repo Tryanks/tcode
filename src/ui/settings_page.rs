@@ -614,7 +614,6 @@ impl SettingsPage {
             .into_any_element()
     }
 
-
     fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
             ThemeMode::System => rust_i18n::t!("settings.theme.system"),
@@ -804,8 +803,6 @@ impl Render for SettingsPage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-
 
 /// Compact relative-time humanizer for the Archived Threads list.
 fn humanize_ago(secs: u64) -> String {

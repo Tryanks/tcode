@@ -72,8 +72,8 @@ impl PlanPanel {
     }
 
     fn render_proposed_plan(&mut self, markdown: String, cx: &mut Context<Self>) -> AnyElement {
-        let title =
-            plan_title(&markdown).unwrap_or_else(|| rust_i18n::t!("plan.proposed_plan").into_owned());
+        let title = plan_title(&markdown)
+            .unwrap_or_else(|| rust_i18n::t!("plan.proposed_plan").into_owned());
         let md_state = self.sync_markdown(&markdown, cx);
         let copied = self.copied;
 
@@ -216,7 +216,11 @@ impl PlanPanel {
             ),
         };
 
-        let mut text = div().flex_1().min_w_0().text_size(px(13.)).child(step.step.clone());
+        let mut text = div()
+            .flex_1()
+            .min_w_0()
+            .text_size(px(13.))
+            .child(step.step.clone());
         if step.status == PlanStepStatus::Completed {
             text = text.line_through().text_color(muted);
         }
@@ -292,8 +296,5 @@ impl Render for PlanPanel {
 
 /// A subtle background tint from an accent color (row highlight).
 fn tint(color: gpui::Hsla) -> gpui::Hsla {
-    gpui::Hsla {
-        a: 0.12,
-        ..color
-    }
+    gpui::Hsla { a: 0.12, ..color }
 }

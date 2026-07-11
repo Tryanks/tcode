@@ -359,7 +359,10 @@ impl SettingsStore {
         self.write_secrets(&all)
     }
 
-    fn write_secrets(&self, all: &BTreeMap<String, BTreeMap<String, String>>) -> std::io::Result<()> {
+    fn write_secrets(
+        &self,
+        all: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> std::io::Result<()> {
         let data = serde_json::to_vec_pretty(all)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let tmp = self.secrets_path.with_extension("json.tmp");
@@ -532,7 +535,11 @@ mod tests {
         }];
         store.save(&settings).unwrap();
         store
-            .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", Some("sk-live"))
+            .set_secret(
+                ProviderKind::ClaudeCode,
+                "ANTHROPIC_API_KEY",
+                Some("sk-live"),
+            )
             .unwrap();
 
         // settings.json never contains the secret; the reloaded row keeps its
@@ -548,12 +555,18 @@ mod tests {
 
         // The value is only reachable through the secrets store, which is 0600.
         let secrets = store.provider_secrets(ProviderKind::ClaudeCode);
-        assert_eq!(secrets.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-live"));
+        assert_eq!(
+            secrets.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-live")
+        );
         assert!(store.provider_secrets(ProviderKind::Codex).is_empty());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = fs::metadata(&store.secrets_path).unwrap().permissions().mode();
+            let mode = fs::metadata(&store.secrets_path)
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
 

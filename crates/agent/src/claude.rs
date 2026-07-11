@@ -40,8 +40,7 @@ use crate::{
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
-const EXIT_PLAN_DENY_MESSAGE: &str =
-    "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.";
+const EXIT_PLAN_DENY_MESSAGE: &str = "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.";
 
 /// Map a canonical [`ApprovalMode`] onto the value Claude's CLI expects for
 /// `--permission-mode` (and the `set_permission_mode` control request).
@@ -310,10 +309,9 @@ async fn actor_loop(
     let closed_reason: Option<String> = loop {
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
-        let sel = futures_lite::future::or(
-            async { Sel::Cmd(cmd_rx.recv().await.ok()) },
-            async { Sel::Line(line_rx.recv().await.ok()) },
-        )
+        let sel = futures_lite::future::or(async { Sel::Cmd(cmd_rx.recv().await.ok()) }, async {
+            Sel::Line(line_rx.recv().await.ok())
+        })
         .await;
 
         match sel {
@@ -521,10 +519,7 @@ async fn handle_command(
     }
 }
 
-async fn write_line(
-    stdin: &mut smol::process::ChildStdin,
-    value: &Value,
-) -> std::io::Result<()> {
+async fn write_line(stdin: &mut smol::process::ChildStdin, value: &Value) -> std::io::Result<()> {
     let mut line = serde_json::to_string(value).unwrap_or_default();
     line.push('\n');
     stdin.write_all(line.as_bytes()).await?;
@@ -817,10 +812,7 @@ impl Mapper {
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("plan-{}", self.exit_plan_captures.len()));
-        Some(AgentEvent::ProposedPlan {
-            item_id,
-            markdown,
-        })
+        Some(AgentEvent::ProposedPlan { item_id, markdown })
     }
 
     /// Map one CLI stdout message to zero or more outcomes.
@@ -858,10 +850,7 @@ impl Mapper {
             None => return Vec::new(),
         };
         self.session_started = true;
-        let model = msg
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let model = msg.get("model").and_then(Value::as_str).map(str::to_string);
         let mut events = vec![AgentEvent::SessionStarted {
             provider_session_id: session_id.clone(),
             resume: ResumeCursor(json!({ "session_id": session_id })),
@@ -1226,10 +1215,7 @@ impl Mapper {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                cwd: input
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                cwd: input.get("cwd").and_then(Value::as_str).map(str::to_string),
                 reason,
             },
             ClaudeRequestType::FileChange => ApprovalKind::FileChange {
@@ -1247,18 +1233,14 @@ impl Mapper {
             .get("permission_suggestions")
             .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
             .cloned();
-        self.pending_approvals.insert(
-            request_id.clone(),
-            PendingApproval { input, suggestions },
-        );
+        self.pending_approvals
+            .insert(request_id.clone(), PendingApproval { input, suggestions });
 
-        vec![AgentEvent::ApprovalRequested(
-            ApprovalRequest {
-                id: request_id,
-                turn_id: self.current_turn_id.clone(),
-                kind,
-            },
-        )]
+        vec![AgentEvent::ApprovalRequested(ApprovalRequest {
+            id: request_id,
+            turn_id: self.current_turn_id.clone(),
+            kind,
+        })]
     }
 
     fn on_result(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1539,11 +1521,12 @@ fn result_status(msg: &Value) -> TurnStatus {
         msg.get("result")
             .and_then(Value::as_str)
             .unwrap_or_default(),
-        msg.get("subtype").and_then(Value::as_str).unwrap_or_default()
+        msg.get("subtype")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
     )
     .to_lowercase();
-    if haystack.contains("interrupt") || haystack.contains("abort") || haystack.contains("cancel")
-    {
+    if haystack.contains("interrupt") || haystack.contains("abort") || haystack.contains("cancel") {
         TurnStatus::Interrupted
     } else {
         TurnStatus::Failed
@@ -1563,13 +1546,11 @@ fn map_usage(usage: &Value, model_usage: Option<&Value>) -> TokenUsage {
         .sum::<u64>();
     let used_tokens = (used > 0).then_some(used);
 
-    let context_window = model_usage
-        .and_then(Value::as_object)
-        .and_then(|m| {
-            m.values()
-                .filter_map(|v| v.get("contextWindow").and_then(Value::as_u64))
-                .max()
-        });
+    let context_window = model_usage.and_then(Value::as_object).and_then(|m| {
+        m.values()
+            .filter_map(|v| v.get("contextWindow").and_then(Value::as_u64))
+            .max()
+    });
 
     TokenUsage {
         input_tokens: input,
@@ -1675,7 +1656,9 @@ fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
 }
 
 fn has_boolean_option(spec: &ModelSpec, id: &str) -> bool {
-    spec.options.iter().any(|o| matches!(o, OptionDescriptor::Boolean { id: oid, .. } if oid == id))
+    spec.options
+        .iter()
+        .any(|o| matches!(o, OptionDescriptor::Boolean { id: oid, .. } if oid == id))
 }
 
 /// Resolve the effort selection against the model's `reasoningEffort`
@@ -1798,7 +1781,15 @@ fn built_in_models() -> Vec<ModelSpec> {
             "Claude Fable 5",
             vec![
                 reasoning(
-                    &["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+                    &[
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultracode",
+                        "ultrathink",
+                    ],
                     "high",
                 ),
                 context_window(),
@@ -1809,7 +1800,15 @@ fn built_in_models() -> Vec<ModelSpec> {
             "Claude Opus 4.8",
             vec![
                 reasoning(
-                    &["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+                    &[
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultracode",
+                        "ultrathink",
+                    ],
                     "high",
                 ),
                 boolean("fastMode", "Fast Mode"),
@@ -2482,7 +2481,11 @@ mod tests {
             .build_approval_response("req-s", ApprovalDecision::ApproveForSession)
             .unwrap();
         assert_eq!(sess["response"]["response"]["behavior"], "allow");
-        assert!(sess["response"]["response"].get("updatedPermissions").is_none());
+        assert!(
+            sess["response"]["response"]
+                .get("updatedPermissions")
+                .is_none()
+        );
 
         // ApproveForSession WITH suggestions → forwarded verbatim.
         let mut m3 = Mapper::new();
@@ -2507,16 +2510,16 @@ mod tests {
     fn classification_matrix_covers_t3_substring_quirks() {
         use ClaudeRequestType::*;
         let cases = [
-            ("Read", FileRead),             // exact lowercase "read"
-            ("Read File", FileRead),        // "read file" substring
-            ("ReadFile", FileChange),       // no space → "file" classifies it as file_change
+            ("Read", FileRead),       // exact lowercase "read"
+            ("Read File", FileRead),  // "read file" substring
+            ("ReadFile", FileChange), // no space → "file" classifies it as file_change
             ("View", FileRead),
-            ("ViewImage", FileRead),        // "view" wins before "image"
+            ("ViewImage", FileRead), // "view" wins before "image"
             ("Grep", FileRead),
             ("Glob", FileRead),
-            ("WebSearch", FileRead),        // "search" predicate wins over web_search
+            ("WebSearch", FileRead), // "search" predicate wins over web_search
             ("codebase_search", FileRead),
-            ("WebFetch", ToolUse),          // neither search nor read-only recognizes it
+            ("WebFetch", ToolUse), // neither search nor read-only recognizes it
             ("Bash", ExecCommand),
             ("run_shell", ExecCommand),
             ("terminal", ExecCommand),
@@ -2525,24 +2528,20 @@ mod tests {
             ("Write", FileChange),
             ("MultiEdit", FileChange),
             ("delete_thing", FileChange),
-            ("TodoWrite", FileChange),      // "write"
-            ("TaskCreate", FileChange),     // "create"
-            ("TaskUpdate", ToolUse),        // no classification substring
+            ("TodoWrite", FileChange),  // "write"
+            ("TaskCreate", FileChange), // "create"
+            ("TaskUpdate", ToolUse),    // no classification substring
             ("TaskList", ToolUse),
-            ("Task", ToolUse),              // agent item, falls through
+            ("Task", ToolUse), // agent item, falls through
             ("some_agent", ToolUse),
             ("subagent_run", ToolUse),
             ("mcp__server__tool", ToolUse),
-            ("view_image", FileRead),       // "view" still wins
-            ("image_tool", ToolUse),        // image → dynamic
+            ("view_image", FileRead), // "view" still wins
+            ("image_tool", ToolUse),  // image → dynamic
             ("MysteryTool", ToolUse),
         ];
         for (name, expected) in cases {
-            assert_eq!(
-                classify_claude_tool(name),
-                expected,
-                "classifying {name:?}"
-            );
+            assert_eq!(classify_claude_tool(name), expected, "classifying {name:?}");
         }
     }
 

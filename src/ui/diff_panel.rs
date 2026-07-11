@@ -1214,14 +1214,13 @@ impl DiffPanel {
                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
         );
 
-        let selector =
-            Popover::new("diff-turn-popover")
-                .default_open(state.debug_diff_scope_menu)
-                .trigger(trigger)
-                .content(move |_, _, cx| {
-                    let panel_for = panel.clone();
-                    let session_for = session_selector.clone();
-                    let scope_row = |id: &'static str,
+        let selector = Popover::new("diff-turn-popover")
+            .default_open(state.debug_diff_scope_menu)
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                let panel_for = panel.clone();
+                let session_for = session_selector.clone();
+                let scope_row = |id: &'static str,
                                      label: gpui::SharedString,
                                      scope: DiffScope,
                                      cx: &mut gpui::Context<
@@ -1259,75 +1258,74 @@ impl DiffPanel {
                                 }
                             })
                     };
-                    let mut list = v_flex()
-                        .p_1()
-                        .min_w(px(190.))
-                        .gap_0p5()
-                        .child(scope_row(
-                            "diff-scope-working",
-                            rust_i18n::t!("diff.working_tree").into_owned().into(),
-                            DiffScope::WorkingTree,
-                            cx,
-                        ))
-                        .child(scope_row(
-                            "diff-scope-branch",
-                            rust_i18n::t!("diff.branch_changes").into_owned().into(),
-                            DiffScope::Branch,
-                            cx,
-                        ))
-                        .child(
-                            div()
-                                .px_2()
-                                .pt_2()
-                                .pb_1()
-                                .text_size(px(10.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(rust_i18n::t!("diff.turns")),
-                        );
-                    let mut items = turns.clone();
-                    items.reverse();
-                    for turn in items {
-                        let panel = panel.clone();
-                        let session = session_selector.clone();
-                        let is_sel = selected_scope == Some(DiffScope::Turn(turn));
-                        list = list.child(
-                            h_flex()
-                                .id(("diff-turn-item", turn))
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .gap_2()
-                                .items_center()
-                                .rounded(px(6.))
-                                .text_size(px(13.))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(cx.theme().accent))
-                                .when(is_sel, |this| this.bg(cx.theme().accent))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(rust_i18n::t!("diff.turn", count = turn + 1)),
-                                )
-                                .when(is_sel, |this| {
-                                    this.child(Icon::new(IconName::Check).xsmall())
-                                })
-                                .on_click({
-                                    let popover = cx.entity();
-                                    move |_, window, cx| {
-                                        panel.update(cx, |this, cx| {
-                                            this.scopes
-                                                .insert(session.clone(), DiffScope::Turn(turn));
-                                            this.cache = None;
-                                            this.selection = None;
-                                            cx.notify();
-                                        });
-                                        popover.update(cx, |st, cx| st.dismiss(window, cx));
-                                    }
-                                }),
-                        );
-                    }
-                    list
-                });
+                let mut list = v_flex()
+                    .p_1()
+                    .min_w(px(190.))
+                    .gap_0p5()
+                    .child(scope_row(
+                        "diff-scope-working",
+                        rust_i18n::t!("diff.working_tree").into_owned().into(),
+                        DiffScope::WorkingTree,
+                        cx,
+                    ))
+                    .child(scope_row(
+                        "diff-scope-branch",
+                        rust_i18n::t!("diff.branch_changes").into_owned().into(),
+                        DiffScope::Branch,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .px_2()
+                            .pt_2()
+                            .pb_1()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("diff.turns")),
+                    );
+                let mut items = turns.clone();
+                items.reverse();
+                for turn in items {
+                    let panel = panel.clone();
+                    let session = session_selector.clone();
+                    let is_sel = selected_scope == Some(DiffScope::Turn(turn));
+                    list = list.child(
+                        h_flex()
+                            .id(("diff-turn-item", turn))
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .when(is_sel, |this| this.bg(cx.theme().accent))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(rust_i18n::t!("diff.turn", count = turn + 1)),
+                            )
+                            .when(is_sel, |this| {
+                                this.child(Icon::new(IconName::Check).xsmall())
+                            })
+                            .on_click({
+                                let popover = cx.entity();
+                                move |_, window, cx| {
+                                    panel.update(cx, |this, cx| {
+                                        this.scopes.insert(session.clone(), DiffScope::Turn(turn));
+                                        this.cache = None;
+                                        this.selection = None;
+                                        cx.notify();
+                                    });
+                                    popover.update(cx, |st, cx| st.dismiss(window, cx));
+                                }
+                            }),
+                    );
+                }
+                list
+            });
 
         let wrap_on = self.wrap;
         let split_on = self.split.get(&session).copied().unwrap_or(false);
@@ -2198,7 +2196,11 @@ diff --git a/util.py b/util.py
                 .current_dir(&root)
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             output
         };
         git(&["init"]);

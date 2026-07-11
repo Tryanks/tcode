@@ -341,7 +341,10 @@ impl ChatView {
                                 window.open_alert_dialog(cx, move |alert, _, _| {
                                     let app_state = app_state.clone();
                                     alert
-                                        .title(rust_i18n::t!("checkpoint.revert_title", turn = turn))
+                                        .title(rust_i18n::t!(
+                                            "checkpoint.revert_title",
+                                            turn = turn
+                                        ))
                                         .description(rust_i18n::t!("checkpoint.revert_description"))
                                         .button_props(
                                             DialogButtonProps::default()
@@ -1079,11 +1082,12 @@ impl ChatView {
                 main = main.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
             }
         } else if let Some(action) = quick.action {
-            main = main.cursor_pointer().hover(|s| s.bg(cx.theme().accent)).on_click(
-                cx.listener(move |this, _, window, cx| {
+            main = main
+                .cursor_pointer()
+                .hover(|s| s.bg(cx.theme().accent))
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.trigger_git_action(action, window, cx);
-                }),
-            );
+                }));
         }
 
         // Dropdown listing the applicable subset. Menu rows dispatch through the
@@ -1124,8 +1128,9 @@ impl ChatView {
                         row = row.text_color(muted);
                         if let Some(hint) = item.hint_key {
                             let text: SharedString = rust_i18n::t!(hint).into_owned().into();
-                            row = row
-                                .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+                            row = row.tooltip(move |window, cx| {
+                                Tooltip::new(text.clone()).build(window, cx)
+                            });
                         }
                     } else {
                         row = row.cursor_pointer().hover(move |s| s.bg(accent)).on_click(
@@ -1160,17 +1165,28 @@ impl ChatView {
 
     /// Dispatch a git quick-action: commit-style actions open the commit dialog;
     /// everything else runs in the background with a progress toast.
-    fn trigger_git_action(&mut self, action: GitAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn trigger_git_action(
+        &mut self,
+        action: GitAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if action.opens_commit_dialog() {
             self.open_commit_dialog(action, window, cx);
         } else {
-            self.app_state
-                .update(cx, |state, cx| state.run_git_action(action, None, None, None, cx));
+            self.app_state.update(cx, |state, cx| {
+                state.run_git_action(action, None, None, None, cx)
+            });
         }
     }
 
     /// Open the commit dialog for `action` (Commit or Commit & push).
-    fn open_commit_dialog(&mut self, action: GitAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_commit_dialog(
+        &mut self,
+        action: GitAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dialog = cx.new(|cx| CommitDialog::new(self.app_state.clone(), action, window, cx));
         self.commit_dialog = Some(dialog.clone());
         window.open_dialog(cx, move |dlg, window, cx| {

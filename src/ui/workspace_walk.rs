@@ -176,7 +176,11 @@ pub fn filter_entries<'a>(
         };
         scored.push((rank, entry.rel_path.len(), entry));
     }
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.rel_path.cmp(&b.2.rel_path)));
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.rel_path.cmp(&b.2.rel_path))
+    });
     scored.into_iter().take(limit).map(|(_, _, e)| e).collect()
 }
 
@@ -190,9 +194,11 @@ mod tests {
         // Folders src, src/ui come first (dirs before files), then files.
         assert!(entries.iter().any(|e| e.rel_path == "src" && e.is_dir));
         assert!(entries.iter().any(|e| e.rel_path == "src/ui" && e.is_dir));
-        assert!(entries
-            .iter()
-            .any(|e| e.rel_path == "src/ui/composer.rs" && !e.is_dir));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.rel_path == "src/ui/composer.rs" && !e.is_dir)
+        );
         let readme = entries.iter().find(|e| e.rel_path == "README.md").unwrap();
         assert_eq!(readme.basename, "README.md");
         assert_eq!(readme.parent, "");
@@ -216,7 +222,10 @@ mod tests {
         // `composer.rs` (basename prefix) ranks above `decompose.md` (basename
         // contains) which ranks above nothing here.
         assert_eq!(out[0].rel_path, "src/composer.rs");
-        assert!(out.iter().any(|e| e.rel_path == "src/ui/composer_trigger.rs"));
+        assert!(
+            out.iter()
+                .any(|e| e.rel_path == "src/ui/composer_trigger.rs")
+        );
         assert!(out.iter().any(|e| e.rel_path == "docs/decompose.md"));
     }
 
