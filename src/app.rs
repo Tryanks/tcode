@@ -17,7 +17,7 @@ use crate::provider_status::{
     AuthStatus, ProviderAuth, ProviderSnapshot, ProviderStatusKind, StatusSummary,
     failed_cli_message, indeterminate_auth_message, missing_cli_message, unauthenticated_message,
 };
-use crate::session::{ReviewComment, Timeline};
+use crate::session::{EntryContent, ReviewComment, Timeline};
 use crate::settings::{ProjectSort, ProviderSettings, Settings, SettingsStore};
 use crate::store::{
     Checkpoint, Project, SessionMeta, SessionStore, WorktreeInfo, now_millis, now_secs,
@@ -625,6 +625,10 @@ pub struct AppState {
     /// git status has loaded (clicking the header button cannot be driven
     /// headlessly). Consumed by `ChatView` on its next render.
     pub debug_open_commit_dialog: bool,
+    /// Screenshot-only (`--debug-edit-open`): open the inline "Edit & resend"
+    /// editor on the last user message (hovering a bubble and clicking its action
+    /// row cannot be driven headlessly). Consumed by `ChatView` on its next render.
+    pub debug_edit_open: bool,
     /// The rich toast overlay (set by `AppShell`), used for long-running git
     /// flows — one progress toast mutated in place through the flow.
     toast_center: Option<Entity<crate::ui::ToastCenter>>,
@@ -709,6 +713,7 @@ impl AppState {
             git_busy: false,
             git_status_generation: 0,
             debug_open_commit_dialog: false,
+            debug_edit_open: false,
             toast_center: None,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
@@ -2460,47 +2465,61 @@ impl AppState {
             .is_some_and(|a| a.meta.checkpoints.iter().any(|c| c.turn == turn))
     }
 
-    /// Revert the active thread to the checkpoint captured before `turn`:
-    /// restore the worktree, discard newer messages/turns from the log, drop the
-    /// newer checkpoint refs, and roll the provider session back to idle. Blocked
-    /// while a turn runs.
-    pub fn revert_to_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+    /// Rewind the active thread to just before `turn`'s user message: restore the
+    /// worktree from that turn's checkpoint (when there is one), truncate the
+    /// JSONL log at the message, drop the now-orphaned newer checkpoint refs, and
+    /// roll the provider session back to Idle — so the next send resumes from the
+    /// truncated transcript. Blocked while a turn runs.
+    ///
+    /// This is the single rewind mechanism behind both Revert and Edit & resend;
+    /// they differ only in what happens afterwards.
+    ///
+    /// * `Some(true)` — rewound and the worktree was restored from a checkpoint.
+    /// * `Some(false)` — rewound, but the turn has no checkpoint (e.g. a non-git
+    ///   cwd): the transcript was truncated and the files on disk were left as
+    ///   they are. Callers must say so.
+    /// * `None` — nothing happened (no active thread, a turn is running, the turn
+    ///   is unknown, or a git/IO failure — which reports itself).
+    fn rewind_to_turn(&mut self, turn: usize, cx: &mut Context<Self>) -> Option<bool> {
         let (session_id, cwd, checkpoint) = {
-            let Some(active) = self.active.as_ref() else {
-                return;
-            };
+            let active = self.active.as_ref()?;
             if active.timeline.turn_running {
                 cx.emit(AppEvent::Error(
                     rust_i18n::t!("checkpoint.revert_blocked").into_owned(),
                 ));
-                return;
+                return None;
             }
-            let Some(cp) = active
+            let checkpoint = active
                 .meta
                 .checkpoints
                 .iter()
                 .find(|c| c.turn == turn)
-                .cloned()
-            else {
-                return;
-            };
-            (active.meta.id.clone(), active.meta.cwd.clone(), cp)
+                .cloned();
+            (active.meta.id.clone(), active.meta.cwd.clone(), checkpoint)
         };
 
-        if let Err(err) = crate::checkpoints::restore_checkpoint(&cwd, &checkpoint.commit) {
-            self.report_error(err, cx);
-            return;
+        // The truncation boundary: the checkpoint's recorded offset, or — with no
+        // checkpoint — the offset recomputed by replaying the stored log.
+        let event_offset = match &checkpoint {
+            Some(cp) => cp.event_offset,
+            None => {
+                crate::session::turn_user_event_offset(&self.store.read_events(&session_id), turn)?
+            }
+        };
+
+        if let Some(cp) = &checkpoint {
+            if let Err(err) = crate::checkpoints::restore_checkpoint(&cwd, &cp.commit) {
+                self.report_error(err, cx);
+                return None;
+            }
+            crate::checkpoints::delete_checkpoint_refs_from(&cwd, &session_id, turn);
         }
-        crate::checkpoints::delete_checkpoint_refs_from(&cwd, &session_id, turn);
-        if let Err(err) = self
-            .store
-            .truncate_events(&session_id, checkpoint.event_offset)
-        {
+        if let Err(err) = self.store.truncate_events(&session_id, event_offset) {
             self.report_error(
                 rust_i18n::t!("errors.persist_event", error = err).into_owned(),
                 cx,
             );
-            return;
+            return None;
         }
 
         // Re-fold the truncated timeline and roll the session back to idle.
@@ -2519,10 +2538,72 @@ impl AppState {
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
         }
-        cx.emit(AppEvent::Notice(
-            rust_i18n::t!("checkpoint.reverted").into_owned(),
-        ));
         cx.notify();
+        Some(checkpoint.is_some())
+    }
+
+    /// Revert the active thread to the checkpoint captured before `turn`. Only
+    /// offered for turns that have a checkpoint (the hover affordance is hidden
+    /// otherwise), so this is a no-op without one.
+    pub fn revert_to_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+        if !self.turn_has_checkpoint(turn) {
+            return;
+        }
+        if self.rewind_to_turn(turn, cx).is_some() {
+            cx.emit(AppEvent::Notice(
+                rust_i18n::t!("checkpoint.reverted").into_owned(),
+            ));
+        }
+    }
+
+    /// Edit & resend a user message: rewind the conversation to the state just
+    /// before it (worktree + transcript + provider session — the same mechanism
+    /// Revert uses), then send `text` as a fresh turn.
+    ///
+    /// Without a checkpoint the transcript is still truncated and the message
+    /// resent, but the files on disk are untouched — the caller is told so with a
+    /// toast rather than silently.
+    pub fn edit_and_resend_turn(&mut self, turn: usize, text: String, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let Some(restored) = self.rewind_to_turn(turn, cx) else {
+            return;
+        };
+        if !restored {
+            cx.emit(AppEvent::Notice(
+                rust_i18n::t!("chat.edit_no_checkpoint").into_owned(),
+            ));
+        }
+        self.send_turn(text, Vec::new(), cx);
+    }
+
+    /// The last turn in the active timeline that has a user message (the target
+    /// of the `--debug-edit-resend` dev flag).
+    pub fn last_user_turn(&self) -> Option<usize> {
+        self.active
+            .as_ref()?
+            .timeline
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.content {
+                EntryContent::User { .. } => Some(entry.turn),
+                _ => None,
+            })
+    }
+
+    /// Dev flag `--debug-edit-resend "<text>"`: edit & resend the last user
+    /// message of the opened session (the GUI's hover action row cannot be
+    /// clicked headlessly).
+    pub fn debug_edit_resend(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(turn) = self.last_user_turn() else {
+            log::error!("--debug-edit-resend: the opened session has no user message");
+            return;
+        };
+        log::info!("--debug-edit-resend: editing turn {turn} -> {text:?}");
+        self.edit_and_resend_turn(turn, text, cx);
     }
 
     // -- worktree mode (Group C) --------------------------------------------
@@ -4465,6 +4546,7 @@ fn truncate_title(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext as _;
 
     fn session_in(project_id: &str, updated_at: u64) -> SessionMeta {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
@@ -5121,5 +5203,192 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(plain);
+    }
+
+    // -- rewind: revert / edit & resend --------------------------------------
+
+    /// A scratch git repo with one committed file.
+    fn scratch_repo() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("tcode-rewind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            crate::process::command("git")
+                .args(args)
+                .current_dir(&root)
+                .env("GIT_AUTHOR_NAME", "tcode")
+                .env("GIT_AUTHOR_EMAIL", "tcode@localhost")
+                .env("GIT_COMMITTER_NAME", "tcode")
+                .env("GIT_COMMITTER_EMAIL", "tcode@localhost")
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "tcode"]);
+        git(&["config", "user.email", "tcode@localhost"]);
+        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        root
+    }
+
+    fn scratch_state(cwd: PathBuf, cx: &mut gpui::TestAppContext) -> Entity<AppState> {
+        let data = std::env::temp_dir().join(format!("tcode-rewind-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        state.update(cx, |state, cx| {
+            state.create_session(ProviderKind::ClaudeCode, cwd, None, None, None, cx);
+        });
+        state
+    }
+
+    /// Record a user message for a new turn exactly the way `dispatch_next_queued`
+    /// does (JSONL offset first, then the message, then the pre-turn checkpoint),
+    /// then let the "agent" reply and finish the turn.
+    fn fake_turn(
+        state: &mut AppState,
+        text: &str,
+        reply: &str,
+        cx: &mut Context<AppState>,
+    ) -> usize {
+        let id = state.active.as_ref().unwrap().meta.id.clone();
+        let offset = state.store.event_count(&id);
+        state.record_user_message(&id, text, cx);
+        state.capture_checkpoint(&id, offset, cx);
+        let turn = state.last_user_turn().unwrap();
+        state.record_event(
+            &id,
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: format!("assistant-{turn}"),
+                content: ItemContent::AssistantMessage {
+                    text: reply.to_string(),
+                },
+            }),
+            cx,
+        );
+        state.record_event(
+            &id,
+            &AgentEvent::TurnCompleted {
+                turn_id: format!("turn-{turn}"),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        offset
+    }
+
+    /// Edit & resend rewinds to the state just before the edited message: the
+    /// JSONL is truncated at exactly that message's offset, the worktree is
+    /// restored from the turn's checkpoint (the file the agent created is gone),
+    /// the newer checkpoints are dropped and the provider session is idle — ready
+    /// for the edited text to be sent as a fresh turn.
+    #[gpui::test]
+    fn edit_and_resend_truncates_the_transcript_and_restores_the_checkpoint(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo();
+        let state = scratch_state(repo.clone(), cx);
+
+        state.update(cx, |state, cx| {
+            let id = state.active.as_ref().unwrap().meta.id.clone();
+
+            // Turn 0: the agent creates a file.
+            let offset0 = fake_turn(state, "add a file", "Created agent.txt.", cx);
+            assert_eq!(offset0, 0);
+            std::fs::write(repo.join("agent.txt"), "written by the agent\n").unwrap();
+
+            // Turn 1: a follow-up (its checkpoint therefore contains agent.txt).
+            let offset1 = fake_turn(state, "now rename it", "Renamed it.", cx);
+            let events_before = state.store.event_count(&id);
+            assert!(offset1 > offset0 && events_before > offset1);
+            assert!(state.turn_has_checkpoint(0) && state.turn_has_checkpoint(1));
+            // The recomputed boundary (the no-checkpoint path) agrees with the
+            // one the checkpoint recorded.
+            let events = state.store.read_events(&id);
+            assert_eq!(
+                crate::session::turn_user_event_offset(&events, 0),
+                Some(offset0)
+            );
+            assert_eq!(
+                crate::session::turn_user_event_offset(&events, 1),
+                Some(offset1)
+            );
+
+            // Edit & resend the FIRST message: everything from it onwards goes.
+            let restored = state.rewind_to_turn(0, cx);
+            assert_eq!(restored, Some(true), "the worktree was restored");
+
+            // (a) the transcript is truncated at the edited message's offset...
+            assert_eq!(state.store.event_count(&id), offset0);
+            assert!(state.active.as_ref().unwrap().timeline.entries.is_empty());
+            // (b) ...the worktree is back to the pre-turn snapshot...
+            assert!(!repo.join("agent.txt").exists());
+            assert_eq!(
+                std::fs::read_to_string(repo.join("seed.txt")).unwrap(),
+                "seed\n"
+            );
+            // (c) ...the orphaned checkpoints are gone, and the provider session
+            // is idle so the next send resumes from the truncated transcript.
+            assert!(state.active.as_ref().unwrap().meta.checkpoints.is_empty());
+            assert!(!crate::checkpoints::checkpoint_ref_exists(&repo, &id, 0));
+            assert!(!crate::checkpoints::checkpoint_ref_exists(&repo, &id, 1));
+            assert!(matches!(
+                state.active.as_ref().unwrap().runtime,
+                Runtime::Idle
+            ));
+            assert!(state.active.as_ref().unwrap().meta.resume_cursor.is_none());
+        });
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A running turn blocks the rewind (Revert and Edit & resend alike).
+    #[gpui::test]
+    fn rewind_is_blocked_while_a_turn_runs(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo();
+        let state = scratch_state(repo.clone(), cx);
+        state.update(cx, |state, cx| {
+            let id = state.active.as_ref().unwrap().meta.id.clone();
+            fake_turn(state, "add a file", "Created it.", cx);
+            let before = state.store.event_count(&id);
+            state.active.as_mut().unwrap().timeline.turn_running = true;
+
+            assert_eq!(state.rewind_to_turn(0, cx), None);
+            assert_eq!(state.store.event_count(&id), before);
+            assert!(state.turn_has_checkpoint(0));
+        });
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Outside a git repo there is no checkpoint to restore: the transcript is
+    /// still truncated at the edited message (so the resend really does replace
+    /// it), but the files on disk are left alone — and the caller is told (the
+    /// `Some(false)` that drives the "not reverted" toast).
+    #[gpui::test]
+    fn rewind_without_a_checkpoint_truncates_but_leaves_files(cx: &mut gpui::TestAppContext) {
+        let plain =
+            std::env::temp_dir().join(format!("tcode-rewind-plain-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&plain).unwrap();
+        let state = scratch_state(plain.clone(), cx);
+
+        state.update(cx, |state, cx| {
+            let id = state.active.as_ref().unwrap().meta.id.clone();
+            let offset0 = fake_turn(state, "add a file", "Created agent.txt.", cx);
+            std::fs::write(plain.join("agent.txt"), "written by the agent\n").unwrap();
+            let offset1 = fake_turn(state, "and again", "Done.", cx);
+            assert!(state.active.as_ref().unwrap().meta.checkpoints.is_empty());
+
+            // Rewind to turn 1: the boundary is recomputed by replaying the log.
+            assert_eq!(state.rewind_to_turn(1, cx), Some(false));
+            assert_eq!(state.store.event_count(&id), offset1);
+            assert_eq!(state.last_user_turn(), Some(0));
+
+            // The agent's file survives (nothing to restore from) — hence the
+            // honest toast.
+            assert!(plain.join("agent.txt").exists());
+            let _ = offset0;
+        });
+
+        let _ = std::fs::remove_dir_all(&plain);
     }
 }

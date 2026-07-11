@@ -76,12 +76,26 @@ Debug launch flags: `--open-latest`, `--open-diff`, `--open-settings`,
 draft for that project).
 
 Screenshot-only flags: `--debug-compose <text>` (seed the composer, driving the
-`@`/`/`/`$` menus), `--debug-image <path>` (attach a pending image),
+`@`/`/`/`$` menus), `--debug-edit-open` (open the inline "Edit & resend" editor on
+the last user message), `--debug-image <path>` (attach a pending image),
 `--debug-cwd <path>` (deterministic draft), `--debug-live` (start the opened
 session's provider without sending a turn), `--debug-send <text>` (send one turn
 on launch without exiting — Claude only reports its slash commands after the
 first message), `--debug-palette <query>` (seed the ⌘K query; `>` restricts to
 actions), and `--debug-settings-section <general|providers|archived>`.
+
+E2E flag: `--debug-edit-resend "<text>"` runs **Edit & resend** on the last user
+message of the most recent session (hovering a bubble and clicking its action row
+cannot be driven headlessly): the thread is rewound to just before that message —
+worktree restored from the turn's git checkpoint, JSONL truncated, provider
+session rolled back — and `<text>` is sent as a fresh turn. E.g.
+
+```sh
+git init /tmp/er && cargo run -- --smoke "claude|/tmp/er|Create agent.txt containing hello."
+cargo run -- --debug-edit-resend "Create edited.txt containing bye."
+# -> agent.txt is gone, the transcript now starts at the edited message, and the
+#    new turn runs and creates edited.txt.
+```
 
 See `docs/DESIGN.md` for the UI spec and the visual verification protocol.
 

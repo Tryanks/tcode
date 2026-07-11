@@ -78,6 +78,11 @@ Canonical values live in `themes/tcode.json` (embedded at build time).
 right: two icon buttons (layout placeholder · diff-panel toggle).
 
 ### Timeline
+- **Turn separation is rhythm, not rules.** Turns are 44px apart; inside a turn
+  blocks sit 16px apart. There is deliberately **no divider/hairline under the
+  user bubble** — the eye separates turns by the space around them and by the
+  typographic step down from the 15px bubble to the 11px uppercase "WORK LOG"
+  label that opens the turn's activity.
 - Turn = "Work Log" section: 11px uppercase muted label; activity rows (muted ✓
   + one-line summary; command/file/tool/reasoning); >3 rows → last 2 +
   "+N previous log entrys" expander; footer "Worked for XmYYs ›" (collapsed by
@@ -86,6 +91,28 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   muted bg, 4px radius). Streaming appends via push_str with
   follow-when-near-bottom.
 - User messages: right-aligned bubble, muted bg, radius 12, max-width ~70%.
+- **Message actions.** Every message reserves a 24px action row under it (the
+  height is always taken, so revealing it never shifts the timeline). It is
+  hidden until the message is hovered — except on the newest user and newest
+  assistant message, where it stays visible so the actions are reachable without
+  hovering. Ghost xsmall buttons, icon + label:
+  - user bubble (right-aligned row): **Copy** · **Edit** · **Revert** — Edit and
+    Revert only on the message that *opened* the turn (a steered message joins a
+    turn already in flight and carries Copy alone), Revert only when the turn has
+    a git checkpoint. Both are disabled with an explaining tooltip while a turn
+    runs.
+  - assistant message (left-aligned row): **Copy**.
+  - Copy puts the message's **raw text** (the markdown source, not the rendered
+    document) on the clipboard and flips to "Copied!" for 2s.
+- **Edit & resend.** Edit replaces the bubble with an inline multi-line editor
+  (primary-bordered card, seeded with the original text; Enter resends, Esc
+  cancels; explicit Cancel / Resend buttons and a muted hint row). Resending
+  rewinds the conversation to the state just before that message — the turn's git
+  checkpoint restores the worktree, the JSONL log is truncated at the message and
+  the provider session is rolled back to Idle (the same single mechanism Revert
+  uses) — and then sends the edited text as a fresh turn. Without a checkpoint
+  (e.g. a non-git cwd) the transcript is still truncated and the message resent,
+  and a toast says plainly that files on disk were not reverted.
 - CHANGED FILES card per turn with file changes: header "CHANGED FILES (N) ·
   +A -D" + "Collapse all" ghost + "View diff" bordered button; body = directory
   tree, file rows with right-aligned per-file +a/-d; paths relative to the
