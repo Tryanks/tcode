@@ -35,6 +35,7 @@ fn main() {
             mcp_server: None,
             launch_env: Default::default(),
             extra_args: Vec::new(),
+            acp: None,
         };
         let handle = start_session(provider, opts).await.expect("start session");
         handle

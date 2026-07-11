@@ -97,6 +97,7 @@ impl ProviderCard {
             match provider {
                 ProviderKind::Codex => path_string(&settings.shadow_home_path),
                 ProviderKind::ClaudeCode => settings.launch_args.clone().unwrap_or_default(),
+                ProviderKind::Acp => String::new(),
             },
             window,
             cx,
@@ -183,6 +184,7 @@ impl ProviderCard {
                 match provider {
                     ProviderKind::Codex => settings.shadow_home_path = third.map(Into::into),
                     ProviderKind::ClaudeCode => settings.launch_args = third,
+                    ProviderKind::Acp => {}
                 }
             },
             cx,
@@ -1148,6 +1150,7 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
     match provider {
         ProviderKind::ClaudeCode => Icon::empty().path("icons/claude.svg"),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
+        ProviderKind::Acp => Icon::empty(),
     }
 }
 
@@ -1155,6 +1158,7 @@ fn default_binary_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Acp => "",
     }
 }
 
@@ -1162,6 +1166,7 @@ fn home_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "~/.codex",
         ProviderKind::ClaudeCode => "~",
+        ProviderKind::Acp => "",
     }
 }
 
@@ -1169,6 +1174,7 @@ fn home_label(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.codex_home").into_owned(),
         ProviderKind::ClaudeCode => rust_i18n::t!("providers.claude_home").into_owned(),
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -1176,6 +1182,7 @@ fn home_help(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.codex_home_help").into_owned(),
         ProviderKind::ClaudeCode => rust_i18n::t!("providers.claude_home_help").into_owned(),
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -1183,6 +1190,7 @@ fn third_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "~/.codex-t3/personal",
         ProviderKind::ClaudeCode => "e.g. --chrome",
+        ProviderKind::Acp => "",
     }
 }
 
@@ -1190,6 +1198,7 @@ fn third_label(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.shadow_home").into_owned(),
         ProviderKind::ClaudeCode => rust_i18n::t!("providers.launch_args").into_owned(),
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -1197,6 +1206,7 @@ fn third_help(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.shadow_home_help").into_owned(),
         ProviderKind::ClaudeCode => rust_i18n::t!("providers.launch_args_help").into_owned(),
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -1204,6 +1214,7 @@ fn custom_model_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "gpt-6.7-codex-ultra-preview",
         ProviderKind::ClaudeCode => "claude-sonnet-5",
+        ProviderKind::Acp => "",
     }
 }
 
