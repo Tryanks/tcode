@@ -120,6 +120,7 @@ approval:
   full_access: "Full access"
   full_access_description: "Allow commands and edits without prompts."
   command_requested: "Command approval requested"
+  file_read_requested: "File read approval requested"
   file_requested: "File change approval requested"
   tool_requested: "Tool approval requested"
   in_directory: "in %{cwd}"

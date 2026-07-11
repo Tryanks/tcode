@@ -93,6 +93,26 @@ pub struct OptionSelection {
     pub value: serde_json::Value,
 } // string or bool
 
+/// A structured question the agent asks the user (Claude `AskUserQuestion`,
+/// Codex `item/tool/requestUserInput`). Rendered as a multiple-choice (or
+/// free-text) prompt; answers ride back through [`SessionCommand::RespondUserInput`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInputQuestion {
+    /// The answer key. Claude: the complete question text (the SDK indexes
+    /// answers by question text). Codex: the native question id.
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Vec<UserInputOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInputOption {
+    pub label: String,
+    pub description: String,
+}
+
 /// Interaction mode (T3: Build/Plan).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +189,14 @@ pub enum SessionCommand {
         request_id: String,
         decision: ApprovalDecision,
     },
+    /// Answer a pending user-input request (Claude `AskUserQuestion`, Codex
+    /// `item/tool/requestUserInput`). Each value is a string (single-select /
+    /// free text) or an array of strings (multi-select), keyed by the matching
+    /// [`UserInputQuestion::id`].
+    RespondUserInput {
+        request_id: String,
+        answers: serde_json::Map<String, serde_json::Value>,
+    },
     /// Switch the permission model mid-session. Providers that cannot switch
     /// live emit `AgentEvent::Warning` and keep the old mode; the UI then
     /// falls back to a resume-restart.
@@ -235,6 +263,18 @@ pub enum AgentEvent {
     ApprovalResolved {
         request_id: String,
         decision: ApprovalDecision,
+    },
+    /// The agent is asking the user one or more structured questions and is
+    /// blocked until a matching [`SessionCommand::RespondUserInput`] arrives.
+    UserInputRequested {
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+    },
+    /// A pending user-input request has been settled (answered, or cancelled on
+    /// teardown — in which case `answers` is empty).
+    UserInputResolved {
+        request_id: String,
+        answers: serde_json::Map<String, serde_json::Value>,
     },
     TokenUsage(TokenUsage),
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
@@ -380,13 +420,23 @@ pub enum ApprovalKind {
         cwd: Option<String>,
         reason: Option<String>,
     },
+    /// A read-only file/search operation (Claude's `file_read_approval` family:
+    /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary
+    /// (see the S2 §1.3 "Approval detail" rules).
+    FileRead {
+        detail: String,
+    },
     FileChange {
         changes: Vec<FileChange>,
         reason: Option<String>,
     },
+    /// Dynamic fallback for any tool that doesn't classify as command / file
+    /// read / file change (agent, mcp, image, …). `detail` is the pre-rendered
+    /// summary per the S2 §1.3 rules.
     ToolUse {
         name: String,
         input: serde_json::Value,
+        detail: String,
     },
 }
 
@@ -397,6 +447,10 @@ pub enum ApprovalDecision {
     /// Approve and don't ask again for this kind of action in this session.
     ApproveForSession,
     Deny,
+    /// Deny and cancel the turn. Claude maps this to a permission denial with
+    /// `"User cancelled tool execution."` (no interrupt); Codex maps it to the
+    /// protocol `{decision:"cancel"}` (deny + immediate turn interruption).
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

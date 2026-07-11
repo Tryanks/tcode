@@ -120,6 +120,7 @@ approval:
   full_access: "完全访问"
   full_access_description: "无需提示即可执行命令和编辑。"
   command_requested: "请求批准执行命令"
+  file_read_requested: "请求批准读取文件"
   file_requested: "请求批准修改文件"
   tool_requested: "请求批准使用工具"
   in_directory: "位于 %{cwd}"

@@ -9,9 +9,10 @@
 //!   cargo run -p agent --example probe -- --list-models <codex|claude>
 //!
 //! Turn mode prints every canonical event as one JSON line and auto-approves any
-//! approval request (only run against throwaway directories). `--mode plan`
-//! sends the turn in Plan interaction mode; `--effort` sets a per-turn reasoning
-//! effort (Codex) — Claude ignores per-turn effort (launch-time only).
+//! approval request and auto-answers any user-input request with each question's
+//! first option (only run against throwaway directories). `--mode plan` sends the
+//! turn in Plan interaction mode; `--effort` sets a per-turn reasoning effort
+//! (Codex) — Claude ignores per-turn effort (launch-time only).
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, InteractionMode, OptionSelection, ProviderKind,
@@ -161,6 +162,37 @@ fn main() {
                         .send(SessionCommand::RespondApproval {
                             request_id: req.id.clone(),
                             decision: ApprovalDecision::Approve,
+                        })
+                        .await
+                        .ok();
+                }
+                AgentEvent::UserInputRequested {
+                    request_id,
+                    questions,
+                } => {
+                    // Auto-answer with each question's first option (or empty
+                    // string for a free-text-only question), printing what we saw.
+                    let mut answers = serde_json::Map::new();
+                    for q in questions {
+                        let answer = q
+                            .options
+                            .first()
+                            .map(|o| o.label.clone())
+                            .unwrap_or_default();
+                        eprintln!(
+                            "probe: user-input {:?} header={:?} options={:?} -> answering {:?}",
+                            q.question,
+                            q.header,
+                            q.options.iter().map(|o| &o.label).collect::<Vec<_>>(),
+                            answer
+                        );
+                        answers.insert(q.id.clone(), serde_json::Value::String(answer));
+                    }
+                    handle
+                        .commands
+                        .send(SessionCommand::RespondUserInput {
+                            request_id: request_id.clone(),
+                            answers,
                         })
                         .await
                         .ok();
