@@ -289,6 +289,12 @@ pub struct AppState {
     /// "Loading models…" row when the cache is also empty).
     pub models_loading: HashMap<ProviderKind, bool>,
     next_start_generation: u64,
+    /// Screenshot-only: seed the composer text on first render (drives `@`/`/`/`$`
+    /// trigger menus headlessly, as `--open-diff` does for the diff panel).
+    pub debug_compose: Option<String>,
+    /// Screenshot-only: inject a pending image attachment on first render (paste
+    /// / drag-drop cannot be driven headlessly).
+    pub debug_image: Option<PathBuf>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -335,6 +341,8 @@ impl AppState {
             model_catalogs,
             models_loading: HashMap::new(),
             next_start_generation: 0,
+            debug_compose: None,
+            debug_image: None,
         }
     }
 
@@ -703,6 +711,32 @@ impl AppState {
 
     pub fn active_session_id(&self) -> Option<&str> {
         self.active.as_ref().map(|a| a.meta.id.as_str())
+    }
+
+    /// The session cwd of the active session (for the `@`-mention workspace walk).
+    pub fn active_cwd(&self) -> Option<PathBuf> {
+        self.active.as_ref().map(|a| a.meta.cwd.clone())
+    }
+
+    /// Directory where the active session's image attachments are persisted
+    /// (`<store root>/attachments/<session id>/`). `None` with no active session.
+    pub fn attachments_dir(&self) -> Option<PathBuf> {
+        let id = self.active_session_id()?;
+        Some(self.store.root().join("attachments").join(id))
+    }
+
+    /// Persist attachment `bytes` under the active session's attachments dir with
+    /// the given file extension, returning the saved file path. Files are written
+    /// now so a pending image is never lost even though the send wire cannot yet
+    /// carry it (see the composer's image seam + reported contract gap).
+    pub fn save_attachment(&self, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
+        let dir = self.attachments_dir().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no active session")
+        })?;
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, bytes)?;
+        Ok(path)
     }
 
     pub fn update_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {

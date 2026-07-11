@@ -46,6 +46,21 @@ fn main() {
     let open_draft = std::env::args()
         .skip_while(|arg| arg != "--open-draft")
         .nth(1);
+    // Screenshot-only: seed the composer text (drives the @/$// trigger menus)
+    // or inject a pending image (paste/drag-drop cannot be driven headlessly).
+    let debug_compose = std::env::args()
+        .skip_while(|arg| arg != "--debug-compose")
+        .nth(1);
+    let debug_image = std::env::args()
+        .skip_while(|arg| arg != "--debug-image")
+        .nth(1)
+        .map(std::path::PathBuf::from);
+    // Screenshot-only: open a deterministic draft rooted at this cwd (so the
+    // `@`-mention walk lists a known repo, independent of the newest session).
+    let debug_cwd = std::env::args()
+        .skip_while(|arg| arg != "--debug-cwd")
+        .nth(1)
+        .map(std::path::PathBuf::from);
     let store = store::SessionStore::open_default().expect("failed to open tcode data directory");
 
     gpui_platform::application()
@@ -71,6 +86,15 @@ fn main() {
             // Refresh the model catalogs in the background so the picker shows
             // real, up-to-date models (the persisted cache serves until then).
             app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
+            {
+                let (dc, di) = (debug_compose.clone(), debug_image.clone());
+                app_state.update(cx, |state, _| {
+                    state.debug_compose = dc;
+                    state.debug_image = di;
+                });
+            }
+            let debug_seed =
+                debug_compose.is_some() || debug_image.is_some() || debug_cwd.is_some();
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
@@ -139,9 +163,15 @@ fn main() {
                     || open_palette
                     || open_plan
                     || open_draft.is_some()
+                    || debug_seed
                 {
                     let _ = app_state.update(cx, |state, cx| {
-                        if open_latest || open_terminal || open_plan {
+                        if let Some(cwd) = debug_cwd.clone() {
+                            // Deterministic draft rooted at `cwd` for screenshots.
+                            if let Some(project_id) = state.create_project(cwd.clone(), cx) {
+                                state.start_draft(project_id, cwd, cx);
+                            }
+                        } else if open_latest || open_terminal || open_plan || debug_seed {
                             state.open_latest_session(cx);
                         }
                         if open_diff {
