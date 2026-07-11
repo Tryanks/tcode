@@ -6,6 +6,12 @@ thin desktop layer over the agents you already use — it spawns the official
 CLIs and speaks their native protocols, so your accounts, models, and tooling
 keep working unchanged.
 
+tcode's design and interaction model are closely modeled on
+[T3 Code](https://t3.gg) by T3 Tools — think of it as a native,
+reduced-feature homage: the same sidebar/timeline/composer/diff experience,
+reimplemented in Rust for two providers. All credit for the original UX design
+goes to the T3 Code team.
+
 Supported providers:
 
 - **Claude Code** — spawns `claude`, bidirectional stream-json protocol
