@@ -11,9 +11,11 @@ use agent::{
 use gpui::{Context, Entity, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
-use crate::session::Timeline;
+use crate::session::{ReviewComment, Timeline};
 use crate::settings::{ProjectSort, Settings, SettingsStore};
-use crate::store::{Checkpoint, Project, SessionMeta, SessionStore, WorktreeInfo, now_millis, now_secs};
+use crate::store::{
+    Checkpoint, Project, SessionMeta, SessionStore, WorktreeInfo, now_millis, now_secs,
+};
 
 const TITLE_MAX_CHARS: usize = 40;
 pub const MAX_TERMINALS_PER_SESSION: usize = 6;
@@ -396,6 +398,11 @@ pub struct AppState {
     /// Screenshot-only: inject a pending image attachment on first render (paste
     /// / drag-drop cannot be driven headlessly).
     pub debug_image: Option<PathBuf>,
+    /// Screenshot-only diff state seeds.
+    pub debug_diff_scope: Option<String>,
+    pub debug_diff_split: bool,
+    pub debug_diff_scope_menu: bool,
+    pub debug_review_comment: bool,
     /// Preview MCP server registration, injected into every session so the agent
     /// can drive the embedded browser. `None` if the server failed to start.
     pub mcp_registration: Option<agent::McpRegistration>,
@@ -422,6 +429,10 @@ pub struct AppState {
     /// The rich toast overlay (set by `AppShell`), used for long-running git
     /// flows — one progress toast mutated in place through the flow.
     toast_center: Option<Entity<crate::ui::ToastCenter>>,
+    /// Composer-draft review notes, keyed by session id (in-memory only).
+    review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
+    /// Invalidates working-tree/branch previews on panel open and turn finish.
+    pub diff_refresh_generation: u64,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -477,6 +488,10 @@ impl AppState {
             next_start_generation: 0,
             debug_compose: None,
             debug_image: None,
+            debug_diff_scope: None,
+            debug_diff_split: false,
+            debug_diff_scope_menu: false,
+            debug_review_comment: false,
             mcp_registration: None,
             preview_requests: None,
             pending_preview_url: None,
@@ -485,6 +500,8 @@ impl AppState {
             git_status_generation: 0,
             debug_open_commit_dialog: false,
             toast_center: None,
+            review_comment_drafts: HashMap::new(),
+            diff_refresh_generation: 0,
         }
     }
 
@@ -976,6 +993,7 @@ impl AppState {
             } else {
                 active.diff_open = true;
                 active.right_tab = RightTab::Diff;
+                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
             }
             cx.notify();
         }
@@ -987,6 +1005,7 @@ impl AppState {
             active.diff_open = true;
             active.right_tab = RightTab::Diff;
             active.diff_selected_turn = Some(turn);
+            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
             cx.notify();
         }
     }
@@ -997,6 +1016,7 @@ impl AppState {
         if let Some(active) = self.active.as_mut() {
             active.diff_open = true;
             active.right_tab = RightTab::Diff;
+            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
             cx.notify();
         }
     }
@@ -1106,7 +1126,9 @@ impl AppState {
     }
 
     pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else { return };
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         if active.terminal_workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION {
             return;
         }
@@ -1125,7 +1147,9 @@ impl AppState {
     }
 
     pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else { return };
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         if active.terminal_workspace.terminal(terminal_id).is_some() {
             active.terminal_workspace.active_id = Some(terminal_id);
             cx.notify();
@@ -1133,7 +1157,9 @@ impl AppState {
     }
 
     pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else { return };
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         let workspace = &mut active.terminal_workspace;
         workspace.terminals.retain(|entry| entry.id != terminal_id);
         workspace
@@ -1149,14 +1175,14 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn split_terminal(
-        &mut self,
-        direction: TerminalSplitDirection,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = self.active.as_mut() else { return };
+    pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
         let workspace = &mut active.terminal_workspace;
-        let Some(first) = workspace.active_id else { return };
+        let Some(first) = workspace.active_id else {
+            return;
+        };
         if workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION
             || workspace.split_for(first).is_some()
         {
@@ -1181,8 +1207,12 @@ impl AppState {
     }
 
     pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else { return };
-        let Some(entry) = active.terminal_workspace.terminal(terminal_id) else { return };
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(entry) = active.terminal_workspace.terminal(terminal_id) else {
+            return;
+        };
         let label = entry.terminal.label();
         let selection = entry.terminal.selected_text();
         if let Some(selection) = selection {
@@ -1255,10 +1285,41 @@ impl AppState {
         }
     }
 
-    pub fn set_diff_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            active.diff_selected_turn = Some(turn);
+    pub fn review_comments(&self) -> &[ReviewComment] {
+        let Some(id) = self.active.as_ref().map(|active| active.meta.id.as_str()) else {
+            return &[];
+        };
+        self.review_comment_drafts
+            .get(id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn add_review_comment(&mut self, comment: ReviewComment, cx: &mut Context<Self>) {
+        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
+            self.review_comment_drafts
+                .entry(id)
+                .or_default()
+                .push(comment);
             cx.notify();
+        }
+    }
+
+    pub fn remove_review_comment(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) else {
+            return;
+        };
+        if let Some(comments) = self.review_comment_drafts.get_mut(&id)
+            && index < comments.len()
+        {
+            comments.remove(index);
+            cx.notify();
+        }
+    }
+
+    pub fn clear_review_comments(&mut self) {
+        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
+            self.review_comment_drafts.remove(&id);
         }
     }
 
@@ -1444,11 +1505,17 @@ impl AppState {
     /// The worktree that deleting `session_id` would orphan (i.e. it is the only
     /// remaining session bound to that worktree), if any — drives the "also
     /// remove the worktree?" confirmation.
-    pub fn worktree_orphaned_by_delete(&self, session_id: &str) -> Option<crate::store::WorktreeInfo> {
+    pub fn worktree_orphaned_by_delete(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::store::WorktreeInfo> {
         let meta = self.sessions.iter().find(|m| m.id == session_id)?;
         let worktree = meta.worktree.clone()?;
         let others = self.sessions.iter().any(|m| {
-            m.id != session_id && m.worktree.as_ref().is_some_and(|w| w.branch == worktree.branch)
+            m.id != session_id
+                && m.worktree
+                    .as_ref()
+                    .is_some_and(|w| w.branch == worktree.branch)
         });
         (!others).then_some(worktree)
     }
@@ -1559,7 +1626,12 @@ impl AppState {
     /// just-recorded user message opened can later be reverted. `event_offset`
     /// is the JSONL length before that message, used as the revert truncation
     /// boundary. Runs synchronously so the snapshot precedes any file edits.
-    fn capture_checkpoint(&mut self, session_id: &str, event_offset: usize, cx: &mut Context<Self>) {
+    fn capture_checkpoint(
+        &mut self,
+        session_id: &str,
+        event_offset: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) else {
             return;
         };
@@ -1613,7 +1685,13 @@ impl AppState {
                 ));
                 return;
             }
-            let Some(cp) = active.meta.checkpoints.iter().find(|c| c.turn == turn).cloned() else {
+            let Some(cp) = active
+                .meta
+                .checkpoints
+                .iter()
+                .find(|c| c.turn == turn)
+                .cloned()
+            else {
                 return;
             };
             (active.meta.id.clone(), active.meta.cwd.clone(), cp)
@@ -1624,7 +1702,10 @@ impl AppState {
             return;
         }
         crate::checkpoints::delete_checkpoint_refs_from(&cwd, &session_id, turn);
-        if let Err(err) = self.store.truncate_events(&session_id, checkpoint.event_offset) {
+        if let Err(err) = self
+            .store
+            .truncate_events(&session_id, checkpoint.event_offset)
+        {
             self.report_error(
                 rust_i18n::t!("errors.persist_event", error = err).into_owned(),
                 cx,
@@ -1698,7 +1779,12 @@ impl AppState {
         let branch_for_task = branch.clone();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                create_git_worktree(&root_for_task, &path_for_task, &branch_for_task, &base_for_task)
+                create_git_worktree(
+                    &root_for_task,
+                    &path_for_task,
+                    &branch_for_task,
+                    &base_for_task,
+                )
             })
             .await;
             let _ = this.update(cx, |state, cx| {
@@ -2023,7 +2109,9 @@ impl AppState {
             );
             active.shutdown_to_idle();
         } else if active.options_changed_while_live() {
-            log::info!("launch-time option changed while live; restarting provider before next turn");
+            log::info!(
+                "launch-time option changed while live; restarting provider before next turn"
+            );
             active.shutdown_to_idle();
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
@@ -2771,6 +2859,7 @@ impl AppState {
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
+                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
@@ -2811,8 +2900,7 @@ impl AppState {
                     active.plan_implemented = false;
                 }
                 AgentEvent::PlanUpdated { .. } => {
-                    let already_showing =
-                        active.diff_open && active.right_tab == RightTab::Plan;
+                    let already_showing = active.diff_open && active.right_tab == RightTab::Plan;
                     if auto_open && !active.auto_open_suppressed && !already_showing {
                         active.diff_open = true;
                         active.right_tab = RightTab::Plan;
@@ -3554,8 +3642,7 @@ mod tests {
 
     #[test]
     fn worktree_orphan_detected_only_for_last_session() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-wt-test-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("tcode-wt-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let mut state = AppState::new(store);
         let worktree = WorktreeInfo {

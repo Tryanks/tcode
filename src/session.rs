@@ -8,6 +8,118 @@ use agent::{
     ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
 };
 
+/// A local review note attached to a range in the diff panel. These live in
+/// the composer draft until the next send; they are never written to session
+/// history as separate events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewComment {
+    pub file: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub side: ReviewSide,
+    pub text: String,
+    pub code_excerpt: String,
+    pub(crate) section_id: String,
+    pub(crate) section_title: String,
+    pub(crate) start_index: usize,
+    pub(crate) end_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewSide {
+    Old,
+    New,
+}
+
+impl ReviewComment {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        file: String,
+        line_start: u32,
+        line_end: u32,
+        side: ReviewSide,
+        text: String,
+        code_excerpt: String,
+        section_id: String,
+        section_title: String,
+        start_index: usize,
+        end_index: usize,
+    ) -> Self {
+        Self {
+            file,
+            line_start: line_start.min(line_end),
+            line_end: line_start.max(line_end),
+            side,
+            text,
+            code_excerpt,
+            section_id,
+            section_title,
+            start_index: start_index.min(end_index),
+            end_index: start_index.max(end_index),
+        }
+    }
+
+    pub fn range_label(&self) -> String {
+        let marker = match self.side {
+            ReviewSide::Old => "-",
+            ReviewSide::New => "+",
+        };
+        if self.line_start == self.line_end {
+            format!("{marker}{}", self.line_start)
+        } else {
+            format!("{marker}{} to {marker}{}", self.line_start, self.line_end)
+        }
+    }
+}
+
+fn escape_review_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn review_fence(contents: &str) -> String {
+    let longest = contents
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(3.max(longest + 1));
+    format!("{fence}diff\n{}\n{fence}", contents.trim_end())
+}
+
+/// Serialize review notes using T3's exact `<review_comment ...>` wire format.
+pub fn append_review_comments_to_prompt(prompt: &str, comments: &[ReviewComment]) -> String {
+    if comments.is_empty() {
+        return prompt.to_string();
+    }
+    let blocks = comments
+        .iter()
+        .map(|comment| {
+            format!(
+                "<review_comment sectionId=\"{}\" sectionTitle=\"{}\" filePath=\"{}\" startIndex=\"{}\" endIndex=\"{}\" rangeLabel=\"{}\">\n{}\n{}\n</review_comment>",
+                escape_review_attribute(&comment.section_id),
+                escape_review_attribute(&comment.section_title),
+                escape_review_attribute(&comment.file),
+                comment.start_index,
+                comment.end_index,
+                escape_review_attribute(&comment.range_label()),
+                comment.text.trim(),
+                review_fence(&comment.code_excerpt),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        blocks
+    } else {
+        format!("{prompt}\n\n{blocks}")
+    }
+}
+
 pub use crate::store::StoredEvent;
 
 impl From<AgentEvent> for StoredEvent {
@@ -817,7 +929,10 @@ mod tests {
         // No heading -> None (caller supplies the localized fallback).
         assert_eq!(plan_title("just a paragraph\nsecond line"), None);
         // Empty heading is skipped.
-        assert_eq!(plan_title("#\n# Real title"), Some("Real title".to_string()));
+        assert_eq!(
+            plan_title("#\n# Real title"),
+            Some("Real title".to_string())
+        );
     }
 
     #[test]
@@ -934,5 +1049,25 @@ mod tests {
             &timeline.entries[0].content,
             EntryContent::Error { message } if message == "boom"
         ));
+    }
+
+    #[test]
+    fn review_comment_serialization_matches_t3_format() {
+        let comment = ReviewComment::new(
+            "src/lib.rs".into(),
+            7,
+            8,
+            ReviewSide::New,
+            "  Please avoid the unwrap.  ".into(),
+            "@@ -7,1 +7,2 @@\n old\n+new".into(),
+            "turn:3".into(),
+            "Turn 4".into(),
+            12,
+            13,
+        );
+        assert_eq!(
+            append_review_comments_to_prompt("Fix this", &[comment]),
+            "Fix this\n\n<review_comment sectionId=\"turn:3\" sectionTitle=\"Turn 4\" filePath=\"src/lib.rs\" startIndex=\"12\" endIndex=\"13\" rangeLabel=\"+7 to +8\">\nPlease avoid the unwrap.\n```diff\n@@ -7,1 +7,2 @@\n old\n+new\n```\n</review_comment>"
+        );
     }
 }
