@@ -29,6 +29,7 @@ fn main() {
             model: None,
             resume: None,
             binary_path: None,
+            approval_mode: Default::default(),
         };
         let handle = start_session(provider, opts).await.expect("start session");
         handle

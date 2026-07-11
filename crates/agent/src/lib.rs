@@ -42,6 +42,28 @@ pub struct SessionOptions {
     pub resume: Option<ResumeCursor>,
     /// Override for the CLI binary; `None` = resolve from PATH.
     pub binary_path: Option<PathBuf>,
+    /// How much the agent may do without asking (mirrors the three-mode
+    /// model of the UI; each provider maps it onto its native knobs).
+    pub approval_mode: ApprovalMode,
+}
+
+/// The user-facing permission model, provider-agnostic.
+///
+/// Providers map this onto their native controls:
+/// - Claude Code: `--permission-mode` default / acceptEdits / bypassPermissions
+///   (switchable mid-session via the control protocol).
+/// - Codex: approval-policy × sandbox-mode combinations on thread start
+///   (mid-session switch may require a resume-restart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Ask before commands and file changes.
+    #[default]
+    Supervised,
+    /// Auto-approve edits, ask before other actions.
+    AutoAcceptEdits,
+    /// Allow commands and edits without prompts.
+    FullAccess,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +87,10 @@ pub enum SessionCommand {
         request_id: String,
         decision: ApprovalDecision,
     },
+    /// Switch the permission model mid-session. Providers that cannot switch
+    /// live emit `AgentEvent::Warning` and keep the old mode; the UI then
+    /// falls back to a resume-restart.
+    SetApprovalMode(ApprovalMode),
     Shutdown,
 }
 

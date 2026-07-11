@@ -35,6 +35,7 @@ fn main() {
             model: None,
             resume: None,
             binary_path: None,
+            approval_mode: Default::default(),
         };
         let handle = match start_session(provider, opts).await {
             Ok(handle) => handle,

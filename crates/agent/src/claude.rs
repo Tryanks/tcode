@@ -274,6 +274,16 @@ async fn handle_command(
             }
             Flow::Continue
         }
+        SessionCommand::SetApprovalMode(mode) => {
+            // Live switching lands with the permission-mode milestone; until
+            // then the UI falls back to a resume-restart.
+            let _ = event_tx
+                .send(AgentEvent::Warning(format!(
+                    "claude: live approval-mode switch to {mode:?} not implemented yet"
+                )))
+                .await;
+            Flow::Continue
+        }
         SessionCommand::Shutdown => {
             let _ = stdin.close().await;
             let _ = child.kill();
