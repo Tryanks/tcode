@@ -41,9 +41,88 @@ const CONTENT_MIN_PADDING: f32 = 24.;
 const WORKLOG_VISIBLE_ROWS: usize = 2;
 
 /// Markdown state that grows with streaming deltas (stream_markdown pattern).
+///
+/// `TextViewState` keeps two copies of the document: `parsed_content` on the
+/// main thread and a private `content` inside its background parse task. Only
+/// `push_str` updates reach the background task — the initial text (and
+/// `set_text`) are parsed synchronously on the main thread and never sent. The
+/// background task therefore only ever knows the text that was *pushed* into
+/// it, and because every `push_str` result replaces `parsed_content` wholesale,
+/// any text that was seeded (or `set_text`) is dropped the moment the first
+/// delta lands. See the `md_state_*` tests.
+///
+/// So this mirror upholds one invariant: **a state that will ever be grown with
+/// `push_str` is seeded empty and only ever grown with `push_str`** (`can_push`).
+/// Text that cannot be expressed as an append rebuilds the entity instead of
+/// calling `set_text`.
 struct MdState {
     state: Entity<TextViewState>,
+    /// The text currently mirrored into `state`.
     synced: String,
+    /// Whether `state`'s whole content arrived through `push_str` (i.e. it was
+    /// seeded empty), which is what makes further `push_str` calls sound.
+    can_push: bool,
+}
+
+/// How to bring a mirrored [`MdState`] in line with the timeline's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MdSync {
+    /// Already in sync.
+    Noop,
+    /// The text grew by an append: `push_str` this delta.
+    Push(String),
+    /// The text changed in a way `push_str` cannot express (or the state is not
+    /// safe to push into): rebuild the entity from this text.
+    Reset(String),
+}
+
+/// The pure delta/reset decision behind [`MdState::sync`].
+fn md_sync(synced: &str, text: &str, can_push: bool) -> MdSync {
+    if synced == text {
+        return MdSync::Noop;
+    }
+    match text.strip_prefix(synced) {
+        Some(delta) if can_push && !delta.is_empty() => MdSync::Push(delta.to_string()),
+        _ => MdSync::Reset(text.to_string()),
+    }
+}
+
+impl MdState {
+    /// Mirror `text`. `streaming` marks text that is still being produced (its
+    /// turn is running): it is seeded empty and pushed, so the background parse
+    /// task stays authoritative. Settled text (replay, finished turns) is
+    /// parsed synchronously at construction so the first layout already has the
+    /// right height.
+    fn new(text: &str, streaming: bool, cx: &mut App) -> Self {
+        let state = if streaming {
+            let state = cx.new(|cx| TextViewState::markdown("", cx));
+            if !text.is_empty() {
+                state.update(cx, |state, cx| state.push_str(text, cx));
+            }
+            state
+        } else {
+            cx.new(|cx| TextViewState::markdown(text, cx))
+        };
+        Self {
+            state,
+            synced: text.to_string(),
+            // An empty seed leaves the background task's document empty too, so
+            // it stays safe to push into even outside streaming mode.
+            can_push: streaming || text.is_empty(),
+        }
+    }
+
+    fn sync(&mut self, text: String, streaming: bool, cx: &mut App) {
+        match md_sync(&self.synced, &text, self.can_push) {
+            MdSync::Noop => {}
+            MdSync::Push(delta) => {
+                self.state
+                    .update(cx, |state, cx| state.push_str(&delta, cx));
+                self.synced = text;
+            }
+            MdSync::Reset(text) => *self = Self::new(&text, streaming, cx),
+        }
+    }
 }
 
 pub struct ChatView {
@@ -118,24 +197,33 @@ impl ChatView {
     /// Mirror timeline markdown text into `TextViewState` entities, growing
     /// them with `push_str` when possible so streaming reparses incrementally.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
+        // (id, text, streaming): `streaming` marks text whose turn is still
+        // running, i.e. text that further deltas will grow.
         let (session_key, texts, running) = {
             let state = self.app_state.read(cx);
             let session_key = state.active_session_id().map(str::to_string);
-            let mut texts: Vec<(String, String)> = Vec::new();
+            let mut texts: Vec<(String, String, bool)> = Vec::new();
             let mut running = false;
             if let Some(active) = &state.active {
-                running = active.timeline.turn_running;
-                for entry in &active.timeline.entries {
+                let timeline = &active.timeline;
+                running = timeline.turn_running;
+                let turn_running =
+                    |turn: usize| timeline.turns.get(turn).is_some_and(|t| t.running);
+                for entry in &timeline.entries {
                     match &entry.content {
                         EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
-                            texts.push((entry.id.clone(), text.clone()));
+                            texts.push((entry.id.clone(), text.clone(), turn_running(entry.turn)));
                         }
                         _ => {}
                     }
                 }
                 // The proposed-plan card renders its markdown too.
-                if let Some(plan) = &active.timeline.proposed_plan {
-                    texts.push((format!("plan:{}", plan.item_id), plan.markdown.clone()));
+                if let Some(plan) = &timeline.proposed_plan {
+                    texts.push((
+                        format!("plan:{}", plan.item_id),
+                        plan.markdown.clone(),
+                        turn_running(plan.turn),
+                    ));
                 }
             }
             (session_key, texts, running)
@@ -150,26 +238,13 @@ impl ChatView {
             self.follow = true;
         }
 
-        for (id, text) in texts {
-            if let Some(md) = self.md_states.get_mut(&id) {
-                if md.synced != text {
-                    if let Some(delta) = text.strip_prefix(md.synced.as_str()) {
-                        let delta = delta.to_string();
-                        md.state.update(cx, |state, cx| state.push_str(&delta, cx));
-                    } else {
-                        md.state.update(cx, |state, cx| state.set_text(&text, cx));
-                    }
-                    md.synced = text;
+        for (id, text, streaming) in texts {
+            match self.md_states.get_mut(&id) {
+                Some(md) => md.sync(text, streaming, cx),
+                None => {
+                    self.md_states
+                        .insert(id, MdState::new(&text, streaming, cx));
                 }
-            } else {
-                let state = cx.new(|cx| TextViewState::markdown(&text, cx));
-                self.md_states.insert(
-                    id,
-                    MdState {
-                        state,
-                        synced: text,
-                    },
-                );
             }
         }
 
@@ -1721,7 +1796,9 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::relativize;
+    use super::{MdState, MdSync, md_sync, relativize};
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use gpui_component::text::TextViewState;
     use std::path::Path;
 
     #[test]
@@ -1739,5 +1816,174 @@ mod tests {
         assert_eq!(relativize("/other/x.rs", cwd, canon), "/other/x.rs");
         // Already-relative paths are left as-is.
         assert_eq!(relativize("src/b.rs", cwd, canon), "src/b.rs");
+    }
+
+    // -- the pure delta/reset decision ---------------------------------------
+
+    #[test]
+    fn md_sync_decides_push_reset_and_noop() {
+        // Unchanged text does nothing (the streaming hot path: most notifies
+        // carry no new text for a given entry).
+        assert_eq!(md_sync("abc", "abc", true), MdSync::Noop);
+        assert_eq!(md_sync("", "", true), MdSync::Noop);
+        // An append is a push of just the delta.
+        assert_eq!(md_sync("", "I", true), MdSync::Push("I".into()));
+        assert_eq!(md_sync("I", "I'll go", true), MdSync::Push("'ll go".into()));
+        // Anything that is not an append rebuilds: a rewrite, a shrink, or a
+        // snapshot that replaces the accumulated text.
+        assert_eq!(md_sync("abc", "xbc", true), MdSync::Reset("xbc".into()));
+        assert_eq!(md_sync("abcd", "abc", true), MdSync::Reset("abc".into()));
+        assert_eq!(md_sync("abc", "", true), MdSync::Reset(String::new()));
+        // A state that cannot be pushed into (its content was parsed at
+        // construction, so the background parse task never saw it) always
+        // rebuilds, even for a pure append.
+        assert_eq!(
+            md_sync("I", "I'll go", false),
+            MdSync::Reset("I'll go".into())
+        );
+        assert_eq!(md_sync("abc", "abc", false), MdSync::Noop);
+    }
+
+    // -- headless TextViewState mirroring ------------------------------------
+
+    /// The document the widget would actually render.
+    fn rendered(state: &Entity<TextViewState>, cx: &mut TestAppContext) -> String {
+        state.update(cx, |state, cx| {
+            state.select_all(cx);
+            state.selected_text()
+        })
+    }
+
+    /// Pins the upstream constraint this mirror is built around: a
+    /// `TextViewState` seeded with text and then grown with `push_str` renders
+    /// only the pushed text — the seed is dropped, because the initial parse
+    /// happens on the main thread and never reaches the background parse task
+    /// whose document each `push_str` result replaces `parsed_content` with.
+    ///
+    /// This is what made a streamed "I'll run that command" render as "'ll run
+    /// that command". If this test ever fails, gpui-component fixed it and
+    /// `MdState::can_push` can go away.
+    #[gpui::test]
+    fn text_view_state_drops_a_non_empty_seed_on_push(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("I", cx)));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.push_str("'ll run it.", cx));
+        cx.run_until_parked();
+
+        assert_eq!(rendered(&state, cx), "'ll run it.\n");
+    }
+
+    /// ...and the same for `set_text`: the background parse task keeps its own
+    /// (delta-only) document, so a later `push_str` resurrects it and throws the
+    /// `set_text` away. Hence [`MdState::sync`] rebuilds instead of calling it.
+    #[gpui::test]
+    fn text_view_state_drops_set_text_on_push(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("", cx)));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.push_str("Hello", cx));
+        state.update(cx, |state, cx| state.set_text("Snapshot.", cx));
+        state.update(cx, |state, cx| state.push_str(" More.", cx));
+        cx.run_until_parked();
+
+        assert_eq!(rendered(&state, cx), "Hello More.\n");
+    }
+
+    /// Incremental `push_str` from an empty seed is faithful: streaming a
+    /// document in 1/3/7-char chunks parses to exactly what a one-shot parse of
+    /// the same markdown produces (paragraphs, list, fenced code, inline marks).
+    /// This is why the streaming path keeps `push_str` instead of re-`set_text`ing
+    /// the whole message on every delta.
+    #[gpui::test]
+    fn push_str_streaming_matches_a_one_shot_parse(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let full = "I'll run that now.\n\nThe plan:\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n\nDone — **bold** and `code`.\n";
+        let one_shot = cx.update(|cx| cx.new(|cx| TextViewState::markdown(full, cx)));
+        cx.run_until_parked();
+        let expected = rendered(&one_shot, cx);
+
+        for size in [1usize, 3, 7] {
+            let chars: Vec<char> = full.chars().collect();
+            let mut md = cx.update(|cx| MdState::new("", true, cx));
+            let mut text = String::new();
+            for chunk in chars.chunks(size) {
+                text.extend(chunk);
+                let next = text.clone();
+                cx.update(|cx| md.sync(next, true, cx));
+                cx.run_until_parked();
+            }
+            assert_eq!(rendered(&md.state, cx), expected, "chunk size {size}");
+        }
+    }
+
+    /// The live streaming path: an assistant entry first appears with its first
+    /// delta and grows. Every character must survive — this is the regression
+    /// for the dropped leading "I" / "Q".
+    #[gpui::test]
+    fn md_state_streams_without_dropping_the_first_chunk(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut md = cx.update(|cx| MdState::new("Q", true, cx));
+        cx.run_until_parked();
+
+        let mut text = String::from("Q");
+        for delta in ["UEUED", "_ONE"] {
+            text.push_str(delta);
+            let next = text.clone();
+            cx.update(|cx| md.sync(next, true, cx));
+            cx.run_until_parked();
+        }
+
+        assert_eq!(md.synced, "QUEUED_ONE");
+        assert_eq!(rendered(&md.state, cx), "QUEUED_ONE\n");
+    }
+
+    /// A non-append change (a snapshot that rewrites the accumulated text)
+    /// rebuilds the state instead of `set_text`ing it, and further deltas keep
+    /// streaming onto the rebuilt state — no stale text resurfaces, nothing is
+    /// duplicated.
+    #[gpui::test]
+    fn md_state_reset_rebuilds_without_duplicating(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut md = cx.update(|cx| MdState::new("First para.", true, cx));
+        cx.run_until_parked();
+
+        // Snapshot rewrites the text (not an append) -> rebuild.
+        cx.update(|cx| md.sync("Rewritten para.".into(), true, cx));
+        cx.run_until_parked();
+        assert!(md.can_push);
+        assert_eq!(rendered(&md.state, cx), "Rewritten para.\n");
+
+        // Streaming resumes on the rebuilt state.
+        cx.update(|cx| md.sync("Rewritten para. Tail.".into(), true, cx));
+        cx.run_until_parked();
+        assert_eq!(rendered(&md.state, cx), "Rewritten para. Tail.\n");
+    }
+
+    /// Settled text (replay / finished turns) is parsed at construction, so it
+    /// is already rendered on the first layout — no empty first frame, which is
+    /// what keeps opening a stored session pinned to the bottom.
+    #[gpui::test]
+    fn md_state_settled_text_parses_synchronously(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let md = cx.update(|cx| MdState::new("Stored reply.", false, cx));
+        // Deliberately no `run_until_parked`: the parse must have happened
+        // during construction.
+        assert!(!md.can_push);
+        assert_eq!(rendered(&md.state, cx), "Stored reply.\n");
+    }
+
+    /// A settled state that unexpectedly grows still renders correctly: it
+    /// cannot be pushed into (the background task never saw its seed), so it
+    /// rebuilds.
+    #[gpui::test]
+    fn md_state_settled_growth_rebuilds(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut md = cx.update(|cx| MdState::new("Stored reply.", false, cx));
+        cx.run_until_parked();
+
+        cx.update(|cx| md.sync("Stored reply. And more.".into(), false, cx));
+        cx.run_until_parked();
+        assert_eq!(rendered(&md.state, cx), "Stored reply. And more.\n");
     }
 }

@@ -7,5 +7,7 @@
 use crate::{AgentError, SessionHandle, SessionOptions};
 
 pub async fn start(_opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    Err(AgentError::Protocol("ACP provider not implemented yet".into()))
+    Err(AgentError::Protocol(
+        "ACP provider not implemented yet".into(),
+    ))
 }

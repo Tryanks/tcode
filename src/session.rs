@@ -589,12 +589,12 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
     match (existing, incoming) {
         (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
             EntryContent::Assistant {
-                text: if new.is_empty() { old } else { new },
+                text: merge_text(old, new),
             }
         }
         (EntryContent::Reasoning { text: old }, EntryContent::Reasoning { text: new }) => {
             EntryContent::Reasoning {
-                text: if new.is_empty() { old } else { new },
+                text: merge_text(old, new),
             }
         }
         (
@@ -609,15 +609,33 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             },
         ) => EntryContent::Command {
             command,
-            output: if output.is_empty() {
-                old_output
-            } else {
-                output
-            },
+            output: merge_text(old_output, output),
             exit_code,
             status,
         },
         (_, incoming) => incoming,
+    }
+}
+
+/// Merge an item snapshot's text (`new`) over text already accumulated from
+/// deltas (`old`).
+///
+/// Snapshots (`ItemStarted` / `ItemUpdated` / `ItemCompleted`) are authoritative
+/// when they carry text, but they can *lag* the delta stream: providers emit an
+/// item snapshot holding the text so far while more deltas are still arriving.
+/// Three rules:
+///
+/// * an empty snapshot never clobbers accumulated text;
+/// * a snapshot that is only a prefix of what the deltas already produced (a
+///   lagging/partial snapshot) never shortens it — shortening would make the
+///   next delta look like a fresh append and duplicate the overlapping text;
+/// * a snapshot with different text replaces (never concatenates onto) the
+///   accumulated text.
+fn merge_text(old: String, new: String) -> String {
+    if new.is_empty() || old.starts_with(new.as_str()) {
+        old
+    } else {
+        new
     }
 }
 
@@ -691,6 +709,75 @@ mod tests {
         assert_eq!(timeline.model.as_deref(), Some("claude-opus-4-8"));
         assert!(timeline.resume.is_some());
         assert_eq!(timeline.first_user_message(), Some("hi"));
+    }
+
+    fn assistant_delta(id: &str, text: &str) -> AgentEvent {
+        AgentEvent::Delta {
+            item_id: id.into(),
+            kind: DeltaKind::AssistantText,
+            text: text.into(),
+        }
+    }
+
+    fn assistant_snapshot(id: &str, text: &str) -> AgentEvent {
+        AgentEvent::ItemUpdated(ThreadItem {
+            id: id.into(),
+            content: ItemContent::AssistantMessage { text: text.into() },
+        })
+    }
+
+    fn assistant_text(timeline: &Timeline, id: &str) -> String {
+        timeline
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| match &e.content {
+                EntryContent::Assistant { text } => text.clone(),
+                other => panic!("entry {id} is not assistant text: {other:?}"),
+            })
+            .unwrap_or_else(|| panic!("no entry {id}"))
+    }
+
+    /// An item snapshot must never be concatenated onto delta-accumulated text,
+    /// and a snapshot that *lags* the deltas (it carries only the text so far,
+    /// or nothing at all) must not shorten what is already there: shortening
+    /// makes the next delta look like a fresh append and duplicates the
+    /// overlapping paragraph.
+    #[test]
+    fn fold_snapshot_never_duplicates_or_shortens_delta_text() {
+        let timeline = Timeline::fold_events(vec![
+            assistant_delta("msg", "Para one.\n\n"),
+            assistant_delta("msg", "Para two."),
+            // Snapshot lagging one delta behind: must not shorten.
+            assistant_snapshot("msg", "Para one.\n\n"),
+            assistant_delta("msg", " Tail."),
+            // Empty snapshot: must not clobber.
+            assistant_snapshot("msg", ""),
+            // Authoritative final snapshot: replaces, never concatenates.
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "msg".into(),
+                content: ItemContent::AssistantMessage {
+                    text: "Para one.\n\nPara two. Tail.".into(),
+                },
+            }),
+        ]);
+
+        assert_eq!(
+            assistant_text(&timeline, "msg"),
+            "Para one.\n\nPara two. Tail."
+        );
+    }
+
+    /// A snapshot whose text genuinely differs (the provider rewrote the
+    /// message) still wins outright.
+    #[test]
+    fn fold_snapshot_with_different_text_replaces_deltas() {
+        let timeline = Timeline::fold_events(vec![
+            assistant_delta("msg", "draft"),
+            assistant_snapshot("msg", "final answer"),
+        ]);
+
+        assert_eq!(assistant_text(&timeline, "msg"), "final answer");
     }
 
     /// Modeled on crates/agent/tests/fixtures/codex/v2_messages.jsonl:
