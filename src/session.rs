@@ -260,7 +260,10 @@ impl Timeline {
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
         let incoming = Self::content_from_item(&item.content);
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
-            entry.content = merge_content(std::mem::replace(&mut entry.content, incoming.clone()), incoming);
+            entry.content = merge_content(
+                std::mem::replace(&mut entry.content, incoming.clone()),
+                incoming,
+            );
         } else {
             let turn = if matches!(incoming, EntryContent::User { .. }) {
                 self.begin_user_turn(ts)
@@ -279,7 +282,9 @@ impl Timeline {
     fn content_from_item(content: &ItemContent) -> EntryContent {
         match content {
             ItemContent::UserMessage { text } => EntryContent::User { text: text.clone() },
-            ItemContent::AssistantMessage { text } => EntryContent::Assistant { text: text.clone() },
+            ItemContent::AssistantMessage { text } => {
+                EntryContent::Assistant { text: text.clone() }
+            }
             ItemContent::Reasoning { text } => EntryContent::Reasoning { text: text.clone() },
             ItemContent::CommandExecution {
                 command,
@@ -385,7 +390,11 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             },
         ) => EntryContent::Command {
             command,
-            output: if output.is_empty() { old_output } else { output },
+            output: if output.is_empty() {
+                old_output
+            } else {
+                output
+            },
             exit_code,
             status,
         },
@@ -417,7 +426,9 @@ mod tests {
                 model: Some("claude-opus-4-8".into()),
             },
             user_msg("user-1", "hi"),
-            AgentEvent::TurnStarted { turn_id: "t1".into() },
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
             AgentEvent::Delta {
                 item_id: "msg_011".into(),
                 kind: DeltaKind::AssistantText,
@@ -473,65 +484,97 @@ mod tests {
             diff: Some("hi\n".into()),
         }];
         let mut timeline = Timeline::default();
-        timeline.apply_at(None, &AgentEvent::TurnStarted { turn_id: "turn-1".into() });
-        timeline.apply_at(None, &AgentEvent::ItemStarted(ThreadItem {
-            id: "patch-1".into(),
-            content: ItemContent::FileChange {
-                changes: changes.clone(),
-                status: ItemStatus::InProgress,
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
             },
-        }));
-        timeline.apply_at(None, &AgentEvent::ApprovalRequested(ApprovalRequest {
-            id: "41".into(),
-            turn_id: Some("turn-1".into()),
-            kind: ApprovalKind::FileChange {
-                changes: changes.clone(),
-                reason: None,
-            },
-        }));
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ItemStarted(ThreadItem {
+                id: "patch-1".into(),
+                content: ItemContent::FileChange {
+                    changes: changes.clone(),
+                    status: ItemStatus::InProgress,
+                },
+            }),
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ApprovalRequested(ApprovalRequest {
+                id: "41".into(),
+                turn_id: Some("turn-1".into()),
+                kind: ApprovalKind::FileChange {
+                    changes: changes.clone(),
+                    reason: None,
+                },
+            }),
+        );
 
         assert!(timeline.turn_running);
         assert_eq!(timeline.pending_approvals.len(), 1);
 
-        timeline.apply_at(None, &AgentEvent::ApprovalResolved {
-            request_id: "41".into(),
-            decision: ApprovalDecision::Approve,
-        });
+        timeline.apply_at(
+            None,
+            &AgentEvent::ApprovalResolved {
+                request_id: "41".into(),
+                decision: ApprovalDecision::Approve,
+            },
+        );
         assert!(timeline.pending_approvals.is_empty());
 
         // Deltas create items lazily.
-        timeline.apply_at(None, &AgentEvent::Delta {
-            item_id: "message-1".into(),
-            kind: DeltaKind::AssistantText,
-            text: "PONG".into(),
-        });
-        timeline.apply_at(None, &AgentEvent::Delta {
-            item_id: "reasoning-1".into(),
-            kind: DeltaKind::ReasoningText,
-            text: "Checking".into(),
-        });
-        timeline.apply_at(None, &AgentEvent::Delta {
-            item_id: "command-1".into(),
-            kind: DeltaKind::CommandOutput,
-            text: "ok\n".into(),
-        });
-        timeline.apply_at(None, &AgentEvent::TokenUsage(TokenUsage {
-            used_tokens: Some(123),
-            context_window: Some(200000),
-            ..Default::default()
-        }));
-        timeline.apply_at(None, &AgentEvent::ItemCompleted(ThreadItem {
-            id: "patch-1".into(),
-            content: ItemContent::FileChange {
-                changes: changes.clone(),
-                status: ItemStatus::Completed,
+        timeline.apply_at(
+            None,
+            &AgentEvent::Delta {
+                item_id: "message-1".into(),
+                kind: DeltaKind::AssistantText,
+                text: "PONG".into(),
             },
-        }));
-        timeline.apply_at(None, &AgentEvent::TurnCompleted {
-            turn_id: "turn-1".into(),
-            status: TurnStatus::Completed,
-            usage: None,
-        });
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::Delta {
+                item_id: "reasoning-1".into(),
+                kind: DeltaKind::ReasoningText,
+                text: "Checking".into(),
+            },
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::Delta {
+                item_id: "command-1".into(),
+                kind: DeltaKind::CommandOutput,
+                text: "ok\n".into(),
+            },
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::TokenUsage(TokenUsage {
+                used_tokens: Some(123),
+                context_window: Some(200000),
+                ..Default::default()
+            }),
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "patch-1".into(),
+                content: ItemContent::FileChange {
+                    changes: changes.clone(),
+                    status: ItemStatus::Completed,
+                },
+            }),
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        );
 
         assert!(!timeline.turn_running);
         assert_eq!(timeline.entries.len(), 4);
@@ -558,29 +601,38 @@ mod tests {
     #[test]
     fn command_snapshot_keeps_streamed_output_when_snapshot_output_empty() {
         let mut timeline = Timeline::default();
-        timeline.apply_at(None, &AgentEvent::ItemStarted(ThreadItem {
-            id: "cmd-1".into(),
-            content: ItemContent::CommandExecution {
-                command: "echo hi".into(),
-                output: String::new(),
-                exit_code: None,
-                status: ItemStatus::InProgress,
+        timeline.apply_at(
+            None,
+            &AgentEvent::ItemStarted(ThreadItem {
+                id: "cmd-1".into(),
+                content: ItemContent::CommandExecution {
+                    command: "echo hi".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            }),
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::Delta {
+                item_id: "cmd-1".into(),
+                kind: DeltaKind::CommandOutput,
+                text: "hi\n".into(),
             },
-        }));
-        timeline.apply_at(None, &AgentEvent::Delta {
-            item_id: "cmd-1".into(),
-            kind: DeltaKind::CommandOutput,
-            text: "hi\n".into(),
-        });
-        timeline.apply_at(None, &AgentEvent::ItemCompleted(ThreadItem {
-            id: "cmd-1".into(),
-            content: ItemContent::CommandExecution {
-                command: "echo hi".into(),
-                output: String::new(),
-                exit_code: Some(0),
-                status: ItemStatus::Completed,
-            },
-        }));
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "cmd-1".into(),
+                content: ItemContent::CommandExecution {
+                    command: "echo hi".into(),
+                    output: String::new(),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                },
+            }),
+        );
 
         assert!(matches!(
             &timeline.entries[0].content,
@@ -599,7 +651,9 @@ mod tests {
             },
             StoredEvent {
                 ts: Some(1_000_500),
-                event: AgentEvent::TurnStarted { turn_id: "t1".into() },
+                event: AgentEvent::TurnStarted {
+                    turn_id: "t1".into(),
+                },
             },
             StoredEvent {
                 ts: Some(1_002_000),
@@ -622,7 +676,9 @@ mod tests {
             },
             StoredEvent {
                 ts: Some(2_000_400),
-                event: AgentEvent::TurnStarted { turn_id: "t2".into() },
+                event: AgentEvent::TurnStarted {
+                    turn_id: "t2".into(),
+                },
             },
         ];
         let timeline = Timeline::fold_events(stored);
@@ -661,20 +717,31 @@ mod tests {
     #[test]
     fn errors_and_session_close_fold_into_timeline() {
         let mut timeline = Timeline::default();
-        timeline.apply_at(None, &AgentEvent::TurnStarted { turn_id: "t".into() });
-        timeline.apply_at(None, &AgentEvent::ApprovalRequested(ApprovalRequest {
-            id: "req".into(),
-            turn_id: None,
-            kind: ApprovalKind::ExecCommand {
-                command: "rm -rf /".into(),
-                cwd: None,
-                reason: None,
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnStarted {
+                turn_id: "t".into(),
             },
-        }));
-        timeline.apply_at(None, &AgentEvent::Error {
-            message: "boom".into(),
-            fatal: true,
-        });
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ApprovalRequested(ApprovalRequest {
+                id: "req".into(),
+                turn_id: None,
+                kind: ApprovalKind::ExecCommand {
+                    command: "rm -rf /".into(),
+                    cwd: None,
+                    reason: None,
+                },
+            }),
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::Error {
+                message: "boom".into(),
+                fatal: true,
+            },
+        );
         timeline.apply_at(None, &AgentEvent::SessionClosed { reason: None });
 
         assert!(!timeline.turn_running);

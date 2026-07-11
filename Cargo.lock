@@ -6473,9 +6473,11 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "log",
+ "rust-i18n",
  "serde",
  "serde_json",
  "smol",
+ "sys-locale",
  "term",
  "uuid",
 ]

@@ -178,7 +178,12 @@ impl Render for TerminalDrawer {
             .border_t_1()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(div().text_size(px(12.)).font_medium().child("Terminal"))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_medium()
+                    .child(rust_i18n::t!("terminal.title")),
+            )
             .child(
                 div()
                     .text_size(px(11.))
@@ -193,7 +198,7 @@ impl Render for TerminalDrawer {
                         Button::new("terminal-restart")
                             .ghost()
                             .small()
-                            .label("Restart")
+                            .label(rust_i18n::t!("terminal.restart"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.app_state
                                     .update(cx, |state, cx| state.restart_terminal(cx))
@@ -207,7 +212,7 @@ impl Render for TerminalDrawer {
                     .small()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip("Close terminal")
+                    .tooltip(rust_i18n::t!("terminal.close"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.app_state
                             .update(cx, |state, cx| state.close_terminal_panel(cx))
@@ -222,8 +227,8 @@ impl Render for TerminalDrawer {
             if state.exited {
                 let status = state
                     .exit_code
-                    .map(|code| format!("process exited ({code})"))
-                    .unwrap_or_else(|| "process exited".into());
+                    .map(|code| rust_i18n::t!("terminal.exited_code", code = code).into_owned())
+                    .unwrap_or_else(|| rust_i18n::t!("terminal.exited").into_owned());
                 grid = grid.child(
                     div()
                         .h(px(LINE_HEIGHT))
@@ -232,7 +237,7 @@ impl Render for TerminalDrawer {
                 );
             }
         } else {
-            grid = grid.child("Starting terminal…");
+            grid = grid.child(rust_i18n::t!("terminal.starting"));
         }
 
         v_flex()

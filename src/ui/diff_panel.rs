@@ -16,12 +16,11 @@ use std::path::Path;
 use agent::{FileChange, FileChangeKind};
 use gpui::{
     AnyElement, Context, Entity, HighlightStyle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, StyledText,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
+    StyledText, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
-    Rope,
+    ActiveTheme as _, Icon, IconName, Rope, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     highlighter::{HighlightTheme, Language, SyntaxHighlighter},
@@ -479,13 +478,17 @@ impl DiffPanel {
                 })
                 .flatten()
                 .collect();
-            (active.meta.id.clone(), turn, changes, active.meta.cwd.clone())
+            (
+                active.meta.id.clone(),
+                turn,
+                changes,
+                active.meta.cwd.clone(),
+            )
         };
 
-        let fresh = self
-            .cache
-            .as_ref()
-            .map_or(true, |c| c.session != session || c.turn != turn || c.dark != dark);
+        let fresh = self.cache.as_ref().map_or(true, |c| {
+            c.session != session || c.turn != turn || c.dark != dark
+        });
         if fresh {
             let theme = cx.theme().highlight_theme.clone();
             let files = changes
@@ -529,8 +532,12 @@ impl DiffPanel {
                     .bg(cx.theme().tab_active)
                     .text_size(px(13.))
                     .font_medium()
-                    .child(Icon::new(IconName::File).xsmall().text_color(cx.theme().muted_foreground))
-                    .child("Diff"),
+                    .child(
+                        Icon::new(IconName::File)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(rust_i18n::t!("diff.title")),
             )
             .child(
                 Button::new("diff-add-panel")
@@ -538,7 +545,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::Plus)
-                    .tooltip("More panels: coming soon"),
+                    .tooltip(rust_i18n::t!("diff.more_panels")),
             )
             // Right icon cluster: expand toggle, a layout no-op, close.
             .child(div().flex_1())
@@ -553,9 +560,9 @@ impl DiffPanel {
                         IconName::Maximize
                     })
                     .tooltip(if expanded {
-                        "Restore panel width"
+                        rust_i18n::t!("diff.restore_width")
                     } else {
-                        "Expand panel to full width"
+                        rust_i18n::t!("diff.expand_width")
                     })
                     .on_click(move |_, _, cx| {
                         app.update(cx, |state, cx| state.toggle_diff_expanded(cx));
@@ -567,7 +574,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::PanelRight)
-                    .tooltip("Panel layout: coming soon"),
+                    .tooltip(rust_i18n::t!("diff.layout_soon")),
             )
             .child(
                 Button::new("diff-close")
@@ -575,7 +582,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip("Close diff panel")
+                    .tooltip(rust_i18n::t!("diff.close"))
                     .on_click(move |_, _, cx| {
                         app2.update(cx, |state, cx| state.close_diff_panel(cx));
                     }),
@@ -590,8 +597,8 @@ impl DiffPanel {
         let selected = state.diff_selected_turn();
         let turns = state.diff_turns();
         let label = match selected {
-            Some(t) => format!("Turn {}", t + 1),
-            None => "No changes".to_string(),
+            Some(t) => rust_i18n::t!("diff.turn", count = t + 1).into_owned(),
+            None => rust_i18n::t!("diff.no_changes").into_owned(),
         };
         let muted = cx.theme().muted_foreground;
         let app = self.app_state.clone();
@@ -606,44 +613,49 @@ impl DiffPanel {
                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
         );
 
-        let selector = Popover::new("diff-turn-popover")
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                // Newest first.
-                let mut items = turns.clone();
-                items.reverse();
-                let mut list = v_flex().p_1().min_w(px(160.)).gap_0p5();
-                for turn in items {
-                    let app = app.clone();
-                    let is_sel = selected == Some(turn);
-                    list = list.child(
-                        h_flex()
-                            .id(("diff-turn-item", turn))
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .gap_2()
-                            .items_center()
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .when(is_sel, |this| this.bg(cx.theme().accent))
-                            .child(div().flex_1().child(format!("Turn {}", turn + 1)))
-                            .when(is_sel, |this| {
-                                this.child(Icon::new(IconName::Check).xsmall())
-                            })
-                            .on_click({
-                                let popover = cx.entity();
-                                move |_, window, cx| {
-                                    app.update(cx, |state, cx| state.set_diff_turn(turn, cx));
-                                    popover.update(cx, |st, cx| st.dismiss(window, cx));
-                                }
-                            }),
-                    );
-                }
-                list
-            });
+        let selector =
+            Popover::new("diff-turn-popover")
+                .trigger(trigger)
+                .content(move |_, _, cx| {
+                    // Newest first.
+                    let mut items = turns.clone();
+                    items.reverse();
+                    let mut list = v_flex().p_1().min_w(px(160.)).gap_0p5();
+                    for turn in items {
+                        let app = app.clone();
+                        let is_sel = selected == Some(turn);
+                        list = list.child(
+                            h_flex()
+                                .id(("diff-turn-item", turn))
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .gap_2()
+                                .items_center()
+                                .rounded(px(6.))
+                                .text_size(px(13.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(cx.theme().accent))
+                                .when(is_sel, |this| this.bg(cx.theme().accent))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(rust_i18n::t!("diff.turn", count = turn + 1)),
+                                )
+                                .when(is_sel, |this| {
+                                    this.child(Icon::new(IconName::Check).xsmall())
+                                })
+                                .on_click({
+                                    let popover = cx.entity();
+                                    move |_, window, cx| {
+                                        app.update(cx, |state, cx| state.set_diff_turn(turn, cx));
+                                        popover.update(cx, |st, cx| st.dismiss(window, cx));
+                                    }
+                                }),
+                        );
+                    }
+                    list
+                });
 
         let wrap_on = self.wrap;
         h_flex()
@@ -663,7 +675,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::PanelLeft)
-                    .tooltip("Split view: unified only"),
+                    .tooltip(rust_i18n::t!("diff.split_unified")),
             )
             .child(
                 Button::new("diff-wrap")
@@ -672,7 +684,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::Menu)
                     .selected(wrap_on)
-                    .tooltip("Toggle soft wrap")
+                    .tooltip(rust_i18n::t!("diff.toggle_wrap"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.wrap = !this.wrap;
                         cx.notify();
@@ -684,7 +696,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::Eye)
-                    .tooltip("Show whitespace: coming soon"),
+                    .tooltip(rust_i18n::t!("diff.whitespace_soon")),
             )
             .child(
                 Button::new("diff-invisibles")
@@ -692,7 +704,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::CaseSensitive)
-                    .tooltip("Show invisibles: coming soon"),
+                    .tooltip(rust_i18n::t!("diff.invisibles_soon")),
             )
             .into_any_element()
     }
@@ -740,9 +752,9 @@ impl DiffPanel {
     fn render_file_header(&self, file: &RenderedFile, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let kind_label = match file.kind {
-            FileChangeKind::Create => Some("new"),
-            FileChangeKind::Delete => Some("deleted"),
-            FileChangeKind::Rename => Some("renamed"),
+            FileChangeKind::Create => Some(rust_i18n::t!("diff.created")),
+            FileChangeKind::Delete => Some(rust_i18n::t!("diff.deleted")),
+            FileChangeKind::Rename => Some(rust_i18n::t!("diff.renamed")),
             FileChangeKind::Modify => None,
         };
         h_flex()
@@ -803,10 +815,7 @@ impl DiffPanel {
             .text_size(px(11.))
             .text_color(cx.theme().muted_foreground)
             .font_family(cx.theme().font_family.clone())
-            .child(format!(
-                "{count} unmodified line{}",
-                if count == 1 { "" } else { "s" }
-            ))
+            .child(rust_i18n::t!("diff.unmodified_lines", count = count))
             .into_any_element()
     }
 
@@ -822,8 +831,14 @@ impl DiffPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (bg, accent) = match kind {
-            RowKind::Added => (Some(cx.theme().success.opacity(0.13)), Some(cx.theme().success)),
-            RowKind::Removed => (Some(cx.theme().danger.opacity(0.12)), Some(cx.theme().danger)),
+            RowKind::Added => (
+                Some(cx.theme().success.opacity(0.13)),
+                Some(cx.theme().success),
+            ),
+            RowKind::Removed => (
+                Some(cx.theme().danger.opacity(0.12)),
+                Some(cx.theme().danger),
+            ),
             RowKind::Context => (None, None),
         };
         let muted = cx.theme().muted_foreground;
@@ -874,7 +889,7 @@ impl DiffPanel {
                 div()
                     .text_size(px(14.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("No file changes in this turn"),
+                    .child(rust_i18n::t!("diff.empty")),
             )
             .into_any_element()
     }

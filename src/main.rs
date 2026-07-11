@@ -6,17 +6,23 @@ mod smoke;
 mod store;
 mod ui;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 use std::borrow::Cow;
 
 use gpui::{
     AppContext as _, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
 };
-use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry};
+use gpui_component::{
+    ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry,
+};
 
 const TCODE_THEME: &str = include_str!("../themes/tcode.json");
 
 fn main() {
     env_logger::init();
+
+    settings::apply_locale(None);
 
     let smoke_spec = smoke::parse_args();
     // Hidden debug/dev flag: open the most recently updated session on launch.
@@ -58,6 +64,7 @@ fn main() {
             Theme::global_mut(cx).apply_config(&dark);
 
             let app_state = cx.new(|_| app::AppState::new(store));
+            settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
                 settings::ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
@@ -156,4 +163,44 @@ fn main() {
             })
             .detach();
         });
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use std::collections::BTreeSet;
+
+    fn keys(yaml: &str) -> BTreeSet<String> {
+        let mut stack: Vec<(usize, String)> = Vec::new();
+        let mut keys = BTreeSet::new();
+        for line in yaml
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        {
+            let indent = line.len() - line.trim_start().len();
+            let Some((name, value)) = line.trim().split_once(':') else {
+                continue;
+            };
+            while stack.last().is_some_and(|(level, _)| *level >= indent) {
+                stack.pop();
+            }
+            let mut path = stack
+                .iter()
+                .map(|(_, key)| key.as_str())
+                .collect::<Vec<_>>();
+            path.push(name.trim());
+            if value.trim().is_empty() {
+                stack.push((indent, name.trim().to_owned()));
+            } else {
+                keys.insert(path.join("."));
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn locale_keys_match() {
+        let en = keys(include_str!("../locales/en.yml"));
+        let zh = keys(include_str!("../locales/zh-CN.yml"));
+        assert_eq!(en, zh, "English and zh-CN locale keys differ");
+    }
 }

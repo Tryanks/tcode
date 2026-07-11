@@ -8,8 +8,8 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme,
@@ -23,7 +23,7 @@ use gpui_component::{
 };
 
 use crate::app::AppState;
-use crate::settings::{Settings, ThemeMode};
+use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
 use crate::ui::window_drag_area;
 
 /// Left inset so branding clears the native macOS traffic lights.
@@ -65,12 +65,14 @@ impl SettingsPage {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = app_state.read(cx).settings.clone();
         let claude_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("claude (from PATH)");
+            let mut input = InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.claude_path.placeholder"));
             input.set_value(path_string(&settings.claude_binary), window, cx);
             input
         });
         let codex_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).placeholder("codex (from PATH)");
+            let mut input = InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.codex_path.placeholder"));
             input.set_value(path_string(&settings.codex_binary), window, cx);
             input
         });
@@ -125,7 +127,7 @@ impl SettingsPage {
         let nav_item = |this: &Self,
                         id: &'static str,
                         icon: IconName,
-                        label: &'static str,
+                        label: SharedString,
                         section: Section,
                         cx: &mut Context<Self>|
          -> AnyElement {
@@ -153,7 +155,7 @@ impl SettingsPage {
                                 .text_sm()
                                 .when(active, |d| d.font_medium())
                                 .text_color(fg)
-                                .child(label),
+                                .child(label.clone()),
                         ),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -170,25 +172,27 @@ impl SettingsPage {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
-            .child(window_drag_area(
-                "settings-nav-drag",
-                gpui_component::h_flex()
-                    .h(px(52.))
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .pl(px(TRAFFIC_LIGHT_INSET))
-                    .pr_2(),
-                window,
-                cx,
-            )
             .child(
-                div()
-                    .text_sm()
-                    .font_bold()
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child("tcode"),
-            ))
+                window_drag_area(
+                    "settings-nav-drag",
+                    gpui_component::h_flex()
+                        .h(px(52.))
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .pl(px(TRAFFIC_LIGHT_INSET))
+                        .pr_2(),
+                    window,
+                    cx,
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .font_bold()
+                        .text_color(cx.theme().sidebar_foreground)
+                        .child("tcode"),
+                ),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -199,7 +203,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-general",
                         IconName::Settings,
-                        "General",
+                        rust_i18n::t!("settings.general").into_owned().into(),
                         Section::General,
                         cx,
                     ))
@@ -207,7 +211,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-providers",
                         IconName::Bot,
-                        "Providers",
+                        rust_i18n::t!("settings.providers").into_owned().into(),
                         Section::Providers,
                         cx,
                     )),
@@ -229,9 +233,10 @@ impl SettingsPage {
                             .text_size(px(13.))
                             .text_color(cx.theme().sidebar_foreground)
                             .child(Icon::new(IconName::ArrowLeft).size_4())
-                            .child("Back")
+                            .child(rust_i18n::t!("settings.back"))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.app_state.update(cx, |state, cx| state.close_settings(cx));
+                                this.app_state
+                                    .update(cx, |state, cx| state.close_settings(cx));
                             })),
                     ),
             )
@@ -258,14 +263,14 @@ impl SettingsPage {
                 .flex_1()
                 .text_size(px(16.))
                 .font_medium()
-                .child("Settings"),
+                .child(rust_i18n::t!("settings.title")),
         )
         .child(
             Button::new("restore-defaults")
                 .outline()
                 .small()
                 .icon(IconName::Undo)
-                .label("Restore defaults")
+                .label(rust_i18n::t!("settings.restore"))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.confirm_restore(window, cx);
                 })),
@@ -282,16 +287,13 @@ impl SettingsPage {
             let claude_input = claude_input.clone();
             let codex_input = codex_input.clone();
             alert
-                .title("Restore default settings?")
-                .description(
-                    "Reset theme, diff, and provider settings to their defaults. \
-                     Your projects and threads are not affected.",
-                )
+                .title(rust_i18n::t!("settings.restore_title"))
+                .description(rust_i18n::t!("settings.restore_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text("Restore defaults")
-                        .cancel_text("Cancel")
+                        .ok_text(rust_i18n::t!("settings.restore"))
+                        .cancel_text(rust_i18n::t!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
@@ -328,20 +330,21 @@ impl SettingsPage {
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.app_state.read(cx).settings.clone();
         v_flex()
-            .child(self.section_label("GENERAL", cx))
+            .child(self.section_label(rust_i18n::t!("settings.general_section"), cx))
+            .child(self.language_row(settings.language.as_deref(), cx))
             .child(self.theme_row(settings.theme_mode, cx))
             .child(self.toggle_row(
                 "word-wrap",
-                "Word wrap in diffs",
-                "Wrap long lines in the diff panel by default.",
+                rust_i18n::t!("settings.word_wrap.title"),
+                rust_i18n::t!("settings.word_wrap.description"),
                 settings.word_wrap_diffs,
                 cx,
                 |s, checked| s.word_wrap_diffs = checked,
             ))
             .child(self.toggle_row(
                 "delete-confirm",
-                "Delete confirmation",
-                "Ask before archiving a thread and its saved conversation.",
+                rust_i18n::t!("settings.delete_confirmation.title"),
+                rust_i18n::t!("settings.delete_confirmation.description"),
                 !settings.skip_delete_confirmation,
                 cx,
                 |s, checked| s.skip_delete_confirmation = !checked,
@@ -350,16 +353,16 @@ impl SettingsPage {
 
     fn render_providers(&self, cx: &mut Context<Self>) -> gpui::Div {
         v_flex()
-            .child(self.section_label("PROVIDERS", cx))
+            .child(self.section_label(rust_i18n::t!("settings.providers_section"), cx))
             .child(self.input_row(
-                "Claude binary path",
-                "Path to the `claude` CLI. Leave empty to use the one on your PATH.",
+                rust_i18n::t!("settings.claude_path.title"),
+                rust_i18n::t!("settings.claude_path.description"),
                 &self.claude_input.clone(),
                 cx,
             ))
             .child(self.input_row(
-                "Codex binary path",
-                "Path to the `codex` CLI. Leave empty to use the one on your PATH.",
+                rust_i18n::t!("settings.codex_path.title"),
+                rust_i18n::t!("settings.codex_path.description"),
                 &self.codex_input.clone(),
                 cx,
             ))
@@ -367,29 +370,34 @@ impl SettingsPage {
 
     // -- row builders -------------------------------------------------------
 
-    fn section_label(&self, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn section_label(&self, label: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
         div()
             .pb_2()
             .text_size(px(11.))
             .font_medium()
             .text_color(cx.theme().muted_foreground)
-            .child(label)
+            .child(label.into())
             .into_any_element()
     }
 
     /// Left description block (bold title + muted description).
-    fn row_labels(&self, title: &'static str, desc: &'static str, cx: &Context<Self>) -> gpui::Div {
+    fn row_labels(
+        &self,
+        title: impl Into<SharedString>,
+        desc: impl Into<SharedString>,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
         v_flex()
             .flex_1()
             .min_w_0()
             .gap_0p5()
             .pr_4()
-            .child(div().text_size(px(14.)).font_medium().child(title))
+            .child(div().text_size(px(14.)).font_medium().child(title.into()))
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(desc),
+                    .child(desc.into()),
             )
     }
 
@@ -405,29 +413,27 @@ impl SettingsPage {
     fn toggle_row(
         &self,
         id: &'static str,
-        title: &'static str,
-        desc: &'static str,
+        title: impl Into<SharedString>,
+        desc: impl Into<SharedString>,
         checked: bool,
         cx: &mut Context<Self>,
         mutate: fn(&mut Settings, bool),
     ) -> AnyElement {
         self.row_frame(cx)
             .child(self.row_labels(title, desc, cx))
-            .child(
-                Switch::new(id).checked(checked).on_click(cx.listener(
-                    move |this, checked: &bool, _, cx| {
-                        let checked = *checked;
-                        this.update_settings(|s| mutate(s, checked), cx);
-                    },
-                )),
-            )
+            .child(Switch::new(id).checked(checked).on_click(cx.listener(
+                move |this, checked: &bool, _, cx| {
+                    let checked = *checked;
+                    this.update_settings(|s| mutate(s, checked), cx);
+                },
+            )))
             .into_any_element()
     }
 
     fn input_row(
         &self,
-        title: &'static str,
-        desc: &'static str,
+        title: impl Into<SharedString>,
+        desc: impl Into<SharedString>,
         input: &Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -439,9 +445,9 @@ impl SettingsPage {
 
     fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
-            ThemeMode::System => "System default",
-            ThemeMode::Light => "Light",
-            ThemeMode::Dark => "Dark",
+            ThemeMode::System => rust_i18n::t!("settings.theme.system"),
+            ThemeMode::Light => rust_i18n::t!("settings.theme.light"),
+            ThemeMode::Dark => rust_i18n::t!("settings.theme.dark"),
         };
         let muted = cx.theme().muted_foreground;
 
@@ -457,11 +463,12 @@ impl SettingsPage {
         );
 
         let this = cx.entity();
-        let dropdown = Popover::new("theme-popover").trigger(trigger).content(
-            move |_, _, cx| {
+        let dropdown = Popover::new("theme-popover")
+            .trigger(trigger)
+            .content(move |_, _, cx| {
                 let this = this.clone();
                 let option = |mode: ThemeMode,
-                              label: &'static str,
+                              label: SharedString,
                               selected: bool,
                               this: &Entity<SettingsPage>,
                               cx: &mut Context<gpui_component::popover::PopoverState>|
@@ -469,7 +476,7 @@ impl SettingsPage {
                     let this = this.clone();
                     let popover = cx.entity();
                     gpui_component::h_flex()
-                        .id(label)
+                        .id(label.clone())
                         .w_full()
                         .px_2()
                         .py_1()
@@ -479,10 +486,8 @@ impl SettingsPage {
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|s| s.bg(cx.theme().accent))
-                        .child(div().flex_1().child(label))
-                        .when(selected, |d| {
-                            d.child(Icon::new(IconName::Check).xsmall())
-                        })
+                        .child(div().flex_1().child(label.clone()))
+                        .when(selected, |d| d.child(Icon::new(IconName::Check).xsmall()))
                         .on_click(move |_, window, cx| {
                             this.update(cx, |page, cx| {
                                 page.update_settings(|s| s.theme_mode = mode, cx);
@@ -496,14 +501,111 @@ impl SettingsPage {
                     .p_1()
                     .min_w(px(160.))
                     .gap_0p5()
-                    .child(option(ThemeMode::System, "System default", mode == ThemeMode::System, &this, cx))
-                    .child(option(ThemeMode::Light, "Light", mode == ThemeMode::Light, &this, cx))
-                    .child(option(ThemeMode::Dark, "Dark", mode == ThemeMode::Dark, &this, cx))
-            },
-        );
+                    .child(option(
+                        ThemeMode::System,
+                        rust_i18n::t!("settings.theme.system").into_owned().into(),
+                        mode == ThemeMode::System,
+                        &this,
+                        cx,
+                    ))
+                    .child(option(
+                        ThemeMode::Light,
+                        rust_i18n::t!("settings.theme.light").into_owned().into(),
+                        mode == ThemeMode::Light,
+                        &this,
+                        cx,
+                    ))
+                    .child(option(
+                        ThemeMode::Dark,
+                        rust_i18n::t!("settings.theme.dark").into_owned().into(),
+                        mode == ThemeMode::Dark,
+                        &this,
+                        cx,
+                    ))
+            });
 
         self.row_frame(cx)
-            .child(self.row_labels("Theme", "Choose how tcode looks across the app.", cx))
+            .child(self.row_labels(
+                rust_i18n::t!("settings.theme.title"),
+                rust_i18n::t!("settings.theme.description"),
+                cx,
+            ))
+            .child(dropdown)
+            .into_any_element()
+    }
+
+    fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+        let selected = language.map(str::to_owned);
+        let label = match language {
+            Some(LANGUAGE_ENGLISH) => rust_i18n::t!("settings.language.english"),
+            Some(LANGUAGE_SIMPLIFIED_CHINESE) => rust_i18n::t!("settings.language.chinese"),
+            _ => rust_i18n::t!("settings.language.system"),
+        };
+        let trigger = Button::new("language-dropdown").outline().compact().child(
+            gpui_component::h_flex()
+                .w(px(160.))
+                .items_center()
+                .justify_between()
+                .child(label)
+                .child(Icon::new(IconName::ChevronDown).xsmall()),
+        );
+        let page = cx.entity();
+        let dropdown =
+            Popover::new("language-popover")
+                .trigger(trigger)
+                .content(move |_, _, cx| {
+                    let option =
+                    |value: Option<&'static str>,
+                     key: &'static str,
+                     cx: &mut Context<gpui_component::popover::PopoverState>| {
+                        let page = page.clone();
+                        let popover = cx.entity();
+                        let is_selected = selected.as_deref() == value;
+                        gpui_component::h_flex()
+                            .id(key)
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(cx.theme().accent))
+                            .child(div().flex_1().child(rust_i18n::t!(key)))
+                            .when(is_selected, |d| {
+                                d.child(Icon::new(IconName::Check).xsmall())
+                            })
+                            .on_click(move |_, window, cx| {
+                                page.update(cx, |page, cx| {
+                                    page.update_settings(
+                                        |s| s.language = value.map(str::to_owned),
+                                        cx,
+                                    )
+                                });
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            })
+                    };
+                    v_flex()
+                        .p_1()
+                        .min_w(px(160.))
+                        .gap_0p5()
+                        .child(option(None, "settings.language.system", cx))
+                        .child(option(
+                            Some(LANGUAGE_ENGLISH),
+                            "settings.language.english",
+                            cx,
+                        ))
+                        .child(option(
+                            Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                            "settings.language.chinese",
+                            cx,
+                        ))
+                });
+        self.row_frame(cx)
+            .child(self.row_labels(
+                rust_i18n::t!("settings.language.title"),
+                rust_i18n::t!("settings.language.description"),
+                cx,
+            ))
             .child(dropdown)
             .into_any_element()
     }
@@ -532,7 +634,9 @@ impl Render for SettingsPage {
 // ---------------------------------------------------------------------------
 
 fn path_string(path: &Option<std::path::PathBuf>) -> String {
-    path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+    path.as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 fn optional_path(input: &Entity<InputState>, cx: &App) -> Option<std::path::PathBuf> {

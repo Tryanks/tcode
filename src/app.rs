@@ -385,7 +385,10 @@ impl AppState {
             match term::Terminal::spawn(&active.meta.cwd) {
                 Ok(terminal) => active.terminal = Some(terminal),
                 Err(error) => {
-                    self.report_error(format!("failed to start terminal: {error}"), cx);
+                    self.report_error(
+                        rust_i18n::t!("errors.terminal_start", error = error).into_owned(),
+                        cx,
+                    );
                     return;
                 }
             }
@@ -411,7 +414,10 @@ impl AppState {
                 active.terminal_open = true;
                 cx.notify();
             }
-            Err(error) => self.report_error(format!("failed to restart terminal: {error}"), cx),
+            Err(error) => self.report_error(
+                rust_i18n::t!("errors.terminal_restart", error = error).into_owned(),
+                cx,
+            ),
         }
     }
 
@@ -461,7 +467,10 @@ impl AppState {
         }
         let project = Project::from_root(root);
         if let Err(err) = self.store.upsert_project(&project) {
-            self.report_error(format!("failed to persist project: {err}"), cx);
+            self.report_error(
+                rust_i18n::t!("errors.persist_project", error = err).into_owned(),
+                cx,
+            );
             return None;
         }
         let id = project.id.clone();
@@ -498,9 +507,13 @@ impl AppState {
 
     pub fn update_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if let Err(err) = self.settings_store.save(&settings) {
-            self.report_error(format!("failed to persist settings: {err}"), cx);
+            self.report_error(
+                rust_i18n::t!("errors.persist_settings", error = err).into_owned(),
+                cx,
+            );
             return;
         }
+        crate::settings::apply_locale(settings.language.as_deref());
         self.settings = settings;
         cx.notify();
     }
@@ -510,7 +523,10 @@ impl AppState {
             self.shutdown_active();
         }
         if let Err(err) = self.store.remove_session(session_id) {
-            self.report_error(format!("failed to delete session: {err}"), cx);
+            self.report_error(
+                rust_i18n::t!("errors.delete_session", error = err).into_owned(),
+                cx,
+            );
             return;
         }
         self.sessions = self.store.load_index();
@@ -533,7 +549,10 @@ impl AppState {
             _ => self.create_project(meta.cwd.clone(), cx),
         };
         if let Err(err) = self.store.upsert_meta(&meta) {
-            self.report_error(format!("failed to persist session: {err}"), cx);
+            self.report_error(
+                rust_i18n::t!("errors.persist_session", error = err).into_owned(),
+                cx,
+            );
         }
         self.sessions = self.store.load_index();
         self.shutdown_active();
@@ -693,7 +712,10 @@ impl AppState {
         // session so the sidebar row appears; the provider then starts below.
         if self.active_is_draft() {
             if let Err(err) = self.commit_draft() {
-                self.report_error(format!("failed to persist session: {err}"), cx);
+                self.report_error(
+                    rust_i18n::t!("errors.persist_session", error = err).into_owned(),
+                    cx,
+                );
                 return;
             }
         }
@@ -740,7 +762,7 @@ impl AppState {
             self.ensure_started(cx);
         }
         if dispatch_failed {
-            self.report_error("session process is gone; try reopening".into(), cx);
+            self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
         }
         cx.notify();
     }
@@ -852,11 +874,13 @@ impl AppState {
                                 active.git_branch = read_git_branch(&active.meta.cwd);
                             }
                         }
-                        cx.emit(AppEvent::Notice(format!("Switched to {branch}")));
+                        cx.emit(AppEvent::Notice(
+                            rust_i18n::t!("notice.switched_branch", branch = branch).into_owned(),
+                        ));
                     }
                     Err(CheckoutError::Dirty) => {
                         cx.emit(AppEvent::Error(
-                            "Working tree has uncommitted changes".into(),
+                            rust_i18n::t!("notice.dirty_tree").into_owned(),
                         ));
                     }
                     Err(CheckoutError::Git(message)) => cx.emit(AppEvent::Error(message)),
@@ -1014,7 +1038,8 @@ impl AppState {
                                 active.pending_sends.clear();
                                 active.turn_in_flight = false;
                             }
-                            let message = format!("failed to start provider: {err}");
+                            let message =
+                                rust_i18n::t!("errors.provider_start", error = err).into_owned();
                             let error_event = AgentEvent::Error {
                                 message: message.clone(),
                                 fatal: true,
@@ -1059,8 +1084,10 @@ impl AppState {
                 active._pump = None;
             }
             let message = match reason {
-                Some(reason) => format!("provider session closed unexpectedly: {reason}"),
-                None => "provider session closed unexpectedly".to_string(),
+                Some(reason) => {
+                    rust_i18n::t!("errors.provider_closed_reason", reason = reason).into_owned()
+                }
+                None => rust_i18n::t!("errors.provider_closed").into_owned(),
             };
             self.report_error(message, cx);
             cx.notify();
@@ -1112,7 +1139,7 @@ impl AppState {
                     active.dispatch_next_pending().is_err()
                 });
             if dispatch_failed {
-                self.report_error("session process is gone; try reopening".into(), cx);
+                self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
             }
         }
 
@@ -1151,7 +1178,10 @@ impl AppState {
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
         let ts = now_millis();
         if let Err(err) = self.store.append_event(session_id, ts, event) {
-            self.report_error(format!("failed to persist event: {err}"), cx);
+            self.report_error(
+                rust_i18n::t!("errors.persist_event", error = err).into_owned(),
+                cx,
+            );
         }
         if let Some(active) = self.active.as_mut() {
             if active.meta.id == session_id {
@@ -1190,7 +1220,10 @@ impl AppState {
 
     fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut Context<Self>) {
         if let Err(err) = self.store.upsert_meta(meta) {
-            self.report_error(format!("failed to persist session index: {err}"), cx);
+            self.report_error(
+                rust_i18n::t!("errors.persist_session_index", error = err).into_owned(),
+                cx,
+            );
         }
         self.sessions = self.store.load_index();
         cx.notify();
@@ -1560,7 +1593,11 @@ mod tests {
     #[test]
     fn model_switch_restarts_live_provider() {
         let (commands, receiver) = async_channel::unbounded();
-        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp/project"), None);
+        let mut meta = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/project"),
+            None,
+        );
         meta.model = Some("sonnet".into());
         let mut active = ActiveSession {
             meta,

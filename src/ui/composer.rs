@@ -49,17 +49,41 @@ struct ModelRow {
 
 fn model_catalog() -> Vec<ModelRow> {
     vec![
-        ModelRow { id: None, name: "Default", provider: ProviderKind::ClaudeCode },
-        ModelRow { id: Some("opus"), name: "Claude Opus", provider: ProviderKind::ClaudeCode },
-        ModelRow { id: Some("sonnet"), name: "Claude Sonnet", provider: ProviderKind::ClaudeCode },
-        ModelRow { id: Some("haiku"), name: "Claude Haiku", provider: ProviderKind::ClaudeCode },
-        ModelRow { id: Some("gpt-5.6-sol"), name: "gpt-5.6-sol", provider: ProviderKind::Codex },
+        ModelRow {
+            id: None,
+            name: "Default",
+            provider: ProviderKind::ClaudeCode,
+        },
+        ModelRow {
+            id: Some("opus"),
+            name: "Claude Opus",
+            provider: ProviderKind::ClaudeCode,
+        },
+        ModelRow {
+            id: Some("sonnet"),
+            name: "Claude Sonnet",
+            provider: ProviderKind::ClaudeCode,
+        },
+        ModelRow {
+            id: Some("haiku"),
+            name: "Claude Haiku",
+            provider: ProviderKind::ClaudeCode,
+        },
+        ModelRow {
+            id: Some("gpt-5.6-sol"),
+            name: "gpt-5.6-sol",
+            provider: ProviderKind::Codex,
+        },
         ModelRow {
             id: Some("gpt-5.6-sol-mini"),
             name: "gpt-5.6-sol-mini",
             provider: ProviderKind::Codex,
         },
-        ModelRow { id: Some("gpt-5.5-codex"), name: "gpt-5.5-codex", provider: ProviderKind::Codex },
+        ModelRow {
+            id: Some("gpt-5.5-codex"),
+            name: "gpt-5.5-codex",
+            provider: ProviderKind::Codex,
+        },
     ]
 }
 
@@ -73,9 +97,9 @@ fn provider_short(provider: ProviderKind) -> &'static str {
 /// The provider glyph (Claude starburst / Codex OpenAI mark).
 fn provider_glyph(provider: ProviderKind) -> Icon {
     match provider {
-        ProviderKind::ClaudeCode => {
-            Icon::empty().path("icons/claude.svg").text_color(rgb(CLAUDE_TINT))
-        }
+        ProviderKind::ClaudeCode => Icon::empty()
+            .path("icons/claude.svg")
+            .text_color(rgb(CLAUDE_TINT)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
     }
 }
@@ -85,30 +109,34 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
 const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
     (
         ApprovalMode::Supervised,
-        "Supervised",
-        "Ask before commands and file changes.",
+        "approval.supervised",
+        "approval.supervised_description",
         "icons/lock.svg",
     ),
     (
         ApprovalMode::AutoAcceptEdits,
-        "Auto-accept edits",
-        "Auto-approve edits, ask before other actions.",
+        "approval.auto_edits",
+        "approval.auto_edits_description",
         "icons/pencil.svg",
     ),
     (
         ApprovalMode::FullAccess,
-        "Full access",
-        "Allow commands and edits without prompts.",
+        "approval.full_access",
+        "approval.full_access_description",
         "icons/unlock.svg",
     ),
 ];
 
-fn approval_mode_meta(mode: ApprovalMode) -> (&'static str, &'static str, &'static str) {
-    let (_, label, description, icon) = APPROVAL_MODES
+fn approval_mode_meta(mode: ApprovalMode) -> (String, String, &'static str) {
+    let (_, label_key, description_key, icon) = APPROVAL_MODES
         .iter()
         .find(|(m, ..)| *m == mode)
         .expect("every ApprovalMode is present in APPROVAL_MODES");
-    (label, description, icon)
+    (
+        rust_i18n::t!(*label_key).into_owned(),
+        rust_i18n::t!(*description_key).into_owned(),
+        icon,
+    )
 }
 
 /// Which rail filter the model picker is showing.
@@ -154,10 +182,11 @@ impl Composer {
                 .multi_line(true)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder("Ask anything, @tag files/folders, $use skills, or / for commands")
+                .placeholder(rust_i18n::t!("composer.placeholder"))
         });
-        let model_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search models…"));
+        let model_search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("composer.search_models"))
+        });
 
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
@@ -198,18 +227,18 @@ impl Composer {
             return;
         }
         if self.app_state.read(cx).active.is_none() {
-            window.push_notification(Notification::info("Create or select a session first."), cx);
+            window.push_notification(Notification::info(rust_i18n::t!("composer.no_session")), cx);
             return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
-        self.app_state.update(cx, |state, cx| state.send_turn(text, cx));
+        self.app_state
+            .update(cx, |state, cx| state.send_turn(text, cx));
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
     }
 
     fn rail(&self, provider: ProviderKind) -> PickerRail {
-        self.picker_rail
-            .unwrap_or(PickerRail::Provider(provider))
+        self.picker_rail.unwrap_or(PickerRail::Provider(provider))
     }
 
     // -- control-row popovers ----------------------------------------------
@@ -242,22 +271,19 @@ impl Composer {
         let pending_restart = app_state.model_pending_restart();
         let selected = current_model.clone();
 
-        let trigger = Button::new("model-picker")
-            .ghost()
-            .compact()
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_size(px(13.))
-                    .child(provider_glyph(provider).small())
-                    .child(div().font_medium().child(display))
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
-                    ),
-            );
+        let trigger = Button::new("model-picker").ghost().compact().child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .text_size(px(13.))
+                .child(provider_glyph(provider).small())
+                .child(div().font_medium().child(display))
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                ),
+        );
 
         Popover::new("model-picker-popover")
             .anchor(Anchor::BottomLeft)
@@ -347,8 +373,8 @@ impl Composer {
         &self,
         id: &'static str,
         icon: Icon,
-        label: &'static str,
-        tooltip: &'static str,
+        label: String,
+        tooltip: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -383,12 +409,8 @@ impl Composer {
         let trigger = Button::new("overflow-controls")
             .ghost()
             .compact()
-            .tooltip("More controls")
-            .child(
-                Icon::new(IconName::Ellipsis)
-                    .small()
-                    .text_color(muted),
-            );
+            .tooltip(rust_i18n::t!("composer.more_controls"))
+            .child(Icon::new(IconName::Ellipsis).small().text_color(muted));
 
         Popover::new("overflow-popover")
             .anchor(Anchor::BottomLeft)
@@ -457,7 +479,11 @@ impl Composer {
             let state = self.app_state.read(cx);
             let active = state.active.as_ref()?;
             let branch = active.git_branch.clone()?;
-            (branch, active.branches.clone(), active.timeline.turn_running)
+            (
+                branch,
+                active.branches.clone(),
+                active.timeline.turn_running,
+            )
         };
         let muted = cx.theme().muted_foreground;
 
@@ -467,7 +493,7 @@ impl Composer {
             Button::new("branch-picker")
                 .ghost()
                 .compact()
-                .tooltip("Wait for the current turn")
+                .tooltip(rust_i18n::t!("composer.wait_turn"))
                 .child(
                     h_flex()
                         .gap_1p5()
@@ -490,11 +516,7 @@ impl Composer {
                     .text_color(muted)
                     .child(Icon::empty().path("icons/git-branch.svg").xsmall())
                     .child(branch)
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(muted),
-                    ),
+                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
             Popover::new("branch-popover")
                 .anchor(Anchor::BottomRight)
@@ -523,7 +545,7 @@ impl Composer {
                                 .py_1p5()
                                 .text_size(px(13.))
                                 .text_color(muted)
-                                .child("Loading…"),
+                                .child(rust_i18n::t!("composer.loading")),
                         );
                     } else {
                         for (index, name) in branches.iter().enumerate() {
@@ -544,7 +566,11 @@ impl Composer {
                                     .text_size(px(13.))
                                     .hover(|s| s.bg(cx.theme().muted))
                                     .child(
-                                        div().flex_1().min_w_0().overflow_hidden().child(name.clone()),
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .child(name.clone()),
                                     )
                                     .when(is_current, |this| {
                                         this.child(
@@ -582,18 +608,23 @@ impl Composer {
                         .gap_1p5()
                         .items_center()
                         .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
-                        .child("Local checkout"),
+                        .child(rust_i18n::t!("composer.local_checkout")),
                 )
                 .child(right)
                 .into_any_element(),
         )
     }
 
-    fn render_approval_panel(&self, request: &ApprovalRequest, count: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_approval_panel(
+        &self,
+        request: &ApprovalRequest,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let summary = match &request.kind {
-            ApprovalKind::ExecCommand { .. } => "Command approval requested",
-            ApprovalKind::FileChange { .. } => "File change approval requested",
-            ApprovalKind::ToolUse { .. } => "Tool approval requested",
+            ApprovalKind::ExecCommand { .. } => rust_i18n::t!("approval.command_requested"),
+            ApprovalKind::FileChange { .. } => rust_i18n::t!("approval.file_requested"),
+            ApprovalKind::ToolUse { .. } => rust_i18n::t!("approval.tool_requested"),
         };
         let muted = cx.theme().muted_foreground;
 
@@ -607,7 +638,12 @@ impl Composer {
                         .child(command.clone()),
                 )
                 .when_some(cwd.clone(), |this, cwd| {
-                    this.child(div().text_size(px(11.)).text_color(muted).child(format!("in {cwd}")))
+                    this.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(rust_i18n::t!("approval.in_directory", cwd = cwd)),
+                    )
                 })
                 .into_any_element(),
             ApprovalKind::FileChange { changes, .. } => v_flex()
@@ -616,7 +652,11 @@ impl Composer {
                     div()
                         .text_size(px(12.5))
                         .font_family(cx.theme().mono_font_family.clone())
-                        .child(format!("{} {}", file_change_kind_label(change.kind), change.path))
+                        .child(format!(
+                            "{} {}",
+                            file_change_kind_label(change.kind),
+                            change.path
+                        ))
                 }))
                 .into_any_element(),
             ApprovalKind::ToolUse { name, input } => div()
@@ -656,9 +696,15 @@ impl Composer {
                             .text_size(px(11.))
                             .font_medium()
                             .text_color(muted)
-                            .child("PENDING APPROVAL"),
+                            .child(rust_i18n::t!("approval.pending")),
                     )
-                    .child(div().flex_1().text_size(px(13.)).font_medium().child(summary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.))
+                            .font_medium()
+                            .child(summary),
+                    )
                     .when(count > 1, |this| {
                         this.child(
                             div()
@@ -696,7 +742,7 @@ impl Composer {
                         Button::new("approval-deny")
                             .ghost()
                             .small()
-                            .label("Deny")
+                            .label(rust_i18n::t!("approval.deny"))
                             .text_color(cx.theme().danger)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
@@ -706,16 +752,20 @@ impl Composer {
                         Button::new("approval-always")
                             .ghost()
                             .small()
-                            .label("Always allow")
+                            .label(rust_i18n::t!("approval.always_allow"))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(always_id.clone(), ApprovalDecision::ApproveForSession, cx);
+                                this.respond(
+                                    always_id.clone(),
+                                    ApprovalDecision::ApproveForSession,
+                                    cx,
+                                );
                             })),
                     )
                     .child(
                         Button::new("approval-approve")
                             .primary()
                             .small()
-                            .label("Approve")
+                            .label(rust_i18n::t!("approval.approve"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
                             })),
@@ -726,8 +776,9 @@ impl Composer {
 
     fn respond(&mut self, request_id: String, decision: ApprovalDecision, cx: &mut Context<Self>) {
         self.approval_expanded = false;
-        self.app_state
-            .update(cx, |state, cx| state.respond_approval(request_id, decision, cx));
+        self.app_state.update(cx, |state, cx| {
+            state.respond_approval(request_id, decision, cx)
+        });
     }
 }
 
@@ -795,8 +846,8 @@ impl Render for Composer {
                 .child(self.render_static_chip(
                     "mode-chip",
                     Icon::empty().path("icons/box.svg"),
-                    "Build",
-                    "Modes: coming soon",
+                    rust_i18n::t!("composer.build").into_owned(),
+                    rust_i18n::t!("composer.modes_soon").into_owned(),
                     cx,
                 ))
                 .child(div().flex_1())
@@ -885,11 +936,10 @@ fn render_model_pane(
             .cursor_pointer()
             .when(active, |s| s.bg(cx.theme().muted))
             .hover(|s| s.bg(cx.theme().muted))
-            .child(icon.small().text_color(if active {
-                cx.theme().foreground
-            } else {
-                muted
-            }))
+            .child(
+                icon.small()
+                    .text_color(if active { cx.theme().foreground } else { muted }),
+            )
             .on_click(move |_, _, cx| {
                 composer.update(cx, |c, cx| {
                     c.picker_rail = Some(target);
@@ -931,7 +981,9 @@ fn render_model_pane(
     // Main pane: search + rows.
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
     for (index, row) in rows.iter().enumerate() {
-        list = list.child(render_model_row(row, index, selected, app_entity, popover, cx));
+        list = list.child(render_model_row(
+            row, index, selected, app_entity, popover, cx,
+        ));
     }
     if rows.is_empty() {
         list = list.child(
@@ -940,7 +992,7 @@ fn render_model_pane(
                 .py_4()
                 .text_size(px(13.))
                 .text_color(muted)
-                .child("No models"),
+                .child(rust_i18n::t!("composer.no_models")),
         );
     }
 
@@ -966,7 +1018,7 @@ fn render_model_pane(
                 .border_color(cx.theme().border)
                 .text_size(px(11.))
                 .text_color(muted)
-                .child("applies on next turn session restart"),
+                .child(rust_i18n::t!("composer.restart_note")),
         );
     }
 
@@ -1082,9 +1134,17 @@ fn render_model_row(
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().accent))
                 .child(
-                    Icon::new(if is_fav { IconName::StarFill } else { IconName::Star })
-                        .xsmall()
-                        .text_color(if is_fav { rgb(CLAUDE_TINT).into() } else { muted }),
+                    Icon::new(if is_fav {
+                        IconName::StarFill
+                    } else {
+                        IconName::Star
+                    })
+                    .xsmall()
+                    .text_color(if is_fav {
+                        rgb(CLAUDE_TINT).into()
+                    } else {
+                        muted
+                    }),
                 )
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
@@ -1146,7 +1206,7 @@ fn render_permission_pane(
                                 .gap_1p5()
                                 .items_center()
                                 .text_size(px(13.))
-                                .child(div().font_medium().child(*label))
+                                .child(div().font_medium().child(rust_i18n::t!(*label)))
                                 .when(is_current, |this| {
                                     this.child(
                                         Icon::new(IconName::Check).xsmall().text_color(primary),
@@ -1157,7 +1217,7 @@ fn render_permission_pane(
                             div()
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(*description),
+                                .child(rust_i18n::t!(*description)),
                         ),
                 ),
         );
@@ -1173,7 +1233,7 @@ fn render_permission_pane(
                 .border_color(cx.theme().border)
                 .text_size(px(11.))
                 .text_color(muted)
-                .child("applies on next turn session restart"),
+                .child(rust_i18n::t!("composer.restart_note")),
         );
     }
     pane.into_any_element()
@@ -1210,13 +1270,16 @@ fn render_overflow_pane(
         .gap_0p5()
         .child(item(Icon::new(IconName::Info), context_label(usage)))
         .child(item(Icon::empty().path(mode_icon), mode_label.into()))
-        .child(item(Icon::empty().path("icons/box.svg"), "Build".into()))
+        .child(item(
+            Icon::empty().path("icons/box.svg"),
+            rust_i18n::t!("composer.build").into_owned().into(),
+        ))
         .into_any_element()
 }
 
 fn render_context_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState>) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let row = |label: &'static str, value: String, cx: &mut Context<PopoverState>| -> AnyElement {
+    let row = |label: String, value: String, cx: &mut Context<PopoverState>| -> AnyElement {
         h_flex()
             .w_full()
             .justify_between()
@@ -1233,23 +1296,39 @@ fn render_context_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState>
             .text_size(px(11.))
             .font_medium()
             .text_color(muted)
-            .child("CONTEXT"),
+            .child(rust_i18n::t!("composer.context_heading")),
     );
 
     match usage {
         Some(u) => {
             pane = pane
-                .child(row("Used", opt_tokens(u.used_tokens.or(u.input_tokens)), cx))
-                .child(row("Cached", opt_tokens(u.cached_input_tokens), cx))
-                .child(row("Output", opt_tokens(u.output_tokens), cx))
-                .child(row("Context window", opt_tokens(u.context_window), cx));
+                .child(row(
+                    rust_i18n::t!("composer.used").into_owned(),
+                    opt_tokens(u.used_tokens.or(u.input_tokens)),
+                    cx,
+                ))
+                .child(row(
+                    rust_i18n::t!("composer.cached").into_owned(),
+                    opt_tokens(u.cached_input_tokens),
+                    cx,
+                ))
+                .child(row(
+                    rust_i18n::t!("composer.output").into_owned(),
+                    opt_tokens(u.output_tokens),
+                    cx,
+                ))
+                .child(row(
+                    rust_i18n::t!("composer.context_window").into_owned(),
+                    opt_tokens(u.context_window),
+                    cx,
+                ));
         }
         None => {
             pane = pane.child(
                 div()
                     .text_size(px(12.))
                     .text_color(muted)
-                    .child("No usage yet this session."),
+                    .child(rust_i18n::t!("composer.no_usage")),
             );
         }
     }
@@ -1269,7 +1348,7 @@ fn current_model_name(provider: ProviderKind, model: Option<&str>) -> String {
     }
     match model {
         Some(id) => id.to_string(),
-        None => "Default".to_string(),
+        None => rust_i18n::t!("composer.default_model").into_owned(),
     }
 }
 
@@ -1302,10 +1381,10 @@ fn context_label(usage: Option<TokenUsage>) -> String {
                 }
                 (Some(used), None) => compact_tokens(used),
                 (None, Some(window)) => compact_tokens(window),
-                (None, None) => "Context".to_string(),
+                (None, None) => rust_i18n::t!("composer.context").into_owned(),
             }
         }
-        None => "Context".to_string(),
+        None => rust_i18n::t!("composer.context").into_owned(),
     }
 }
 
@@ -1347,24 +1426,24 @@ mod tests {
         assert_eq!(
             approval_mode_meta(ApprovalMode::Supervised),
             (
-                "Supervised",
-                "Ask before commands and file changes.",
+                "Supervised".to_string(),
+                "Ask before commands and file changes.".to_string(),
                 "icons/lock.svg"
             )
         );
         assert_eq!(
             approval_mode_meta(ApprovalMode::AutoAcceptEdits),
             (
-                "Auto-accept edits",
-                "Auto-approve edits, ask before other actions.",
+                "Auto-accept edits".to_string(),
+                "Auto-approve edits, ask before other actions.".to_string(),
                 "icons/pencil.svg"
             )
         );
         assert_eq!(
             approval_mode_meta(ApprovalMode::FullAccess),
             (
-                "Full access",
-                "Allow commands and edits without prompts.",
+                "Full access".to_string(),
+                "Allow commands and edits without prompts.".to_string(),
                 "icons/unlock.svg"
             )
         );
@@ -1372,7 +1451,10 @@ mod tests {
 
     #[test]
     fn current_model_name_maps_catalog() {
-        assert_eq!(current_model_name(ProviderKind::ClaudeCode, None), "Default");
+        assert_eq!(
+            current_model_name(ProviderKind::ClaudeCode, None),
+            "Default"
+        );
         assert_eq!(
             current_model_name(ProviderKind::ClaudeCode, Some("opus")),
             "Claude Opus"

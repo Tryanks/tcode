@@ -21,6 +21,8 @@ serde_json = "1"
 smol = "2"
 async-channel = "2"
 env_logger = "0.11"
+rust-i18n = "4"
+sys-locale = "0.3"
 
 [features]
 default = ["runtime-shaders"]

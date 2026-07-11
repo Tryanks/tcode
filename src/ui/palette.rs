@@ -11,14 +11,14 @@
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
 
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
     input::{Input, InputEvent, InputState},
-    h_flex, v_flex,
+    v_flex,
 };
 
 use crate::app::AppState;
@@ -78,7 +78,7 @@ struct Item {
 }
 
 struct Group {
-    label: &'static str,
+    label: String,
     items: Vec<Item>,
 }
 
@@ -93,22 +93,25 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let query = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search commands, projects, and threads…")
+            InputState::new(window, cx).placeholder(rust_i18n::t!("palette.placeholder"))
         });
 
         let subscriptions = vec![
             cx.observe(&app_state, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&query, window, |this, _query, event, window, cx| match event {
-                InputEvent::Change => {
-                    this.selected = 0;
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => {
-                    this.activate_selected(window, cx);
-                }
-                _ => {}
-            }),
+            cx.subscribe_in(
+                &query,
+                window,
+                |this, _query, event, window, cx| match event {
+                    InputEvent::Change => {
+                        this.selected = 0;
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { .. } => {
+                        this.activate_selected(window, cx);
+                    }
+                    _ => {}
+                },
+            ),
         ];
 
         Self {
@@ -130,7 +133,8 @@ impl CommandPalette {
     }
 
     fn close(&self, cx: &mut Context<Self>) {
-        self.app_state.update(cx, |state, cx| state.close_palette(cx));
+        self.app_state
+            .update(cx, |state, cx| state.close_palette(cx));
     }
 
     /// Build the grouped result list for the current query.
@@ -140,14 +144,23 @@ impl CommandPalette {
 
         // Actions.
         let mut actions: Vec<(i32, Item)> = Vec::new();
-        let mut push_action = |label: String, icon: IconName, action: Action, subtitle: Option<String>| {
-            if let Some(score) = fuzzy_score(&query, &label) {
-                actions.push((score, Item { icon, label, subtitle, action }));
-            }
-        };
+        let mut push_action =
+            |label: String, icon: IconName, action: Action, subtitle: Option<String>| {
+                if let Some(score) = fuzzy_score(&query, &label) {
+                    actions.push((
+                        score,
+                        Item {
+                            icon,
+                            label,
+                            subtitle,
+                            action,
+                        },
+                    ));
+                }
+            };
         for group in state.grouped_sessions() {
             push_action(
-                format!("New thread in {}", group.project.name),
+                rust_i18n::t!("palette.new_thread", project = group.project.name).into_owned(),
                 IconName::Plus,
                 Action::NewThread {
                     cwd: group.project.root.clone(),
@@ -156,9 +169,24 @@ impl CommandPalette {
                 None,
             );
         }
-        push_action("Open settings".into(), IconName::Settings, Action::OpenSettings, None);
-        push_action("Toggle theme".into(), IconName::Moon, Action::ToggleTheme, None);
-        push_action("Toggle diff panel".into(), IconName::PanelRight, Action::ToggleDiff, None);
+        push_action(
+            rust_i18n::t!("palette.open_settings").into_owned(),
+            IconName::Settings,
+            Action::OpenSettings,
+            None,
+        );
+        push_action(
+            rust_i18n::t!("palette.toggle_theme").into_owned(),
+            IconName::Moon,
+            Action::ToggleTheme,
+            None,
+        );
+        push_action(
+            rust_i18n::t!("palette.toggle_diff").into_owned(),
+            IconName::PanelRight,
+            Action::ToggleDiff,
+            None,
+        );
         actions.sort_by(|a, b| b.0.cmp(&a.0));
 
         // Threads (fuzzy over titles).
@@ -172,7 +200,9 @@ impl CommandPalette {
                             icon: IconName::SquareTerminal,
                             label: meta.title.clone(),
                             subtitle: Some(group.project.name.clone()),
-                            action: Action::OpenThread { session_id: meta.id.clone() },
+                            action: Action::OpenThread {
+                                session_id: meta.id.clone(),
+                            },
                         },
                     ));
                 }
@@ -183,13 +213,13 @@ impl CommandPalette {
         let mut groups = Vec::new();
         if !actions.is_empty() {
             groups.push(Group {
-                label: "Actions",
+                label: rust_i18n::t!("palette.actions").into_owned(),
                 items: actions.into_iter().map(|(_, i)| i).collect(),
             });
         }
         if !threads.is_empty() {
             groups.push(Group {
-                label: "Threads",
+                label: rust_i18n::t!("palette.threads").into_owned(),
                 items: threads.into_iter().map(|(_, i)| i).collect(),
             });
         }
@@ -218,7 +248,8 @@ impl CommandPalette {
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
-                self.app_state.update(cx, |state, cx| state.open_settings(cx));
+                self.app_state
+                    .update(cx, |state, cx| state.open_settings(cx));
             }
             Action::ToggleTheme => {
                 let next = if cx.theme().mode.is_dark() {
@@ -235,11 +266,13 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                self.app_state.update(cx, |state, cx| state.toggle_diff_panel(cx));
+                self.app_state
+                    .update(cx, |state, cx| state.toggle_diff_panel(cx));
                 self.close(cx);
             }
             Action::OpenThread { session_id } => {
-                self.app_state.update(cx, |state, cx| state.select_session(&session_id, cx));
+                self.app_state
+                    .update(cx, |state, cx| state.select_session(&session_id, cx));
                 self.close(cx);
             }
         }
@@ -279,7 +312,14 @@ impl Render for CommandPalette {
         let muted = cx.theme().muted_foreground;
 
         // Build the result list, tracking a running flat index for highlight.
-        let mut list = v_flex().id("palette-list").flex_1().min_h_0().overflow_y_scroll().px_2().py_2().gap_1();
+        let mut list = v_flex()
+            .id("palette-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px_2()
+            .py_2()
+            .gap_1();
         let mut flat = 0usize;
         for group in &groups {
             list = list.child(
@@ -289,7 +329,7 @@ impl Render for CommandPalette {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(group.label),
+                    .child(group.label.clone()),
             );
             for item in &group.items {
                 let index = flat;
@@ -344,7 +384,7 @@ impl Render for CommandPalette {
                     .py_4()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child("No matches"),
+                    .child(rust_i18n::t!("palette.no_matches")),
             );
         }
 
@@ -368,7 +408,11 @@ impl Render for CommandPalette {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(Icon::new(IconName::Search).small().text_color(muted))
-                    .child(div().flex_1().child(Input::new(&self.query).appearance(false))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.query).appearance(false)),
+                    ),
             )
             .child(list)
             .child(
@@ -382,9 +426,9 @@ impl Render for CommandPalette {
                     .border_color(cx.theme().border)
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child("↑↓ Navigate")
-                    .child("Enter Select")
-                    .child("Esc Close"),
+                    .child(rust_i18n::t!("palette.navigate"))
+                    .child(rust_i18n::t!("palette.select"))
+                    .child(rust_i18n::t!("palette.close")),
             );
 
         div()
@@ -397,9 +441,12 @@ impl Render for CommandPalette {
             .flex()
             .justify_center()
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.close(cx);
-            }))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(
                 div()
                     .mt(px(96.))

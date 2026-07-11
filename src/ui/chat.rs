@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use agent::{FileChange, ItemStatus};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
@@ -332,7 +332,7 @@ impl ChatView {
                         .text_size(px(11.))
                         .font_medium()
                         .text_color(muted)
-                        .child("Work Log"),
+                        .child(rust_i18n::t!("chat.work_log")),
                 );
             }
 
@@ -364,7 +364,7 @@ impl ChatView {
                             this.toggle_expanded(&rows_key, cx);
                         }))
                         .child(Icon::new(IconName::ChevronDown).xsmall())
-                        .child(format!("+{hidden} previous log entrys")),
+                        .child(rust_i18n::t!("chat.previous_logs", count = hidden)),
                 );
             }
         }
@@ -382,12 +382,17 @@ impl ChatView {
                     .text_size(px(13.))
                     .text_color(muted)
                     .child(div().text_color(cx.theme().primary).child("•••"))
-                    .child(format!("Working for {}", format_duration(secs))),
+                    .child(rust_i18n::t!(
+                        "chat.working_for",
+                        duration = format_duration(secs)
+                    )),
             );
         } else {
             let label = match turn.duration_secs() {
-                Some(secs) => format!("Worked for {}", format_duration(secs)),
-                None => "Worked".to_string(),
+                Some(secs) => {
+                    rust_i18n::t!("chat.worked_for", duration = format_duration(secs)).into_owned()
+                }
+                None => rust_i18n::t!("chat.worked").into_owned(),
             };
             section = section.child(
                 h_flex()
@@ -413,7 +418,9 @@ impl ChatView {
     fn render_activity_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let (icon, summary): (IconName, AnyElement) = match &entry.content {
-            EntryContent::Command { command, status, .. } => {
+            EntryContent::Command {
+                command, status, ..
+            } => {
                 let icon = if matches!(status, ItemStatus::InProgress) {
                     IconName::SquareTerminal
                 } else {
@@ -424,7 +431,7 @@ impl ChatView {
                     .flex_1()
                     .gap_1()
                     .overflow_hidden()
-                    .child(div().flex_none().child("Command run"))
+                    .child(div().flex_none().child(rust_i18n::t!("chat.command_run")))
                     .child(
                         div()
                             .min_w_0()
@@ -475,7 +482,7 @@ impl ChatView {
                     .flex_1()
                     .gap_1()
                     .overflow_hidden()
-                    .child(div().flex_none().child("Thinking"))
+                    .child(div().flex_none().child(rust_i18n::t!("chat.thinking")))
                     .child(
                         div()
                             .min_w_0()
@@ -545,7 +552,7 @@ impl ChatView {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(format!("CHANGED FILES ({})", changes.len()))
+                    .child(rust_i18n::t!("chat.changed_files", count = changes.len()))
                     .child("·")
                     .child(
                         div()
@@ -562,7 +569,11 @@ impl ChatView {
                 Button::new(("collapse-all", index))
                     .ghost()
                     .xsmall()
-                    .label(if collapsed { "Expand all" } else { "Collapse all" })
+                    .label(if collapsed {
+                        rust_i18n::t!("chat.expand_all")
+                    } else {
+                        rust_i18n::t!("chat.collapse_all")
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_expanded(&card_key, cx);
                     })),
@@ -571,8 +582,8 @@ impl ChatView {
                 Button::new(("view-diff", index))
                     .outline()
                     .xsmall()
-                    .label("View diff")
-                    .tooltip("Open this turn in the diff panel")
+                    .label(rust_i18n::t!("chat.view_diff"))
+                    .tooltip(rust_i18n::t!("chat.view_diff_tooltip"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app_state
                             .update(cx, |state, cx| state.open_diff_for_turn(index, cx));
@@ -685,7 +696,7 @@ impl ChatView {
                 .text_size(px(16.))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
-                .child("New thread")
+                .child(rust_i18n::t!("chat.new_thread"))
         } else {
             match &title {
                 Some(title) => div()
@@ -702,7 +713,7 @@ impl ChatView {
                     .text_size(px(16.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No active thread"),
+                    .child(rust_i18n::t!("chat.no_active_thread")),
             }
         };
 
@@ -716,36 +727,37 @@ impl ChatView {
             .when(show_actions, |this| {
                 this.children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
                     .child(
-                    h_flex()
-                        .flex_none()
-                        .gap_1()
-                        .child(
-                            Button::new("panel-layout")
-                                .ghost()
-                                .small()
-                                .compact()
-                                .icon(IconName::PanelBottom)
-                                .selected(terminal_open)
-                                .tooltip("Toggle terminal")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.app_state
-                                        .update(cx, |state, cx| state.toggle_terminal_panel(cx));
-                                })),
-                        )
-                        .child(
-                            Button::new("diff-panel")
-                                .ghost()
-                                .small()
-                                .compact()
-                                .icon(IconName::PanelRight)
-                                .selected(diff_open)
-                                .tooltip("Toggle diff panel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.app_state
-                                        .update(cx, |state, cx| state.toggle_diff_panel(cx));
-                                })),
-                        ),
-                )
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .child(
+                                Button::new("panel-layout")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::PanelBottom)
+                                    .selected(terminal_open)
+                                    .tooltip(rust_i18n::t!("chat.toggle_terminal"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.app_state.update(cx, |state, cx| {
+                                            state.toggle_terminal_panel(cx)
+                                        });
+                                    })),
+                            )
+                            .child(
+                                Button::new("diff-panel")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::PanelRight)
+                                    .selected(diff_open)
+                                    .tooltip(rust_i18n::t!("chat.toggle_diff"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.app_state
+                                            .update(cx, |state, cx| state.toggle_diff_panel(cx));
+                                    })),
+                            ),
+                    )
             })
             .into_any_element()
     }
@@ -776,7 +788,7 @@ impl ChatView {
                 let p3 = popover.clone();
                 let muted = cx.theme().muted_foreground;
                 let accent = cx.theme().accent;
-                let menu_item = move |id: &'static str, icon: IconName, label: &'static str| {
+                let menu_item = move |id: &'static str, icon: IconName, label: SharedString| {
                     h_flex()
                         .id(id)
                         .w_full()
@@ -796,30 +808,39 @@ impl ChatView {
                     .p_1()
                     .gap_0p5()
                     .child(
-                        menu_item("open-zed", IconName::ExternalLink, "Open in Zed").on_click(
-                            move |_, window, cx| {
-                                open_in_zed(&zed_cwd, window, cx);
-                                p1.update(cx, |st, cx| st.dismiss(window, cx));
-                            },
-                        ),
+                        menu_item(
+                            "open-zed",
+                            IconName::ExternalLink,
+                            rust_i18n::t!("chat.open_zed").into_owned().into(),
+                        )
+                        .on_click(move |_, window, cx| {
+                            open_in_zed(&zed_cwd, window, cx);
+                            p1.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     )
                     .child(
-                        menu_item("open-finder", IconName::FolderOpen, "Open in Finder").on_click(
-                            move |_, window, cx| {
-                                open_in_finder(&finder_cwd, window, cx);
-                                p2.update(cx, |st, cx| st.dismiss(window, cx));
-                            },
-                        ),
+                        menu_item(
+                            "open-finder",
+                            IconName::FolderOpen,
+                            rust_i18n::t!("chat.open_finder").into_owned().into(),
+                        )
+                        .on_click(move |_, window, cx| {
+                            open_in_finder(&finder_cwd, window, cx);
+                            p2.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     )
                     .child(
-                        menu_item("copy-path", IconName::Copy, "Copy path").on_click(
-                            move |_, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copy_cwd.display().to_string(),
-                                ));
-                                p3.update(cx, |st, cx| st.dismiss(window, cx));
-                            },
-                        ),
+                        menu_item(
+                            "copy-path",
+                            IconName::Copy,
+                            rust_i18n::t!("chat.copy_path").into_owned().into(),
+                        )
+                        .on_click(move |_, window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                copy_cwd.display().to_string(),
+                            ));
+                            p3.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     )
                     .into_any_element()
             });
@@ -847,7 +868,7 @@ impl ChatView {
                             .xsmall()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child("Open")
+                    .child(rust_i18n::t!("chat.open"))
                     .on_click(cx.listener(move |_, _, window, cx| {
                         open_in_zed(&main_cwd, window, cx);
                     })),
@@ -868,13 +889,13 @@ impl ChatView {
                 div()
                     .text_size(px(20.))
                     .font_semibold()
-                    .child("Pick a thread to continue"),
+                    .child(rust_i18n::t!("chat.empty_title")),
             )
             .child(
                 div()
                     .text_size(px(14.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("Select an existing thread or create a new one to get started."),
+                    .child(rust_i18n::t!("chat.empty_description")),
             )
             .into_any_element()
     }
@@ -890,7 +911,7 @@ impl ChatView {
                     .outline()
                     .small()
                     .icon(IconName::ChevronDown)
-                    .label("Scroll to end")
+                    .label(rust_i18n::t!("chat.scroll_end"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.follow = true;
                         this.scroll_handle.scroll_to_bottom();
@@ -899,7 +920,6 @@ impl ChatView {
             )
             .into_any_element()
     }
-
 }
 
 impl Render for ChatView {
@@ -941,7 +961,11 @@ impl Render for ChatView {
         // `CONTENT_MAX_WIDTH`; horizontal padding lives on the centering wrapper
         // (below) so the column shrinks gracefully — never clipping — when the
         // diff panel narrows the chat region.
-        let mut column = v_flex().w_full().max_w(px(CONTENT_MAX_WIDTH)).py_6().gap_8();
+        let mut column = v_flex()
+            .w_full()
+            .max_w(px(CONTENT_MAX_WIDTH))
+            .py_6()
+            .gap_8();
         for (index, turn) in turns.iter().enumerate() {
             let turn_entries: Vec<&TimelineEntry> =
                 entries.iter().filter(|e| e.turn == index).collect();
@@ -1025,7 +1049,7 @@ fn chevron(open: bool) -> IconName {
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     if std::process::Command::new("zed").arg(cwd).spawn().is_err() {
         window.push_notification(
-            Notification::error("Zed CLI not found (install via Zed → Install CLI)"),
+            Notification::error(rust_i18n::t!("errors.zed_cli_missing")),
             cx,
         );
     }
@@ -1034,7 +1058,7 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 /// Reveal `cwd` in Finder via `open <cwd>` (macOS); notify on failure.
 fn open_in_finder(cwd: &Path, window: &mut Window, cx: &mut App) {
     if std::process::Command::new("open").arg(cwd).spawn().is_err() {
-        window.push_notification(Notification::error("Failed to open Finder"), cx);
+        window.push_notification(Notification::error(rust_i18n::t!("errors.finder_open")), cx);
     }
 }
 
@@ -1075,9 +1099,14 @@ fn tool_brief(input: &serde_json::Value) -> String {
 /// Wall-clock duration formatted as "XmYYs" / "YYs".
 fn format_duration(secs: u64) -> String {
     if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
+        rust_i18n::t!(
+            "time.duration_minutes",
+            minutes = secs / 60,
+            seconds = format!("{:02}", secs % 60)
+        )
+        .into_owned()
     } else {
-        format!("{secs}s")
+        rust_i18n::t!("time.duration_seconds", seconds = secs).into_owned()
     }
 }
 
@@ -1225,7 +1254,10 @@ mod tests {
         assert_eq!(relativize("/tmp/proj/src/a.rs", cwd, canon), "src/a.rs");
         assert_eq!(relativize("/tmp/proj/a.rs", cwd, canon), "a.rs");
         // Provider reports the canonical (symlink-resolved) path.
-        assert_eq!(relativize("/private/tmp/proj/src/a.rs", cwd, canon), "src/a.rs");
+        assert_eq!(
+            relativize("/private/tmp/proj/src/a.rs", cwd, canon),
+            "src/a.rs"
+        );
         // Outside the cwd stays absolute.
         assert_eq!(relativize("/other/x.rs", cwd, canon), "/other/x.rs");
         // Already-relative paths are left as-is.
