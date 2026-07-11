@@ -1,0 +1,146 @@
+# tcode design spec
+
+The visual contract for tcode's UI. When code and this doc disagree, fix one of
+them — deliberately.
+
+## Design tokens
+
+Fonts:
+- UI: **DM Sans** (bundled, OFL) → fallback -apple-system, system-ui
+- Mono: SF Mono → SFMono-Regular, JetBrains Mono, Menlo (system; not bundled)
+
+Radius base: 10px. Buttons/chips ~8px, cards ~10-12px, composer 16px, circular
+send button fully round.
+
+Light theme:
+| token | value |
+|---|---|
+| background | #ffffff |
+| foreground | #262626 |
+| primary | #1447e6 |
+| primary-fg | #ffffff |
+| muted bg | rgba(0,0,0,0.04) |
+| muted-fg | #686868 |
+| accent (hover) | rgba(0,0,0,0.04) |
+| border | rgba(0,0,0,0.08) |
+| destructive | #ef4444 / fg #b91c1c |
+| success | #10b981 / fg #047857 |
+
+Dark theme:
+| token | value |
+|---|---|
+| background | #161616 |
+| foreground | #f5f5f5 |
+| primary | #155dfc |
+| muted bg | rgba(255,255,255,0.04) |
+| muted-fg | #818181 |
+| accent (hover) | rgba(255,255,255,0.04) |
+| border | rgba(255,255,255,0.06) |
+| destructive | #fb414a / fg #f87171 |
+| success | #10b981 / fg #34d399 |
+
+Diff colors: added rows get a low-alpha success tint with a solid success left
+accent bar; removed rows the destructive equivalent; +N / -M counts render in
+success-fg / destructive-fg.
+
+Canonical values live in `themes/tcode.json` (embedded at build time).
+
+## Layout metrics (at 1440×900)
+
+- Sidebar 255px, resizable; 1px right border; collapses to a 48px icon strip.
+- Window top is seamless: no app titlebar — the sidebar's first row (traffic
+  lights inset 74px, collapse button, wordmark + channel pill) and the chat
+  header (52px) form the top strip; both are window-drag areas.
+- Chat content column: max-width 768px, centered, ≥24px horizontal padding
+  (must reflow, never clip, when the diff panel narrows the chat region).
+- Composer: floating card, radius 16, 1px border, subtle shadow; bottom control
+  row ≈44px.
+- Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
+
+## Surface anatomy
+
+### Sidebar
+1. App row: collapse icon button, "tcode" bold 14px, channel pill ("DEV").
+2. Search row: magnifier + "Search" muted + ⌘K kbd chip → opens the palette.
+3. "PROJECTS" header: 11px uppercase muted + sort (no-op) + add-project button
+   (native directory picker).
+4. Project groups: rotating chevron + folder icon + 13px medium name; hover
+   shows "+" (new thread in project); collapse state persisted.
+   Thread rows: title truncated + relative time (muted 11px); hover = accent bg
+   and time swaps to archive icon; active = persistent accent bg; a running
+   session shows "● Working" (green, 11px) left of the title; >6 threads →
+   "Show more" row.
+5. Footer: gear + "Settings" → settings route.
+
+### Chat header
+52px; thread title 16px medium left ("No active thread" muted when empty);
+right: two icon buttons (layout placeholder · diff-panel toggle).
+
+### Timeline
+- Turn = "Work Log" section: 11px uppercase muted label; activity rows (muted ✓
+  + one-line summary; command/file/tool/reasoning); >3 rows → last 2 +
+  "+N previous log entrys" expander; footer "Worked for XmYYs ›" (collapsed by
+  default when finished, expanded live with "••• Working for Ns" ticking).
+- Assistant markdown 15px, relaxed line-height, inline code chips (mono 13,
+  muted bg, 4px radius). Streaming appends via push_str with
+  follow-when-near-bottom.
+- User messages: right-aligned bubble, muted bg, radius 12, max-width ~70%.
+- CHANGED FILES card per turn with file changes: header "CHANGED FILES (N) ·
+  +A -D" + "Collapse all" ghost + "View diff" bordered button; body = directory
+  tree, file rows with right-aligned per-file +a/-d; paths relative to the
+  session cwd.
+- Small muted local-time row after each finished turn.
+- Floating "⌄ Scroll to end" pill when not at bottom.
+
+### Composer
+Floating card; placeholder "Ask anything, @tag files/folders, $use skills, or
+/ for commands". Control row: provider glyph + model name + chevron (model
+picker popover) · divider · context chip ("42k / 200k" from live token usage)
+· lock + "Ask to edit" (static; permission profiles not yet a feature) · box +
+"Build" (static) · spacer · running: blue spinner + circular stop button; idle:
+circular send button (primary bg when input non-empty). Below the card: folder
+icon + "Local checkout" left, branch icon + current git branch right (hidden
+outside a git repo).
+
+Model picker popover (~360px, radius 12): left rail = favorites star + provider
+glyphs; search input; rows = model name (✓ current) + provider subtitle, ⌘1…⌘9
+chips, favorite star; footer note when a live session will restart (via resume)
+on model change.
+
+Approval panel (above composer): "PENDING APPROVAL" label, summary + count,
+expandable detail (command text / file list), actions Deny / Always allow /
+Approve (primary).
+
+### Diff panel
+Right resizable split (default 560px, min 320px): tab strip ("Diff" + "+"
+no-op) with expand/close cluster; toolbar "Turn N ⌄" selector + wrap toggle
+(+ no-op split/whitespace/¶ icons); body per file: header row (icon, relative
+path, "new" badge for creates, +N/-M) then unified diff: dual line-number
+gutters (11px mono muted), 12px mono content, syntax highlighting by extension,
+add/remove row tints + left accent bars, "N unmodified lines" muted separator
+rows between hunks.
+
+### Settings (full-page route)
+Left nav (sidebar width): General / Providers + "← Back" pinned bottom. Header:
+"Settings" + "Restore defaults" bordered button (confirm). Rows: bold 14px
+title + 13px muted description left, control right (dropdown / toggle / text
+input), hairline separators. General: Theme (System/Light/Dark, live), Word
+wrap in diffs, Delete confirmation. Providers: claude / codex binary paths.
+
+### Command palette (⌘K)
+Centered top-anchored modal over a dim backdrop: search input; grouped results
+— Actions (new thread per project, open settings, toggle theme, toggle diff
+panel) and Threads (fuzzy over titles); footer key hints (↑↓ Navigate · Enter
+Select · Esc Close).
+
+### Empty state
+Centered "Pick a thread to continue" (20px semibold) over "Select an existing
+thread or create a new one to get started." (14px muted). No composer rendered.
+
+## Verification protocol
+
+For any visual change: `cargo build` (zero warnings) + `cargo test --workspace`
++ a headless smoke (`--smoke "claude|<tmpdir>|..."`), then launch with
+`--open-latest` (optionally `--open-diff` / `--open-settings` /
+`--open-palette`), capture the window (`tools/windowid.c` helper +
+`screencapture -x -l<id>`), and review both themes against this spec.
