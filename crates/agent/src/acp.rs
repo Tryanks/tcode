@@ -41,6 +41,10 @@ const CONFIG_OPTION_PREFIX: &str = "acp:cfg:";
 /// Cap on captured terminal output when the agent sets none (1 MiB).
 const DEFAULT_TERMINAL_OUTPUT_LIMIT: u64 = 1 << 20;
 
+/// How long we wait for an agent to answer `initialize` before declaring it
+/// broken. Generous: an `npm exec` recipe may have to fetch the package first.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// How long we let an agent's `authenticate` run before giving up and telling
 /// the user to sign in with the agent's own CLI (Gemini's is a browser OAuth
 /// flow that otherwise blocks session startup for five minutes).
@@ -344,28 +348,53 @@ async fn handshake(
     state: &Rc<RefCell<State>>,
     events: &Sender<AgentEvent>,
 ) -> Result<Session, AgentError> {
-    let init = connection
-        .initialize(
-            acp::InitializeRequest::new(acp::ProtocolVersion::LATEST)
-                .client_capabilities(
-                    acp::ClientCapabilities::new()
-                        .fs(acp::FileSystemCapabilities::new()
-                            .read_text_file(true)
-                            .write_text_file(true))
-                        .terminal(true),
-                )
-                .client_info(
-                    acp::Implementation::new("tcode", env!("CARGO_PKG_VERSION")).title("tcode"),
-                ),
-        )
-        .await
-        .map_err(|err| {
-            AgentError::Protocol(format!(
+    // On a leash: an agent that starts but never answers `initialize` (cline
+    // 3.0.39 does exactly this) would otherwise hang session startup forever,
+    // with the UI stuck on "Starting…".
+    let init = future::or(
+        async {
+            Some(
+                connection
+                    .initialize(
+                        acp::InitializeRequest::new(acp::ProtocolVersion::LATEST)
+                            .client_capabilities(
+                                acp::ClientCapabilities::new()
+                                    .fs(acp::FileSystemCapabilities::new()
+                                        .read_text_file(true)
+                                        .write_text_file(true))
+                                    .terminal(true),
+                            )
+                            .client_info(
+                                acp::Implementation::new("tcode", env!("CARGO_PKG_VERSION"))
+                                    .title("tcode"),
+                            ),
+                    )
+                    .await,
+            )
+        },
+        async {
+            smol::Timer::after(INITIALIZE_TIMEOUT).await;
+            None
+        },
+    )
+    .await;
+    let init = match init {
+        Some(Ok(init)) => init,
+        Some(Err(err)) => {
+            return Err(AgentError::Protocol(format!(
                 "`{}` failed to initialize: {}",
                 agent.name,
                 describe(&err)
-            ))
-        })?;
+            )));
+        }
+        None => {
+            return Err(AgentError::Protocol(format!(
+                "`{}` did not answer `initialize` within {}s — it may not speak ACP over stdio (check its launch arguments)",
+                agent.name,
+                INITIALIZE_TIMEOUT.as_secs()
+            )));
+        }
+    };
 
     let caps = init.agent_capabilities.clone();
     // Capability gate: our preview MCP server is a loopback streamable-HTTP
