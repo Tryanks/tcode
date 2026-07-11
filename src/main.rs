@@ -24,6 +24,9 @@ fn main() {
     // Hidden debug/dev flag: also open the diff panel on launch (pairs with
     // --open-latest; lets the diff panel be screenshotted headlessly).
     let open_diff = std::env::args().any(|arg| arg == "--open-diff");
+    // Hidden debug/dev flag: open the active session's terminal drawer. This
+    // implies --open-latest so it is useful by itself for screenshot checks.
+    let open_terminal = std::env::args().any(|arg| arg == "--open-terminal");
     // Hidden debug/dev flags: open the settings page / command palette on
     // launch so those surfaces can be screenshotted headlessly.
     let open_settings = std::env::args().any(|arg| arg == "--open-settings");
@@ -105,13 +108,16 @@ fn main() {
 
                 if let Some(spec) = smoke_spec {
                     let _ = cx.update(|cx| smoke::drive(spec, app_state, cx));
-                } else if open_latest || open_settings || open_palette {
+                } else if open_latest || open_terminal || open_settings || open_palette {
                     let _ = app_state.update(cx, |state, cx| {
-                        if open_latest {
+                        if open_latest || open_terminal {
                             state.open_latest_session(cx);
                         }
                         if open_diff {
                             state.open_diff_panel(cx);
+                        }
+                        if open_terminal {
+                            state.open_terminal_panel(cx);
                         }
                         if open_settings {
                             state.open_settings(cx);

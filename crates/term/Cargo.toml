@@ -1,0 +1,7 @@
+[package]
+name = "term"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
