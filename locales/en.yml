@@ -127,6 +127,15 @@ composer:
   output: "Output"
   context_window: "Context window"
   no_usage: "No usage yet this session."
+  context_window_title: "Context Window"
+  compacts_automatically: "%{provider} automatically compacts its context when needed."
+  no_files: "No matching files or folders."
+  no_skills: "No skills found. Try / to browse provider commands."
+  no_command: "No matching command."
+  searching: "Searching…"
+  cmd_model_desc: "Open the model picker"
+  cmd_plan_desc: "Switch this thread into plan mode"
+  cmd_default_desc: "Switch this thread back to normal build mode"
 approval:
   supervised: "Supervised"
   supervised_description: "Ask before commands and file changes."
@@ -223,3 +232,7 @@ errors:
 notice:
   switched_branch: "Switched to %{branch}"
   dirty_tree: "Working tree has uncommitted changes"
+attach:
+  unsupported_type: "Unsupported file type for '%{name}'. Please attach image files only."
+  too_large: "'%{name}' exceeds the 10MB attachment limit."
+  too_many: "You can attach up to 8 images per message."
