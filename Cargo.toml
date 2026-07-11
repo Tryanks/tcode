@@ -40,6 +40,11 @@ gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }
 
+[dev-dependencies]
+# Headless `TextViewState` tests (streaming markdown sync) need gpui's
+# `TestAppContext`. Same git source/rev as the normal dependency above.
+gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+
 [features]
 default = ["runtime-shaders"]
 runtime-shaders = ["gpui_platform/runtime_shaders"]
