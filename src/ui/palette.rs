@@ -82,6 +82,8 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
             .text_color(rgb(CLAUDE_TINT)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
         ProviderKind::Acp => Icon::empty(),
+        // Installed ACP agents render the registry's own icon where we have
+        // it; the rail falls back to this generic mark.
     }
 }
 

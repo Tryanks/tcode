@@ -25,6 +25,7 @@ use agent::ProviderKind;
 
 use crate::app::AppState;
 use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
+use crate::ui::acp_panel::AcpPanel;
 use crate::ui::provider_card::ProviderCard;
 use crate::ui::window_drag_area;
 
@@ -60,6 +61,8 @@ pub struct SettingsPage {
     app_state: Entity<AppState>,
     /// One card per provider, in T3's driver order (Codex, then Claude).
     provider_cards: Vec<(ProviderKind, Entity<ProviderCard>)>,
+    /// The ACP marketplace + installed-agent cards, below the native ones.
+    acp_panel: Entity<AcpPanel>,
     section: Section,
     _subscriptions: Vec<Subscription>,
 }
@@ -74,9 +77,11 @@ impl SettingsPage {
             Some("archived") => Section::Archived,
             _ => Section::General,
         };
+        let acp_panel = cx.new(|cx| AcpPanel::new(app_state.clone(), window, cx));
         let mut page = Self {
             app_state,
             provider_cards: Vec::new(),
+            acp_panel,
             section,
             _subscriptions: subscriptions,
         };
@@ -363,9 +368,10 @@ impl SettingsPage {
             ))
     }
 
-    /// Settings → Providers: one card per provider inside a single bordered
-    /// container, under a section header carrying the last-checked time and a
-    /// refresh action (T3 §1).
+    /// Settings → Providers: one card per native provider inside a single
+    /// bordered container, under a section header carrying the last-checked time
+    /// and a refresh action (T3 §1) — then the ACP agents section (marketplace +
+    /// installed cards).
     fn render_providers(&self, cx: &mut Context<Self>) -> gpui::Div {
         let state = self.app_state.read(cx);
         let checked_at = state.providers_checked_at();
@@ -426,7 +432,10 @@ impl SettingsPage {
             );
         }
 
-        v_flex().child(header).child(list)
+        v_flex()
+            .child(header)
+            .child(list)
+            .child(self.acp_panel.clone())
     }
 
     /// Archived Threads: archived sessions grouped by project, each with
