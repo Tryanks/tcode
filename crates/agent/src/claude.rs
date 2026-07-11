@@ -22,7 +22,8 @@
 //! task owns the child: it reads stdout lines, receives [`SessionCommand`]s, and
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use futures_lite::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 use serde_json::{Value, json};
@@ -31,9 +32,15 @@ use smol::process::{Command, Stdio};
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind, ResumeCursor,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus, ModelSpec,
+    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderKind, ResumeCursor,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    TurnStatus,
 };
+
+/// T3's exact message denied to `ExitPlanMode` once the plan is captured.
+const EXIT_PLAN_DENY_MESSAGE: &str =
+    "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.";
 
 /// Map a canonical [`ApprovalMode`] onto the value Claude's CLI expects for
 /// `--permission-mode` (and the `set_permission_mode` control request).
@@ -58,6 +65,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "claude".to_string());
 
+    // Resolve model-scoped launch options from the persisted selections
+    // (effort/context/fast/thinking are launch-time only; mid-session changes
+    // ride the resume-restart machinery).
+    let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
+
     let mut cmd = Command::new(&binary);
     cmd.arg("--print")
         .arg("--input-format")
@@ -71,12 +83,26 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .arg("--permission-mode")
         .arg(permission_mode_flag(opts.approval_mode));
 
-    if let Some(model) = &opts.model {
+    if let Some(model) = &launch.model_id {
         cmd.arg("--model").arg(model);
+    }
+    if let Some(effort) = &launch.effort {
+        cmd.arg("--effort").arg(effort);
+    }
+    if let Some(settings) = &launch.settings_json {
+        cmd.arg("--settings").arg(settings);
     }
     if let Some(session_id) = resume_session_id(&opts.resume) {
         cmd.arg("--resume").arg(session_id);
     }
+    log::debug!(
+        "claude spawn args: model={:?} effort={:?} settings={:?} ultrathink={} permission-mode={}",
+        launch.model_id,
+        launch.effort,
+        launch.settings_json,
+        launch.ultrathink,
+        permission_mode_flag(opts.approval_mode),
+    );
 
     cmd.current_dir(&opts.cwd)
         .stdin(Stdio::piped())
@@ -144,13 +170,104 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
     .detach();
 
-    smol::spawn(actor_loop(child, stdin, cmd_rx, line_rx, event_tx)).detach();
+    let session_config = SessionConfig {
+        ultrathink: launch.ultrathink,
+        interaction_mode: opts.interaction_mode,
+        base_permission_mode: permission_mode_flag(opts.approval_mode),
+    };
+    smol::spawn(actor_loop(
+        child,
+        stdin,
+        cmd_rx,
+        line_rx,
+        event_tx,
+        session_config,
+    ))
+    .detach();
 
     Ok(SessionHandle {
         provider: ProviderKind::ClaudeCode,
         commands: cmd_tx,
         events: event_rx,
     })
+}
+
+/// Model-scoped launch flags resolved from the session's option selections.
+#[derive(Debug, Default)]
+struct ClaudeLaunchOptions {
+    /// Model id with a `[1m]` suffix appended for the 1M context window.
+    model_id: Option<String>,
+    /// `--effort` value after T3's compatibility transforms (`None` when the
+    /// selection is `ultrathink`, which is a prompt-prefix mode).
+    effort: Option<String>,
+    /// `--settings` JSON string (fastMode / ultracode / alwaysThinkingEnabled).
+    settings_json: Option<String>,
+    /// Whether the effort selection is `ultrathink` (prompt-prefix mode).
+    ultrathink: bool,
+}
+
+impl ClaudeLaunchOptions {
+    fn resolve(model: Option<&str>, selections: &[OptionSelection]) -> Self {
+        let spec = model.and_then(model_spec);
+        let raw_effort = selection_str(selections, "reasoningEffort");
+        let resolved_effort = resolve_claude_effort(spec.as_ref(), raw_effort.as_deref());
+        let ultrathink = resolved_effort.as_deref() == Some("ultrathink");
+        let ultracode = resolved_effort.as_deref() == Some("ultracode");
+        let effort = normalize_claude_cli_effort(resolved_effort.as_deref(), model);
+
+        // Model id: append `[1m]` when the 1M context window is selected.
+        let model_id = model.map(|m| {
+            if selection_str(selections, "contextWindow").as_deref() == Some("1m") {
+                format!("{m}[1m]")
+            } else {
+                m.to_owned()
+            }
+        });
+
+        // `--settings` object: only supported/true keys are emitted.
+        let fast_supported = spec
+            .as_ref()
+            .map(|s| has_boolean_option(s, "fastMode"))
+            .unwrap_or(false);
+        let thinking_supported = spec
+            .as_ref()
+            .map(|s| has_boolean_option(s, "thinking"))
+            .unwrap_or(false);
+        let fast_mode = fast_supported && selection_bool(selections, "fastMode") == Some(true);
+        let thinking = if thinking_supported {
+            selection_bool(selections, "thinking")
+        } else {
+            None
+        };
+
+        let mut settings = serde_json::Map::new();
+        if let Some(thinking) = thinking {
+            settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
+        }
+        if fast_mode {
+            settings.insert("fastMode".into(), json!(true));
+        }
+        if ultracode {
+            settings.insert("ultracode".into(), json!(true));
+        }
+        let settings_json = (!settings.is_empty())
+            .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default());
+
+        ClaudeLaunchOptions {
+            model_id,
+            effort,
+            settings_json,
+            ultrathink,
+        }
+    }
+}
+
+/// Per-session config threaded into the actor loop / mapper.
+#[derive(Debug, Clone)]
+struct SessionConfig {
+    ultrathink: bool,
+    interaction_mode: InteractionMode,
+    base_permission_mode: &'static str,
 }
 
 fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<String> {
@@ -167,8 +284,10 @@ async fn actor_loop(
     cmd_rx: async_channel::Receiver<SessionCommand>,
     line_rx: async_channel::Receiver<String>,
     event_tx: async_channel::Sender<AgentEvent>,
+    config: SessionConfig,
 ) {
     let mut mapper = Mapper::new();
+    mapper.configure(config);
 
     let closed_reason: Option<String> = loop {
         // Race a UI command against the next stdout line. `or` biases toward the
@@ -207,6 +326,11 @@ async fn actor_loop(
                         let _ = child.kill();
                         return;
                     }
+                }
+                // Drain any control responses the mapper needs to write back
+                // (e.g. the auto-deny answering an `ExitPlanMode` prompt).
+                for write in mapper.take_outgoing() {
+                    let _ = write_line(&mut stdin, &write).await;
                 }
             }
             Sel::Line(None) => {
@@ -251,13 +375,35 @@ async fn handle_command(
     child: &mut smol::process::Child,
 ) -> Flow {
     match command {
-        SessionCommand::SendTurn { text } => {
+        SessionCommand::SendTurn { text, options } => {
+            // Apply the interaction mode (per-turn override, else session mode)
+            // via a `set_permission_mode` control request when it has changed.
+            let mode = options
+                .as_ref()
+                .and_then(|o| o.interaction_mode)
+                .unwrap_or(mapper.interaction_mode);
+            let desired = match mode {
+                InteractionMode::Plan => "plan",
+                InteractionMode::Build => mapper.base_permission_mode,
+            };
+            if desired != mapper.applied_permission_mode {
+                let req = mapper.set_permission_mode_request_str(desired);
+                let _ = write_line(stdin, &req).await;
+                mapper.applied_permission_mode = desired.to_string();
+            }
+
             let turn_id = mapper.start_turn();
             let _ = event_tx
                 .send(AgentEvent::TurnStarted {
                     turn_id: turn_id.clone(),
                 })
                 .await;
+            // `ultrathink` is a prompt-prefix mode, not a `--effort` value.
+            let text = if mapper.ultrathink {
+                format!("Ultrathink:\n{text}")
+            } else {
+                text
+            };
             let msg = user_message(&text);
             if write_line(stdin, &msg).await.is_err() {
                 let _ = event_tx
@@ -267,6 +413,12 @@ async fn handle_command(
                     })
                     .await;
             }
+            Flow::Continue
+        }
+        SessionCommand::SetInteractionMode(mode) => {
+            // Stored now; the `set_permission_mode` switch is issued before the
+            // next `SendTurn` (matching T3's per-message application).
+            mapper.interaction_mode = mode;
             Flow::Continue
         }
         SessionCommand::Interrupt => {
@@ -296,6 +448,8 @@ async fn handle_command(
             // `set_permission_mode` control_request (same shape the Agent SDK
             // sends). On success we emit nothing — the UI updated optimistically;
             // only a stdin write failure warrants a Warning.
+            let flag = permission_mode_flag(mode);
+            mapper.base_permission_mode = flag;
             let msg = mapper.set_permission_mode_request(mode);
             if write_line(stdin, &msg).await.is_err() {
                 let _ = event_tx
@@ -303,6 +457,8 @@ async fn handle_command(
                         "claude: failed to switch permission mode to {mode:?}"
                     )))
                     .await;
+            } else {
+                mapper.applied_permission_mode = flag.to_string();
             }
             Flow::Continue
         }
@@ -370,6 +526,18 @@ pub(crate) struct Mapper {
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
     interrupt_pending: bool,
+    /// Whether the effort selection is `ultrathink` (→ prompt prefix).
+    ultrathink: bool,
+    /// Session Build/Plan mode (updated by `SetInteractionMode`).
+    interaction_mode: InteractionMode,
+    /// Permission mode to restore on Build (from the session's ApprovalMode).
+    base_permission_mode: &'static str,
+    /// Permission mode currently applied on the CLI, so we only switch on change.
+    applied_permission_mode: String,
+    /// Dedupe keys for captured `ExitPlanMode` plans (tool id, else plan text).
+    exit_plan_captures: HashSet<String>,
+    /// Control responses to write back (e.g. the auto-deny for `ExitPlanMode`).
+    outgoing: Vec<Value>,
 }
 
 impl Mapper {
@@ -383,7 +551,25 @@ impl Mapper {
             tool_items: HashMap::new(),
             pending_approvals: HashMap::new(),
             interrupt_pending: false,
+            ultrathink: false,
+            interaction_mode: InteractionMode::Build,
+            base_permission_mode: "default",
+            applied_permission_mode: "default".to_string(),
+            exit_plan_captures: HashSet::new(),
+            outgoing: Vec::new(),
         }
+    }
+
+    fn configure(&mut self, config: SessionConfig) {
+        self.ultrathink = config.ultrathink;
+        self.interaction_mode = config.interaction_mode;
+        self.base_permission_mode = config.base_permission_mode;
+        self.applied_permission_mode = config.base_permission_mode.to_string();
+    }
+
+    /// Drain queued control-response writes for the actor to send.
+    fn take_outgoing(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.outgoing)
     }
 
     /// Allocate the next synthesized turn id and mark it in-flight.
@@ -417,12 +603,17 @@ impl Mapper {
     /// `{request_id, type:"control_request", request:e}`, and
     /// `setPermissionMode(m)` sends `{subtype:"set_permission_mode", mode:m}`.
     fn set_permission_mode_request(&mut self, mode: ApprovalMode) -> Value {
+        self.set_permission_mode_request_str(permission_mode_flag(mode))
+    }
+
+    /// `set_permission_mode` with a raw wire mode string (e.g. `"plan"`).
+    fn set_permission_mode_request_str(&mut self, mode: &str) -> Value {
         json!({
             "type": "control_request",
             "request_id": self.next_control_id(),
             "request": {
                 "subtype": "set_permission_mode",
-                "mode": permission_mode_flag(mode),
+                "mode": mode,
             }
         })
     }
@@ -463,6 +654,31 @@ impl Mapper {
                 "response": response,
             }
         }))
+    }
+
+    /// Emit a [`AgentEvent::ProposedPlan`] for a captured plan, deduping across
+    /// the assistant-block and permission-callback capture paths (T3 captures
+    /// from both). Returns `None` if this plan was already captured.
+    fn capture_proposed_plan(
+        &mut self,
+        tool_use_id: Option<&str>,
+        markdown: String,
+    ) -> Option<AgentEvent> {
+        let key = match tool_use_id.filter(|id| !id.is_empty()) {
+            Some(id) => format!("tool:{id}"),
+            None => format!("plan:{markdown}"),
+        };
+        if !self.exit_plan_captures.insert(key) {
+            return None;
+        }
+        let item_id = tool_use_id
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("plan-{}", self.exit_plan_captures.len()));
+        Some(AgentEvent::ProposedPlan {
+            item_id,
+            markdown,
+        })
     }
 
     /// Map one CLI stdout message to zero or more outcomes.
@@ -633,6 +849,29 @@ impl Mapper {
             .to_string();
         let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
 
+        // TodoWrite drives the structured plan/task sidebar, not the timeline.
+        if is_todo_tool(&name) {
+            if let Some(steps) = extract_plan_steps_from_todo(&input) {
+                return vec![AgentEvent::PlanUpdated {
+                    turn_id: self.current_turn_id.clone(),
+                    explanation: None,
+                    steps,
+                }];
+            }
+            return Vec::new();
+        }
+
+        // ExitPlanMode: capture the proposed plan from the assistant block
+        // (deduped against the permission-callback capture).
+        if name == "ExitPlanMode" {
+            if let Some(markdown) = extract_exit_plan_markdown(&input) {
+                if let Some(event) = self.capture_proposed_plan(Some(&tool_use_id), markdown) {
+                    return vec![event];
+                }
+            }
+            return Vec::new();
+        }
+
         let (item, content) = if name == "Bash" {
             let command = input
                 .get("command")
@@ -764,6 +1003,34 @@ impl Mapper {
             .get("description")
             .and_then(Value::as_str)
             .map(str::to_string);
+
+        // ExitPlanMode: capture the plan (deduped against the assistant-block
+        // capture via the shared `tool_use_id`), then auto-deny with T3's exact
+        // message rather than surfacing an approval to the user.
+        if tool_name == "ExitPlanMode" {
+            let tool_use_id = request
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .unwrap_or(&request_id);
+            let mut events = Vec::new();
+            if let Some(markdown) = extract_exit_plan_markdown(&input) {
+                if let Some(event) = self.capture_proposed_plan(Some(tool_use_id), markdown) {
+                    events.push(event);
+                }
+            }
+            self.outgoing.push(json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "deny",
+                        "message": EXIT_PLAN_DENY_MESSAGE,
+                    }
+                }
+            }));
+            return events;
+        }
 
         let kind = if tool_name == "Bash" {
             ApprovalKind::ExecCommand {
@@ -964,6 +1231,329 @@ fn map_usage(usage: &Value, model_usage: Option<&Value>) -> TokenUsage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plan / todo extraction
+// ---------------------------------------------------------------------------
+
+fn is_todo_tool(name: &str) -> bool {
+    name.to_lowercase().contains("todowrite")
+}
+
+/// Map `TodoWrite` input `{ todos: [{ content, status, activeForm? }] }` to
+/// plan steps (content → step, fallback `"Task"`; completed/in_progress →
+/// Completed/InProgress, else Pending). `activeForm` is ignored.
+fn extract_plan_steps_from_todo(input: &Value) -> Option<Vec<PlanStep>> {
+    let todos = input.get("todos").and_then(Value::as_array)?;
+    if todos.is_empty() {
+        return None;
+    }
+    let steps = todos
+        .iter()
+        .filter(|todo| todo.is_object())
+        .map(|todo| {
+            let step = todo
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Task")
+                .to_owned();
+            let status = match todo.get("status").and_then(Value::as_str) {
+                Some("completed") => PlanStepStatus::Completed,
+                Some("in_progress") => PlanStepStatus::InProgress,
+                _ => PlanStepStatus::Pending,
+            };
+            PlanStep { step, status }
+        })
+        .collect();
+    Some(steps)
+}
+
+/// Extract the plan markdown from an `ExitPlanMode` tool input (`{ plan }`),
+/// trimmed and non-empty.
+fn extract_exit_plan_markdown(input: &Value) -> Option<String> {
+    input
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+// ---------------------------------------------------------------------------
+// Model catalog + effort mapping
+// ---------------------------------------------------------------------------
+
+fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
+    selections
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.value.as_str().map(str::to_owned))
+}
+
+fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
+    selections
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.value.as_bool())
+}
+
+fn has_boolean_option(spec: &ModelSpec, id: &str) -> bool {
+    spec.options.iter().any(|o| matches!(o, OptionDescriptor::Boolean { id: oid, .. } if oid == id))
+}
+
+/// Resolve the effort selection against the model's `reasoningEffort`
+/// descriptor: an accepted listed value wins, else the descriptor default
+/// (T3's `resolveClaudeEffort` / `getProviderOptionDescriptors`). `None` when
+/// the model has no reasoning selector (e.g. Haiku).
+fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<String> {
+    let spec = spec?;
+    let (options, default_value) = spec.options.iter().find_map(|o| match o {
+        OptionDescriptor::Select {
+            id,
+            options,
+            default_value,
+            ..
+        } if id == "reasoningEffort" => Some((options, default_value)),
+        _ => None,
+    })?;
+    if let Some(raw) = raw {
+        if options.iter().any(|o| o.value == raw) {
+            return Some(raw.to_owned());
+        }
+    }
+    default_value.clone()
+}
+
+/// T3's `normalizeClaudeCliEffort`: `ultrathink` → no flag (prompt prefix);
+/// `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5 / Opus 4.8 / Sonnet 5;
+/// Sonnet 4.6 `max` → `high`; otherwise passthrough.
+fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Option<String> {
+    let effort = effort?;
+    if effort == "ultrathink" {
+        return None;
+    }
+    if effort == "ultracode" {
+        return Some("xhigh".to_owned());
+    }
+    if effort == "xhigh"
+        && model != Some("claude-fable-5")
+        && model != Some("claude-opus-4-8")
+        && model != Some("claude-sonnet-5")
+    {
+        return Some("max".to_owned());
+    }
+    if effort == "max" && model == Some("claude-sonnet-4-6") {
+        return Some("high".to_owned());
+    }
+    Some(effort.to_owned())
+}
+
+fn effort_option(value: &str) -> SelectOption {
+    let label = match value {
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra High",
+        "max" => "Max",
+        "ultracode" => "Ultracode",
+        "ultrathink" => "Ultrathink",
+        other => other,
+    };
+    SelectOption {
+        value: value.to_owned(),
+        label: label.to_owned(),
+        description: None,
+    }
+}
+
+fn reasoning(values: &[&str], default: &str) -> OptionDescriptor {
+    OptionDescriptor::Select {
+        id: "reasoningEffort".to_owned(),
+        label: "Reasoning".to_owned(),
+        options: values.iter().map(|v| effort_option(v)).collect(),
+        default_value: Some(default.to_owned()),
+    }
+}
+
+fn context_window() -> OptionDescriptor {
+    OptionDescriptor::Select {
+        id: "contextWindow".to_owned(),
+        label: "Context Window".to_owned(),
+        options: vec![
+            SelectOption {
+                value: "200k".to_owned(),
+                label: "200k".to_owned(),
+                description: None,
+            },
+            SelectOption {
+                value: "1m".to_owned(),
+                label: "1M".to_owned(),
+                description: None,
+            },
+        ],
+        default_value: Some("200k".to_owned()),
+    }
+}
+
+fn boolean(id: &str, label: &str) -> OptionDescriptor {
+    OptionDescriptor::Boolean {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        default_value: false,
+    }
+}
+
+fn model(id: &str, display_name: &str, options: Vec<OptionDescriptor>) -> ModelSpec {
+    ModelSpec {
+        id: id.to_owned(),
+        display_name: display_name.to_owned(),
+        is_default: false,
+        options,
+    }
+}
+
+/// The full static Claude catalog (unfiltered by version). Mirrors T3's
+/// `BUILT_IN_MODELS` (S1 §2).
+fn built_in_models() -> Vec<ModelSpec> {
+    vec![
+        model(
+            "claude-fable-5",
+            "Claude Fable 5",
+            vec![
+                reasoning(
+                    &["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+                    "high",
+                ),
+                context_window(),
+            ],
+        ),
+        model(
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            vec![
+                reasoning(
+                    &["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"],
+                    "high",
+                ),
+                boolean("fastMode", "Fast Mode"),
+            ],
+        ),
+        model(
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            vec![
+                reasoning(
+                    &["low", "medium", "high", "xhigh", "max", "ultrathink"],
+                    "xhigh",
+                ),
+                boolean("fastMode", "Fast Mode"),
+            ],
+        ),
+        model(
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            vec![
+                reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
+                boolean("fastMode", "Fast Mode"),
+                context_window(),
+            ],
+        ),
+        model(
+            "claude-opus-4-5",
+            "Claude Opus 4.5",
+            vec![
+                reasoning(&["low", "medium", "high", "max"], "high"),
+                boolean("fastMode", "Fast Mode"),
+            ],
+        ),
+        model(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            vec![
+                reasoning(
+                    &["low", "medium", "high", "xhigh", "max", "ultrathink"],
+                    "high",
+                ),
+                context_window(),
+            ],
+        ),
+        model(
+            "claude-sonnet-4-6",
+            "Claude Sonnet 4.6",
+            vec![
+                reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
+                context_window(),
+            ],
+        ),
+        model(
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
+            vec![boolean("thinking", "Thinking")],
+        ),
+    ]
+}
+
+/// Capabilities for one model id (from the unfiltered catalog).
+fn model_spec(id: &str) -> Option<ModelSpec> {
+    let id = id.trim();
+    built_in_models().into_iter().find(|m| m.id == id)
+}
+
+/// Whether a version-gated model is available at the installed Claude version.
+fn model_available(id: &str, version: Option<(u32, u32, u32)>) -> bool {
+    match id {
+        "claude-fable-5" => version_ge(version, (2, 1, 169)),
+        "claude-opus-4-8" => version_ge(version, (2, 1, 154)),
+        "claude-opus-4-7" => version_ge(version, (2, 1, 111)),
+        _ => true,
+    }
+}
+
+fn version_ge(version: Option<(u32, u32, u32)>, min: (u32, u32, u32)) -> bool {
+    version.map(|v| v >= min).unwrap_or(false)
+}
+
+/// Parse a `MAJOR.MINOR.PATCH` triple from `claude --version` output
+/// (e.g. `"2.1.206 (Claude Code)"`).
+fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
+    let token = text.split_whitespace().next()?;
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|p| p.split('-').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Run `claude --version` and parse the semver triple; `None` on any failure.
+async fn claude_version(binary: Option<&Path>) -> Option<(u32, u32, u32)> {
+    let bin = binary
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "claude".to_string());
+    let output = Command::new(&bin)
+        .arg("--version")
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .output()
+        .await
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_semver(&stdout)
+}
+
+/// List Claude's models: the static catalog, gated by the installed CLI version.
+pub async fn list_models(binary_path: Option<PathBuf>) -> Result<Vec<ModelSpec>, AgentError> {
+    let version = claude_version(binary_path.as_deref()).await;
+    Ok(built_in_models()
+        .into_iter()
+        .filter(|m| model_available(&m.id, version))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,6 +1561,216 @@ mod tests {
     fn feed(mapper: &mut Mapper, line: &str) -> Vec<AgentEvent> {
         let msg: Value = serde_json::from_str(line).expect("valid json fixture line");
         mapper.on_message(msg)
+    }
+
+    #[test]
+    fn effort_compat_transforms() {
+        // ultrathink → no flag (prompt-prefix mode)
+        assert_eq!(
+            normalize_claude_cli_effort(Some("ultrathink"), Some("claude-opus-4-8")),
+            None
+        );
+        // ultracode → xhigh
+        assert_eq!(
+            normalize_claude_cli_effort(Some("ultracode"), Some("claude-opus-4-8")).as_deref(),
+            Some("xhigh")
+        );
+        // xhigh → max EXCEPT on fable-5 / opus-4-8 / sonnet-5
+        assert_eq!(
+            normalize_claude_cli_effort(Some("xhigh"), Some("claude-opus-4-7")).as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5")).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            normalize_claude_cli_effort(Some("xhigh"), Some("claude-opus-4-8")).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            normalize_claude_cli_effort(Some("xhigh"), Some("claude-sonnet-5")).as_deref(),
+            Some("xhigh")
+        );
+        // sonnet-4-6 max → high
+        assert_eq!(
+            normalize_claude_cli_effort(Some("max"), Some("claude-sonnet-4-6")).as_deref(),
+            Some("high")
+        );
+        // passthrough
+        assert_eq!(
+            normalize_claude_cli_effort(Some("low"), Some("claude-opus-4-6")).as_deref(),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn resolve_effort_uses_listed_value_or_default() {
+        let fable = model_spec("claude-fable-5");
+        // Listed value wins.
+        assert_eq!(
+            resolve_claude_effort(fable.as_ref(), Some("max")).as_deref(),
+            Some("max")
+        );
+        // Unknown value falls back to the descriptor default (high).
+        assert_eq!(
+            resolve_claude_effort(fable.as_ref(), Some("bogus")).as_deref(),
+            Some("high")
+        );
+        // No selection → default.
+        assert_eq!(
+            resolve_claude_effort(fable.as_ref(), None).as_deref(),
+            Some("high")
+        );
+        // Haiku has no reasoning selector.
+        let haiku = model_spec("claude-haiku-4-5");
+        assert_eq!(resolve_claude_effort(haiku.as_ref(), Some("low")), None);
+    }
+
+    #[test]
+    fn version_gating_filters_new_models() {
+        let ids = |version: Option<(u32, u32, u32)>| -> Vec<String> {
+            built_in_models()
+                .into_iter()
+                .filter(|m| model_available(&m.id, version))
+                .map(|m| m.id)
+                .collect()
+        };
+        // Current version exposes everything.
+        assert!(ids(Some((2, 1, 206))).contains(&"claude-fable-5".to_string()));
+        // Below every gate: fable-5 / opus-4-8 / opus-4-7 hidden, rest visible.
+        let old = ids(Some((2, 1, 100)));
+        assert!(!old.contains(&"claude-fable-5".to_string()));
+        assert!(!old.contains(&"claude-opus-4-8".to_string()));
+        assert!(!old.contains(&"claude-opus-4-7".to_string()));
+        assert!(old.contains(&"claude-opus-4-6".to_string()));
+        assert!(old.contains(&"claude-haiku-4-5".to_string()));
+        // Exact boundary is inclusive.
+        assert!(ids(Some((2, 1, 154))).contains(&"claude-opus-4-8".to_string()));
+        assert!(!ids(Some((2, 1, 153))).contains(&"claude-opus-4-8".to_string()));
+        // Unknown version hides gated models.
+        assert!(!ids(None).contains(&"claude-fable-5".to_string()));
+    }
+
+    #[test]
+    fn parse_semver_from_version_output() {
+        assert_eq!(parse_semver("2.1.206 (Claude Code)"), Some((2, 1, 206)));
+        assert_eq!(parse_semver("2.1.169"), Some((2, 1, 169)));
+        assert_eq!(parse_semver("nonsense"), None);
+    }
+
+    #[test]
+    fn launch_options_resolve_effort_context_and_settings() {
+        // 1M context suffix + ultracode → effort xhigh + settings.ultracode.
+        let launch = ClaudeLaunchOptions::resolve(
+            Some("claude-opus-4-8"),
+            &[
+                OptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: json!("ultracode"),
+                },
+                OptionSelection {
+                    id: "fastMode".into(),
+                    value: json!(true),
+                },
+            ],
+        );
+        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(launch.effort.as_deref(), Some("xhigh"));
+        assert!(!launch.ultrathink);
+        let settings: Value =
+            serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
+        assert_eq!(settings["ultracode"], true);
+        assert_eq!(settings["fastMode"], true);
+
+        // ultrathink → no --effort, prompt-prefix flag set.
+        let launch = ClaudeLaunchOptions::resolve(
+            Some("claude-fable-5"),
+            &[
+                OptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: json!("ultrathink"),
+                },
+                OptionSelection {
+                    id: "contextWindow".into(),
+                    value: json!("1m"),
+                },
+            ],
+        );
+        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5[1m]"));
+        assert_eq!(launch.effort, None);
+        assert!(launch.ultrathink);
+        assert!(launch.settings_json.is_none());
+
+        // Haiku thinking → settings.alwaysThinkingEnabled.
+        let launch = ClaudeLaunchOptions::resolve(
+            Some("claude-haiku-4-5"),
+            &[OptionSelection {
+                id: "thinking".into(),
+                value: json!(true),
+            }],
+        );
+        let settings: Value =
+            serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
+        assert_eq!(settings["alwaysThinkingEnabled"], true);
+    }
+
+    #[test]
+    fn todo_write_maps_to_plan_updated() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg_t","content":[{"type":"tool_use","id":"toolu_todo","name":"TodoWrite","input":{"todos":[{"content":"Build board","status":"completed","activeForm":"Building board"},{"content":"","status":"in_progress"},{"content":"Ship","status":"todo"}]}}]}}"#,
+        );
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::PlanUpdated { turn_id, steps, .. } => {
+                assert_eq!(turn_id.as_deref(), Some("turn-1"));
+                assert_eq!(steps.len(), 3);
+                assert_eq!(steps[0].step, "Build board");
+                assert_eq!(steps[0].status, PlanStepStatus::Completed);
+                assert_eq!(steps[1].step, "Task"); // empty content fallback
+                assert_eq!(steps[1].status, PlanStepStatus::InProgress);
+                assert_eq!(steps[2].status, PlanStepStatus::Pending);
+            }
+            other => panic!("expected PlanUpdated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exit_plan_mode_captures_and_denies() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        // Permission-callback path: capture ProposedPlan + queue auto-deny.
+        let evs = feed(
+            &mut m,
+            r##"{"type":"control_request","request_id":"req-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plan\n- step one"}}}"##,
+        );
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::ProposedPlan { item_id, markdown } => {
+                assert_eq!(item_id, "req-plan");
+                assert_eq!(markdown, "# Plan\n- step one");
+            }
+            other => panic!("expected ProposedPlan, got {other:?}"),
+        }
+        let outgoing = m.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["response"]["subtype"], "success");
+        assert_eq!(outgoing[0]["response"]["request_id"], "req-plan");
+        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            outgoing[0]["response"]["response"]["message"],
+            EXIT_PLAN_DENY_MESSAGE
+        );
+
+        // Assistant-block path with the SAME tool id is deduped (no second event).
+        let evs = feed(
+            &mut m,
+            r##"{"type":"assistant","message":{"id":"msg_p","content":[{"type":"tool_use","id":"req-plan","name":"ExitPlanMode","input":{"plan":"# Plan\n- step one"}}]}}"##,
+        );
+        assert!(evs.is_empty(), "duplicate capture should be suppressed");
     }
 
     #[test]

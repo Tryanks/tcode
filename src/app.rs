@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, ItemContent, ProviderKind, SessionCommand,
-    SessionOptions, ThreadItem, TurnStatus, start_session,
+    AgentEvent, ApprovalDecision, ApprovalMode, InteractionMode, ItemContent, ProviderKind,
+    SessionCommand, SessionOptions, ThreadItem, TurnStatus, start_session,
 };
 use gpui::{Context, EventEmitter, Task};
 
@@ -171,7 +171,10 @@ impl ActiveSession {
             return Ok(false);
         };
         commands
-            .try_send(SessionCommand::SendTurn { text })
+            .try_send(SessionCommand::SendTurn {
+                text,
+                options: None,
+            })
             .map_err(|_| ())?;
         self.pending_sends.remove(0);
         self.turn_in_flight = true;
@@ -543,6 +546,12 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let mut meta = SessionMeta::new(provider, cwd, model);
+        // Smoke mode forces Supervised so the approval path stays exercised even
+        // though the app-wide default is now FullAccess (T3 parity). Must be set
+        // before `ensure_started` spawns the provider with these launch flags.
+        if self.smoke.is_some() {
+            meta.approval_mode = ApprovalMode::Supervised;
+        }
         // Associate with the given project, or derive one from the cwd.
         meta.project_id = match project_id {
             Some(id) if self.projects.iter().any(|p| p.id == id) => Some(id),
@@ -899,8 +908,9 @@ impl AppState {
             .is_some_and(ActiveSession::model_changed_while_live)
     }
 
-    /// The active session's selected approval mode (Supervised for a draft with
-    /// no active session, matching a fresh `SessionMeta`).
+    /// The active session's selected approval mode (`ApprovalMode::default()` —
+    /// now FullAccess — for a draft with no active session, matching a fresh
+    /// `SessionMeta`).
     pub fn active_approval_mode(&self) -> ApprovalMode {
         self.active
             .as_ref()
@@ -1348,6 +1358,9 @@ fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
         resume: meta.resume_cursor.clone(),
         binary_path,
         approval_mode: meta.approval_mode,
+        // Not yet persisted per-session; UI wiring is the next slice.
+        option_selections: Vec::new(),
+        interaction_mode: InteractionMode::default(),
     }
 }
 
@@ -1546,7 +1559,7 @@ mod tests {
         assert_eq!(active.dispatch_next_pending(), Ok(true));
         assert!(matches!(
             receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { text }) if text == "first"
+            Ok(SessionCommand::SendTurn { text, .. }) if text == "first"
         ));
         assert_eq!(active.dispatch_next_pending(), Ok(false));
         assert!(receiver.try_recv().is_err());
@@ -1556,7 +1569,7 @@ mod tests {
         assert_eq!(active.dispatch_next_pending(), Ok(true));
         assert!(matches!(
             receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { text }) if text == "second"
+            Ok(SessionCommand::SendTurn { text, .. }) if text == "second"
         ));
         assert!(active.pending_sends.is_empty());
     }

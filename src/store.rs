@@ -74,7 +74,8 @@ pub struct SessionMeta {
     #[serde(default)]
     pub model: Option<String>,
     /// The user-facing permission model for this session. Older index files
-    /// predate the field; a missing value defaults to `Supervised`.
+    /// predate the field; a missing value defaults to `ApprovalMode::default()`
+    /// (now `FullAccess`, matching T3).
     #[serde(default)]
     pub approval_mode: ApprovalMode,
     #[serde(default)]
@@ -587,24 +588,25 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_approval_mode_defaults_to_supervised_when_absent() {
+    fn session_meta_approval_mode_defaults_to_full_access_when_absent() {
         // An index entry written before the permission-mode milestone has no
-        // `approval_mode` key; it must load as `Supervised` (serde default).
+        // `approval_mode` key; it loads as the serde default, now `FullAccess`
+        // (T3 parity — the app-wide default changed from Supervised).
         let legacy = serde_json::json!({
             "id": "s1", "title": "One", "provider": "codex",
             "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
+        assert_eq!(meta.approval_mode, ApprovalMode::FullAccess);
 
         // A newer entry with an explicit mode round-trips.
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-        assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
-        meta.approval_mode = ApprovalMode::FullAccess;
+        assert_eq!(meta.approval_mode, ApprovalMode::FullAccess);
+        meta.approval_mode = ApprovalMode::Supervised;
         let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains("\"approval_mode\":\"full_access\""));
+        assert!(json.contains("\"approval_mode\":\"supervised\""));
         let back: SessionMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.approval_mode, ApprovalMode::FullAccess);
+        assert_eq!(back.approval_mode, ApprovalMode::Supervised);
     }
 
     #[test]

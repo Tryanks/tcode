@@ -30,6 +30,8 @@ fn main() {
             resume: None,
             binary_path: None,
             approval_mode: Default::default(),
+            option_selections: Vec::new(),
+            interaction_mode: Default::default(),
         };
         let handle = start_session(provider, opts).await.expect("start session");
         handle
@@ -38,6 +40,7 @@ fn main() {
                 text: "Count from 1 to 500 slowly, one number per line, \
                        thinking carefully about each number."
                     .into(),
+                options: None,
             })
             .await
             .unwrap();

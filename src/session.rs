@@ -213,6 +213,11 @@ impl Timeline {
                     self.turns[turn].running = false;
                 }
             }
+            // Plan / proposed-plan surfaces are consumed by the composer-fidelity
+            // UI slice (next); the timeline model does not render them yet.
+            AgentEvent::PlanUpdated { .. }
+            | AgentEvent::ProposedPlanDelta { .. }
+            | AgentEvent::ProposedPlan { .. } => {}
         }
     }
 
