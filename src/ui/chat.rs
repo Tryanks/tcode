@@ -23,6 +23,7 @@ use crate::app::{AppEvent, AppState};
 use crate::session::{EntryContent, TimelineEntry, TurnMeta};
 use crate::store::now_millis;
 use crate::ui::composer::{Composer, ComposerEvent};
+use crate::ui::terminal_drawer::TerminalDrawer;
 use crate::ui::window_drag_area;
 
 /// Content-column max width (T3 centers the timeline at ~760px).
@@ -42,6 +43,7 @@ struct MdState {
 pub struct ChatView {
     app_state: Entity<AppState>,
     composer: Entity<Composer>,
+    terminal_drawer: Entity<TerminalDrawer>,
     scroll_handle: ScrollHandle,
     md_states: HashMap<String, MdState>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
@@ -79,10 +81,12 @@ impl ChatView {
                 window.push_notification(Notification::error(message.clone()), cx);
             }),
         ];
+        let terminal_drawer = cx.new(|cx| TerminalDrawer::new(app_state.clone(), cx));
 
         Self {
             app_state,
             composer,
+            terminal_drawer,
             scroll_handle: ScrollHandle::new(),
             md_states: HashMap::new(),
             expanded: HashSet::new(),
@@ -683,6 +687,7 @@ impl ChatView {
         };
 
         let diff_open = self.app_state.read(cx).diff_panel_open();
+        let terminal_open = self.app_state.read(cx).terminal_panel_open();
         window_drag_area("chat-header-drag", base, window, cx)
             .child(title_el)
             .when(title.is_some(), |this| {
@@ -696,7 +701,12 @@ impl ChatView {
                                 .small()
                                 .compact()
                                 .icon(IconName::PanelBottom)
-                                .tooltip("Toggle panel (soon)"),
+                                .selected(terminal_open)
+                                .tooltip("Toggle terminal")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.app_state
+                                        .update(cx, |state, cx| state.toggle_terminal_panel(cx));
+                                })),
                         )
                         .child(
                             Button::new("diff-panel")
@@ -784,6 +794,14 @@ impl Render for ChatView {
         };
 
         let header = self.render_header(Some(title), window, cx);
+        let terminal_open = self.app_state.read(cx).terminal_panel_open();
+        let terminal_height = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|a| a.terminal_height)
+            .unwrap_or(240.);
 
         // Group entries by turn and render each turn section into the centered
         // content column. The column fills the available width up to
@@ -800,7 +818,9 @@ impl Render for ChatView {
             column = column.child(self.render_turn(index, turn, &cwd, &turn_entries, cx));
         }
 
-        root.child(header)
+        let main = v_flex()
+            .size_full()
+            .min_h_0()
             .child(
                 div()
                     .id("timeline")
@@ -825,7 +845,34 @@ impl Render for ChatView {
             .when(self.has_content_below(), |this| {
                 this.child(self.render_scroll_pill(cx))
             })
-            .child(self.composer.clone())
+            .child(self.composer.clone());
+
+        let body: AnyElement = if terminal_open {
+            let drawer = self.terminal_drawer.clone();
+            let drawer_resize = self.terminal_drawer.clone();
+            let width = f32::from(window.bounds().size.width);
+            drawer.update(cx, |drawer, cx| drawer.resize(width, terminal_height, cx));
+            gpui_component::resizable::v_resizable("chat-terminal-panels")
+                .on_resize(move |state, _, cx| {
+                    let height = state.read(cx).sizes().get(1).copied();
+                    if let Some(height) = height {
+                        drawer_resize
+                            .update(cx, |drawer, cx| drawer.resize(width, f32::from(height), cx));
+                    }
+                })
+                .child(gpui_component::resizable::resizable_panel().child(main))
+                .child(
+                    gpui_component::resizable::resizable_panel()
+                        .flex_none()
+                        .size(px(terminal_height))
+                        .size_range(px(120.)..px(600.))
+                        .child(self.terminal_drawer.clone()),
+                )
+                .into_any_element()
+        } else {
+            main.into_any_element()
+        };
+        root.child(header).child(body)
     }
 }
 

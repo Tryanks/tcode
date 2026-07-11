@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent"]
+members = ["crates/agent", "crates/term"]
 
 [package]
 name = "tcode"
@@ -8,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 agent = { path = "crates/agent" }
+term = { path = "crates/term" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
