@@ -2,6 +2,9 @@
 //! permission/mode chips + send/stop), the below-card checkout/branch row, and
 //! the pending-approval panel (see docs/DESIGN.md "Composer").
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use agent::{
     ApprovalDecision, ApprovalKind, ApprovalRequest, FileChangeKind, ProviderKind, TokenUsage,
 };
@@ -11,7 +14,8 @@ use gpui::{
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, StyledExt as _,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -23,10 +27,14 @@ use gpui_component::{
 
 use crate::app::AppState;
 
-/// Claude's warm brand tint for the ✻ glyph.
+/// Claude's warm brand tint for the starburst glyph.
 const CLAUDE_TINT: u32 = 0xD97757;
 /// T3's circular stop button red-orange.
 const STOP_TINT: u32 = 0xF4562E;
+/// Below this measured control-row width the row collapses its context /
+/// permission / mode chips into a "⋯" overflow popover so nothing spills past
+/// the card edge (diff panel open, or a small window).
+const CONTROL_ROW_COMPACT_BELOW: f32 = 520.;
 
 /// One selectable model in the picker.
 #[derive(Clone)]
@@ -61,10 +69,12 @@ fn provider_short(provider: ProviderKind) -> &'static str {
     }
 }
 
-/// The provider glyph (Claude ✻ / Codex OpenAI mark).
+/// The provider glyph (Claude starburst / Codex OpenAI mark).
 fn provider_glyph(provider: ProviderKind) -> Icon {
     match provider {
-        ProviderKind::ClaudeCode => Icon::new(IconName::Asterisk).text_color(rgb(CLAUDE_TINT)),
+        ProviderKind::ClaudeCode => {
+            Icon::empty().path("icons/claude.svg").text_color(rgb(CLAUDE_TINT))
+        }
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
     }
 }
@@ -89,6 +99,17 @@ pub struct Composer {
     picker_rail: Option<PickerRail>,
     /// Whether the approval panel's detail is expanded.
     approval_expanded: bool,
+    /// Measured width of the control row (written from the prepaint callback,
+    /// read at render time); drives the collapse to the "⋯" overflow layout at
+    /// narrow widths. Shared via `Rc<Cell>` because the paint-phase callback
+    /// cannot mutate the entity directly.
+    control_width: Rc<Cell<Option<f32>>>,
+    /// The width `render` last observed, to detect when a fresh measurement
+    /// arrived and drive the reflow convergence (see `render`).
+    prev_seen_width: Option<f32>,
+    /// Whether the current render was scheduled by our own animation-frame
+    /// request (vs. an external trigger). Used to stop the convergence loop.
+    raf_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -132,6 +153,9 @@ impl Composer {
             model_search,
             picker_rail: None,
             approval_expanded: false,
+            control_width: Rc::new(Cell::new(None)),
+            prev_seen_width: None,
+            raf_pending: false,
             _subscriptions: subscriptions,
         }
     }
@@ -279,6 +303,34 @@ impl Composer {
                     .child(icon.small().text_color(muted))
                     .child(label),
             )
+            .into_any_element()
+    }
+
+    /// The "⋯" overflow button + popover holding the context / permission /
+    /// mode controls when the control row is too narrow to show them inline.
+    fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let usage = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|a| a.timeline.usage);
+        let muted = cx.theme().muted_foreground;
+
+        let trigger = Button::new("overflow-controls")
+            .ghost()
+            .compact()
+            .tooltip("More controls")
+            .child(
+                Icon::new(IconName::Ellipsis)
+                    .small()
+                    .text_color(muted),
+            );
+
+        Popover::new("overflow-popover")
+            .anchor(Anchor::BottomLeft)
+            .trigger(trigger)
+            .content(move |_, _, cx| render_overflow_pane(usage, cx))
             .into_any_element()
     }
 
@@ -515,7 +567,7 @@ impl Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (turn_running, approval, approval_count) = {
             let state = self.app_state.read(cx);
             match &state.active {
@@ -531,32 +583,82 @@ impl Render for Composer {
         let border = cx.theme().border;
         let divider = move || div().w_px().h(px(16.)).bg(border);
 
-        let control_row = h_flex()
+        // Collapse to the compact "⋯" layout once the row is measured narrower
+        // than the threshold. Until the first prepaint measurement lands we
+        // assume the full layout (the common wide case).
+        let measured = self.control_width.get();
+        let compact = measured.is_some_and(|w| w < CONTROL_ROW_COMPACT_BELOW);
+
+        // The control row's width is only known after layout (the paint-phase
+        // callback below), one frame behind this render, and that callback
+        // cannot itself re-render. So we drive a short animation-frame loop:
+        // request another frame after any render that could have changed the
+        // measurement, and stop once two consecutive frames agree. This keeps
+        // the composer in sync when the diff panel toggles or the window/panels
+        // resize, without perpetually rendering when idle.
+        let external_trigger = !self.raf_pending;
+        self.raf_pending = false;
+        let need_frame = external_trigger || measured != self.prev_seen_width;
+        self.prev_seen_width = measured;
+        if need_frame {
+            self.raf_pending = true;
+            window.request_animation_frame();
+        }
+
+        let control_row_base = h_flex()
             .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .px_2()
             .pb_2()
             .pt_1()
             .gap_1()
-            .items_center()
-            .child(self.render_model_picker(cx))
-            .child(divider())
-            .child(self.render_context_chip(cx))
-            .child(self.render_static_chip(
-                "permission-chip",
-                Icon::empty().path("icons/lock.svg"),
-                "Ask to edit",
-                "Permission profiles: coming soon",
-                cx,
-            ))
-            .child(self.render_static_chip(
-                "mode-chip",
-                Icon::empty().path("icons/box.svg"),
-                "Build",
-                "Modes: coming soon",
-                cx,
-            ))
-            .child(div().flex_1())
-            .child(self.render_send_or_stop(turn_running, cx));
+            .items_center();
+
+        let control_row = if compact {
+            control_row_base
+                .child(self.render_model_picker(cx))
+                .child(self.render_overflow_menu(cx))
+                .child(div().flex_1())
+                .child(self.render_send_or_stop(turn_running, cx))
+        } else {
+            control_row_base
+                .child(self.render_model_picker(cx))
+                .child(divider())
+                .child(self.render_context_chip(cx))
+                .child(self.render_static_chip(
+                    "permission-chip",
+                    Icon::empty().path("icons/lock.svg"),
+                    "Ask to edit",
+                    "Permission profiles: coming soon",
+                    cx,
+                ))
+                .child(self.render_static_chip(
+                    "mode-chip",
+                    Icon::empty().path("icons/box.svg"),
+                    "Build",
+                    "Modes: coming soon",
+                    cx,
+                ))
+                .child(div().flex_1())
+                .child(self.render_send_or_stop(turn_running, cx))
+        };
+
+        // Measure the control row's laid-out width so the next frame can decide
+        // whether to collapse. The paint-phase callback can't mutate the entity
+        // or re-run its render, so the width lives in a shared Cell; on a real
+        // change we schedule an entity notify on the next frame (outside paint)
+        // to re-render with the new layout.
+        let width_cell = self.control_width.clone();
+        let control_row = control_row.on_prepaint(move |bounds, _window, _cx| {
+            let width: f32 = bounds.size.width.into();
+            let changed = width_cell
+                .get()
+                .is_none_or(|prev| (prev - width).abs() > 0.5);
+            if changed {
+                width_cell.set(Some(width));
+            }
+        });
 
         let card = v_flex()
             .w_full()
@@ -832,6 +934,36 @@ fn render_model_row(
                     popover_fav.update(cx, |_, cx| cx.notify());
                 }),
         )
+        .into_any_element()
+}
+
+/// The "⋯" overflow popover: the context chip's usage summary plus the static
+/// permission / mode chips, shown when the control row collapses at narrow
+/// widths.
+fn render_overflow_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState>) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let item = |icon: Icon, label: String| -> AnyElement {
+        h_flex()
+            .w_full()
+            .px_2()
+            .py_1p5()
+            .gap_1p5()
+            .items_center()
+            .rounded(px(6.))
+            .text_size(px(13.))
+            .text_color(muted)
+            .child(icon.small().text_color(muted))
+            .child(label)
+            .into_any_element()
+    };
+
+    v_flex()
+        .w(px(220.))
+        .p_1()
+        .gap_0p5()
+        .child(item(Icon::new(IconName::Info), context_label(usage)))
+        .child(item(Icon::empty().path("icons/lock.svg"), "Ask to edit".into()))
+        .child(item(Icon::empty().path("icons/box.svg"), "Build".into()))
         .into_any_element()
 }
 

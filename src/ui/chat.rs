@@ -47,6 +47,10 @@ pub struct ChatView {
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
     session_key: Option<String>,
+    /// Whether the timeline follows streaming output to the bottom. Engaged on
+    /// submit and whenever the user scrolls back near the bottom; disengaged
+    /// when the user scrolls up to read earlier content.
+    follow: bool,
     /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
     _tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -59,6 +63,10 @@ impl ChatView {
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, event, cx| {
                 let ComposerEvent::Submitted = event;
+                // Force the timeline to the bottom and (re)engage follow-mode so
+                // the streaming reply stays visible even if the user had
+                // scrolled up before sending.
+                this.follow = true;
                 this.scroll_handle.scroll_to_bottom();
                 cx.notify();
             }),
@@ -79,6 +87,7 @@ impl ChatView {
             md_states: HashMap::new(),
             expanded: HashSet::new(),
             session_key: None,
+            follow: true,
             _tick: None,
             _subscriptions: subscriptions,
         }
@@ -87,7 +96,6 @@ impl ChatView {
     /// Mirror timeline markdown text into `TextViewState` entities, growing
     /// them with `push_str` when possible so streaming reparses incrementally.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
-        let was_near_bottom = self.is_near_bottom();
         let (session_key, texts, running) = {
             let state = self.app_state.read(cx);
             let session_key = state.active_session_id().map(str::to_string);
@@ -112,6 +120,8 @@ impl ChatView {
             self.md_states.clear();
             self.expanded.clear();
             self.session_key = session_key;
+            // A freshly opened session starts pinned to the latest content.
+            self.follow = true;
         }
 
         for (id, text) in texts {
@@ -152,7 +162,7 @@ impl ChatView {
             self._tick = None;
         }
 
-        if session_changed || (running && was_near_bottom) {
+        if session_changed || (running && self.follow) {
             self.scroll_handle.scroll_to_bottom();
         }
     }
@@ -221,22 +231,24 @@ impl ChatView {
         }
 
         // 4. CHANGED FILES card (aggregated across the turn's file changes).
-        let mut changes: Vec<&FileChange> = Vec::new();
-        let mut applying = false;
-        for entry in entries {
-            if let EntryContent::FileChange {
-                changes: file_changes,
-                status,
-            } = &entry.content
-            {
-                if matches!(status, ItemStatus::InProgress) {
-                    applying = true;
+        // The card only appears once the turn has finished: while a turn runs,
+        // file edits are visible as Work Log activity rows and accumulate
+        // silently. Replay marks turns idle (mark_idle), so finished turns from
+        // stored sessions still render the card.
+        if !turn.running {
+            let mut changes: Vec<&FileChange> = Vec::new();
+            for entry in entries {
+                if let EntryContent::FileChange {
+                    changes: file_changes,
+                    ..
+                } = &entry.content
+                {
+                    changes.extend(file_changes.iter());
                 }
-                changes.extend(file_changes.iter());
             }
-        }
-        if !changes.is_empty() {
-            column = column.child(self.render_changed_files(index, cwd, &changes, applying, cx));
+            if !changes.is_empty() {
+                column = column.child(self.render_changed_files(index, cwd, &changes, cx));
+            }
         }
 
         // 5. Turn timestamp row (finished turns with a known end time).
@@ -497,7 +509,6 @@ impl ChatView {
         index: usize,
         cwd: &Path,
         changes: &[&FileChange],
-        applying: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -524,9 +535,6 @@ impl ChatView {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .when(applying, |this| {
-                        this.child(Icon::new(IconName::LoaderCircle).xsmall())
-                    })
                     .child(format!("CHANGED FILES ({})", changes.len()))
                     .child("·")
                     .child(
@@ -743,6 +751,7 @@ impl ChatView {
                     .icon(IconName::ChevronDown)
                     .label("Scroll to end")
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.follow = true;
                         this.scroll_handle.scroll_to_bottom();
                         cx.notify();
                     })),
@@ -799,7 +808,12 @@ impl Render for ChatView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        // Following disengages when the user scrolls up to read,
+                        // and re-engages once they return near the bottom.
+                        this.follow = this.is_near_bottom();
+                        cx.notify();
+                    }))
                     .child(
                         h_flex()
                             .w_full()
