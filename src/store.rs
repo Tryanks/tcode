@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use agent::{AgentEvent, ProviderKind, ResumeCursor};
+use agent::{AgentEvent, ApprovalMode, ProviderKind, ResumeCursor};
 use serde::{Deserialize, Serialize};
 
 /// One persisted event, optionally tagged with the wall-clock time (unix ms)
@@ -73,6 +73,10 @@ pub struct SessionMeta {
     pub project_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// The user-facing permission model for this session. Older index files
+    /// predate the field; a missing value defaults to `Supervised`.
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
     pub created_at: u64,
@@ -89,6 +93,7 @@ impl SessionMeta {
             cwd,
             project_id: None,
             model,
+            approval_mode: ApprovalMode::default(),
             resume_cursor: None,
             created_at: now,
             updated_at: now,
@@ -576,6 +581,27 @@ mod tests {
         let s3 = file.sessions.iter().find(|s| s.id == "s3").unwrap();
         assert_ne!(s3.project_id, s1.project_id);
         let _ = fs::remove_dir_all(store.root());
+    }
+
+    #[test]
+    fn session_meta_approval_mode_defaults_to_supervised_when_absent() {
+        // An index entry written before the permission-mode milestone has no
+        // `approval_mode` key; it must load as `Supervised` (serde default).
+        let legacy = serde_json::json!({
+            "id": "s1", "title": "One", "provider": "codex",
+            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
+        });
+        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
+
+        // A newer entry with an explicit mode round-trips.
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
+        assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
+        meta.approval_mode = ApprovalMode::FullAccess;
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"approval_mode\":\"full_access\""));
+        let back: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.approval_mode, ApprovalMode::FullAccess);
     }
 
     #[test]

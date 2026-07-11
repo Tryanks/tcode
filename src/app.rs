@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalDecision, ItemContent, ProviderKind, SessionCommand, SessionOptions,
-    ThreadItem, TurnStatus, start_session,
+    AgentEvent, ApprovalDecision, ApprovalMode, ItemContent, ProviderKind, SessionCommand,
+    SessionOptions, ThreadItem, TurnStatus, start_session,
 };
 use gpui::{Context, EventEmitter, Task};
 
@@ -88,6 +88,11 @@ pub struct ActiveSession {
     /// user picks a different model we compare against this to decide whether a
     /// restart is needed before the next turn.
     live_model: Option<String>,
+    /// The approval mode the live provider process is actually running under.
+    /// Claude switches live (this is updated in lockstep, so no restart);
+    /// Codex binds the mode at thread start, so a mid-session change leaves this
+    /// stale and forces a resume-restart before the next turn.
+    live_approval_mode: Option<ApprovalMode>,
     pending_sends: Vec<String>,
     turn_in_flight: bool,
     /// Diff panel UI state (per-session, in-memory only). Open/closed, the
@@ -108,6 +113,15 @@ impl ActiveSession {
     /// selected in `meta.model` (so the next turn must restart the provider).
     fn model_changed_while_live(&self) -> bool {
         matches!(self.runtime, Runtime::Live(_)) && self.meta.model != self.live_model
+    }
+
+    /// Whether the live provider is running a different approval mode than the
+    /// one now selected in `meta.approval_mode`. Only providers that cannot
+    /// switch live (Codex) reach this state: Claude updates `live_approval_mode`
+    /// in lockstep when it applies the switch on the wire.
+    fn approval_mode_changed_while_live(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && Some(self.meta.approval_mode) != self.live_approval_mode
     }
 
     /// Tear down the live provider and return to `Idle` so the next
@@ -495,6 +509,7 @@ impl AppState {
             git_branch,
             runtime: Runtime::Idle,
             live_model: None,
+            live_approval_mode: None,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -537,6 +552,7 @@ impl AppState {
             git_branch,
             runtime: Runtime::Idle,
             live_model: None,
+            live_approval_mode: None,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -580,13 +596,20 @@ impl AppState {
             return;
         };
         active.pending_sends.push(text);
-        // If the user switched models while the provider is live, restart it
-        // first: the queued turn then flushes on the fresh (correct-model)
-        // process, resumed from the stored cursor.
+        // If the user switched models — or a provider that can't switch its
+        // approval mode live (Codex) had its mode changed — while the provider
+        // is live, restart it first: the queued turn then flushes on the fresh
+        // process, resumed from the stored cursor with the current model + mode.
         if active.model_changed_while_live() {
             log::info!(
                 "model changed to {:?} while live; restarting provider before next turn",
                 active.meta.model
+            );
+            active.shutdown_to_idle();
+        } else if active.approval_mode_changed_while_live() {
+            log::info!(
+                "approval mode changed to {:?} while live; restarting provider before next turn",
+                active.meta.approval_mode
             );
             active.shutdown_to_idle();
         }
@@ -655,6 +678,50 @@ impl AppState {
             .is_some_and(ActiveSession::model_changed_while_live)
     }
 
+    /// The active session's selected approval mode (Supervised for a draft with
+    /// no active session, matching a fresh `SessionMeta`).
+    pub fn active_approval_mode(&self) -> ApprovalMode {
+        self.active
+            .as_ref()
+            .map(|a| a.meta.approval_mode)
+            .unwrap_or_default()
+    }
+
+    /// Select `mode` for the active session and persist it. Claude applies the
+    /// switch live over the control protocol; Codex (which binds the mode at
+    /// thread start) instead restarts via the resume cursor on the next turn.
+    pub fn set_active_approval_mode(&mut self, mode: ApprovalMode, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.meta.approval_mode == mode {
+            return;
+        }
+        active.meta.approval_mode = mode;
+        active.meta.updated_at = now_secs();
+
+        if let Runtime::Live(commands) = &active.runtime {
+            let _ = commands.try_send(SessionCommand::SetApprovalMode(mode));
+            // Claude applies the switch live: keep `live_approval_mode` in sync so
+            // no restart is scheduled. Codex can't, so leave it stale — the next
+            // `send_turn` sees the mismatch and restarts from the resume cursor.
+            if active.meta.provider == ProviderKind::ClaudeCode {
+                active.live_approval_mode = Some(mode);
+            }
+        }
+
+        let meta = active.meta.clone();
+        self.persist_meta(&meta, cx);
+    }
+
+    /// Whether changing approval mode will restart the live provider on the next
+    /// turn (Codex) — used by the permission picker to show a "restart" note.
+    pub fn approval_pending_restart(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(ActiveSession::approval_mode_changed_while_live)
+    }
+
     /// Toggle a model id in the persisted favorites list.
     pub fn toggle_favorite_model(&mut self, model: &str, cx: &mut Context<Self>) {
         let mut settings = self.settings.clone();
@@ -685,9 +752,10 @@ impl AppState {
         let generation = self.next_start_generation;
         let active = self.active.as_mut().unwrap();
         active.runtime = Runtime::Starting { generation };
-        // Remember the model this process is being launched with so a later
-        // model switch can detect the mismatch and restart.
+        // Remember the model + approval mode this process is being launched
+        // with so a later switch can detect the mismatch and restart.
         active.live_model = active.meta.model.clone();
+        active.live_approval_mode = Some(active.meta.approval_mode);
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
@@ -974,7 +1042,7 @@ fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
         binary_path,
-        approval_mode: agent::ApprovalMode::default(),
+        approval_mode: meta.approval_mode,
     }
 }
 
@@ -1072,6 +1140,7 @@ mod tests {
             git_branch: None,
             runtime: Runtime::Live(commands),
             live_model: None,
+            live_approval_mode: None,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -1099,6 +1168,7 @@ mod tests {
             git_branch: None,
             runtime: Runtime::Live(commands),
             live_model: None,
+            live_approval_mode: None,
             pending_sends: vec!["first".into(), "second".into()],
             turn_in_flight: false,
             diff_open: false,
@@ -1137,6 +1207,7 @@ mod tests {
             git_branch: None,
             runtime: Runtime::Starting { generation: 2 },
             live_model: None,
+            live_approval_mode: None,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -1166,6 +1237,7 @@ mod tests {
             runtime: Runtime::Live(commands),
             // Process was started on "opus"; the user has since picked "sonnet".
             live_model: Some("opus".into()),
+            live_approval_mode: None,
             pending_sends: vec!["do it".into()],
             turn_in_flight: false,
             diff_open: false,
