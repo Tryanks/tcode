@@ -10,13 +10,31 @@ use futures_lite::future;
 use serde_json::{Value, json};
 
 use crate::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, DeltaKind, FileChange,
-    FileChangeKind, ItemContent, ItemStatus, ProviderKind, ResumeCursor, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
+    DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind, ResumeCursor,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
 };
 
-const APPROVAL_POLICY: &str = "untrusted";
-const SANDBOX_MODE: &str = "read-only";
+/// Map a canonical [`ApprovalMode`] onto Codex's `approvalPolicy` × `sandbox`
+/// pair for `thread/start` (and `thread/resume`).
+///
+/// The wire strings are the kebab-case `AskForApproval` / `SandboxMode`
+/// variants from codex `app-server-protocol` v2 (`shared.rs`): approval
+/// `untrusted` / `on-request` / `never`, sandbox `read-only` /
+/// `workspace-write` / `danger-full-access`. The three-mode assignment mirrors
+/// T3's `CodexSessionRuntime.runtimeModeToThreadConfig`:
+/// - Supervised (approval-required): everything outside a read-only sandbox is
+///   confirmed → asks before commands and file changes.
+/// - AutoAcceptEdits: edits inside the workspace-write sandbox proceed;
+///   escalations (e.g. commands needing more access) still request approval.
+/// - FullAccess: no prompts, unsandboxed.
+fn approval_knobs(mode: ApprovalMode) -> (&'static str, &'static str) {
+    match mode {
+        ApprovalMode::Supervised => ("untrusted", "read-only"),
+        ApprovalMode::AutoAcceptEdits => ("on-request", "workspace-write"),
+        ApprovalMode::FullAccess => ("never", "danger-full-access"),
+    }
+}
 
 /// Starts an app-server process and waits until its thread is ready.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -252,6 +270,7 @@ async fn initialize_and_open_thread(
     send_json(stdin, &json!({ "method": "initialized" }))?;
 
     let cwd = opts.cwd.to_string_lossy();
+    let (approval_policy, sandbox) = approval_knobs(opts.approval_mode);
     let (method, mut params) = if let Some(resume) = &opts.resume {
         let thread_id = resume
             .0
@@ -267,8 +286,8 @@ async fn initialize_and_open_thread(
             json!({
                 "threadId": thread_id,
                 "cwd": cwd,
-                "approvalPolicy": APPROVAL_POLICY,
-                "sandbox": SANDBOX_MODE
+                "approvalPolicy": approval_policy,
+                "sandbox": sandbox
             }),
         )
     } else {
@@ -276,8 +295,8 @@ async fn initialize_and_open_thread(
             "thread/start",
             json!({
                 "cwd": cwd,
-                "approvalPolicy": APPROVAL_POLICY,
-                "sandbox": SANDBOX_MODE
+                "approvalPolicy": approval_policy,
+                "sandbox": sandbox
             }),
         )
     };
@@ -430,10 +449,13 @@ impl Actor {
                 Ok(())
             }
             SessionCommand::SetApprovalMode(mode) => {
-                // Live switching lands with the permission-mode milestone;
-                // until then the UI falls back to a resume-restart.
+                // The app-server binds approvalPolicy × sandbox at thread
+                // start/resume; there is no thread-level permissions-update
+                // request. Signal the UI to fall back to a resume-restart (the
+                // fresh thread/resume carries the new mode), mirroring the
+                // model-switch path.
                 self.emit(AgentEvent::Warning(format!(
-                    "codex: live approval-mode switch to {mode:?} not implemented yet"
+                    "codex: applying approval mode {mode:?} requires a session restart"
                 )))
                 .await;
                 Ok(())
@@ -847,6 +869,22 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[test]
+    fn approval_knobs_map_all_modes() {
+        assert_eq!(
+            approval_knobs(ApprovalMode::Supervised),
+            ("untrusted", "read-only")
+        );
+        assert_eq!(
+            approval_knobs(ApprovalMode::AutoAcceptEdits),
+            ("on-request", "workspace-write")
+        );
+        assert_eq!(
+            approval_knobs(ApprovalMode::FullAccess),
+            ("never", "danger-full-access")
+        );
     }
 
     #[test]

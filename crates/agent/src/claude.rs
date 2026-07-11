@@ -30,10 +30,25 @@ use smol::io::BufReader;
 use smol::process::{Command, Stdio};
 
 use crate::{
-    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalRequest, DeltaKind, FileChange,
-    FileChangeKind, ItemContent, ItemStatus, ProviderKind, ResumeCursor, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
+    DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind, ResumeCursor,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
 };
+
+/// Map a canonical [`ApprovalMode`] onto the value Claude's CLI expects for
+/// `--permission-mode` (and the `set_permission_mode` control request).
+///
+/// Verified against `@anthropic-ai/claude-agent-sdk` v0.3.170
+/// `SDKControlSetPermissionModeRequest` (`sdk.d.ts`): `'default'` prompts for
+/// dangerous operations, `'acceptEdits'` auto-accepts file edits, and
+/// `'bypassPermissions'` skips all permission checks.
+pub(crate) fn permission_mode_flag(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Supervised => "default",
+        ApprovalMode::AutoAcceptEdits => "acceptEdits",
+        ApprovalMode::FullAccess => "bypassPermissions",
+    }
+}
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -52,7 +67,9 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .arg("--include-partial-messages")
         .arg("--verbose")
         .arg("--permission-prompt-tool")
-        .arg("stdio");
+        .arg("stdio")
+        .arg("--permission-mode")
+        .arg(permission_mode_flag(opts.approval_mode));
 
     if let Some(model) = &opts.model {
         cmd.arg("--model").arg(model);
@@ -275,13 +292,18 @@ async fn handle_command(
             Flow::Continue
         }
         SessionCommand::SetApprovalMode(mode) => {
-            // Live switching lands with the permission-mode milestone; until
-            // then the UI falls back to a resume-restart.
-            let _ = event_tx
-                .send(AgentEvent::Warning(format!(
-                    "claude: live approval-mode switch to {mode:?} not implemented yet"
-                )))
-                .await;
+            // The CLI's control protocol switches permission mode live via a
+            // `set_permission_mode` control_request (same shape the Agent SDK
+            // sends). On success we emit nothing — the UI updated optimistically;
+            // only a stdin write failure warrants a Warning.
+            let msg = mapper.set_permission_mode_request(mode);
+            if write_line(stdin, &msg).await.is_err() {
+                let _ = event_tx
+                    .send(AgentEvent::Warning(format!(
+                        "claude: failed to switch permission mode to {mode:?}"
+                    )))
+                    .await;
+            }
             Flow::Continue
         }
         SessionCommand::Shutdown => {
@@ -386,6 +408,22 @@ impl Mapper {
             "type": "control_request",
             "request_id": self.next_control_id(),
             "request": { "subtype": "interrupt" }
+        })
+    }
+
+    /// Client → CLI `set_permission_mode` control request. Wire shape verified
+    /// against `@anthropic-ai/claude-agent-sdk` v0.3.170 (`browser-sdk.js`):
+    /// `request(e)` wraps the payload as
+    /// `{request_id, type:"control_request", request:e}`, and
+    /// `setPermissionMode(m)` sends `{subtype:"set_permission_mode", mode:m}`.
+    fn set_permission_mode_request(&mut self, mode: ApprovalMode) -> Value {
+        json!({
+            "type": "control_request",
+            "request_id": self.next_control_id(),
+            "request": {
+                "subtype": "set_permission_mode",
+                "mode": permission_mode_flag(mode),
+            }
         })
     }
 
@@ -1253,6 +1291,33 @@ mod tests {
             }
             other => panic!("expected TurnCompleted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn permission_mode_flag_maps_all_modes() {
+        assert_eq!(permission_mode_flag(ApprovalMode::Supervised), "default");
+        assert_eq!(
+            permission_mode_flag(ApprovalMode::AutoAcceptEdits),
+            "acceptEdits"
+        );
+        assert_eq!(
+            permission_mode_flag(ApprovalMode::FullAccess),
+            "bypassPermissions"
+        );
+    }
+
+    #[test]
+    fn set_permission_mode_request_shape() {
+        let mut m = Mapper::new();
+        let req = m.set_permission_mode_request(ApprovalMode::AutoAcceptEdits);
+        assert_eq!(req["type"], "control_request");
+        assert!(req["request_id"].is_string());
+        assert_eq!(req["request"]["subtype"], "set_permission_mode");
+        assert_eq!(req["request"]["mode"], "acceptEdits");
+
+        // FullAccess maps to bypassPermissions on the wire.
+        let req = m.set_permission_mode_request(ApprovalMode::FullAccess);
+        assert_eq!(req["request"]["mode"], "bypassPermissions");
     }
 
     #[test]

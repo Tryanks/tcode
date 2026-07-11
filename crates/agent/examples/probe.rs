@@ -1,12 +1,17 @@
 //! Headless end-to-end probe for provider clients.
 //!
-//! Usage: cargo run -p agent --example probe -- <codex|claude> "<prompt>" [cwd]
+//! Usage:
+//!   cargo run -p agent --example probe -- \
+//!       <codex|claude> "<prompt>" [cwd] [supervised|auto_edits|full_access]
+//!
+//! The optional 4th arg selects the approval mode (default: supervised).
 //!
 //! Prints every canonical event as one JSON line. Auto-approves any approval
 //! request (only run this against throwaway directories).
 
 use agent::{
-    AgentEvent, ApprovalDecision, ProviderKind, SessionCommand, SessionOptions, start_session,
+    AgentEvent, ApprovalDecision, ApprovalMode, ProviderKind, SessionCommand, SessionOptions,
+    start_session,
 };
 
 fn main() {
@@ -21,13 +26,23 @@ fn main() {
         }
     };
     let prompt = args.next().unwrap_or_else(|| {
-        eprintln!("usage: probe <codex|claude> <prompt> [cwd]");
+        eprintln!("usage: probe <codex|claude> <prompt> [cwd] [supervised|auto_edits|full_access]");
         std::process::exit(2);
     });
     let cwd = args
         .next()
         .map(Into::into)
         .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let approval_mode = match args.next().as_deref() {
+        None | Some("supervised") => ApprovalMode::Supervised,
+        Some("auto_edits") => ApprovalMode::AutoAcceptEdits,
+        Some("full_access") => ApprovalMode::FullAccess,
+        Some(other) => {
+            eprintln!("unknown approval mode {other:?}; use supervised|auto_edits|full_access");
+            std::process::exit(2);
+        }
+    };
+    eprintln!("probe: approval_mode = {approval_mode:?}");
 
     let exit_code = smol::block_on(async move {
         let opts = SessionOptions {
@@ -35,7 +50,7 @@ fn main() {
             model: None,
             resume: None,
             binary_path: None,
-            approval_mode: Default::default(),
+            approval_mode,
         };
         let handle = match start_session(provider, opts).await {
             Ok(handle) => handle,

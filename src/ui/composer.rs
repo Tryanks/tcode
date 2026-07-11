@@ -6,7 +6,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use agent::{
-    ApprovalDecision, ApprovalKind, ApprovalRequest, FileChangeKind, ProviderKind, TokenUsage,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, FileChangeKind, ProviderKind,
+    TokenUsage,
 };
 use gpui::{
     Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
@@ -77,6 +78,37 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
         }
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
     }
+}
+
+/// The three approval modes in display order, each with its label, one-line
+/// description (exact UI copy), and chip icon (lock → pencil → unlock).
+const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
+    (
+        ApprovalMode::Supervised,
+        "Supervised",
+        "Ask before commands and file changes.",
+        "icons/lock.svg",
+    ),
+    (
+        ApprovalMode::AutoAcceptEdits,
+        "Auto-accept edits",
+        "Auto-approve edits, ask before other actions.",
+        "icons/pencil.svg",
+    ),
+    (
+        ApprovalMode::FullAccess,
+        "Full access",
+        "Allow commands and edits without prompts.",
+        "icons/unlock.svg",
+    ),
+];
+
+fn approval_mode_meta(mode: ApprovalMode) -> (&'static str, &'static str, &'static str) {
+    let (_, label, description, icon) = APPROVAL_MODES
+        .iter()
+        .find(|(m, ..)| *m == mode)
+        .expect("every ApprovalMode is present in APPROVAL_MODES");
+    (label, description, icon)
 }
 
 /// Which rail filter the model picker is showing.
@@ -280,6 +312,36 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The approval-mode selector: a chip showing the current mode (icon +
+    /// label) opening a popover of the three modes (icon + bold name + muted
+    /// description, ✓ on the current one).
+    fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.app_state.read(cx).active_approval_mode();
+        let (label, _, icon_path) = approval_mode_meta(current);
+        let muted = cx.theme().muted_foreground;
+
+        let trigger = Button::new("permission-chip").ghost().compact().child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .text_size(px(13.))
+                .text_color(muted)
+                .child(Icon::empty().path(icon_path).small().text_color(muted))
+                .child(label)
+                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+        );
+
+        let app_entity = self.app_state.clone();
+        let pending_restart = self.app_state.read(cx).approval_pending_restart();
+        Popover::new("permission-popover")
+            .anchor(Anchor::BottomLeft)
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                render_permission_pane(current, pending_restart, &app_entity, &cx.entity(), cx)
+            })
+            .into_any_element()
+    }
+
     /// A static (non-selectable) chip: icon + label + "coming soon" tooltip.
     fn render_static_chip(
         &self,
@@ -316,6 +378,7 @@ impl Composer {
             .as_ref()
             .and_then(|a| a.timeline.usage);
         let muted = cx.theme().muted_foreground;
+        let mode = self.app_state.read(cx).active_approval_mode();
 
         let trigger = Button::new("overflow-controls")
             .ghost()
@@ -330,7 +393,7 @@ impl Composer {
         Popover::new("overflow-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
-            .content(move |_, _, cx| render_overflow_pane(usage, cx))
+            .content(move |_, _, cx| render_overflow_pane(usage, mode, cx))
             .into_any_element()
     }
 
@@ -626,13 +689,7 @@ impl Render for Composer {
                 .child(self.render_model_picker(cx))
                 .child(divider())
                 .child(self.render_context_chip(cx))
-                .child(self.render_static_chip(
-                    "permission-chip",
-                    Icon::empty().path("icons/lock.svg"),
-                    "Ask to edit",
-                    "Permission profiles: coming soon",
-                    cx,
-                ))
+                .child(self.render_permission_picker(cx))
                 .child(self.render_static_chip(
                     "mode-chip",
                     Icon::empty().path("icons/box.svg"),
@@ -937,10 +994,97 @@ fn render_model_row(
         .into_any_element()
 }
 
-/// The "⋯" overflow popover: the context chip's usage summary plus the static
+/// The approval-mode popover: three rows (icon + bold name + muted
+/// description), a ✓ on the current mode, and an optional restart note when the
+/// live provider (Codex) will restart to apply the change on the next turn.
+fn render_permission_pane(
+    current: ApprovalMode,
+    pending_restart: bool,
+    app_entity: &Entity<AppState>,
+    popover: &Entity<PopoverState>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let primary = cx.theme().primary;
+
+    let mut list = v_flex().w_full().p_1().gap_0p5();
+    for (index, (mode, label, description, icon_path)) in APPROVAL_MODES.iter().enumerate() {
+        let mode = *mode;
+        let is_current = mode == current;
+        let app = app_entity.clone();
+        let popover = popover.clone();
+        list = list.child(
+            h_flex()
+                .id(("permission-row", index))
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .gap_2()
+                .items_start()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(cx.theme().muted))
+                .on_click(move |_, window, cx| {
+                    app.update(cx, |s, cx| s.set_active_approval_mode(mode, cx));
+                    popover.update(cx, |st, cx| st.dismiss(window, cx));
+                })
+                .child(
+                    Icon::empty()
+                        .path(*icon_path)
+                        .small()
+                        .text_color(if is_current { primary } else { muted }),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .text_size(px(13.))
+                                .child(div().font_medium().child(*label))
+                                .when(is_current, |this| {
+                                    this.child(
+                                        Icon::new(IconName::Check).xsmall().text_color(primary),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(*description),
+                        ),
+                ),
+        );
+    }
+
+    let mut pane = v_flex().w(px(280.)).child(list);
+    if pending_restart {
+        pane = pane.child(
+            div()
+                .px_3()
+                .py_1p5()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_size(px(11.))
+                .text_color(muted)
+                .child("applies on next turn session restart"),
+        );
+    }
+    pane.into_any_element()
+}
+
+/// The "⋯" overflow popover: the context chip's usage summary plus the
 /// permission / mode chips, shown when the control row collapses at narrow
 /// widths.
-fn render_overflow_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState>) -> AnyElement {
+fn render_overflow_pane(
+    usage: Option<TokenUsage>,
+    mode: ApprovalMode,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let item = |icon: Icon, label: String| -> AnyElement {
         h_flex()
@@ -957,12 +1101,13 @@ fn render_overflow_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState
             .into_any_element()
     };
 
+    let (mode_label, _, mode_icon) = approval_mode_meta(mode);
     v_flex()
         .w(px(220.))
         .p_1()
         .gap_0p5()
         .child(item(Icon::new(IconName::Info), context_label(usage)))
-        .child(item(Icon::empty().path("icons/lock.svg"), "Ask to edit".into()))
+        .child(item(Icon::empty().path(mode_icon), mode_label.into()))
         .child(item(Icon::empty().path("icons/box.svg"), "Build".into()))
         .into_any_element()
 }
@@ -1092,6 +1237,34 @@ mod tests {
                 ..Default::default()
             })),
             "200k"
+        );
+    }
+
+    #[test]
+    fn approval_mode_meta_matches_ui_copy() {
+        assert_eq!(
+            approval_mode_meta(ApprovalMode::Supervised),
+            (
+                "Supervised",
+                "Ask before commands and file changes.",
+                "icons/lock.svg"
+            )
+        );
+        assert_eq!(
+            approval_mode_meta(ApprovalMode::AutoAcceptEdits),
+            (
+                "Auto-accept edits",
+                "Auto-approve edits, ask before other actions.",
+                "icons/pencil.svg"
+            )
+        );
+        assert_eq!(
+            approval_mode_meta(ApprovalMode::FullAccess),
+            (
+                "Full access",
+                "Allow commands and edits without prompts.",
+                "icons/unlock.svg"
+            )
         );
     }
 
