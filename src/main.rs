@@ -7,6 +7,7 @@ mod settings;
 mod smoke;
 mod store;
 mod ui;
+mod version_check;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -68,6 +69,25 @@ fn main() {
     let debug_diff_split = std::env::args().any(|arg| arg == "--debug-diff-split");
     let debug_diff_scope_menu = std::env::args().any(|arg| arg == "--debug-diff-scope-menu");
     let debug_review_comment = std::env::args().any(|arg| arg == "--debug-review-comment");
+    // Screenshot-only: start the opened session's provider process (without
+    // sending a turn) so provider-supplied state — the `/` and `$` command feed
+    // — is reachable headlessly. Implies --open-latest. Note Claude's CLI only
+    // emits its system-init (carrying `slash_commands`) once it receives a user
+    // message, so use `--debug-send` to populate its command feed.
+    let debug_live = std::env::args().any(|arg| arg == "--debug-live");
+    // Screenshot-only: send one turn on launch (without exiting, unlike --smoke)
+    // so provider state that only arrives with the first message is reachable.
+    let debug_send = std::env::args()
+        .skip_while(|arg| arg != "--debug-send")
+        .nth(1);
+    // Screenshot-only: seed the command palette query (pairs with --open-palette).
+    let debug_palette = std::env::args()
+        .skip_while(|arg| arg != "--debug-palette")
+        .nth(1);
+    // Screenshot-only: open a specific Settings section (pairs with --open-settings).
+    let debug_settings_section = std::env::args()
+        .skip_while(|arg| arg != "--debug-settings-section")
+        .nth(1);
     // Screenshot-only: open a deterministic draft rooted at this cwd (so the
     // `@`-mention walk lists a known repo, independent of the newest session).
     let debug_cwd = std::env::args()
@@ -121,19 +141,28 @@ fn main() {
             // Refresh the model catalogs in the background so the picker shows
             // real, up-to-date models (the persisted cache serves until then).
             app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
+            // Check provider CLI versions on launch (unless disabled), toasting
+            // when a newer version is available (s3 §6).
+            app_state.update(cx, |state, cx| {
+                if state.provider_update_checks_enabled() {
+                    state.check_provider_versions(cx);
+                }
+            });
             {
-                let (dc, di, ds) = (
-                    debug_compose.clone(),
-                    debug_image.clone(),
-                    debug_diff_scope.clone(),
-                );
+                let dc = debug_compose.clone();
+                let di = debug_image.clone();
+                let dscope = debug_diff_scope.clone();
+                let dp = debug_palette.clone();
+                let dsec = debug_settings_section.clone();
                 app_state.update(cx, |state, _| {
                     state.debug_compose = dc;
                     state.debug_image = di;
-                    state.debug_diff_scope = ds;
+                    state.debug_diff_scope = dscope;
                     state.debug_diff_split = debug_diff_split;
                     state.debug_diff_scope_menu = debug_diff_scope_menu;
                     state.debug_review_comment = debug_review_comment;
+                    state.debug_palette = dp;
+                    state.debug_settings_section = dsec;
                 });
             }
             let debug_seed = debug_compose.is_some()
@@ -142,7 +171,9 @@ fn main() {
                 || debug_diff_scope.is_some()
                 || debug_diff_split
                 || debug_diff_scope_menu
-                || debug_review_comment;
+                || debug_review_comment
+                || debug_live
+                || debug_send.is_some();
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
@@ -280,6 +311,12 @@ fn main() {
                         }
                         if debug_git_dialog {
                             state.debug_open_commit_dialog = true;
+                        }
+                        if debug_live {
+                            state.debug_start_provider(cx);
+                        }
+                        if let Some(text) = debug_send.clone() {
+                            state.send_turn(text, Vec::new(), cx);
                         }
                     });
                 }

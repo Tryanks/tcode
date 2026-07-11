@@ -149,6 +149,7 @@ fn main() {
             .send(SessionCommand::SendTurn {
                 text: prompt,
                 options: Some(turn_options),
+                attachments: Vec::new(),
             })
             .await
             .expect("session command channel closed before first turn");

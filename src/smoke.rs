@@ -84,7 +84,7 @@ pub fn drive(spec: SmokeSpec, app_state: Entity<AppState>, cx: &mut App) {
                     cwd.display()
                 );
                 state.create_session(provider, cwd, None, None, cx);
-                state.send_turn(prompt, cx);
+                state.send_turn(prompt, Vec::new(), cx);
             }
             SmokeSpec::Resume { prompt } => {
                 let Some(meta) = state.sessions.first().cloned() else {
@@ -98,7 +98,7 @@ pub fn drive(spec: SmokeSpec, app_state: Entity<AppState>, cx: &mut App) {
                     meta.resume_cursor.is_some()
                 );
                 state.select_session(&meta.id.clone(), cx);
-                state.send_turn(prompt, cx);
+                state.send_turn(prompt, Vec::new(), cx);
             }
         }
     });

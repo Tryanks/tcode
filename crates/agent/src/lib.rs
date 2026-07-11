@@ -214,6 +214,37 @@ pub struct UserInputOption {
     pub description: String,
 }
 
+/// An image attachment sent alongside a turn's text. `data_base64` is the raw
+/// image bytes, standard-base64 encoded (no data-URL prefix); each provider maps
+/// it onto its native content-block shape (Claude `image`/`base64` source; Codex
+/// `image` input with a `data:` URL).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// MIME type, e.g. `image/png`.
+    pub media_type: String,
+    /// Standard-base64 of the raw bytes (no `data:...;base64,` prefix).
+    pub data_base64: String,
+}
+
+/// A provider-native command or skill surfaced to the composer's `/` and `$`
+/// menus. Claude contributes its `slash_commands` (as [`ProviderCommandKind::Command`])
+/// and `skills`; Codex contributes `skills/list` entries (as [`ProviderCommandKind::Skill`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCommand {
+    pub name: String,
+    pub description: Option<String>,
+    pub kind: ProviderCommandKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCommandKind {
+    /// A `/`-command (Claude slash command).
+    Command,
+    /// A `$`-skill (Claude skill / Codex skill).
+    Skill,
+}
+
 /// Interaction mode (T3: Build/Plan).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -284,6 +315,9 @@ pub enum SessionCommand {
         /// Per-turn overrides (Codex applies per turn; Claude ignores
         /// `effort`). `None` = use the session's persisted options.
         options: Option<TurnOptions>,
+        /// Image attachments carried alongside the text (empty for text-only
+        /// turns). Each provider maps these onto its native content blocks.
+        attachments: Vec<Attachment>,
     },
     Interrupt,
     RespondApproval {
@@ -378,6 +412,16 @@ pub enum AgentEvent {
         answers: serde_json::Map<String, serde_json::Value>,
     },
     TokenUsage(TokenUsage),
+    /// Provider-native commands / skills discovered for this session (Claude
+    /// `slash_commands` + `skills` from system-init; Codex `skills/list`). The
+    /// composer's `/` and `$` menus consume these. Session metadata — not folded
+    /// into the timeline / persisted to the JSONL log.
+    ProviderCommands {
+        commands: Vec<ProviderCommand>,
+    },
+    /// The provider compacted its context window (Claude `system/compact_boundary`;
+    /// Codex `contextCompaction` item). Rendered as a "Context compacted" work-log row.
+    ContextCompacted,
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {
@@ -562,6 +606,10 @@ pub struct TokenUsage {
     /// Total context currently in use, if the provider reports it.
     pub used_tokens: Option<u64>,
     pub context_window: Option<u64>,
+    /// Cumulative tokens processed over the session's lifetime, if known (Codex
+    /// `thread/tokenUsage` running total; Claude accumulated per-turn usage).
+    /// Shown as "Total processed" in the context-meter popover.
+    pub total_processed_tokens: Option<u64>,
 }
 
 #[cfg(test)]

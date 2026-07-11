@@ -42,6 +42,7 @@ fn main() {
                        thinking carefully about each number."
                     .into(),
                 options: None,
+                attachments: Vec::new(),
             })
             .await
             .unwrap();

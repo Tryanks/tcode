@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, InteractionMode, ItemContent, ModelSpec,
-    OptionSelection, ProviderKind, SessionCommand, SessionOptions, ThreadItem, TurnOptions,
-    TurnStatus, list_models, start_session,
+    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
+    ModelSpec, OptionSelection, ProviderCommand, ProviderKind, SessionCommand, SessionOptions,
+    ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
 };
 use gpui::{Context, Entity, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
@@ -199,6 +199,23 @@ pub enum RightTab {
     Preview,
 }
 
+/// A queued turn: its text and any image attachments, awaiting dispatch to the
+/// live provider.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingSend {
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
+impl From<&str> for PendingSend {
+    fn from(text: &str) -> Self {
+        PendingSend {
+            text: text.to_string(),
+            attachments: Vec::new(),
+        }
+    }
+}
+
 /// Provider process state for the active session.
 enum Runtime {
     /// Not started yet — stored session opened (replay only) or brand new.
@@ -249,8 +266,12 @@ pub struct ActiveSession {
     /// Group C: set while the first send is creating a worktree in the
     /// background (drives the composer's "Preparing worktree…" action).
     preparing_worktree: bool,
-    pending_sends: Vec<String>,
+    pending_sends: Vec<PendingSend>,
     turn_in_flight: bool,
+    /// Provider-native commands / skills discovered at session start (Claude
+    /// `slash_commands` + `skills`; Codex `skills/list`). Feeds the composer's
+    /// `/` and `$` menus. In-memory only.
+    provider_commands: Vec<ProviderCommand>,
     /// Diff panel UI state (per-session, in-memory only). `diff_open` is the
     /// right-panel open/closed flag; `right_tab` selects which tab it shows.
     pub diff_open: bool,
@@ -321,20 +342,35 @@ impl ActiveSession {
         self._pump = None;
     }
 
-    /// Dispatch at most one queued send, preserving FIFO order.
+    /// Whether this session steers (sends mid-turn) instead of queueing. Group B:
+    /// the Claude CLI accepts mid-turn user messages as steering, so we
+    /// deliberately exceed T3 here and dispatch immediately even while a turn is
+    /// in flight. Codex keeps the strict one-turn-at-a-time queue.
+    fn supports_steering(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && self.meta.provider == ProviderKind::ClaudeCode
+    }
+
+    /// Dispatch at most one queued send, preserving FIFO order. A turn already in
+    /// flight blocks dispatch for queueing providers (Codex); steering providers
+    /// (Claude) dispatch immediately (see [`Self::supports_steering`]).
     fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
-        if self.turn_in_flight {
+        if self.turn_in_flight && !self.supports_steering() {
             return Ok(false);
         }
         let Runtime::Live(commands) = &self.runtime else {
             return Ok(false);
         };
-        let Some(text) = self.pending_sends.first().cloned() else {
+        let Some(send) = self.pending_sends.first().cloned() else {
             return Ok(false);
         };
         let options = Some(self.turn_options());
         commands
-            .try_send(SessionCommand::SendTurn { text, options })
+            .try_send(SessionCommand::SendTurn {
+                text: send.text,
+                options,
+                attachments: send.attachments,
+            })
             .map_err(|_| ())?;
         self.pending_sends.remove(0);
         self.turn_in_flight = true;
@@ -355,6 +391,23 @@ impl ActiveSession {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SmokeMode {
     pub auto_approve: bool,
+}
+
+/// The result of a provider version check (Group C / s3 §6).
+#[derive(Debug, Clone, Default)]
+pub struct ProviderVersionStatus {
+    /// Installed version (raw string, e.g. `"2.1.206"`); `None` if `--version` failed.
+    pub installed: Option<String>,
+    /// Latest published version from npm; `None` if the lookup failed.
+    pub latest: Option<String>,
+    /// Whether `latest` is strictly newer than `installed`.
+    pub update_available: bool,
+    /// Whether a version check is currently running.
+    pub checking: bool,
+    /// Whether a self-update command is currently running.
+    pub updating: bool,
+    /// How the binary was installed (drives the update command).
+    pub install_source: crate::version_check::InstallSource,
 }
 
 /// The workspace a draft thread will run in (Group C): the project checkout, or
@@ -403,6 +456,12 @@ pub struct AppState {
     pub debug_diff_split: bool,
     pub debug_diff_scope_menu: bool,
     pub debug_review_comment: bool,
+    /// Screenshot-only: seed the command palette's query when it opens (so the
+    /// `>`-actions filter and thread result rows can be captured headlessly).
+    pub debug_palette: Option<String>,
+    /// Screenshot-only: which Settings section to open (`general` / `providers` /
+    /// `archived`), so each can be captured headlessly.
+    pub debug_settings_section: Option<String>,
     /// Preview MCP server registration, injected into every session so the agent
     /// can drive the embedded browser. `None` if the server failed to start.
     pub mcp_registration: Option<agent::McpRegistration>,
@@ -433,6 +492,9 @@ pub struct AppState {
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// Invalidates working-tree/branch previews on panel open and turn finish.
     pub diff_refresh_generation: u64,
+    /// Per-provider version-check results (Group C). Populated on launch (when
+    /// the toggle is on) and by Settings → "Check now".
+    pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -502,6 +564,9 @@ impl AppState {
             toast_center: None,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
+            debug_palette: None,
+            debug_settings_section: None,
+            provider_versions: HashMap::new(),
         }
     }
 
@@ -558,6 +623,174 @@ impl AppState {
             .detach();
         }
         cx.notify();
+    }
+
+    /// Screenshot/dev only (`--debug-live`): start the active (non-draft)
+    /// session's provider process without sending a turn, so provider-supplied
+    /// state (the `/` + `$` command feed) is reachable headlessly.
+    pub fn debug_start_provider(&mut self, cx: &mut Context<Self>) {
+        if self.active.as_ref().is_some_and(|a| !a.draft) {
+            self.ensure_started(cx);
+        }
+    }
+
+    // -- provider version checks (Group C / s3 §6) --------------------------
+
+    /// Whether the on-launch provider version check is enabled (default on).
+    pub fn provider_update_checks_enabled(&self) -> bool {
+        !self.settings.provider_update_checks_disabled
+    }
+
+    /// The last known version-check result for `provider`.
+    pub fn provider_version(&self, provider: ProviderKind) -> Option<&ProviderVersionStatus> {
+        self.provider_versions.get(&provider)
+    }
+
+    /// Resolve the binary path for a provider: the settings override, else a
+    /// PATH lookup of the bare command name.
+    fn resolve_provider_binary(&self, provider: ProviderKind) -> Option<PathBuf> {
+        let (over, name) = match provider {
+            ProviderKind::Codex => (self.settings.codex_binary.clone(), "codex"),
+            ProviderKind::ClaudeCode => (self.settings.claude_binary.clone(), "claude"),
+        };
+        over.or_else(|| which_in_path(name))
+    }
+
+    /// Check every provider's installed vs. latest version in the background,
+    /// storing results in `provider_versions` and toasting once per provider
+    /// that has an update available.
+    pub fn check_provider_versions(&mut self, cx: &mut Context<Self>) {
+        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+            let binary = self.resolve_provider_binary(provider);
+            let status = self.provider_versions.entry(provider).or_default();
+            if status.checking {
+                continue;
+            }
+            status.checking = true;
+            status.install_source = binary
+                .as_deref()
+                .map(crate::version_check::detect_install_source)
+                .unwrap_or_default();
+            let source = status.install_source;
+            let program = binary
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| default_program(provider));
+            let package = crate::version_check::npm_package(provider);
+            cx.spawn(async move |this, cx| {
+                let installed = run_capture(&program, &["--version"]).await;
+                let latest = run_capture("npm", &["view", package, "version"]).await;
+                let _ = this.update(cx, |state, cx| {
+                    let update_available = match (&installed, &latest) {
+                        (Some(i), Some(l)) => crate::version_check::is_update_available(i, l),
+                        _ => false,
+                    };
+                    let already = state
+                        .provider_versions
+                        .get(&provider)
+                        .map(|s| s.update_available)
+                        .unwrap_or(false);
+                    // Normalize both to `a.b.c` for display (raw `--version`
+                    // output can carry a program name / suffix).
+                    let pretty = |raw: &Option<String>| {
+                        raw.as_ref().map(|r| {
+                            crate::version_check::parse_version(r)
+                                .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+                                .unwrap_or_else(|| r.clone())
+                        })
+                    };
+                    let installed_pretty = pretty(&installed);
+                    let latest_pretty = pretty(&latest);
+                    let status = state.provider_versions.entry(provider).or_default();
+                    status.checking = false;
+                    status.install_source = source;
+                    status.installed = installed_pretty;
+                    status.latest = latest_pretty.clone();
+                    status.update_available = update_available;
+                    // Toast once when an update becomes newly available.
+                    if update_available && !already {
+                        if let Some(version) = &latest_pretty {
+                            cx.emit(AppEvent::Notice(
+                                rust_i18n::t!(
+                                    "notice.update_available",
+                                    provider = provider.display_name(),
+                                    version = version
+                                )
+                                .into_owned(),
+                            ));
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// Run the provider's self-update command (per its detected install source),
+    /// showing an "updating" toast, then re-check its version.
+    pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
+        let source = self
+            .provider_versions
+            .get(&provider)
+            .map(|s| s.install_source)
+            .unwrap_or_default();
+        let Some(command) = crate::version_check::update_command(provider, source) else {
+            self.report_error(
+                rust_i18n::t!("errors.update_unknown", provider = provider.display_name())
+                    .into_owned(),
+                cx,
+            );
+            return;
+        };
+        let status = self.provider_versions.entry(provider).or_default();
+        if status.updating {
+            return;
+        }
+        status.updating = true;
+        cx.emit(AppEvent::Notice(
+            rust_i18n::t!("notice.updating_provider", provider = provider.display_name())
+                .into_owned(),
+        ));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+            let ok = run_status(&command[0], &args).await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(status) = state.provider_versions.get_mut(&provider) {
+                    status.updating = false;
+                }
+                if ok {
+                    cx.emit(AppEvent::Notice(
+                        rust_i18n::t!("notice.update_done", provider = provider.display_name())
+                            .into_owned(),
+                    ));
+                    // Refresh the version so the "update available" state clears.
+                    state.check_provider_versions(cx);
+                } else {
+                    state.report_error(
+                        rust_i18n::t!(
+                            "errors.update_failed",
+                            provider = provider.display_name()
+                        )
+                        .into_owned(),
+                        cx,
+                    );
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Provider-native commands / skills for the active session (empty until the
+    /// session's provider reports them). Feeds the composer's `/` and `$` menus.
+    pub fn active_provider_commands(&self) -> &[ProviderCommand] {
+        self.active
+            .as_ref()
+            .map(|a| a.provider_commands.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The cached model catalog for `provider` (empty when never fetched).
@@ -1762,7 +1995,13 @@ impl AppState {
 
     /// Kick off background worktree creation for a draft's first send, then send
     /// the queued text once it is ready. Sets the "Preparing worktree…" state.
-    fn begin_worktree_prep(&mut self, text: String, base: String, cx: &mut Context<Self>) {
+    fn begin_worktree_prep(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        base: String,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -1807,7 +2046,7 @@ impl AppState {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
                         active.git_branch = read_git_branch(&worktree_path);
                         // Now that the worktree exists, run the deferred send.
-                        state.send_turn(text, cx);
+                        state.send_turn(text, attachments, cx);
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
@@ -1865,6 +2104,7 @@ impl AppState {
             preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -1908,6 +2148,7 @@ impl AppState {
             preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -2001,6 +2242,7 @@ impl AppState {
             preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -2032,13 +2274,13 @@ impl AppState {
     }
 
     /// Submit a user turn. Starts the provider lazily if needed.
-    pub fn send_turn(&mut self, text: String, cx: &mut Context<Self>) {
+    pub fn send_turn(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut Context<Self>) {
         // Group C: a draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
         if let Some(active) = self.active.as_ref() {
             if active.draft && !active.preparing_worktree {
                 if let WorkspaceMode::NewWorktree { base } = active.draft_workspace.clone() {
-                    self.begin_worktree_prep(text, base, cx);
+                    self.begin_worktree_prep(text, attachments, base, cx);
                     return;
                 }
             }
@@ -2090,7 +2332,10 @@ impl AppState {
         } else {
             text
         };
-        active.pending_sends.push(sent_text);
+        active.pending_sends.push(PendingSend {
+            text: sent_text,
+            attachments,
+        });
         // If the user switched models — or a provider that can't switch its
         // approval mode live (Codex) had its mode changed, or a launch-time
         // option changed — while the provider is live, restart it first: the
@@ -2339,7 +2584,7 @@ impl AppState {
             active.plan_implemented = true;
         }
         self.set_interaction_mode(InteractionMode::Build, cx);
-        self.send_turn(crate::session::implement_prompt(&markdown), cx);
+        self.send_turn(crate::session::implement_prompt(&markdown), Vec::new(), cx);
     }
 
     /// Accept the proposed plan in a fresh thread in the same project (same
@@ -2394,6 +2639,7 @@ impl AppState {
             preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -2402,7 +2648,7 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
-        self.send_turn(crate::session::implement_prompt(&markdown), cx);
+        self.send_turn(crate::session::implement_prompt(&markdown), Vec::new(), cx);
         cx.notify();
     }
 
@@ -2845,6 +3091,21 @@ impl AppState {
             return;
         }
 
+        // Provider commands/skills are session metadata for the composer menus —
+        // stored on the active session, never folded into the timeline or the
+        // persisted JSONL log.
+        if let AgentEvent::ProviderCommands { commands } = &event {
+            if let Some(active) = self
+                .active
+                .as_mut()
+                .filter(|active| active.meta.id == session_id)
+            {
+                active.provider_commands = commands.clone();
+                cx.notify();
+            }
+            return;
+        }
+
         // Session bookkeeping side effects.
         match &event {
             AgentEvent::SessionStarted { resume, model, .. } => {
@@ -3047,6 +3308,58 @@ impl AppState {
         log::error!("{message}");
         cx.emit(AppEvent::Error(message));
     }
+}
+
+/// The bare command name for a provider (fallback when no path resolves).
+fn default_program(provider: ProviderKind) -> String {
+    match provider {
+        ProviderKind::Codex => "codex".into(),
+        ProviderKind::ClaudeCode => "claude".into(),
+    }
+}
+
+/// A minimal PATH lookup for `name` (first executable match). Used to locate the
+/// provider binary for install-source detection when no override is set.
+fn which_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Spawn `program args…` and return its trimmed stdout, or `None` on any
+/// failure. The nested-Claude markers are stripped so `claude --version` behaves
+/// like a top-level invocation.
+async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
+    let output = smol::process::Command::new(program)
+        .args(args)
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Spawn `program args…` for a side effect (e.g. an update command) and report
+/// whether it exited successfully.
+async fn run_status(program: &str, args: &[&str]) -> bool {
+    smol::process::Command::new(program)
+        .args(args)
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Read the current git branch (or short detached-HEAD sha) for `cwd`, if it is
@@ -3448,6 +3761,7 @@ mod tests {
             preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -3483,6 +3797,7 @@ mod tests {
             preparing_worktree: false,
             pending_sends: vec!["first".into(), "second".into()],
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -3499,7 +3814,7 @@ mod tests {
         ));
         assert_eq!(active.dispatch_next_pending(), Ok(false));
         assert!(receiver.try_recv().is_err());
-        assert_eq!(active.pending_sends, ["second"]);
+        assert_eq!(active.pending_sends, [PendingSend::from("second")]);
 
         active.turn_in_flight = false;
         assert_eq!(active.dispatch_next_pending(), Ok(true));
@@ -3529,6 +3844,7 @@ mod tests {
             preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -3570,6 +3886,7 @@ mod tests {
             preparing_worktree: false,
             pending_sends: vec!["do it".into()],
             turn_in_flight: false,
+            provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -3586,7 +3903,7 @@ mod tests {
         // while the queued turn is preserved for the restarted process.
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         assert!(matches!(active.runtime, Runtime::Idle));
-        assert_eq!(active.pending_sends, ["do it"]);
+        assert_eq!(active.pending_sends, [PendingSend::from("do it")]);
         assert!(!active.model_changed_while_live());
 
         // No restart when the selected model matches the live one.
