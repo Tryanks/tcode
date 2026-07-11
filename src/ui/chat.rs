@@ -1197,7 +1197,7 @@ impl Render for ChatView {
             .read(cx)
             .active
             .as_ref()
-            .map(|a| a.terminal_height)
+            .map(|a| a.terminal_workspace.height)
             .unwrap_or(240.);
 
         // Group entries by turn and render each turn section into the centered
