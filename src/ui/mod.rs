@@ -1,0 +1,224 @@
+mod chat;
+mod composer;
+mod diff_panel;
+mod palette;
+mod settings_page;
+mod sidebar;
+
+use gpui::{
+    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, Styled as _, Subscription, Window, actions,
+    div, prelude::FluentBuilder as _, px,
+};
+use gpui_component::{
+    ActiveTheme as _, Root, h_flex,
+    resizable::{h_resizable, resizable_panel},
+};
+
+use chat::ChatView;
+use diff_panel::DiffPanel;
+use palette::CommandPalette;
+use settings_page::SettingsPage;
+use sidebar::SessionsSidebar;
+
+use crate::app::{AppState, Route};
+
+actions!(tcode, [TogglePalette]);
+
+/// Transient per-frame state backing [`window_drag_area`].
+struct WindowDragState {
+    should_move: bool,
+}
+
+impl Render for WindowDragState {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// Make `el` a window-drag handle (the window has no separate titlebar, so the
+/// column top rows are the drag surface). Mirrors gpui-component's `TitleBar`
+/// mechanics: a press arms a move, the first drag calls `start_window_move`.
+/// Child buttons that stop propagation on mouse-down won't arm a drag.
+pub(crate) fn window_drag_area(
+    id: impl Into<ElementId>,
+    el: Div,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let state = window.use_keyed_state(id, cx, |_, _| WindowDragState { should_move: false });
+    el.on_mouse_down_out(window.listener_for(&state, |state, _, _, _| {
+        state.should_move = false;
+    }))
+    .on_mouse_down(
+        MouseButton::Left,
+        window.listener_for(&state, |state, _, _, _| {
+            state.should_move = true;
+        }),
+    )
+    .on_mouse_up(
+        MouseButton::Left,
+        window.listener_for(&state, |state, _, _, _| {
+            state.should_move = false;
+        }),
+    )
+    .on_mouse_move(window.listener_for(&state, |state, _, window, _| {
+        if state.should_move {
+            state.should_move = false;
+            window.start_window_move();
+        }
+    }))
+}
+
+pub struct AppShell {
+    app_state: Entity<AppState>,
+    sidebar: Entity<SessionsSidebar>,
+    chat: Entity<ChatView>,
+    diff: Entity<DiffPanel>,
+    settings_page: Entity<SettingsPage>,
+    palette: Entity<CommandPalette>,
+    /// Tracks the palette's open state across frames so it can be focused on the
+    /// open transition.
+    palette_was_open: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl AppShell {
+    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let initial_title = app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| active.meta.title.as_str())
+            .unwrap_or("tcode");
+        window.set_window_title(initial_title);
+        let subscription = cx.observe_in(&app_state, window, |_, state, window, cx| {
+            let title = state
+                .read(cx)
+                .active
+                .as_ref()
+                .map(|active| active.meta.title.as_str())
+                .unwrap_or("tcode");
+            window.set_window_title(title);
+            cx.notify();
+        });
+        Self {
+            sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx)),
+            chat: cx.new(|cx| ChatView::new(app_state.clone(), window, cx)),
+            diff: cx.new(|cx| DiffPanel::new(app_state.clone(), cx)),
+            settings_page: cx.new(|cx| SettingsPage::new(app_state.clone(), window, cx)),
+            palette: cx.new(|cx| CommandPalette::new(app_state.clone(), window, cx)),
+            app_state,
+            palette_was_open: false,
+            _subscriptions: vec![subscription],
+        }
+    }
+
+    fn on_toggle_palette(
+        &mut self,
+        _: &TogglePalette,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_state.update(cx, |state, cx| state.toggle_palette(cx));
+    }
+}
+
+impl Render for AppShell {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sheet_layer = Root::render_sheet_layer(window, cx);
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+        let route = self.app_state.read(cx).route;
+        let palette_open = self.app_state.read(cx).palette_open;
+        // Focus the palette's search input on the open transition.
+        if palette_open && !self.palette_was_open {
+            self.palette.update(cx, |p, cx| p.focus(window, cx));
+        }
+        self.palette_was_open = palette_open;
+        let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        let diff_open = self.app_state.read(cx).diff_panel_open();
+        let diff_expanded = self.app_state.read(cx).diff_panel_expanded();
+
+        // The full-page settings route replaces the chat workspace entirely.
+        if route == Route::Settings {
+            return div()
+                .id("app-shell")
+                .size_full()
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
+                .on_action(cx.listener(Self::on_toggle_palette))
+                .child(self.settings_page.clone())
+                .children(sheet_layer)
+                .children(dialog_layer)
+                .children(notification_layer);
+        }
+
+        // The chat column: chat alone, chat split with the diff panel, or the
+        // diff panel full-width when expanded.
+        let chat_region: AnyElement = if diff_open && diff_expanded {
+            div()
+                .size_full()
+                .min_w_0()
+                .child(self.diff.clone())
+                .into_any_element()
+        } else if diff_open {
+            h_resizable("chat-diff-panels")
+                .child(resizable_panel().child(self.chat.clone()))
+                .child(
+                    resizable_panel()
+                        .size(px(560.))
+                        .size_range(px(320.)..px(1400.))
+                        .child(self.diff.clone()),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .min_w_0()
+                .child(self.chat.clone())
+                .into_any_element()
+        };
+
+        let workspace: AnyElement = if collapsed {
+            h_flex()
+                .size_full()
+                .child(div().flex_none().w(px(48.)).child(self.sidebar.clone()))
+                .child(div().flex_1().min_w_0().child(chat_region))
+                .into_any_element()
+        } else {
+            h_resizable("workspace-panels")
+                .child(
+                    resizable_panel()
+                        .flex_none()
+                        .size(px(255.))
+                        .size_range(px(220.)..px(380.))
+                        .child(self.sidebar.clone()),
+                )
+                .child(resizable_panel().child(chat_region))
+                .into_any_element()
+        };
+
+        // No separate titlebar: the sidebar and chat columns run to the window
+        // top (the native traffic lights overlay the sidebar's top-left).
+        div()
+            .id("app-shell")
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .on_action(cx.listener(Self::on_toggle_palette))
+            .child(
+                div()
+                    .id("workspace")
+                    .flex_1()
+                    .size_full()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(workspace),
+            )
+            .when(palette_open, |this| this.child(self.palette.clone()))
+            .children(sheet_layer)
+            .children(dialog_layer)
+            .children(notification_layer)
+    }
+}

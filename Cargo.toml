@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/agent"]
+
+[package]
+name = "tcode"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agent = { path = "crates/agent" }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+log = "0.4"
+dirs = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol = "2"
+async-channel = "2"
+env_logger = "0.11"
+
+[features]
+default = ["runtime-shaders"]
+runtime-shaders = ["gpui_platform/runtime_shaders"]
