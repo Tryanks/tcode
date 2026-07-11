@@ -242,10 +242,19 @@ impl Render for AppShell {
         };
 
         let workspace: AnyElement = if collapsed {
+            // `h_flex` centers its children on the cross axis, so both columns
+            // need an explicit full height — without it the icon strip and the
+            // whole chat column float vertically centered in the window.
             h_flex()
                 .size_full()
-                .child(div().flex_none().w(px(48.)).child(self.sidebar.clone()))
-                .child(div().flex_1().min_w_0().child(chat_region))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(48.))
+                        .h_full()
+                        .child(self.sidebar.clone()),
+                )
+                .child(div().flex_1().min_w_0().h_full().child(chat_region))
                 .into_any_element()
         } else {
             h_resizable("workspace-panels")

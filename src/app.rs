@@ -511,6 +511,7 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        let settings_collapsed = settings.sidebar_collapsed;
         let terminal_preferences_path = store.root().join("terminal-ui.json");
         let terminal_preferences = std::fs::read(&terminal_preferences_path)
             .ok()
@@ -540,7 +541,7 @@ impl AppState {
             active: None,
             settings,
             smoke: None,
-            sidebar_collapsed: false,
+            sidebar_collapsed: settings_collapsed,
             route: Route::Chat,
             palette_open: false,
             model_catalogs,
@@ -829,6 +830,10 @@ impl AppState {
 
     pub fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        // Persist so the choice survives a restart (save errors are cosmetic).
+        self.settings.sidebar_collapsed = self.sidebar_collapsed;
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
         cx.notify();
     }
 
