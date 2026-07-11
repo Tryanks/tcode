@@ -24,7 +24,6 @@ use gpui_component::{
 use crate::app::AppState;
 use crate::settings::ThemeMode;
 use crate::ui::settings_page::apply_theme;
-use crate::ui::sidebar::open_new_session_dialog;
 
 /// Score `text` against a fuzzy `query` (case-insensitive subsequence match).
 /// Returns `None` when `query` is not a subsequence of `text`; a higher score
@@ -213,13 +212,9 @@ impl CommandPalette {
         match action {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
-                open_new_session_dialog(
-                    self.app_state.clone(),
-                    Some(cwd),
-                    Some(project_id),
-                    window,
-                    cx,
-                );
+                self.app_state.update(cx, |state, cx| {
+                    state.start_draft(project_id, cwd, cx);
+                });
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.

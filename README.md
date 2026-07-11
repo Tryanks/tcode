@@ -63,7 +63,8 @@ cargo run -p agent --example interrupt_probe -- claude /tmp/smoke
 ```
 
 Debug launch flags: `--open-latest`, `--open-diff`, `--open-settings`,
-`--open-palette`. See `docs/DESIGN.md` for the UI spec and the visual
+`--open-palette`, and `--open-draft <project-id-or-name>` (opens a new-thread
+draft for that project). See `docs/DESIGN.md` for the UI spec and the visual
 verification protocol.
 
 ## Architecture

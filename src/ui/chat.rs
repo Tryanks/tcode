@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent::{FileChange, ItemStatus};
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -15,6 +16,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,
+    popover::Popover,
     text::{TextView, TextViewState},
     v_flex,
 };
@@ -76,9 +78,13 @@ impl ChatView {
                 this.sync_markdown_states(cx);
                 cx.notify();
             }),
-            cx.subscribe_in(&app_state, window, |_, _, event, window, cx| {
-                let AppEvent::Error(message) = event;
-                window.push_notification(Notification::error(message.clone()), cx);
+            cx.subscribe_in(&app_state, window, |_, _, event, window, cx| match event {
+                AppEvent::Error(message) => {
+                    window.push_notification(Notification::error(message.clone()), cx);
+                }
+                AppEvent::Notice(message) => {
+                    window.push_notification(Notification::success(message.clone()), cx);
+                }
             }),
         ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(app_state.clone(), cx));
@@ -656,6 +662,8 @@ impl ChatView {
     fn render_header(
         &self,
         title: Option<String>,
+        is_draft: bool,
+        cwd: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -668,30 +676,46 @@ impl ChatView {
             .border_b_1()
             .border_color(cx.theme().border);
 
-        let title_el = match &title {
-            Some(title) => div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_size(px(16.))
-                .font_medium()
-                .child(title.clone()),
-            None => div()
+        // A draft shows a muted "New thread" label; an open thread its title;
+        // nothing active shows "No active thread".
+        let title_el = if is_draft {
+            div()
                 .flex_1()
                 .min_w_0()
                 .text_size(px(16.))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
-                .child("No active thread"),
+                .child("New thread")
+        } else {
+            match &title {
+                Some(title) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(px(16.))
+                    .font_medium()
+                    .child(title.clone()),
+                None => div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(16.))
+                    .font_medium()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No active thread"),
+            }
         };
 
+        // The right-side cluster (Open split-button + panel toggles) shows for
+        // any active thread, including a draft.
+        let show_actions = is_draft || title.is_some();
         let diff_open = self.app_state.read(cx).diff_panel_open();
         let terminal_open = self.app_state.read(cx).terminal_panel_open();
         window_drag_area("chat-header-drag", base, window, cx)
             .child(title_el)
-            .when(title.is_some(), |this| {
-                this.child(
+            .when(show_actions, |this| {
+                this.children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
+                    .child(
                     h_flex()
                         .flex_none()
                         .gap_1()
@@ -723,6 +747,113 @@ impl ChatView {
                         ),
                 )
             })
+            .into_any_element()
+    }
+
+    /// The bordered "Open" split-button: main click opens the session cwd in
+    /// Zed; the chevron opens a menu (Zed / Finder / Copy path). Matches T3's
+    /// header control.
+    fn render_open_button(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
+        let border = cx.theme().border;
+        let main_cwd = cwd.clone();
+        let menu_cwd = cwd;
+
+        let chevron = Popover::new("open-menu")
+            .anchor(Anchor::TopRight)
+            .trigger(
+                Button::new("open-menu-trigger")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ChevronDown),
+            )
+            .content(move |_state, _window, cx| {
+                let zed_cwd = menu_cwd.clone();
+                let finder_cwd = menu_cwd.clone();
+                let copy_cwd = menu_cwd.clone();
+                let popover = cx.entity();
+                let p1 = popover.clone();
+                let p2 = popover.clone();
+                let p3 = popover.clone();
+                let muted = cx.theme().muted_foreground;
+                let accent = cx.theme().accent;
+                let menu_item = move |id: &'static str, icon: IconName, label: &'static str| {
+                    h_flex()
+                        .id(id)
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .text_size(px(13.))
+                        .hover(move |s| s.bg(accent))
+                        .child(Icon::new(icon).xsmall().text_color(muted))
+                        .child(label)
+                };
+                v_flex()
+                    .w(px(180.))
+                    .p_1()
+                    .gap_0p5()
+                    .child(
+                        menu_item("open-zed", IconName::ExternalLink, "Open in Zed").on_click(
+                            move |_, window, cx| {
+                                open_in_zed(&zed_cwd, window, cx);
+                                p1.update(cx, |st, cx| st.dismiss(window, cx));
+                            },
+                        ),
+                    )
+                    .child(
+                        menu_item("open-finder", IconName::FolderOpen, "Open in Finder").on_click(
+                            move |_, window, cx| {
+                                open_in_finder(&finder_cwd, window, cx);
+                                p2.update(cx, |st, cx| st.dismiss(window, cx));
+                            },
+                        ),
+                    )
+                    .child(
+                        menu_item("copy-path", IconName::Copy, "Copy path").on_click(
+                            move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_cwd.display().to_string(),
+                                ));
+                                p3.update(cx, |st, cx| st.dismiss(window, cx));
+                            },
+                        ),
+                    )
+                    .into_any_element()
+            });
+
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .items_center()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(border)
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .id("open-main")
+                    .h_full()
+                    .px_2()
+                    .gap_1p5()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .child(
+                        Icon::new(IconName::ExternalLink)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child("Open")
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        open_in_zed(&main_cwd, window, cx);
+                    })),
+            )
+            .child(div().w_px().h(px(16.)).bg(border))
+            .child(chevron)
             .into_any_element()
     }
 
@@ -781,19 +912,21 @@ impl Render for ChatView {
                     active.timeline.entries.clone(),
                     active.timeline.turns.clone(),
                     active.meta.cwd.clone(),
+                    active.draft,
                 )
             })
         };
 
         let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
 
-        let Some((title, entries, turns, cwd)) = active else {
+        let Some((title, entries, turns, cwd, is_draft)) = active else {
             return root
-                .child(self.render_header(None, window, cx))
+                .child(self.render_header(None, false, None, window, cx))
                 .child(self.render_empty_state(cx));
         };
 
-        let header = self.render_header(Some(title), window, cx);
+        let title = if is_draft { None } else { Some(title) };
+        let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
         let terminal_open = self.app_state.read(cx).terminal_panel_open();
         let terminal_height = self
             .app_state
@@ -885,6 +1018,23 @@ fn chevron(open: bool) -> IconName {
         IconName::ChevronDown
     } else {
         IconName::ChevronRight
+    }
+}
+
+/// Launch `zed <cwd>` detached; surface a notification if the CLI is missing.
+fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
+    if std::process::Command::new("zed").arg(cwd).spawn().is_err() {
+        window.push_notification(
+            Notification::error("Zed CLI not found (install via Zed → Install CLI)"),
+            cx,
+        );
+    }
+}
+
+/// Reveal `cwd` in Finder via `open <cwd>` (macOS); notify on failure.
+fn open_in_finder(cwd: &Path, window: &mut Window, cx: &mut App) {
+    if std::process::Command::new("open").arg(cwd).spawn().is_err() {
+        window.push_notification(Notification::error("Failed to open Finder"), cx);
     }
 }
 

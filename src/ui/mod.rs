@@ -8,8 +8,8 @@ mod terminal_drawer;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, Styled as _, Subscription, Window, actions,
-    div, prelude::FluentBuilder as _, px,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Render, Styled as _,
+    Subscription, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Root, h_flex,
@@ -53,8 +53,14 @@ pub(crate) fn window_drag_area(
     }))
     .on_mouse_down(
         MouseButton::Left,
-        window.listener_for(&state, |state, _, _, _| {
-            state.should_move = true;
+        window.listener_for(&state, |state, event: &MouseDownEvent, window, _| {
+            // Double-click zooms/maximizes the window like a native titlebar.
+            if event.click_count >= 2 {
+                state.should_move = false;
+                window.titlebar_double_click();
+            } else {
+                state.should_move = true;
+            }
         }),
     )
     .on_mouse_up(
@@ -86,21 +92,16 @@ pub struct AppShell {
 
 impl AppShell {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let initial_title = app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .map(|active| active.meta.title.as_str())
-            .unwrap_or("tcode");
-        window.set_window_title(initial_title);
-        let subscription = cx.observe_in(&app_state, window, |_, state, window, cx| {
-            let title = state
-                .read(cx)
-                .active
-                .as_ref()
-                .map(|active| active.meta.title.as_str())
-                .unwrap_or("tcode");
-            window.set_window_title(title);
+        let window_title = |state: &AppState| -> String {
+            match state.active.as_ref() {
+                Some(active) if active.draft => "New thread".to_string(),
+                Some(active) => active.meta.title.clone(),
+                None => "tcode".to_string(),
+            }
+        };
+        window.set_window_title(&window_title(app_state.read(cx)));
+        let subscription = cx.observe_in(&app_state, window, move |_, state, window, cx| {
+            window.set_window_title(&window_title(state.read(cx)));
             cx.notify();
         });
         Self {
