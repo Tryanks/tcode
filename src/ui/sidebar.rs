@@ -1,18 +1,21 @@
 use std::collections::HashSet;
 
 use gpui::{
-    Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions,
-    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathPromptOptions, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
+    input::{Input, InputEvent, InputState},
+    menu::ContextMenuExt as _,
     scroll::ScrollableElement as _,
     v_flex,
 };
+use serde::Deserialize;
 
 use crate::app::{AppState, ProjectGroup};
 use crate::store::{SessionMeta, now_secs};
@@ -28,10 +31,40 @@ const TRAFFIC_LIGHT_INSET: f32 = 8.;
 /// Max threads shown per project group before the "Show more" row.
 const THREADS_COLLAPSED_LIMIT: usize = 6;
 
+// Thread-row context-menu actions (each carries the target session id, so a
+// single set of handlers on the sidebar root serves every row).
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadRename(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadMarkUnread(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadCopyPath(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadCopyId(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadArchive(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadDelete(String);
+
+/// In-progress inline rename of a thread row.
+struct RenameState {
+    session_id: String,
+    input: Entity<InputState>,
+    _sub: Subscription,
+}
+
 pub struct SessionsSidebar {
     app_state: Entity<AppState>,
     /// Project ids whose thread list is expanded past the collapsed limit.
     expanded_groups: HashSet<String>,
+    /// The thread currently being renamed inline, if any.
+    renaming: Option<RenameState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -41,6 +74,7 @@ impl SessionsSidebar {
         Self {
             app_state,
             expanded_groups: HashSet::new(),
+            renaming: None,
             _subscriptions: subscriptions,
         }
     }
@@ -80,12 +114,190 @@ impl SessionsSidebar {
         cx.notify();
     }
 
+    // -- context-menu action handlers ---------------------------------------
+
+    fn on_rename(&mut self, action: &ThreadRename, window: &mut Window, cx: &mut Context<Self>) {
+        let session_id = action.0.clone();
+        let title = self
+            .app_state
+            .read(cx)
+            .sessions
+            .iter()
+            .find(|m| m.id == session_id)
+            .map(|m| m.title.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx));
+        input.update(cx, |state, cx| {
+            state.set_value(&title, window, cx);
+            state.focus(window, cx);
+        });
+        let sub = cx.subscribe_in(&input, window, |this, _input, event, window, cx| match event {
+            InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
+            InputEvent::Blur => this.cancel_rename(cx),
+            _ => {}
+        });
+        self.renaming = Some(RenameState {
+            session_id,
+            input,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = self.renaming.take() {
+            let value = state.input.read(cx).value().to_string();
+            self.app_state.update(cx, |app, cx| {
+                app.rename_session(&state.session_id, &value, cx);
+            });
+            cx.notify();
+        }
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn on_mark_unread(
+        &mut self,
+        action: &ThreadMarkUnread,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = action.0.clone();
+        self.app_state
+            .update(cx, |app, cx| app.mark_session_unread(&id, cx));
+    }
+
+    fn on_copy_path(
+        &mut self,
+        action: &ThreadCopyPath,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(meta) = self
+            .app_state
+            .read(cx)
+            .sessions
+            .iter()
+            .find(|m| m.id == action.0)
+        {
+            let path = meta.cwd.to_string_lossy().into_owned();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
+        }
+    }
+
+    fn on_copy_id(&mut self, action: &ThreadCopyId, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(action.0.clone()));
+    }
+
+    fn on_archive(&mut self, action: &ThreadArchive, window: &mut Window, cx: &mut Context<Self>) {
+        let id = action.0.clone();
+        let title = self
+            .app_state
+            .read(cx)
+            .sessions
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.title.clone())
+            .unwrap_or_default();
+        self.archive_thread(&id, &title, window, cx);
+    }
+
+    fn on_delete(&mut self, action: &ThreadDelete, window: &mut Window, cx: &mut Context<Self>) {
+        let id = action.0.clone();
+        let title = self
+            .app_state
+            .read(cx)
+            .sessions
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.title.clone())
+            .unwrap_or_default();
+        self.delete_thread(&id, &title, window, cx);
+    }
+
+    /// Archive a thread, honoring the delete-confirmation setting. Blocked while
+    /// the turn runs (`archive_session` no-ops then; the caller's tooltip warns).
+    fn archive_thread(
+        &mut self,
+        session_id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_state = self.app_state.clone();
+        if app_state.read(cx).turn_running_for(session_id) {
+            return;
+        }
+        let session_id = session_id.to_string();
+        if app_state.read(cx).settings.skip_delete_confirmation {
+            app_state.update(cx, |state, cx| state.archive_session(&session_id, cx));
+            return;
+        }
+        let title = title.to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_state = app_state.clone();
+            let session_id = session_id.clone();
+            alert
+                .title(rust_i18n::t!("sidebar.archive_title"))
+                .description(rust_i18n::t!("sidebar.archive_description", title = title))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(rust_i18n::t!("sidebar.archive_action"))
+                        .cancel_text(rust_i18n::t!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    app_state.update(cx, |state, cx| state.archive_session(&session_id, cx));
+                    true
+                })
+        });
+    }
+
+    /// Permanently delete a thread: an optional confirm, then (when it orphans a
+    /// worktree) a second "remove the worktree too?" prompt.
+    fn delete_thread(
+        &mut self,
+        session_id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_state = self.app_state.clone();
+        let session_id = session_id.to_string();
+        let skip = app_state.read(cx).settings.skip_delete_confirmation;
+        if skip {
+            proceed_delete(app_state, session_id, window, cx);
+            return;
+        }
+        let title = title.to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_state = app_state.clone();
+            let session_id = session_id.clone();
+            alert
+                .title(rust_i18n::t!("sidebar.delete_title", title = title.clone()))
+                .description(rust_i18n::t!("sidebar.delete_description"))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(rust_i18n::t!("sidebar.delete_action"))
+                        .cancel_text(rust_i18n::t!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, window, cx| {
+                    proceed_delete(app_state.clone(), session_id.clone(), window, cx);
+                    true
+                })
+        });
+    }
+
     // -- rendering ----------------------------------------------------------
 
     fn render_app_row(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The window has no separate titlebar: this row hosts the traffic
-        // lights (native, top-left) plus branding, and doubles as the drag
-        // handle for the sidebar side of the window top.
         window_drag_area(
             "sidebar-app-row-drag",
             h_flex()
@@ -230,6 +442,7 @@ impl SessionsSidebar {
     ) -> impl IntoElement + use<> {
         let project_id = group.project.id.clone();
         let collapsed = self.app_state.read(cx).is_project_collapsed(&project_id);
+        let has_unread = self.app_state.read(cx).project_has_unread(&project_id);
         let group_key = format!("group-{project_id}");
 
         let expanded = self.expanded_groups.contains(&project_id);
@@ -287,6 +500,21 @@ impl SessionsSidebar {
                         .text_color(cx.theme().sidebar_foreground)
                         .child(group.project.name.clone()),
                 )
+                // Unread dot when any child thread is unread (hidden on hover so
+                // the "+" can take the slot).
+                .when(has_unread, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .group_hover(group_key.clone(), |s| s.invisible())
+                            .child(
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(cx.theme().primary),
+                            ),
+                    )
+                })
                 .child(
                     div()
                         .invisible()
@@ -346,13 +574,23 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let session_id = meta.id.clone();
-        let delete_session_id = meta.id.clone();
-        let session_title = meta.title.clone();
-        let app_state = self.app_state.clone();
         let row_key = format!("thread-{session_id}");
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
+        let unread = self.app_state.read(cx).session_unread(&session_id);
+        let is_worktree = meta.worktree.is_some();
 
-        h_flex()
+        // Inline rename takes over the whole row's content area.
+        let renaming = self
+            .renaming
+            .as_ref()
+            .filter(|r| r.session_id == session_id)
+            .map(|r| r.input.clone());
+
+        // Menu-builder captures.
+        let menu_id = session_id.clone();
+        let menu_running = working;
+
+        let row = h_flex()
             .id(gpui::SharedString::from(format!("thread-row-{session_id}")))
             .group(row_key.clone())
             .h(px(30.))
@@ -364,11 +602,14 @@ impl SessionsSidebar {
             .cursor_pointer()
             .when(is_active, |s| s.bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener({
                 let session_id = session_id.clone();
-                this.app_state.update(cx, |state, cx| {
-                    state.select_session(&session_id, cx);
-                });
+                move |this, _, _, cx| {
+                    let session_id = session_id.clone();
+                    this.app_state.update(cx, |state, cx| {
+                        state.select_session(&session_id, cx);
+                    });
+                }
             }))
             .when(working, |row| {
                 row.child(
@@ -384,6 +625,33 @@ impl SessionsSidebar {
                                 .child(rust_i18n::t!("sidebar.working")),
                         ),
                 )
+            });
+
+        // Row body: rename input, or the (unread dot + worktree glyph + title).
+        let row = if let Some(input) = renaming {
+            row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&input).small()),
+            )
+        } else {
+            row.when(unread && !working, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(cx.theme().primary),
+                )
+            })
+            .when(is_worktree, |row| {
+                row.child(
+                    Icon::empty()
+                        .path("icons/git-branch.svg")
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
             })
             .child(
                 div()
@@ -397,6 +665,8 @@ impl SessionsSidebar {
             )
             .when(!working, |row| {
                 // Right slot: relative time, replaced by an archive button on hover.
+                let title = meta.title.clone();
+                let archive_id = session_id.clone();
                 row.child(
                     div()
                         .relative()
@@ -431,51 +701,47 @@ impl SessionsSidebar {
                                                 .text_color(cx.theme().muted_foreground),
                                         )
                                         .tooltip(rust_i18n::t!("sidebar.archive"))
-                                        .on_click(move |_, window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
-                                            let app_state = app_state.clone();
-                                            let session_id = delete_session_id.clone();
-                                            let title = session_title.clone();
-                                            // "Delete confirmation" off → archive immediately.
-                                            if app_state.read(cx).settings.skip_delete_confirmation
-                                            {
-                                                app_state.update(cx, |state, cx| {
-                                                    state.delete_session(&session_id, cx);
-                                                });
-                                                return;
-                                            }
-                                            window.open_alert_dialog(cx, move |alert, _, _| {
-                                                let app_state = app_state.clone();
-                                                let session_id = session_id.clone();
-                                                alert
-                                                    .title(rust_i18n::t!("sidebar.archive_title"))
-                                                    .description(rust_i18n::t!(
-                                                        "sidebar.archive_description",
-                                                        title = title
-                                                    ))
-                                                    .button_props(
-                                                        DialogButtonProps::default()
-                                                            .ok_variant(ButtonVariant::Danger)
-                                                            .ok_text(rust_i18n::t!(
-                                                                "sidebar.archive_action"
-                                                            ))
-                                                            .cancel_text(rust_i18n::t!(
-                                                                "settings.cancel"
-                                                            ))
-                                                            .show_cancel(true),
-                                                    )
-                                                    .on_ok(move |_, _, cx| {
-                                                        app_state.update(cx, |state, cx| {
-                                                            state.delete_session(&session_id, cx);
-                                                        });
-                                                        true
-                                                    })
-                                            });
-                                        }),
+                                            this.archive_thread(&archive_id, &title, window, cx);
+                                        })),
                                 ),
                         ),
                 )
             })
+        };
+
+        row.context_menu(move |menu, _window, _cx| {
+            let id = menu_id.clone();
+            menu.menu(
+                rust_i18n::t!("sidebar.ctx_rename").into_owned(),
+                Box::new(ThreadRename(id.clone())),
+            )
+            .menu(
+                rust_i18n::t!("sidebar.ctx_mark_unread").into_owned(),
+                Box::new(ThreadMarkUnread(id.clone())),
+            )
+            .separator()
+            .menu(
+                rust_i18n::t!("sidebar.ctx_copy_path").into_owned(),
+                Box::new(ThreadCopyPath(id.clone())),
+            )
+            .menu(
+                rust_i18n::t!("sidebar.ctx_copy_id").into_owned(),
+                Box::new(ThreadCopyId(id.clone())),
+            )
+            .separator()
+            .menu_with_enable(
+                rust_i18n::t!("sidebar.archive").into_owned(),
+                Box::new(ThreadArchive(id.clone())),
+                !menu_running,
+            )
+            .menu(
+                rust_i18n::t!("sidebar.ctx_delete").into_owned(),
+                Box::new(ThreadDelete(id.clone())),
+            )
+        })
+        .into_any_element()
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -519,8 +785,6 @@ impl SessionsSidebar {
             .items_center()
             .pb_2()
             .gap_2()
-            // Clear the native traffic lights (top-left) and keep the top of the
-            // strip draggable like the expanded app row.
             .child(window_drag_area(
                 "sidebar-collapsed-drag",
                 h_flex().h(px(52.)).w_full().flex_none(),
@@ -554,6 +818,57 @@ impl SessionsSidebar {
                     })),
             )
     }
+}
+
+/// Delete `session_id`, first asking whether to also remove an orphaned worktree.
+fn proceed_delete(
+    app_state: Entity<AppState>,
+    session_id: String,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    let orphan = app_state
+        .read(cx)
+        .worktree_orphaned_by_delete(&session_id);
+    let Some(worktree) = orphan else {
+        app_state.update(cx, |state, cx| {
+            state.delete_session(&session_id, false, cx);
+        });
+        return;
+    };
+    let path = worktree.root_project_path.display().to_string();
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let app_state = app_state.clone();
+        let session_id = session_id.clone();
+        let remove = session_id.clone();
+        let keep = session_id.clone();
+        let app_remove = app_state.clone();
+        alert
+            .title(rust_i18n::t!("sidebar.worktree_cleanup_title"))
+            .description(rust_i18n::t!(
+                "sidebar.worktree_cleanup_description",
+                path = path.clone()
+            ))
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_variant(ButtonVariant::Danger)
+                    .ok_text(rust_i18n::t!("sidebar.worktree_cleanup_remove"))
+                    .cancel_text(rust_i18n::t!("sidebar.worktree_cleanup_keep"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, _, cx| {
+                app_remove.update(cx, |state, cx| {
+                    state.delete_session(&remove, true, cx);
+                });
+                true
+            })
+            .on_cancel(move |_, _, cx| {
+                app_state.update(cx, |state, cx| {
+                    state.delete_session(&keep, false, cx);
+                });
+                true
+            })
+    });
 }
 
 impl Render for SessionsSidebar {
@@ -602,6 +917,12 @@ impl Render for SessionsSidebar {
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .text_color(cx.theme().sidebar_foreground)
+            .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_mark_unread))
+            .on_action(cx.listener(Self::on_copy_path))
+            .on_action(cx.listener(Self::on_copy_id))
+            .on_action(cx.listener(Self::on_archive))
+            .on_action(cx.listener(Self::on_delete))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
             .child(self.render_projects_header(cx))

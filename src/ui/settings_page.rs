@@ -14,7 +14,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme,
     ThemeMode as ComponentThemeMode, WindowExt as _,
-    button::{Button, ButtonVariant},
+    button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
     popover::Popover,
@@ -41,6 +41,7 @@ const CONTENT_MAX_WIDTH: f32 = 720.;
 enum Section {
     General,
     Providers,
+    Archived,
 }
 
 /// Apply a settings theme mode to the live window (shared with the palette's
@@ -220,6 +221,14 @@ impl SettingsPage {
                         rust_i18n::t!("settings.providers").into_owned().into(),
                         Section::Providers,
                         cx,
+                    ))
+                    .child(nav_item(
+                        self,
+                        "settings-nav-archived",
+                        IconName::Inbox,
+                        rust_i18n::t!("settings.archived").into_owned().into(),
+                        Section::Archived,
+                        cx,
                     )),
             )
             .child(
@@ -316,6 +325,7 @@ impl SettingsPage {
         let column = match self.section {
             Section::General => self.render_general(cx),
             Section::Providers => self.render_providers(cx),
+            Section::Archived => self.render_archived(cx),
         };
         div()
             .id("settings-scroll")
@@ -380,6 +390,129 @@ impl SettingsPage {
                 &self.codex_input.clone(),
                 cx,
             ))
+    }
+
+    /// Archived Threads: archived sessions grouped by project, each with
+    /// Unarchive + Delete-permanently controls (Group A).
+    fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let groups = self.app_state.read(cx).archived_groups();
+        let mut col =
+            v_flex().child(self.section_label(rust_i18n::t!("settings.archived_section"), cx));
+
+        if groups.is_empty() {
+            return col.child(
+                v_flex()
+                    .py(px(48.))
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_medium()
+                            .child(rust_i18n::t!("settings.archived_empty")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("settings.archived_empty_desc")),
+                    ),
+            );
+        }
+
+        let now = crate::store::now_secs();
+        let mut key = 0usize;
+        for group in groups {
+            col = col.child(
+                div()
+                    .pt_4()
+                    .pb_1()
+                    .text_size(px(12.))
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child(group.project.name.clone()),
+            );
+            for meta in &group.sessions {
+                key += 1;
+                let archived_at = meta.archived_at.unwrap_or(meta.created_at);
+                let archived_when = humanize_ago(now.saturating_sub(archived_at));
+                let created_when = humanize_ago(now.saturating_sub(meta.created_at));
+                let desc = format!(
+                    "{} · {}",
+                    rust_i18n::t!("settings.archived_at", when = archived_when),
+                    rust_i18n::t!("settings.archived_created", when = created_when),
+                );
+                let id_unarchive = meta.id.clone();
+                let id_delete = meta.id.clone();
+                let title = meta.title.clone();
+                col = col.child(
+                    self.row_frame(cx)
+                        .child(self.row_labels(meta.title.clone(), desc, cx))
+                        .child(
+                            gpui_component::h_flex()
+                                .flex_none()
+                                .gap_2()
+                                .child(
+                                    Button::new(("unarchive", key))
+                                        .outline()
+                                        .small()
+                                        .label(rust_i18n::t!("settings.unarchive"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            let id = id_unarchive.clone();
+                                            this.app_state.update(cx, |state, cx| {
+                                                state.unarchive_session(&id, cx);
+                                            });
+                                        })),
+                                )
+                                .child(
+                                    Button::new(("delete-perm", key))
+                                        .danger()
+                                        .small()
+                                        .label(rust_i18n::t!("settings.delete_permanently"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.confirm_delete_archived(
+                                                &id_delete, &title, window, cx,
+                                            );
+                                        })),
+                                ),
+                        ),
+                );
+            }
+        }
+        col
+    }
+
+    /// Confirm and permanently delete an archived thread.
+    fn confirm_delete_archived(
+        &self,
+        session_id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_state = self.app_state.clone();
+        let session_id = session_id.to_string();
+        let title = title.to_string();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_state = app_state.clone();
+            let session_id = session_id.clone();
+            alert
+                .title(rust_i18n::t!("sidebar.delete_title", title = title.clone()))
+                .description(rust_i18n::t!("sidebar.delete_description"))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(rust_i18n::t!("settings.delete_permanently"))
+                        .cancel_text(rust_i18n::t!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    app_state.update(cx, |state, cx| {
+                        state.delete_session(&session_id, false, cx);
+                    });
+                    true
+                })
+        });
     }
 
     // -- row builders -------------------------------------------------------
@@ -656,4 +789,17 @@ fn path_string(path: &Option<std::path::PathBuf>) -> String {
 fn optional_path(input: &Entity<InputState>, cx: &App) -> Option<std::path::PathBuf> {
     let value = input.read(cx).value().trim().to_string();
     (!value.is_empty()).then(|| value.into())
+}
+
+/// Compact relative-time humanizer for the Archived Threads list.
+fn humanize_ago(secs: u64) -> String {
+    if secs < 60 {
+        rust_i18n::t!("time.just_now").into_owned()
+    } else if secs < 3600 {
+        rust_i18n::t!("time.minutes_ago", count = secs / 60).into_owned()
+    } else if secs < 86_400 {
+        rust_i18n::t!("time.hours_ago", count = secs / 3600).into_owned()
+    } else {
+        rust_i18n::t!("time.days_ago", count = secs / 86_400).into_owned()
+    }
 }
