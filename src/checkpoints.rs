@@ -191,6 +191,10 @@ mod tests {
         // A deterministic identity so `commit` works in a bare CI environment.
         run_git(&root, &["config", "user.name", "tcode"], None).unwrap();
         run_git(&root, &["config", "user.email", "tcode@localhost"], None).unwrap();
+        // Windows' git defaults to core.autocrlf=true, which would restore
+        // "original\n" as "original\r\n". That is correct git behavior; pin it
+        // off here so these fixtures assert checkpoint semantics, not line endings.
+        run_git(&root, &["config", "core.autocrlf", "false"], None).unwrap();
         root
     }
 
