@@ -986,6 +986,11 @@ impl Actor {
                 log::debug!("codex: ignoring ACP-only SetOption {id}");
                 Ok(())
             }
+            SessionCommand::Steer { .. } => {
+                // TODO(steering): real implementation lands with the queue/steer task.
+                log::debug!("codex: Steer not wired yet");
+                Ok(())
+            }
             SessionCommand::Shutdown => Ok(()),
         }
     }

@@ -504,6 +504,11 @@ async fn handle_command(
             log::debug!("claude: ignoring ACP-only SetOption {id}");
             Flow::Continue
         }
+        SessionCommand::Steer { .. } => {
+            // TODO(steering): real implementation lands with the queue/steer task.
+            log::debug!("claude: Steer not wired yet");
+            Flow::Continue
+        }
         SessionCommand::Shutdown => {
             // Settle any pending AskUserQuestion prompts: deny the callback with
             // T3's cancel message and emit an empty resolution (S2 §4.2).
