@@ -79,6 +79,8 @@ pub enum EntryContent {
     Error {
         message: String,
     },
+    /// The provider compacted its context window (a "Context compacted" work-log row).
+    ContextCompacted,
 }
 
 /// A proposed plan captured this session (Codex plan item / Claude
@@ -280,6 +282,18 @@ impl Timeline {
                     turn,
                 });
             }
+            AgentEvent::ContextCompacted => {
+                let turn = self.ensure_turn(ts);
+                let id = self.synthetic_id("compacted");
+                self.entries.push(TimelineEntry {
+                    id,
+                    content: EntryContent::ContextCompacted,
+                    ts,
+                    turn,
+                });
+            }
+            // Session metadata (composer menus) — not folded into the timeline.
+            AgentEvent::ProviderCommands { .. } => {}
         }
     }
 

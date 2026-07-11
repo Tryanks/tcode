@@ -62,12 +62,28 @@ git init /tmp/smoke && cargo run -- --smoke "claude|/tmp/smoke|Reply with exactl
 # headless probes for the provider layer:
 cargo run -p agent --example probe -- claude "Reply with exactly: PONG" /tmp/smoke
 cargo run -p agent --example interrupt_probe -- claude /tmp/smoke
+
+# image attachments end-to-end (sends a real PNG; prints the assistant's reply):
+cargo run -p agent --example image_probe -- claude /tmp/blue.png \
+    "What color is this image? Reply with just the color." /tmp/smoke
+
+# mid-turn steering (Claude): starts a long turn, then steers it while it runs
+cargo run -p agent --example steer_probe -- claude /tmp/smoke
 ```
 
 Debug launch flags: `--open-latest`, `--open-diff`, `--open-settings`,
 `--open-palette`, and `--open-draft <project-id-or-name>` (opens a new-thread
-draft for that project). See `docs/DESIGN.md` for the UI spec and the visual
-verification protocol.
+draft for that project).
+
+Screenshot-only flags: `--debug-compose <text>` (seed the composer, driving the
+`@`/`/`/`$` menus), `--debug-image <path>` (attach a pending image),
+`--debug-cwd <path>` (deterministic draft), `--debug-live` (start the opened
+session's provider without sending a turn), `--debug-send <text>` (send one turn
+on launch without exiting — Claude only reports its slash commands after the
+first message), `--debug-palette <query>` (seed the ⌘K query; `>` restricts to
+actions), and `--debug-settings-section <general|providers|archived>`.
+
+See `docs/DESIGN.md` for the UI spec and the visual verification protocol.
 
 ## Architecture
 
