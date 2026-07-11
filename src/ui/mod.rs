@@ -94,7 +94,7 @@ impl AppShell {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let window_title = |state: &AppState| -> String {
             match state.active.as_ref() {
-                Some(active) if active.draft => "New thread".to_string(),
+                Some(active) if active.draft => rust_i18n::t!("chat.new_thread").into_owned(),
                 Some(active) => active.meta.title.clone(),
                 None => "tcode".to_string(),
             }
@@ -122,7 +122,8 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.app_state.update(cx, |state, cx| state.toggle_palette(cx));
+        self.app_state
+            .update(cx, |state, cx| state.toggle_palette(cx));
     }
 }
 

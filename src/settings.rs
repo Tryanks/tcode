@@ -5,6 +5,30 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub const LANGUAGE_ENGLISH: &str = "en";
+pub const LANGUAGE_SIMPLIFIED_CHINESE: &str = "zh-CN";
+
+/// Resolve the persisted override against the current system preference and
+/// update rust-i18n's process-global locale (shared by gpui-component).
+pub fn apply_locale(override_locale: Option<&str>) {
+    let locale = match override_locale {
+        Some(LANGUAGE_ENGLISH) => LANGUAGE_ENGLISH,
+        Some(LANGUAGE_SIMPLIFIED_CHINESE) => LANGUAGE_SIMPLIFIED_CHINESE,
+        _ => {
+            if sys_locale::get_locale()
+                .as_deref()
+                .is_some_and(|locale| locale.to_ascii_lowercase().starts_with("zh"))
+            {
+                LANGUAGE_SIMPLIFIED_CHINESE
+            } else {
+                LANGUAGE_ENGLISH
+            }
+        }
+    };
+    rust_i18n::set_locale(locale);
+    gpui_component::set_locale(locale);
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeMode {
@@ -36,16 +60,19 @@ impl ProjectSort {
     }
 
     /// A human label for the sort button's tooltip.
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            ProjectSort::RecentActivity => "Recent activity",
-            ProjectSort::NameAsc => "Name A-Z",
+            ProjectSort::RecentActivity => rust_i18n::t!("sidebar.sort_recent").into_owned(),
+            ProjectSort::NameAsc => rust_i18n::t!("sidebar.sort_name").into_owned(),
         }
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
+    /// None follows the operating-system language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_binary: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +145,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let store = SettingsStore::new(root.clone());
         let expected = Settings {
+            language: Some(LANGUAGE_SIMPLIFIED_CHINESE.into()),
             codex_binary: Some(PathBuf::from("/opt/tools/codex")),
             claude_binary: Some(PathBuf::from("/opt/tools/claude")),
             theme_mode: ThemeMode::Dark,
@@ -145,8 +173,8 @@ mod tests {
 
     #[test]
     fn project_sort_persists() {
-        let root = std::env::temp_dir()
-            .join(format!("tcode-settings-sort-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-sort-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let store = SettingsStore::new(root.clone());
         let settings = Settings {
@@ -162,8 +190,8 @@ mod tests {
     fn loads_legacy_file_without_new_fields() {
         // A settings.json written before the word-wrap / delete-confirmation
         // fields existed must still parse, with the new fields defaulting off.
-        let root = std::env::temp_dir()
-            .join(format!("tcode-settings-legacy-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-legacy-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let store = SettingsStore::new(root.clone());
         fs::write(

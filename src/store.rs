@@ -457,10 +457,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         // Legacy bare event replays with no timestamp.
         assert_eq!(events[0].ts, None);
-        assert!(matches!(
-            events[0].event,
-            AgentEvent::TurnStarted { .. }
-        ));
+        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
         // Envelope carries the recorded timestamp.
         assert_eq!(events[1].ts, Some(1_730_000_000_000));
         assert!(matches!(
@@ -478,7 +475,13 @@ mod tests {
         let store = SessionStore::open_at(temp_root()).unwrap();
         let id = "roundtrip";
         store
-            .append_event(id, 42, &AgentEvent::TurnStarted { turn_id: "t".into() })
+            .append_event(
+                id,
+                42,
+                &AgentEvent::TurnStarted {
+                    turn_id: "t".into(),
+                },
+            )
             .unwrap();
         let raw = fs::read_to_string(store.events_path(id)).unwrap();
         assert!(raw.contains("\"ts\":42"));

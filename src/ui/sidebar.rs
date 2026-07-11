@@ -53,7 +53,7 @@ impl SessionsSidebar {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Select project directory".into()),
+            prompt: Some(rust_i18n::t!("sidebar.select_project").into_owned().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(mut paths))) = rx.await {
@@ -98,37 +98,37 @@ impl SessionsSidebar {
             window,
             cx,
         )
-            .child(
-                Button::new("collapse-sidebar")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::PanelLeft)
-                    .tooltip("Collapse sidebar")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| {
-                            state.toggle_sidebar_collapsed(cx);
-                        });
-                    })),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font_bold()
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child("tcode"),
-            )
-            .child(
-                div()
-                    .px_1()
-                    .py(px(1.))
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .text_color(cx.theme().muted_foreground)
-                    .text_size(px(9.))
-                    .font_semibold()
-                    .child("DEV"),
-            )
+        .child(
+            Button::new("collapse-sidebar")
+                .ghost()
+                .small()
+                .compact()
+                .icon(IconName::PanelLeft)
+                .tooltip(rust_i18n::t!("sidebar.collapse"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.app_state.update(cx, |state, cx| {
+                        state.toggle_sidebar_collapsed(cx);
+                    });
+                })),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_bold()
+                .text_color(cx.theme().sidebar_foreground)
+                .child("tcode"),
+        )
+        .child(
+            div()
+                .px_1()
+                .py(px(1.))
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .text_color(cx.theme().muted_foreground)
+                .text_size(px(9.))
+                .font_semibold()
+                .child("DEV"),
+        )
     }
 
     fn render_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -143,7 +143,8 @@ impl SessionsSidebar {
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().sidebar_accent))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state.update(cx, |state, cx| state.open_palette(cx));
+                    this.app_state
+                        .update(cx, |state, cx| state.open_palette(cx));
                 }))
                 .child(
                     Icon::new(IconName::Search)
@@ -155,7 +156,7 @@ impl SessionsSidebar {
                         .flex_1()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Search"),
+                        .child(rust_i18n::t!("sidebar.search")),
                 )
                 .child(
                     div()
@@ -184,7 +185,7 @@ impl SessionsSidebar {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child("PROJECTS"),
+                    .child(rust_i18n::t!("sidebar.projects")),
             )
             .child(
                 h_flex()
@@ -195,7 +196,7 @@ impl SessionsSidebar {
                             .xsmall()
                             .compact()
                             .icon(IconName::SortAscending)
-                            .tooltip(format!("Sort: {sort_label}"))
+                            .tooltip(rust_i18n::t!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.app_state.update(cx, |state, cx| {
                                     state.cycle_project_sort(cx);
@@ -212,7 +213,7 @@ impl SessionsSidebar {
                                     .path("icons/folder-plus.svg")
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .tooltip("Add project")
+                            .tooltip(rust_i18n::t!("sidebar.add_project"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
@@ -245,7 +246,9 @@ impl SessionsSidebar {
 
         let mut container = v_flex().flex_none().child(
             h_flex()
-                .id(gpui::SharedString::from(format!("project-header-{project_id}")))
+                .id(gpui::SharedString::from(format!(
+                    "project-header-{project_id}"
+                )))
                 .group(group_key.clone())
                 .h(px(30.))
                 .items_center()
@@ -294,7 +297,7 @@ impl SessionsSidebar {
                                 .xsmall()
                                 .compact()
                                 .icon(IconName::Plus)
-                                .tooltip("Create new thread")
+                                .tooltip(rust_i18n::t!("sidebar.create_thread"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     let cwd = plus_cwd.clone();
@@ -327,7 +330,7 @@ impl SessionsSidebar {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_group(&toggle_id, cx);
                         }))
-                        .child("Show more"),
+                        .child(rust_i18n::t!("sidebar.show_more")),
                 );
             }
         }
@@ -373,17 +376,12 @@ impl SessionsSidebar {
                         .flex_none()
                         .items_center()
                         .gap_1()
-                        .child(
-                            div()
-                                .size(px(6.))
-                                .rounded_full()
-                                .bg(cx.theme().success),
-                        )
+                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
                         .child(
                             div()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().success)
-                                .child("Working"),
+                                .child(rust_i18n::t!("sidebar.working")),
                         ),
                 )
             })
@@ -432,14 +430,15 @@ impl SessionsSidebar {
                                                 .path("icons/archive.svg")
                                                 .text_color(cx.theme().muted_foreground),
                                         )
-                                        .tooltip("Archive thread")
+                                        .tooltip(rust_i18n::t!("sidebar.archive"))
                                         .on_click(move |_, window, cx| {
                                             cx.stop_propagation();
                                             let app_state = app_state.clone();
                                             let session_id = delete_session_id.clone();
                                             let title = session_title.clone();
                                             // "Delete confirmation" off → archive immediately.
-                                            if app_state.read(cx).settings.skip_delete_confirmation {
+                                            if app_state.read(cx).settings.skip_delete_confirmation
+                                            {
                                                 app_state.update(cx, |state, cx| {
                                                     state.delete_session(&session_id, cx);
                                                 });
@@ -449,15 +448,20 @@ impl SessionsSidebar {
                                                 let app_state = app_state.clone();
                                                 let session_id = session_id.clone();
                                                 alert
-                                                    .title("Archive thread?")
-                                                    .description(format!(
-                                                        "Archive \"{title}\" and its saved conversation? This cannot be undone."
+                                                    .title(rust_i18n::t!("sidebar.archive_title"))
+                                                    .description(rust_i18n::t!(
+                                                        "sidebar.archive_description",
+                                                        title = title
                                                     ))
                                                     .button_props(
                                                         DialogButtonProps::default()
                                                             .ok_variant(ButtonVariant::Danger)
-                                                            .ok_text("Archive")
-                                                            .cancel_text("Cancel")
+                                                            .ok_text(rust_i18n::t!(
+                                                                "sidebar.archive_action"
+                                                            ))
+                                                            .cancel_text(rust_i18n::t!(
+                                                                "settings.cancel"
+                                                            ))
                                                             .show_cancel(true),
                                                     )
                                                     .on_ok(move |_, _, cx| {
@@ -489,7 +493,8 @@ impl SessionsSidebar {
                     .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().sidebar_accent))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| state.open_settings(cx));
+                        this.app_state
+                            .update(cx, |state, cx| state.open_settings(cx));
                     }))
                     .child(
                         Icon::new(IconName::Settings)
@@ -500,7 +505,7 @@ impl SessionsSidebar {
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().sidebar_foreground)
-                            .child("Settings"),
+                            .child(rust_i18n::t!("settings.title")),
                     ),
             )
     }
@@ -528,7 +533,7 @@ impl SessionsSidebar {
                     .small()
                     .compact()
                     .icon(IconName::PanelLeftOpen)
-                    .tooltip("Expand sidebar")
+                    .tooltip(rust_i18n::t!("sidebar.expand"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.app_state.update(cx, |state, cx| {
                             state.toggle_sidebar_collapsed(cx);
@@ -542,9 +547,10 @@ impl SessionsSidebar {
                     .small()
                     .compact()
                     .icon(IconName::Settings)
-                    .tooltip("Settings")
+                    .tooltip(rust_i18n::t!("settings.title"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| state.open_settings(cx));
+                        this.app_state
+                            .update(cx, |state, cx| state.open_settings(cx));
                     })),
             )
     }
@@ -582,16 +588,11 @@ impl Render for SessionsSidebar {
                     .py_3()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No projects yet. Add one to start."),
+                    .child(rust_i18n::t!("sidebar.empty")),
             );
         } else {
             for group in &groups {
-                list = list.child(self.render_group(
-                    group,
-                    active_id.as_deref(),
-                    turn_running,
-                    cx,
-                ));
+                list = list.child(self.render_group(group, active_id.as_deref(), turn_running, cx));
             }
         }
 
@@ -616,12 +617,12 @@ impl Render for SessionsSidebar {
 
 fn humanize_ago(secs: u64) -> String {
     if secs < 60 {
-        "just now".to_string()
+        rust_i18n::t!("time.just_now").into_owned()
     } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
+        rust_i18n::t!("time.minutes_ago", count = secs / 60).into_owned()
     } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
+        rust_i18n::t!("time.hours_ago", count = secs / 3600).into_owned()
     } else {
-        format!("{}d ago", secs / 86_400)
+        rust_i18n::t!("time.days_ago", count = secs / 86_400).into_owned()
     }
 }

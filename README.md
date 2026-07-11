@@ -1,5 +1,7 @@
 # tcode
 
+The interface follows the system language by default and supports English and Simplified Chinese in Settings.
+
 A native macOS GUI for coding-agent CLIs, built with [GPUI](https://gpui.rs)
 and [gpui-component](https://github.com/longbridge/gpui-component). tcode is a
 thin desktop layer over the agents you already use — it spawns the official
