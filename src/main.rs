@@ -62,6 +62,12 @@ fn main() {
         .skip_while(|arg| arg != "--debug-image")
         .nth(1)
         .map(std::path::PathBuf::from);
+    let debug_diff_scope = std::env::args()
+        .skip_while(|arg| arg != "--debug-diff-scope")
+        .nth(1);
+    let debug_diff_split = std::env::args().any(|arg| arg == "--debug-diff-split");
+    let debug_diff_scope_menu = std::env::args().any(|arg| arg == "--debug-diff-scope-menu");
+    let debug_review_comment = std::env::args().any(|arg| arg == "--debug-review-comment");
     // Screenshot-only: open a deterministic draft rooted at this cwd (so the
     // `@`-mention walk lists a known repo, independent of the newest session).
     let debug_cwd = std::env::args()
@@ -116,14 +122,27 @@ fn main() {
             // real, up-to-date models (the persisted cache serves until then).
             app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
             {
-                let (dc, di) = (debug_compose.clone(), debug_image.clone());
+                let (dc, di, ds) = (
+                    debug_compose.clone(),
+                    debug_image.clone(),
+                    debug_diff_scope.clone(),
+                );
                 app_state.update(cx, |state, _| {
                     state.debug_compose = dc;
                     state.debug_image = di;
+                    state.debug_diff_scope = ds;
+                    state.debug_diff_split = debug_diff_split;
+                    state.debug_diff_scope_menu = debug_diff_scope_menu;
+                    state.debug_review_comment = debug_review_comment;
                 });
             }
-            let debug_seed =
-                debug_compose.is_some() || debug_image.is_some() || debug_cwd.is_some();
+            let debug_seed = debug_compose.is_some()
+                || debug_image.is_some()
+                || debug_cwd.is_some()
+                || debug_diff_scope.is_some()
+                || debug_diff_split
+                || debug_diff_scope_menu
+                || debug_review_comment;
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
