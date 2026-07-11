@@ -33,6 +33,11 @@ fn main() {
     // Hidden debug/dev flag: open the right panel on the Plan/Tasks tab (pairs
     // with --open-latest; lets the plan panel be screenshotted headlessly).
     let open_plan = std::env::args().any(|arg| arg == "--open-plan");
+    // Hidden dev flag: open the Preview tab and navigate to the given URL (pairs
+    // with --open-latest) so the preview browser can be screenshotted headlessly.
+    let open_preview = std::env::args()
+        .skip_while(|arg| arg != "--open-preview")
+        .nth(1);
     // Hidden debug/dev flag: open the active session's terminal drawer. This
     // implies --open-latest so it is useful by itself for screenshot checks.
     let open_terminal = std::env::args().any(|arg| arg == "--open-terminal");
@@ -67,6 +72,15 @@ fn main() {
             Theme::global_mut(cx).apply_config(&dark);
 
             let app_state = cx.new(|_| app::AppState::new(store));
+            // Bring up the in-process preview MCP server and register it with the
+            // app so every spawned agent session can drive the embedded browser.
+            match preview_mcp::start() {
+                Ok(server) => {
+                    log::info!("preview MCP server listening at {}", server.url);
+                    app_state.update(cx, |state, _| state.attach_preview_mcp(server));
+                }
+                Err(err) => log::warn!("preview MCP server failed to start: {err}"),
+            }
             // Refresh the model catalogs in the background so the picker shows
             // real, up-to-date models (the persisted cache serves until then).
             app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
@@ -137,11 +151,15 @@ fn main() {
                     || open_settings
                     || open_palette
                     || open_plan
+                    || open_preview.is_some()
                     || open_draft.is_some()
                 {
                     let _ = app_state.update(cx, |state, cx| {
-                        if open_latest || open_terminal || open_plan {
+                        if open_latest || open_terminal || open_plan || open_preview.is_some() {
                             state.open_latest_session(cx);
+                        }
+                        if let Some(url) = &open_preview {
+                            state.open_preview_with_url(url.clone(), cx);
                         }
                         if open_diff {
                             state.open_diff_panel(cx);

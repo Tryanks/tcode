@@ -72,7 +72,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 /// down. Mirrors T3's `requestAllCodexModels` (initial `{}`, then `{cursor}`
 /// until `nextCursor` is empty).
 pub async fn list_models(binary_path: Option<PathBuf>) -> Result<Vec<ModelSpec>, AgentError> {
-    let (mut child, mut stdin, lines) = spawn_server(binary_path.as_deref())?;
+    let (mut child, mut stdin, lines) = spawn_server(binary_path.as_deref(), &[])?;
     let result = collect_models(&mut stdin, &lines).await;
     stop_child(&mut child, stdin);
     result
@@ -376,7 +376,13 @@ async fn run_actor(
     events: Sender<AgentEvent>,
     ready: Sender<Result<(), AgentError>>,
 ) {
-    let (mut child, mut stdin, lines) = match spawn_server(opts.binary_path.as_deref()) {
+    // Register the embedded preview MCP server (streamable HTTP) via a `-c`
+    // config override so the agent can drive the in-app browser.
+    let extra_args: Vec<String> = match &opts.mcp_server {
+        Some(mcp) => vec!["-c".to_string(), mcp.codex_config_override()],
+        None => Vec::new(),
+    };
+    let (mut child, mut stdin, lines) = match spawn_server(opts.binary_path.as_deref(), &extra_args) {
         Ok(parts) => parts,
         Err(err) => {
             let _ = ready.send(Err(err)).await;
@@ -488,10 +494,12 @@ async fn run_actor(
 
 fn spawn_server(
     binary_path: Option<&Path>,
+    extra_args: &[String],
 ) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>), AgentError> {
     let binary = binary_path.unwrap_or_else(|| Path::new("codex"));
     let mut child = Command::new(binary)
         .arg("app-server")
+        .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
