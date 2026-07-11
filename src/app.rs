@@ -96,6 +96,10 @@ pub struct ActiveSession {
     pub diff_open: bool,
     pub diff_expanded: bool,
     pub diff_selected_turn: Option<usize>,
+    /// Bottom terminal drawer state and its lazily-spawned per-session PTY.
+    pub terminal_open: bool,
+    pub terminal_height: f32,
+    pub terminal: Option<term::Terminal>,
     _pump: Option<Task<()>>,
 }
 
@@ -320,6 +324,60 @@ impl AppState {
         }
     }
 
+    // -- terminal drawer (per-session, in-memory) --------------------------
+
+    pub fn terminal_panel_open(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.terminal_open)
+    }
+
+    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        if self.terminal_panel_open() {
+            self.close_terminal_panel(cx);
+        } else {
+            self.open_terminal_panel(cx);
+        }
+    }
+
+    pub fn open_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.terminal.is_none() {
+            match term::Terminal::spawn(&active.meta.cwd) {
+                Ok(terminal) => active.terminal = Some(terminal),
+                Err(error) => {
+                    self.report_error(format!("failed to start terminal: {error}"), cx);
+                    return;
+                }
+            }
+        }
+        active.terminal_open = true;
+        cx.notify();
+    }
+
+    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            active.terminal_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn restart_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        match term::Terminal::spawn(&active.meta.cwd) {
+            Ok(terminal) => {
+                active.terminal = Some(terminal);
+                active.terminal_open = true;
+                cx.notify();
+            }
+            Err(error) => self.report_error(format!("failed to restart terminal: {error}"), cx),
+        }
+    }
+
     pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.diff_open = false;
@@ -442,6 +500,9 @@ impl AppState {
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
             _pump: None,
         });
         self.ensure_started(cx);
@@ -481,6 +542,9 @@ impl AppState {
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
             _pump: None,
         });
         cx.notify();
@@ -1012,6 +1076,9 @@ mod tests {
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
             _pump: None,
         });
 
@@ -1036,6 +1103,9 @@ mod tests {
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
             _pump: None,
         };
 
@@ -1071,6 +1141,9 @@ mod tests {
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
             _pump: None,
         };
 
@@ -1097,6 +1170,9 @@ mod tests {
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
             _pump: None,
         };
 
