@@ -21,10 +21,9 @@ chat:
   toggle_plan: "Toggle plan panel"
   toggle_preview: "Toggle preview browser"
   open: "Open"
-  reveal_finder: "Reveal in Finder"
+  reveal_in_file_manager: "Reveal in file manager"
   copy_path: "Copy path"
   open_zed: "Open in Zed"
-  open_finder: "Open in Finder"
   empty_title: "Pick a thread to continue"
   empty_description: "Select an existing thread or create a new one to get started."
   scroll_end: "Scroll to end"
@@ -377,7 +376,6 @@ errors:
   worktree_add: "Failed to create worktree: %{error}"
   worktree_remove: "Failed to remove worktree: %{error}"
   zed_cli_missing: "Zed CLI not found (install via Zed → Install CLI)"
-  finder_open: "Failed to open Finder"
 notice:
   switched_branch: "Switched to %{branch}"
   dirty_tree: "Working tree has uncommitted changes"
@@ -396,6 +394,7 @@ preview:
   reload: "Reload"
   scan_ports: "Scan localhost dev ports"
   open_external: "Open in system browser"
+  unsupported_linux: "Preview is not available on Linux yet."
 git:
   action:
     commit: "Commit"

@@ -190,25 +190,97 @@ pub(crate) fn resolve_binary(
         return Ok(path.to_path_buf());
     }
     // An explicit path component means "use this as given" (no PATH search).
-    if default_name.contains(std::path::MAIN_SEPARATOR) {
+    // Both separators are checked: Windows accepts `/` in paths too.
+    if default_name.contains(['/', '\\']) {
         return Ok(PathBuf::from(default_name));
     }
-    let path_var = std::env::var_os("PATH")
-        .ok_or_else(|| AgentError::Spawn(format!("`{default_name}` not found: PATH is unset")))?;
-    for dir in std::env::split_paths(&path_var) {
+    if std::env::var_os("PATH").is_none() {
+        return Err(AgentError::Spawn(format!(
+            "`{default_name}` not found: PATH is unset"
+        )));
+    }
+    find_on_path(default_name).ok_or_else(|| {
+        AgentError::Spawn(format!(
+            "`{default_name}` not found on PATH (set its path in Settings → Providers)"
+        ))
+    })
+}
+
+/// Locate `name` on the parent's `PATH`, returning its absolute path.
+///
+/// On Windows this is `PATHEXT`-aware: the provider CLIs (and npm/pnpm/bun) are
+/// installed as `claude.cmd` / `codex.exe` shims and *never* exist under their
+/// bare name, so a plain `dir.join(name)` probe finds nothing. Each PATH entry
+/// is tried with every `PATHEXT` extension, in `PATHEXT` order, before the bare
+/// name. Elsewhere it is the classic "first executable file on PATH" search.
+///
+/// Shared with the app crate (`crate::process`), which routes every bare-name
+/// spawn (npm, pnpm, bun, git, …) through it on Windows.
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    find_in_dirs(
+        std::env::split_paths(&path_var),
+        name,
+        &path_extensions(),
+        is_executable,
+    )
+}
+
+/// The executable extensions to try for a bare name: `PATHEXT` on Windows
+/// (falling back to its documented default), and nothing anywhere else.
+fn path_extensions() -> Vec<String> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .map(str::trim)
+        .filter(|ext| !ext.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The file names to probe for `name` in one PATH directory, in priority order.
+///
+/// A name that already carries an extension (`claude.cmd`, `codex.exe`) is used
+/// as given. A bare name gets each `pathext` entry appended, with the
+/// extensionless name tried last (so a Unix-style extensionless binary dropped
+/// on a Windows PATH still resolves). With an empty `pathext` (every non-Windows
+/// target) this is just `[name]`.
+fn candidate_names(name: &str, pathext: &[String]) -> Vec<String> {
+    if std::path::Path::new(name).extension().is_some() {
+        return vec![name.to_string()];
+    }
+    let mut names: Vec<String> = pathext.iter().map(|ext| format!("{name}{ext}")).collect();
+    names.push(name.to_string());
+    names
+}
+
+/// The PATH walk itself, parameterized on the directories, the extension list
+/// and the "is this executable" predicate so both platform branches are testable
+/// from any host (see `resolve_binary_tests`).
+fn find_in_dirs(
+    dirs: impl IntoIterator<Item = PathBuf>,
+    name: &str,
+    pathext: &[String],
+    is_exec: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    let candidates = candidate_names(name, pathext);
+    for dir in dirs {
         // Skip unexpanded/relative entries — they are meaningless to us and
         // would resolve against the child's cwd.
         if !dir.is_absolute() {
             continue;
         }
-        let candidate = dir.join(default_name);
-        if is_executable(&candidate) {
-            return Ok(candidate);
+        for candidate in &candidates {
+            let path = dir.join(candidate);
+            if is_exec(&path) {
+                return Some(path);
+            }
         }
     }
-    Err(AgentError::Spawn(format!(
-        "`{default_name}` not found on PATH (set its path in Settings → Providers)"
-    )))
+    None
 }
 
 #[cfg(unix)]
@@ -219,6 +291,8 @@ fn is_executable(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Windows has no exec bit: a regular file whose name matched a `PATHEXT`
+/// candidate *is* the executable.
 #[cfg(not(unix))]
 fn is_executable(path: &std::path::Path) -> bool {
     path.is_file()
@@ -735,6 +809,26 @@ mod launch_env_tests {
 mod resolve_binary_tests {
     use super::*;
 
+    /// The documented Windows default, used when `PATHEXT` is unset.
+    fn windows_pathext() -> Vec<String> {
+        [".COM", ".EXE", ".BAT", ".CMD"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Windows' "is executable": a regular file (no exec bit exists there).
+    fn is_file(path: &std::path::Path) -> bool {
+        path.is_file()
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tcode-resolve-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn explicit_path_is_used_as_given() {
         let explicit = std::path::Path::new("/opt/custom/claude");
@@ -742,18 +836,133 @@ mod resolve_binary_tests {
         assert_eq!(resolved, explicit);
     }
 
+    /// A `default_name` that carries a path component is passed through — with
+    /// either separator, since Windows accepts `/` as well as `\`.
     #[test]
-    fn bare_name_resolves_to_an_absolute_path_on_path() {
-        // `sh` is on PATH everywhere we run; the point is that the result is
-        // absolute, so a child that sets its own cwd can still exec it.
-        let resolved = resolve_binary(None, "sh").expect("sh must resolve");
-        assert!(resolved.is_absolute(), "resolved {resolved:?} is not absolute");
-        assert!(is_executable(&resolved));
+    fn a_name_with_any_separator_skips_the_path_search() {
+        assert_eq!(
+            resolve_binary(None, "/opt/custom/claude").unwrap(),
+            PathBuf::from("/opt/custom/claude")
+        );
+        assert_eq!(
+            resolve_binary(None, r"C:\tools\claude.cmd").unwrap(),
+            PathBuf::from(r"C:\tools\claude.cmd")
+        );
+        assert_eq!(
+            resolve_binary(None, "C:/tools/claude.cmd").unwrap(),
+            PathBuf::from("C:/tools/claude.cmd")
+        );
     }
 
     #[test]
     fn missing_binary_reports_a_helpful_error() {
         let err = resolve_binary(None, "tcode-definitely-not-a-real-binary").unwrap_err();
         assert!(matches!(err, AgentError::Spawn(msg) if msg.contains("not found on PATH")));
+    }
+
+    // ---- the Unix branch ----------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_resolves_an_extensionless_file_with_the_exec_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir("unix");
+        let bin = dir.join("foo");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A same-named non-executable file must not win.
+        std::fs::write(dir.join("bar"), "not executable").unwrap();
+
+        assert_eq!(
+            find_in_dirs([dir.clone()], "foo", &[], is_executable),
+            Some(bin)
+        );
+        assert_eq!(find_in_dirs([dir], "bar", &[], is_executable), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_bare_name_resolves_to_an_absolute_path_on_path() {
+        // `sh` is on PATH everywhere we run; the point is that the result is
+        // absolute, so a child that sets its own cwd can still exec it.
+        let resolved = resolve_binary(None, "sh").expect("sh must resolve");
+        assert!(
+            resolved.is_absolute(),
+            "resolved {resolved:?} is not absolute"
+        );
+        assert!(is_executable(&resolved));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_tries_only_the_bare_name() {
+        assert_eq!(path_extensions(), Vec::<String>::new());
+        assert_eq!(candidate_names("claude", &[]), vec!["claude".to_string()]);
+    }
+
+    // ---- the Windows branch (exercised from any host) ------------------------
+
+    /// The resolved file name, lowercased: the extension comes from `PATHEXT`
+    /// (conventionally uppercase: `.EXE`), while the file on disk is usually
+    /// lowercase. Both Windows and macOS resolve that case-insensitively, so the
+    /// assertions below compare names case-insensitively too.
+    fn resolved_name(path: Option<PathBuf>) -> Option<String> {
+        Some(path?.file_name()?.to_string_lossy().to_lowercase())
+    }
+
+    /// The real Windows shape: `claude` only ever exists as `claude.cmd`, so the
+    /// bare join the old resolver did found nothing.
+    #[test]
+    fn windows_resolves_a_cmd_shim_for_a_bare_name() {
+        let dir = temp_dir("win-cmd");
+        std::fs::write(dir.join("claude.cmd"), "@echo off\n").unwrap();
+
+        let found = find_in_dirs([dir], "claude", &windows_pathext(), is_file);
+        assert_eq!(resolved_name(found), Some("claude.cmd".to_string()));
+    }
+
+    /// PATHEXT order decides: `.EXE` beats `.CMD` when both exist.
+    #[test]
+    fn windows_honors_pathext_order_and_falls_back_to_the_bare_name() {
+        let dir = temp_dir("win-order");
+        std::fs::write(dir.join("codex.cmd"), "").unwrap();
+        std::fs::write(dir.join("codex.exe"), "").unwrap();
+        let found = find_in_dirs([dir], "codex", &windows_pathext(), is_file);
+        assert_eq!(resolved_name(found), Some("codex.exe".to_string()));
+
+        // An extensionless file is still found — last, after every PATHEXT try.
+        let bare = temp_dir("win-bare");
+        std::fs::write(bare.join("codex"), "").unwrap();
+        let found = find_in_dirs([bare], "codex", &windows_pathext(), is_file);
+        assert_eq!(resolved_name(found), Some("codex".to_string()));
+    }
+
+    /// A name that already has an extension is used verbatim (no PATHEXT loop):
+    /// `claude.cmd` must not be probed as `claude.cmd.EXE`.
+    #[test]
+    fn windows_uses_an_explicit_extension_as_given() {
+        assert_eq!(
+            candidate_names("claude.cmd", &windows_pathext()),
+            vec!["claude.cmd".to_string()]
+        );
+        assert_eq!(
+            candidate_names("npm", &windows_pathext()),
+            vec![
+                "npm.COM".to_string(),
+                "npm.EXE".to_string(),
+                "npm.BAT".to_string(),
+                "npm.CMD".to_string(),
+                "npm".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pathext_defaults_when_unset() {
+        // On a real Windows host PATHEXT is always set, but the default must be
+        // the documented one when it is not.
+        assert!(path_extensions().iter().any(|ext| ext.eq_ignore_ascii_case(".EXE")));
+        assert!(path_extensions().iter().any(|ext| ext.eq_ignore_ascii_case(".CMD")));
     }
 }

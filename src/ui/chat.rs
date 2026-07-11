@@ -1201,7 +1201,7 @@ impl ChatView {
             )
             .content(move |_state, _window, cx| {
                 let zed_cwd = menu_cwd.clone();
-                let finder_cwd = menu_cwd.clone();
+                let reveal_cwd = menu_cwd.clone();
                 let copy_cwd = menu_cwd.clone();
                 let popover = cx.entity();
                 let p1 = popover.clone();
@@ -1241,12 +1241,14 @@ impl ChatView {
                     )
                     .child(
                         menu_item(
-                            "open-finder",
+                            "reveal-in-file-manager",
                             IconName::FolderOpen,
-                            rust_i18n::t!("chat.open_finder").into_owned().into(),
+                            rust_i18n::t!("chat.reveal_in_file_manager")
+                                .into_owned()
+                                .into(),
                         )
                         .on_click(move |_, window, cx| {
-                            open_in_finder(&finder_cwd, window, cx);
+                            reveal_in_file_manager(&reveal_cwd, cx);
                             p2.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
                     )
@@ -1536,11 +1538,10 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Reveal `cwd` in Finder via `open <cwd>` (macOS); notify on failure.
-fn open_in_finder(cwd: &Path, window: &mut Window, cx: &mut App) {
-    if crate::process::command("open").arg(cwd).spawn().is_err() {
-        window.push_notification(Notification::error(rust_i18n::t!("errors.finder_open")), cx);
-    }
+/// Reveal `cwd` in the platform's file manager (Finder / Explorer / the XDG
+/// file manager). gpui does the platform dispatch, so no shell-out is needed.
+fn reveal_in_file_manager(cwd: &Path, cx: &mut App) {
+    cx.reveal_path(cwd);
 }
 
 /// Leading icon for a Work Log activity row, keyed on the item's status.
@@ -1678,39 +1679,18 @@ fn diff_counts(added: u32, deleted: u32, cx: &Context<ChatView>) -> AnyElement {
 }
 
 /// Format a unix-ms timestamp as a local 12-hour clock, e.g. "2:39 AM".
-#[cfg(unix)]
+///
+/// `chrono::Local` reads the platform's timezone (Unix: the tz database /
+/// `localtime_r`; Windows: the OS timezone API), so this is correct on all three
+/// targets — unlike the hand-rolled `localtime_r` FFI it replaces, whose `tm`
+/// layout was UB on 32-bit and which fell back to a UTC clock on Windows.
 fn format_local_time(unix_ms: u64) -> String {
-    #[repr(C)]
-    struct CTm {
-        tm_sec: i32,
-        tm_min: i32,
-        tm_hour: i32,
-        tm_mday: i32,
-        tm_mon: i32,
-        tm_year: i32,
-        tm_wday: i32,
-        tm_yday: i32,
-        tm_isdst: i32,
-        tm_gmtoff: i64,
-        tm_zone: *const i8,
-    }
-    unsafe extern "C" {
-        fn localtime_r(time: *const i64, result: *mut CTm) -> *mut CTm;
-    }
+    use chrono::{Local, TimeZone as _, Timelike as _};
 
-    let secs = (unix_ms / 1000) as i64;
-    let mut tm: CTm = unsafe { std::mem::zeroed() };
-    if unsafe { localtime_r(&secs, &mut tm) }.is_null() {
+    let Some(local) = Local.timestamp_millis_opt(unix_ms as i64).single() else {
         return String::new();
-    }
-    twelve_hour(tm.tm_hour, tm.tm_min)
-}
-
-#[cfg(not(unix))]
-fn format_local_time(unix_ms: u64) -> String {
-    // Fallback: UTC clock (no timezone database without extra deps).
-    let total_min = (unix_ms / 60_000) % (24 * 60);
-    twelve_hour((total_min / 60) as i32, (total_min % 60) as i32)
+    };
+    twelve_hour(local.hour() as i32, local.minute() as i32)
 }
 
 fn twelve_hour(hour24: i32, minute: i32) -> String {

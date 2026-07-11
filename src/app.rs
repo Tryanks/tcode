@@ -591,6 +591,10 @@ impl AppState {
     }
 
     /// Take the queued preview URL, if any (consumed by `PreviewPanel`).
+    ///
+    /// Linux has no preview WebView to navigate (see `ui::preview_panel`), so
+    /// nothing consumes this there — the queue is simply never drained.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub fn take_pending_preview_url(&mut self) -> Option<String> {
         self.pending_preview_url.take()
     }
@@ -3496,17 +3500,14 @@ fn default_program(provider: ProviderKind) -> String {
     }
 }
 
-/// A minimal PATH lookup for `name` (first executable match). Used to locate the
+/// A PATH lookup for `name` (first executable match). Used to locate the
 /// provider binary for install-source detection when no override is set.
+///
+/// Delegates to the agent crate's resolver so it stays `PATHEXT`-aware: on
+/// Windows the binary is `claude.cmd` / `codex.exe`, never the bare name, and
+/// install-source detection needs the real file name to classify it.
 fn which_in_path(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    agent::find_on_path(name)
 }
 
 /// Spawn `program args…` and return its trimmed stdout, or `None` on any

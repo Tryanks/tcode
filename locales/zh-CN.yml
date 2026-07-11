@@ -21,10 +21,9 @@ chat:
   toggle_plan: "切换计划面板"
   toggle_preview: "切换预览浏览器"
   open: "打开"
-  reveal_finder: "在访达中显示"
+  reveal_in_file_manager: "在文件管理器中显示"
   copy_path: "复制路径"
   open_zed: "在 Zed 中打开"
-  open_finder: "在访达中打开"
   empty_title: "选择一个对话以继续"
   empty_description: "选择已有对话或新建一个对话以开始。"
   scroll_end: "滚动到底部"
@@ -372,7 +371,6 @@ errors:
   worktree_add: "创建工作树失败：%{error}"
   worktree_remove: "移除工作树失败：%{error}"
   zed_cli_missing: "找不到 Zed CLI（请通过 Zed → Install CLI 安装）"
-  finder_open: "无法打开访达"
 notice:
   switched_branch: "已切换到 %{branch}"
   dirty_tree: "工作树中有未提交的更改"
@@ -391,6 +389,7 @@ preview:
   reload: "重新加载"
   scan_ports: "扫描本地开发端口"
   open_external: "在系统浏览器中打开"
+  unsupported_linux: "预览功能暂不支持 Linux。"
 git:
   action:
     commit: "提交"

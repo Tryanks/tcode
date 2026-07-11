@@ -125,8 +125,11 @@ fn main() {
         .run(move |cx| {
             gpui_component::init(cx);
 
-            // Global ⌘K opens/closes the command palette (handled by AppShell).
-            cx.bind_keys([KeyBinding::new("cmd-k", ui::TogglePalette, None)]);
+            // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
+            // AppShell). `secondary` is gpui's platform modifier: command on
+            // macOS, control on Windows/Linux — where a literal `cmd-` binding
+            // would mean the Super/Win key, which the OS intercepts.
+            cx.bind_keys([KeyBinding::new("secondary-k", ui::TogglePalette, None)]);
 
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(assets::DM_SANS)])
@@ -213,11 +216,17 @@ fn main() {
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
                 window_min_size: Some(size(px(900.), px(600.))),
-                // Seamless titlebar: transparent, with the traffic lights nudged
-                // down to sit vertically centered in the 52px top strip.
+                // macOS: seamless titlebar — transparent, with the traffic lights
+                // nudged down to sit vertically centered in the 52px top strip.
+                //
+                // Windows/Linux: a transparent titlebar means a *client-decorated*
+                // window, and we draw no minimize/maximize/close controls of our
+                // own (traffic_light_position is a macOS no-op) — the window would
+                // have no way to be closed from the chrome. So there we keep the
+                // native system titlebar; our top strip simply sits below it.
                 titlebar: Some(TitlebarOptions {
                     title: None,
-                    appears_transparent: true,
+                    appears_transparent: cfg!(target_os = "macos"),
                     traffic_light_position: Some(point(px(12.), px(18.))),
                 }),
                 ..Default::default()

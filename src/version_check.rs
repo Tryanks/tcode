@@ -41,17 +41,31 @@ pub enum InstallSource {
 ///
 /// Order matters: Bun and pnpm both keep global bins in their own directories,
 /// so they are matched before the generic npm/node patterns.
+///
+/// Backslashes are normalized to `/` first, so the Windows shapes
+/// (`C:\Users\x\AppData\Roaming\npm\claude.cmd`,
+/// `C:\Users\x\AppData\Local\pnpm\codex.cmd`) match the same patterns. Homebrew
+/// does not exist on Windows, so [`InstallSource::Brew`] is unreachable there —
+/// which matters because a Windows user directory can legitimately contain
+/// "homebrew" (e.g. a checkout) and must not be misdetected.
 pub fn detect_install_source(path: &Path) -> InstallSource {
-    let p = path.to_string_lossy();
-    if p.contains("/Cellar/")
-        || p.contains("/opt/homebrew/")
-        || p.contains("/homebrew/")
-        || p.contains("/usr/local/Cellar/")
-    {
+    let raw = path.to_string_lossy();
+    let p = raw.replace('\\', "/");
+    let brew = cfg!(not(windows))
+        && (p.contains("/Cellar/")
+            || p.contains("/opt/homebrew/")
+            || p.contains("/homebrew/")
+            || p.contains("/usr/local/Cellar/"));
+    if brew {
         InstallSource::Brew
     } else if p.contains("/.bun/") || p.contains("/bun/install/") {
         InstallSource::Bun
-    } else if p.contains("/.pnpm") || p.contains("/pnpm/") || p.contains("/Library/pnpm") {
+    } else if p.contains("/.pnpm")
+        || p.contains("/pnpm/")
+        || p.contains("/Library/pnpm")
+        // Windows: pnpm's global bin dir (PNPM_HOME).
+        || p.contains("/AppData/Local/pnpm")
+    {
         InstallSource::Pnpm
     } else if p.contains("/node_modules/")
         || p.contains("/.nvm/")
@@ -59,6 +73,10 @@ pub fn detect_install_source(path: &Path) -> InstallSource {
         || p.contains("/fnm")
         || p.contains("/npm/")
         || p.contains("/lib/node_modules/")
+        // Windows: the global npm prefix (%APPDATA%\npm) — also caught by the
+        // `/npm/` pattern above, but spelled out because it is *the* npm shape
+        // there and must survive any future narrowing of that pattern.
+        || p.contains("/AppData/Roaming/npm")
     {
         InstallSource::Npm
     } else if p.contains("/.local/") {
@@ -199,6 +217,52 @@ mod tests {
             detect_install_source(&PathBuf::from("/usr/bin/codex")),
             InstallSource::Unknown
         );
+    }
+
+    /// The Windows path shapes: backslash-separated, `.cmd`/`.exe` shims under
+    /// %APPDATA% / %LOCALAPPDATA% / the user profile.
+    #[test]
+    fn detects_install_source_from_windows_paths() {
+        assert_eq!(
+            detect_install_source(&PathBuf::from(
+                r"C:\Users\x\AppData\Roaming\npm\claude.cmd"
+            )),
+            InstallSource::Npm
+        );
+        assert_eq!(
+            detect_install_source(&PathBuf::from(
+                r"C:\Users\x\AppData\Local\pnpm\codex.cmd"
+            )),
+            InstallSource::Pnpm
+        );
+        assert_eq!(
+            detect_install_source(&PathBuf::from(r"C:\Users\x\.bun\bin\claude.exe")),
+            InstallSource::Bun
+        );
+        assert_eq!(
+            detect_install_source(&PathBuf::from(
+                r"C:\Program Files\nodejs\node_modules\npm\bin\codex.cmd"
+            )),
+            InstallSource::Npm
+        );
+        assert_eq!(
+            detect_install_source(&PathBuf::from(r"C:\tools\codex.exe")),
+            InstallSource::Unknown
+        );
+    }
+
+    /// Homebrew cannot be an install source on Windows: a user path that merely
+    /// *contains* "homebrew" (a checkout, a WSL mount) must not be misread. On
+    /// Unix the very same string is a real Homebrew install.
+    #[test]
+    fn brew_is_unreachable_on_windows() {
+        let path = PathBuf::from("/opt/homebrew/bin/codex");
+        let expected = if cfg!(windows) {
+            InstallSource::Unknown
+        } else {
+            InstallSource::Brew
+        };
+        assert_eq!(detect_install_source(&path), expected);
     }
 
     /// The exact command table from the T3 Providers spec (§3), for every
