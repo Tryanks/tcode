@@ -8,8 +8,9 @@ use std::rc::Rc;
 use std::path::PathBuf;
 
 use agent::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, FileChangeKind, InteractionMode,
-    ModelSpec, OptionDescriptor, ProviderKind, TokenUsage, UserInputQuestion,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, Attachment, FileChangeKind,
+    InteractionMode, ModelSpec, OptionDescriptor, ProviderCommandKind, ProviderKind, TokenUsage,
+    UserInputQuestion,
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
@@ -205,9 +206,7 @@ enum MenuIcon {
     File,
     Folder,
     Command,
-    /// Skill rows — wired for when provider skills become reachable (the agent
-    /// crate is frozen; no skills are listed today, see the reported gap).
-    #[allow(dead_code)]
+    /// Skill rows (`$`), populated from the provider's skills feed.
     Skill,
 }
 
@@ -216,13 +215,9 @@ enum MenuIcon {
 enum MenuAccept {
     /// Insert the serialized `[basename](path)` mention for this relative path.
     InsertPath(String),
-    /// Insert `$<name> ` for this skill. Wired for when provider skills become
-    /// reachable (agent crate frozen — see reported contract gap).
-    #[allow(dead_code)]
+    /// Insert `$<name> ` for this provider skill.
     InsertSkill(String),
-    /// Insert `/<name> ` for this provider command. Wired for when provider
-    /// slash commands become reachable (agent crate frozen — see reported gap).
-    #[allow(dead_code)]
+    /// Insert `/<name> ` for this provider slash command.
     InsertCommand(String),
     /// Strip the `/model` command and open the model picker.
     OpenModelPicker,
@@ -365,6 +360,9 @@ impl Composer {
         });
 
         let subscriptions = vec![
+            // Re-render when app state changes (e.g. the provider's commands /
+            // skills feed arrives after session start, feeding the `/`+`$` menus).
+            cx.observe(&app_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
                 match event {
                     InputEvent::PressEnter { shift: false, .. } => {
@@ -508,14 +506,14 @@ impl Composer {
         let text = append_review_comments_to_prompt(&text, &review_comments);
         input.update(cx, |state, cx| state.set_value("", window, cx));
         // Image-only messages get T3's exact synthetic text. Attachments are
-        // persisted on disk (see `add_image_*`); the send wire currently carries
-        // only text, so the images themselves are not transmitted (contract gap:
-        // `SessionCommand::SendTurn` needs an `attachments` field — see report).
+        // persisted on disk (see `add_image_*`); read + base64-encode each one
+        // so the provider receives real image content blocks (Group A).
         let sent_text = if text.is_empty() && has_images {
             attachments::image_only_message().to_string()
         } else {
             text
         };
+        let attachments = self.collect_attachments();
         self.pending_images.clear();
         self.image_preview = None;
         self.app_state.update(cx, |state, cx| {
@@ -523,7 +521,7 @@ impl Composer {
                 active.terminal_workspace.contexts.clear();
             }
             state.clear_review_comments();
-            state.send_turn(sent_text, cx)
+            state.send_turn(sent_text, attachments, cx)
         });
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
@@ -585,7 +583,7 @@ impl Composer {
 
     /// Build the rows for the currently active trigger menu, plus its empty-state
     /// copy and whether it is still loading.
-    fn menu_rows(&self, _cx: &App) -> (Vec<MenuRow>, String, bool) {
+    fn menu_rows(&self, cx: &App) -> (Vec<MenuRow>, String, bool) {
         let Some(trigger) = self.active_trigger.as_ref() else {
             return (Vec::new(), String::new(), false);
         };
@@ -617,10 +615,26 @@ impl Composer {
                 )
             }
             TriggerKind::Skill => {
-                // Provider skills are not reachable without an agent-crate change
-                // (frozen). List nothing; show T3's exact empty copy.
+                // Provider-native skills (Claude `skills` / Codex `skills/list`),
+                // filtered by the `$`-query prefix.
+                let query = trigger.query.to_lowercase();
+                let rows = self
+                    .app_state
+                    .read(cx)
+                    .active_provider_commands()
+                    .iter()
+                    .filter(|c| c.kind == ProviderCommandKind::Skill)
+                    .filter(|c| query.is_empty() || c.name.to_lowercase().contains(&query))
+                    .take(MENU_ROW_CAP)
+                    .map(|c| MenuRow {
+                        primary: format!("${}", c.name),
+                        secondary: c.description.clone().unwrap_or_default(),
+                        icon: MenuIcon::Skill,
+                        accept: MenuAccept::InsertSkill(c.name.clone()),
+                    })
+                    .collect();
                 (
-                    Vec::new(),
+                    rows,
                     rust_i18n::t!("composer.no_skills").into_owned(),
                     false,
                 )
@@ -644,7 +658,7 @@ impl Composer {
                         MenuAccept::SetMode(InteractionMode::Build),
                     ),
                 ];
-                let rows = builtins
+                let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
                     .filter(|(name, _, _)| query.is_empty() || name.starts_with(&query))
                     .map(|(name, desc, accept)| MenuRow {
@@ -654,13 +668,24 @@ impl Composer {
                         accept,
                     })
                     .collect();
-                // Provider-native commands (Claude slash commands / Codex skills)
-                // require an agent-crate change (frozen); none are listed here.
-                (
-                    rows,
-                    rust_i18n::t!("composer.no_command").into_owned(),
-                    false,
-                )
+                // Provider-native slash commands (Claude `slash_commands`), shown
+                // after the built-in group, filtered by the `/`-query prefix.
+                rows.extend(
+                    self.app_state
+                        .read(cx)
+                        .active_provider_commands()
+                        .iter()
+                        .filter(|c| c.kind == ProviderCommandKind::Command)
+                        .filter(|c| query.is_empty() || c.name.to_lowercase().starts_with(&query))
+                        .take(MENU_ROW_CAP)
+                        .map(|c| MenuRow {
+                            primary: format!("/{}", c.name),
+                            secondary: c.description.clone().unwrap_or_default(),
+                            icon: MenuIcon::Command,
+                            accept: MenuAccept::InsertCommand(c.name.clone()),
+                        }),
+                );
+                (rows, rust_i18n::t!("composer.no_command").into_owned(), false)
             }
         }
     }
@@ -796,6 +821,22 @@ impl Composer {
                 ClipboardEntry::String(_) => {}
             }
         }
+    }
+
+    /// Read each pending image off disk and base64-encode it into a wire
+    /// [`Attachment`]. Unreadable files are skipped (they were validated on add).
+    fn collect_attachments(&self) -> Vec<Attachment> {
+        use base64::Engine as _;
+        self.pending_images
+            .iter()
+            .filter_map(|image| {
+                let bytes = std::fs::read(&image.path).ok()?;
+                Some(Attachment {
+                    media_type: mime_from_path(&image.path),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                })
+            })
+            .collect()
     }
 
     fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1303,11 +1344,52 @@ impl Composer {
 
     fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
         if turn_running {
-            return h_flex()
+            // Group B: Claude accepts mid-turn user messages as steering, so its
+            // send button stays active while a turn runs (Codex keeps queueing
+            // with only the Stop control).
+            let steers = self
+                .app_state
+                .read(cx)
+                .active
+                .as_ref()
+                .is_some_and(|a| a.meta.provider == ProviderKind::ClaudeCode);
+            let has_text = !self.input.read(cx).value().trim().is_empty();
+            let mut row = h_flex()
                 .gap_2()
                 .items_center()
                 // Blue activity spinner.
-                .child(Spinner::new().small().color(cx.theme().primary))
+                .child(Spinner::new().small().color(cx.theme().primary));
+            if steers {
+                let (bg, fg) = if has_text {
+                    (cx.theme().primary, cx.theme().primary_foreground)
+                } else {
+                    (cx.theme().muted, cx.theme().muted_foreground)
+                };
+                row = row.child(
+                    div()
+                        .id("steer-turn")
+                        .size(px(36.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(bg)
+                        .cursor_pointer()
+                        .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(
+                                rust_i18n::t!("composer.steer_tooltip").into_owned(),
+                            )
+                            .build(window, cx)
+                        })
+                        .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let input = this.input.clone();
+                            this.submit(&input, window, cx);
+                        })),
+                );
+            }
+            return row
                 // Circular red-orange stop button.
                 .child(
                     div()
@@ -3192,10 +3274,25 @@ fn render_context_meter_pane(
         );
     }
 
+    // "Total processed" — the session-cumulative token count, when the provider
+    // reports it (Codex running total; Claude accumulated per-turn usage).
+    if let Some(total) = usage.and_then(|u| u.total_processed_tokens) {
+        pane = pane.child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .gap_3()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(rust_i18n::t!("composer.total_processed"))
+                .child(context_meter::format_tokens(Some(total))),
+        );
+    }
+
     // "<Provider> automatically compacts its context when needed." Both Claude
     // and Codex compact automatically, so the line always shows for a known
-    // provider (our TokenUsage carries no explicit `compactsAutomatically` flag
-    // — see the reported contract gap; no `Total processed` field either).
+    // provider.
     if let Some(provider) = provider {
         pane = pane.child(
             div()

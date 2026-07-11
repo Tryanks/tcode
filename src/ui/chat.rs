@@ -242,6 +242,7 @@ impl ChatView {
                         | EntryContent::Tool { .. }
                         | EntryContent::Reasoning { .. }
                         | EntryContent::Error { .. }
+                        | EntryContent::ContextCompacted
                 )
             })
             .collect();
@@ -590,6 +591,17 @@ impl ChatView {
                     .child(one_line(message))
                     .into_any_element();
                 (IconName::TriangleAlert, summary)
+            }
+            EntryContent::ContextCompacted => {
+                let summary = div()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(muted)
+                    .child(rust_i18n::t!("chat.context_compacted"))
+                    .into_any_element();
+                (IconName::Minimize, summary)
             }
             // Non-activity content never reaches this row.
             _ => (IconName::Check, div().into_any_element()),

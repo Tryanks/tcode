@@ -22,6 +22,8 @@ use gpui_component::{
     v_flex,
 };
 
+use agent::ProviderKind;
+
 use crate::app::AppState;
 use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
 use crate::ui::window_drag_area;
@@ -92,11 +94,17 @@ impl SettingsPage {
             }),
         ];
 
+        // Screenshot-only: `--debug-settings-section` opens a specific section.
+        let section = match app_state.read(cx).debug_settings_section.as_deref() {
+            Some("providers") => Section::Providers,
+            Some("archived") => Section::Archived,
+            _ => Section::General,
+        };
         Self {
             app_state,
             claude_input,
             codex_input,
-            section: Section::General,
+            section,
             _subscriptions: subscriptions,
         }
     }
@@ -373,6 +381,15 @@ impl SettingsPage {
                 cx,
                 |s, checked| s.auto_open_task_panel = checked,
             ))
+            .child(self.toggle_row(
+                "provider-update-checks",
+                rust_i18n::t!("settings.provider_updates.title"),
+                rust_i18n::t!("settings.provider_updates.description"),
+                // Stored inverted: checked = enabled.
+                !settings.provider_update_checks_disabled,
+                cx,
+                |s, checked| s.provider_update_checks_disabled = !checked,
+            ))
     }
 
     fn render_providers(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -390,6 +407,72 @@ impl SettingsPage {
                 &self.codex_input.clone(),
                 cx,
             ))
+            .child(self.version_row(ProviderKind::ClaudeCode, cx))
+            .child(self.version_row(ProviderKind::Codex, cx))
+    }
+
+    /// A per-provider version/update row (Group C): shows the installed version
+    /// and up-to-date / update-available status, a "Check now" button, and an
+    /// "Update" button when a newer version is available.
+    fn version_row(&self, provider: ProviderKind, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.app_state.read(cx);
+        let status = state.provider_version(provider).cloned().unwrap_or_default();
+        let muted = cx.theme().muted_foreground;
+
+        let title = format!("{} version", provider.display_name());
+        let detail = if status.checking {
+            rust_i18n::t!("settings.checking").into_owned()
+        } else if status.update_available {
+            let latest = status.latest.clone().unwrap_or_default();
+            rust_i18n::t!("settings.update_available_row", version = latest).into_owned()
+        } else if let Some(installed) = &status.installed {
+            rust_i18n::t!("settings.up_to_date", version = installed).into_owned()
+        } else {
+            rust_i18n::t!("settings.version_unknown").into_owned()
+        };
+
+        let mut controls = gpui_component::h_flex().gap_2().items_center();
+        if status.update_available {
+            controls = controls.child(
+                Button::new("provider-update")
+                    .primary()
+                    .small()
+                    .loading(status.updating)
+                    .label(rust_i18n::t!("settings.update_button"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.app_state
+                            .update(cx, |state, cx| state.update_provider(provider, cx));
+                    })),
+            );
+        }
+        controls = controls.child(
+            Button::new("provider-check-now")
+                .outline()
+                .small()
+                .label(rust_i18n::t!("settings.check_now"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.app_state
+                        .update(cx, |state, cx| state.check_provider_versions(cx));
+                })),
+        );
+
+        self.row_frame(cx)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .pr_4()
+                    .child(div().text_size(px(14.)).font_medium().child(title))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(muted)
+                            .child(detail),
+                    ),
+            )
+            .child(controls)
+            .into_any_element()
     }
 
     /// Archived Threads: archived sessions grouped by project, each with

@@ -93,6 +93,11 @@ pub struct Settings {
     /// Absent in legacy files (defaults to off).
     #[serde(default)]
     pub auto_open_task_panel: bool,
+    /// Whether the on-launch provider version check is DISABLED. Stored inverted
+    /// so the feature defaults to on (s3 §6: "Provider update checks", default
+    /// on) even for legacy settings files that lack the field.
+    #[serde(default)]
+    pub provider_update_checks_disabled: bool,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -163,6 +168,7 @@ mod tests {
             word_wrap_diffs: true,
             skip_delete_confirmation: true,
             auto_open_task_panel: true,
+            provider_update_checks_disabled: true,
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,

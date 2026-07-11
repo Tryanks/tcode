@@ -12,10 +12,11 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus, ModelSpec,
-    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderKind, ResumeCursor,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnOptions, TurnStatus, UserInputOption, UserInputQuestion,
+    Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
+    ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus, UserInputOption,
+    UserInputQuestion,
 };
 
 mod developer_instructions;
@@ -391,7 +392,7 @@ async fn run_actor(
     };
 
     let startup = initialize_and_open_thread(&opts, &mut stdin, &lines).await;
-    let (thread_id, model, next_id) = match startup {
+    let (thread_id, model, next_id, provider_commands) = match startup {
         Ok(value) => value,
         Err(err) => {
             let _ = ready.send(Err(err)).await;
@@ -430,6 +431,14 @@ async fn run_actor(
             .await;
         stop_child(&mut actor.child, actor.stdin);
         return;
+    }
+    // Feed the composer's `$`-skill menu with the session's discovered skills.
+    if !provider_commands.is_empty() {
+        actor
+            .emit(AgentEvent::ProviderCommands {
+                commands: provider_commands,
+            })
+            .await;
     }
     if ready.send(Ok(())).await.is_err() {
         stop_child(&mut actor.child, actor.stdin);
@@ -558,7 +567,7 @@ async fn initialize_and_open_thread(
     opts: &SessionOptions,
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
-) -> Result<(String, Option<String>, i64), AgentError> {
+) -> Result<(String, Option<String>, i64, Vec<ProviderCommand>), AgentError> {
     send_json(
         stdin,
         &json!({
@@ -627,7 +636,75 @@ async fn initialize_and_open_thread(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| opts.model.clone());
-    Ok((thread_id, model, 3))
+
+    // Discover the session's skills for the composer's `$` menu. Supported since
+    // codex 0.144.1 (verified live). A failure/omission is non-fatal: we log and
+    // return an empty list so sessions still start on older builds.
+    let mut next_id = 3;
+    let provider_commands = match request_codex_skills(&opts.cwd, stdin, lines, next_id).await {
+        Ok(commands) => {
+            next_id += 1;
+            commands
+        }
+        Err(err) => {
+            log::debug!("codex skills/list unavailable: {err}");
+            Vec::new()
+        }
+    };
+    Ok((thread_id, model, next_id, provider_commands))
+}
+
+/// Query `skills/list` for `cwd` and map the entries into `Skill`-kind
+/// [`ProviderCommand`]s. The response shape (verified against codex 0.144.1) is
+/// `{data: [{cwd, skills: [{name, description, interface:{…}}]}]}`.
+async fn request_codex_skills(
+    cwd: &Path,
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+    id: i64,
+) -> Result<Vec<ProviderCommand>, AgentError> {
+    send_json(
+        stdin,
+        &json!({ "id": id, "method": "skills/list", "params": { "cwds": [cwd.to_string_lossy()] } }),
+    )?;
+    let result = wait_for_response(lines, id).await?;
+    Ok(parse_codex_skills(&result))
+}
+
+/// Flatten a `skills/list` response into `Skill`-kind [`ProviderCommand`]s
+/// (deduped by name, empty names dropped).
+fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let Some(entries) = result.get("data").and_then(Value::as_array) else {
+        return out;
+    };
+    for entry in entries {
+        let Some(skills) = entry.get("skills").and_then(Value::as_array) else {
+            continue;
+        };
+        for skill in skills {
+            let Some(name) = skill.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() || !seen.insert(name.to_owned()) {
+                continue;
+            }
+            let description = skill
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| skill.pointer("/interface/shortDescription").and_then(Value::as_str))
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty());
+            out.push(ProviderCommand {
+                name: name.to_owned(),
+                description,
+                kind: ProviderCommandKind::Skill,
+            });
+        }
+    }
+    out
 }
 
 async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Value, AgentError> {
@@ -702,7 +779,12 @@ impl Actor {
     /// Build `turn/start` params, applying per-turn overrides on top of the
     /// session's persisted effort / service tier / interaction mode. Mirrors
     /// T3's `buildTurnStartParams` + `buildCodexCollaborationMode`.
-    fn build_turn_params(&self, text: &str, options: Option<&TurnOptions>) -> Value {
+    fn build_turn_params(
+        &self,
+        text: &str,
+        options: Option<&TurnOptions>,
+        attachments: &[Attachment],
+    ) -> Value {
         let effort = options
             .and_then(|o| o.effort.clone())
             .or_else(|| self.effort.clone());
@@ -710,9 +792,18 @@ impl Actor {
             .and_then(|o| o.interaction_mode)
             .unwrap_or(self.interaction_mode);
 
+        // Text first, then one `image` input entry per attachment carrying a
+        // `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape).
+        let mut input = vec![json!({ "type": "text", "text": text, "text_elements": [] })];
+        for attachment in attachments {
+            input.push(json!({
+                "type": "image",
+                "url": format!("data:{};base64,{}", attachment.media_type, attachment.data_base64),
+            }));
+        }
         let mut params = json!({
             "threadId": self.thread_id,
-            "input": [{ "type": "text", "text": text, "text_elements": [] }],
+            "input": input,
         });
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
@@ -753,8 +844,12 @@ impl Actor {
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
         match command {
-            SessionCommand::SendTurn { text, options } => {
-                let params = self.build_turn_params(&text, options.as_ref());
+            SessionCommand::SendTurn {
+                text,
+                options,
+                attachments,
+            } => {
+                let params = self.build_turn_params(&text, options.as_ref(), &attachments);
                 self.request("turn/start", params, PendingRequest::TurnStart)
             }
             SessionCommand::SetInteractionMode(mode) => {
@@ -1019,6 +1114,16 @@ impl Actor {
                             self.emit(AgentEvent::ProposedPlan { item_id, markdown })
                                 .await;
                         }
+                    }
+                    return;
+                }
+                // Context-compaction marker item (`type: "contextCompaction"`):
+                // surface the "Context compacted" work-log row once, on completion.
+                if item_value.and_then(|i| i.get("type")).and_then(Value::as_str)
+                    == Some("contextCompaction")
+                {
+                    if method == "item/completed" {
+                        self.emit(AgentEvent::ContextCompacted).await;
                     }
                     return;
                 }
@@ -1384,12 +1489,17 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
     let last = value.get("last")?;
+    // The session-cumulative running total lives in a sibling `total` object.
+    let total_processed_tokens = value
+        .pointer("/total/totalTokens")
+        .and_then(Value::as_u64);
     Some(TokenUsage {
         input_tokens: last.get("inputTokens").and_then(Value::as_u64),
         cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_u64),
         output_tokens: last.get("outputTokens").and_then(Value::as_u64),
         used_tokens: last.get("totalTokens").and_then(Value::as_u64),
         context_window: value.get("modelContextWindow").and_then(Value::as_u64),
+        total_processed_tokens,
     })
 }
 
@@ -1528,7 +1638,7 @@ mod tests {
         actor.service_tier = Some("flex".into());
         actor.model = Some("gpt-5-codex".into());
 
-        let params = actor.build_turn_params("hi", None);
+        let params = actor.build_turn_params("hi", None, &[]);
         assert_eq!(params["effort"], "high");
         assert_eq!(params["serviceTier"], "flex");
         let collab = &params["collaborationMode"];
@@ -1549,7 +1659,7 @@ mod tests {
             effort: None,
             interaction_mode: Some(InteractionMode::Build),
         };
-        let params = actor.build_turn_params("hi", Some(&opts));
+        let params = actor.build_turn_params("hi", Some(&opts), &[]);
         assert!(params.get("effort").is_none());
         assert_eq!(params["collaborationMode"]["mode"], "default");
         assert_eq!(params["collaborationMode"]["settings"]["reasoning_effort"], "medium");
@@ -1562,6 +1672,63 @@ mod tests {
 
         let _ = actor.child.kill();
         let _ = actor.child.wait();
+    }
+
+    #[test]
+    fn turn_input_carries_image_entries() {
+        let (mut actor, _events) = test_actor();
+        actor.model = Some("gpt-5-codex".into());
+        let attachments = vec![Attachment {
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+        }];
+        let params = actor.build_turn_params("what color?", None, &attachments);
+        let input = params["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "text");
+        assert_eq!(input[0]["text"], "what color?");
+        assert_eq!(input[1]["type"], "image");
+        assert_eq!(input[1]["url"], "data:image/png;base64,AAAA");
+        let _ = actor.child.kill();
+        let _ = actor.child.wait();
+    }
+
+    #[test]
+    fn skills_list_response_parses_to_provider_commands() {
+        let result = json!({
+            "data": [
+                {
+                    "cwd": "/tmp",
+                    "skills": [
+                        {"name": "browser:control", "description": "drive the browser", "interface": {"displayName": "Browser"}},
+                        {"name": "", "description": "dropped"},
+                        {"name": "dataviz", "interface": {"shortDescription": "charts"}}
+                    ]
+                },
+                {"cwd": "/tmp", "skills": [{"name": "browser:control", "description": "dup dropped"}]}
+            ]
+        });
+        let commands = parse_codex_skills(&result);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].name, "browser:control");
+        assert_eq!(commands[0].kind, ProviderCommandKind::Skill);
+        assert_eq!(commands[0].description.as_deref(), Some("drive the browser"));
+        // Falls back to interface.shortDescription when `description` is absent.
+        assert_eq!(commands[1].name, "dataviz");
+        assert_eq!(commands[1].description.as_deref(), Some("charts"));
+    }
+
+    #[test]
+    fn token_usage_reads_total_processed() {
+        let usage = map_usage(&json!({
+            "last": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 120},
+            "total": {"totalTokens": 5000},
+            "modelContextWindow": 200000
+        }))
+        .unwrap();
+        assert_eq!(usage.used_tokens, Some(120));
+        assert_eq!(usage.total_processed_tokens, Some(5000));
+        assert_eq!(usage.context_window, Some(200000));
     }
 
     #[test]
