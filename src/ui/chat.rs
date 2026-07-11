@@ -19,12 +19,15 @@ use gpui_component::{
     notification::Notification,
     popover::Popover,
     text::{TextView, TextViewState},
+    tooltip::Tooltip,
     v_flex,
 };
 
 use crate::app::{AppEvent, AppState};
+use crate::git::GitAction;
 use crate::session::{EntryContent, TimelineEntry, TurnMeta};
 use crate::store::now_millis;
+use crate::ui::commit_dialog::CommitDialog;
 use crate::ui::composer::{Composer, ComposerEvent};
 use crate::ui::terminal_drawer::TerminalDrawer;
 use crate::ui::window_drag_area;
@@ -61,6 +64,8 @@ pub struct ChatView {
     /// Whether the proposed-plan card's "Copied!" confirmation is showing (2s).
     plan_copied: bool,
     _plan_copied_task: Option<Task<()>>,
+    /// The live commit dialog entity while it is open (kept alive across frames).
+    commit_dialog: Option<Entity<CommitDialog>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -105,6 +110,7 @@ impl ChatView {
             _tick: None,
             plan_copied: false,
             _plan_copied_task: None,
+            commit_dialog: None,
             _subscriptions: subscriptions,
         }
     }
@@ -957,7 +963,8 @@ impl ChatView {
         window_drag_area("chat-header-drag", base, window, cx)
             .child(title_el)
             .when(show_actions, |this| {
-                this.children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
+                this.children(self.render_git_button(cx))
+                    .children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
                     .child(
                         h_flex()
                             .flex_none()
@@ -1018,6 +1025,145 @@ impl ChatView {
                     )
             })
             .into_any_element()
+    }
+
+    /// The adaptive Git quick-action split-button (left of Open): the primary
+    /// action follows the background git status (Commit / Commit & push / Push /
+    /// Pull / Publish branch / Initialize Git, or a disabled status hint); the
+    /// chevron lists the applicable subset. Ported from T3's `GitActionsControl`.
+    fn render_git_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let quick = self.app_state.read(cx).git_quick_action()?;
+        let border = cx.theme().border;
+        let items = self.app_state.read(cx).git_menu_items();
+
+        // Main action segment.
+        let label: SharedString = rust_i18n::t!(quick.label_key).into_owned().into();
+        let main_icon = quick
+            .action
+            .map(git_action_icon)
+            .unwrap_or_else(|| Icon::empty().path("icons/git-branch.svg"));
+        let mut main = h_flex()
+            .id("git-main")
+            .h_full()
+            .px_2()
+            .gap_1p5()
+            .items_center()
+            .text_size(px(13.))
+            .child(main_icon.xsmall().text_color(if quick.disabled {
+                cx.theme().muted_foreground
+            } else {
+                cx.theme().foreground
+            }))
+            .child(label);
+        if quick.disabled {
+            main = main.text_color(cx.theme().muted_foreground);
+            if let Some(hint) = quick.hint_key {
+                let text: SharedString = rust_i18n::t!(hint).into_owned().into();
+                main = main.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+            }
+        } else if let Some(action) = quick.action {
+            main = main.cursor_pointer().hover(|s| s.bg(cx.theme().accent)).on_click(
+                cx.listener(move |this, _, window, cx| {
+                    this.trigger_git_action(action, window, cx);
+                }),
+            );
+        }
+
+        // Dropdown listing the applicable subset. Menu rows dispatch through the
+        // ChatView entity (the popover content runs at App level, not in a view
+        // context, so `cx.listener` is unavailable here).
+        let chat = cx.entity();
+        let chevron = Popover::new("git-menu")
+            .anchor(Anchor::TopRight)
+            .trigger(
+                Button::new("git-menu-trigger")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ChevronDown),
+            )
+            .content(move |_state, _window, cx| {
+                let muted = cx.theme().muted_foreground;
+                let accent = cx.theme().accent;
+                let popover = cx.entity();
+                let mut menu = v_flex().w(px(210.)).p_1().gap_0p5();
+                for (index, item) in items.clone().into_iter().enumerate() {
+                    let label: SharedString = rust_i18n::t!(item.label_key).into_owned().into();
+                    let action = item.action;
+                    let disabled = item.disabled;
+                    let popover = popover.clone();
+                    let chat = chat.clone();
+                    let mut row = h_flex()
+                        .id(("git-menu-item", index))
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .text_size(px(13.))
+                        .child(git_action_icon(action).xsmall().text_color(muted))
+                        .child(div().flex_1().child(label));
+                    if disabled {
+                        row = row.text_color(muted);
+                        if let Some(hint) = item.hint_key {
+                            let text: SharedString = rust_i18n::t!(hint).into_owned().into();
+                            row = row
+                                .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+                        }
+                    } else {
+                        row = row.cursor_pointer().hover(move |s| s.bg(accent)).on_click(
+                            move |_, window, cx| {
+                                popover.update(cx, |st, cx| st.dismiss(window, cx));
+                                chat.update(cx, |this, cx| {
+                                    this.trigger_git_action(action, window, cx)
+                                });
+                            },
+                        );
+                    }
+                    menu = menu.child(row);
+                }
+                menu.into_any_element()
+            });
+
+        Some(
+            h_flex()
+                .flex_none()
+                .h(px(28.))
+                .items_center()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(border)
+                .overflow_hidden()
+                .child(main)
+                .child(div().w_px().h(px(16.)).bg(border))
+                .child(chevron)
+                .into_any_element(),
+        )
+    }
+
+    /// Dispatch a git quick-action: commit-style actions open the commit dialog;
+    /// everything else runs in the background with a progress toast.
+    fn trigger_git_action(&mut self, action: GitAction, window: &mut Window, cx: &mut Context<Self>) {
+        if action.opens_commit_dialog() {
+            self.open_commit_dialog(action, window, cx);
+        } else {
+            self.app_state
+                .update(cx, |state, cx| state.run_git_action(action, None, None, None, cx));
+        }
+    }
+
+    /// Open the commit dialog for `action` (Commit or Commit & push).
+    fn open_commit_dialog(&mut self, action: GitAction, window: &mut Window, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| CommitDialog::new(self.app_state.clone(), action, window, cx));
+        self.commit_dialog = Some(dialog.clone());
+        window.open_dialog(cx, move |dlg, window, cx| {
+            let content = dialog.clone();
+            let footer_dialog = dialog.clone();
+            dlg.title(rust_i18n::t!("git.commit.title").into_owned())
+                .w(px(600.))
+                .content(move |content_el, _window, _cx| content_el.child(content.clone()))
+                .footer(render_commit_footer(&footer_dialog, window, cx))
+        });
     }
 
     /// The bordered "Open" split-button: main click opens the session cwd in
@@ -1182,6 +1328,20 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Screenshot-only: `--debug-git-dialog` opens the commit dialog once the
+        // background git status has landed (a header click is not drivable
+        // headlessly). Consumed once.
+        let open_commit_dialog = self.app_state.update(cx, |state, _| {
+            let armed = state.debug_open_commit_dialog && state.git_status.is_some();
+            if armed {
+                state.debug_open_commit_dialog = false;
+            }
+            armed
+        });
+        if open_commit_dialog {
+            self.open_commit_dialog(GitAction::Commit, window, cx);
+        }
+
         let active = {
             let state = self.app_state.read(cx);
             state.active.as_ref().map(|active| {
@@ -1304,6 +1464,52 @@ fn chevron(open: bool) -> IconName {
 }
 
 /// Launch `zed <cwd>` detached; surface a notification if the CLI is missing.
+/// The leading icon for a git quick-action.
+fn git_action_icon(action: GitAction) -> Icon {
+    match action {
+        GitAction::Push => Icon::new(IconName::ArrowUp),
+        GitAction::Pull => Icon::empty().path("icons/download.svg"),
+        _ => Icon::empty().path("icons/git-branch.svg"),
+    }
+}
+
+/// The commit dialog's footer action row (Cancel / Commit[& push]). Built inside
+/// the `open_dialog` builder so the buttons can close the dialog on click.
+fn render_commit_footer(
+    dialog: &Entity<CommitDialog>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let confirm_label = dialog.update(cx, |d, cx| d.confirm_label(cx));
+    let cancel_dialog = dialog.clone();
+    let confirm_dialog = dialog.clone();
+    h_flex()
+        .w_full()
+        .gap_2()
+        .justify_end()
+        .child(
+            Button::new("commit-cancel")
+                .ghost()
+                .label(rust_i18n::t!("git.commit.cancel"))
+                .on_click(move |_, window, cx| {
+                    let _ = &cancel_dialog;
+                    window.close_dialog(cx);
+                }),
+        )
+        .child(
+            Button::new("commit-confirm")
+                .primary()
+                .label(confirm_label)
+                .on_click(move |_, window, cx| {
+                    let should_close = confirm_dialog.update(cx, |d, cx| d.confirm(window, cx));
+                    if should_close {
+                        window.close_dialog(cx);
+                    }
+                }),
+        )
+        .into_any_element()
+}
+
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     if std::process::Command::new("zed").arg(cwd).spawn().is_err() {
         window.push_notification(

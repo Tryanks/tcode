@@ -8,7 +8,7 @@ use agent::{
     OptionSelection, ProviderKind, SessionCommand, SessionOptions, ThreadItem, TurnOptions,
     TurnStatus, list_models, start_session,
 };
-use gpui::{Context, EventEmitter, Task};
+use gpui::{Context, Entity, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Timeline;
@@ -405,6 +405,23 @@ pub struct AppState {
     /// A URL the preview panel should navigate to on its next render (set by the
     /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
     pub pending_preview_url: Option<String>,
+    /// Background-computed git state of the active session's cwd, driving the
+    /// adaptive header quick-action button (`None` until the first refresh /
+    /// with no active session). See [`AppState::refresh_git_status`].
+    pub git_status: Option<crate::git::GitStatus>,
+    /// A git quick-action (commit/push/pull/…) is currently running, so the
+    /// button is disabled with an in-progress hint.
+    pub git_busy: bool,
+    /// Monotonic token so a stale background status refresh (from a session the
+    /// user has since switched away from) is ignored.
+    git_status_generation: u64,
+    /// Screenshot-only (`--debug-git-dialog`): open the commit dialog once the
+    /// git status has loaded (clicking the header button cannot be driven
+    /// headlessly). Consumed by `ChatView` on its next render.
+    pub debug_open_commit_dialog: bool,
+    /// The rich toast overlay (set by `AppShell`), used for long-running git
+    /// flows — one progress toast mutated in place through the flow.
+    toast_center: Option<Entity<crate::ui::ToastCenter>>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -463,6 +480,11 @@ impl AppState {
             mcp_registration: None,
             preview_requests: None,
             pending_preview_url: None,
+            git_status: None,
+            git_busy: false,
+            git_status_generation: 0,
+            debug_open_commit_dialog: false,
+            toast_center: None,
         }
     }
 
@@ -558,6 +580,303 @@ impl AppState {
     pub fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
+    }
+
+    // -- git quick actions (Group: Git) -------------------------------------
+
+    /// Register the shared toast overlay (called once by `AppShell`).
+    pub fn set_toast_center(&mut self, center: Entity<crate::ui::ToastCenter>) {
+        self.toast_center = Some(center);
+    }
+
+    /// Kick off a background refresh of the active session's git status (on
+    /// session open, after each turn, and after each git action). A stale result
+    /// (session switched, or a newer refresh superseded it) is discarded.
+    pub fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+            self.git_status = None;
+            cx.notify();
+            return;
+        };
+        let session_id = self.active_session_id().map(str::to_string);
+        self.git_status_generation += 1;
+        let generation = self.git_status_generation;
+        cx.spawn(async move |this, cx| {
+            let status = smol::unblock(move || crate::git::read_status(&cwd)).await;
+            let _ = this.update(cx, |state, cx| {
+                if state.git_status_generation == generation
+                    && state.active_session_id().map(str::to_string) == session_id
+                {
+                    state.git_status = Some(status);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The resolved primary quick-action for the active session, or `None` when
+    /// there is no active session or its status has not been computed yet (so
+    /// the button stays hidden rather than flashing "Initialize Git" on a repo).
+    pub fn git_quick_action(&self) -> Option<crate::git::QuickAction> {
+        self.active.as_ref()?;
+        let status = self.git_status.as_ref()?;
+        Some(crate::git::quick_action(status, self.git_busy))
+    }
+
+    /// The applicable dropdown items for the active session's git state.
+    pub fn git_menu_items(&self) -> Vec<crate::git::MenuItem> {
+        match (self.active.as_ref(), self.git_status.as_ref()) {
+            (Some(_), Some(status)) => crate::git::menu_items(status, self.git_busy),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The active session's changed files (for the commit dialog list).
+    pub fn git_changed_files(&self) -> Vec<crate::git::GitFileEntry> {
+        self.git_status
+            .as_ref()
+            .map(|s| s.changed_files.clone())
+            .unwrap_or_default()
+    }
+
+    /// The active session's current branch (for the commit dialog header).
+    pub fn git_branch_name(&self) -> Option<String> {
+        self.git_status.as_ref().and_then(|s| s.branch.clone())
+    }
+
+    /// Whether the active session is on the repo's default branch (main/master)
+    /// — drives the commit dialog's safeguard banner.
+    pub fn git_on_default_branch(&self) -> bool {
+        self.git_status
+            .as_ref()
+            .is_some_and(|s| s.is_default_branch)
+    }
+
+    /// Generate a commit message with the current provider (Claude, headless
+    /// `claude -p`) for the active session, scoped to `included` paths. Returns
+    /// a task the caller (commit dialog) awaits to fill the message field.
+    pub fn generate_commit_message(
+        &self,
+        included: Option<Vec<String>>,
+        cx: &gpui::App,
+    ) -> Task<Result<String, String>> {
+        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+            return cx
+                .background_executor()
+                .spawn(async { Err("no active session".to_string()) });
+        };
+        let binary = self.settings.claude_binary.clone();
+        cx.background_executor().spawn(async move {
+            smol::unblock(move || {
+                let (stat, patch) = crate::git::commit_diff_context(&cwd, included.as_deref());
+                let prompt = crate::git::build_commit_prompt(&stat, &patch);
+                let raw = crate::git::run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
+                let message = crate::git::sanitize_commit_message(&raw);
+                if message.is_empty() {
+                    Err("model returned an empty commit message".to_string())
+                } else {
+                    Ok(message)
+                }
+            })
+            .await
+        })
+    }
+
+    /// Run a resolved git quick-action in the background, tracking progress in a
+    /// single toast (running → success/error with the command output as the
+    /// error detail). Refreshes the git status + branch label on completion.
+    ///
+    /// `message` is the commit message (commit actions); `included` the checked
+    /// file subset (`None` = all); `feature_branch` the safeguard's new branch.
+    pub fn run_git_action(
+        &mut self,
+        action: crate::git::GitAction,
+        message: Option<String>,
+        included: Option<Vec<String>>,
+        feature_branch: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_busy {
+            self.toast_push(
+                crate::ui::toast::ToastSpec::new(
+                    crate::ui::toast::ToastKind::Warning,
+                    rust_i18n::t!("git.toast.busy").into_owned(),
+                ),
+                cx,
+            );
+            return;
+        }
+        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+            return;
+        };
+        let current_branch = self.git_branch_name();
+        self.git_busy = true;
+
+        let (running_key, success_key) = git_action_toast_keys(action);
+        let toast_id = self.toast_push(
+            crate::ui::toast::ToastSpec::loading(rust_i18n::t!(running_key).into_owned()),
+            cx,
+        );
+
+        // Clones kept for the retry action offered on failure.
+        let retry_message = message.clone();
+        let retry_included = included.clone();
+        let retry_feature = feature_branch.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                crate::git::perform_action(
+                    &cwd,
+                    action,
+                    message.as_deref(),
+                    included.as_deref(),
+                    feature_branch.as_deref(),
+                    current_branch.as_deref(),
+                )
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                state.git_busy = false;
+                match &result {
+                    Ok(_) => state.toast_terminal(
+                        toast_id,
+                        crate::ui::toast::ToastKind::Success,
+                        rust_i18n::t!(success_key).into_owned(),
+                        None,
+                        cx,
+                    ),
+                    Err(detail) => {
+                        state.toast_terminal(
+                            toast_id,
+                            crate::ui::toast::ToastKind::Error,
+                            rust_i18n::t!("git.toast.failed").into_owned(),
+                            Some(detail.clone()),
+                            cx,
+                        );
+                        // Offer a one-click retry of the same action.
+                        if let Some(center) = state.toast_center.clone() {
+                            let app_entity = cx.entity();
+                            let center_for_retry = center.clone();
+                            let retry = crate::ui::toast::ToastAction::new(
+                                rust_i18n::t!("git.toast.retry").into_owned(),
+                                move |_window, cx| {
+                                    center_for_retry.update(cx, |c, cx| c.dismiss(toast_id, cx));
+                                    let (m, i, f) = (
+                                        retry_message.clone(),
+                                        retry_included.clone(),
+                                        retry_feature.clone(),
+                                    );
+                                    app_entity.update(cx, |state, cx| {
+                                        state.run_git_action(action, m, i, f, cx);
+                                    });
+                                },
+                            );
+                            center.update(cx, |c, cx| c.set_actions(toast_id, vec![retry], cx));
+                        }
+                    }
+                }
+                if let Some(active) = state.active.as_mut() {
+                    active.git_branch = read_git_branch(&active.meta.cwd);
+                }
+                state.refresh_git_status(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Debug/E2E entry point (`--debug-git-commit "msg"`): stage everything and
+    /// commit the active session's cwd with `message`, driving the same toast +
+    /// status-refresh path as the UI commit.
+    pub fn debug_git_commit(&mut self, message: String, cx: &mut Context<Self>) {
+        self.run_git_action(crate::git::GitAction::Commit, Some(message), None, None, cx);
+    }
+
+    /// Debug/E2E entry point (`--debug-git-action push|pull|publish|init`): run a
+    /// non-commit quick-action directly. The current branch is read fresh (the
+    /// background status refresh may not have landed yet).
+    pub fn debug_git_action(&mut self, name: String, cx: &mut Context<Self>) {
+        use crate::git::GitAction;
+        let action = match name.as_str() {
+            "push" => GitAction::Push,
+            "pull" => GitAction::Pull,
+            "publish" => GitAction::PublishBranch,
+            "init" => GitAction::InitializeGit,
+            other => {
+                log::warn!("unknown --debug-git-action '{other}'");
+                return;
+            }
+        };
+        // PublishBranch needs the branch name; seed the status synchronously.
+        if matches!(action, GitAction::PublishBranch) && self.git_status.is_none() {
+            if let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) {
+                self.git_status = Some(crate::git::read_status(&cwd));
+            }
+        }
+        self.run_git_action(action, None, None, None, cx);
+    }
+
+    /// Debug/E2E entry point (`--debug-git-genmsg`): generate a commit message
+    /// for the active session and surface it (logged + info toast) so the AI
+    /// path can be exercised headlessly.
+    pub fn debug_git_generate_message(&mut self, cx: &mut Context<Self>) {
+        let task = self.generate_commit_message(None, cx);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(message) => {
+                    log::info!("generated commit message:\n{message}");
+                    state.toast_push(
+                        crate::ui::toast::ToastSpec::new(
+                            crate::ui::toast::ToastKind::Info,
+                            "Generated commit message",
+                        )
+                        .detail(message),
+                        cx,
+                    );
+                }
+                Err(err) => {
+                    log::warn!("commit message generation failed: {err}");
+                    state.toast_push(
+                        crate::ui::toast::ToastSpec::new(
+                            crate::ui::toast::ToastKind::Error,
+                            rust_i18n::t!("git.toast.failed").into_owned(),
+                        )
+                        .detail(err),
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Push a toast onto the shared overlay, returning its id (0 when the
+    /// overlay is not yet wired, e.g. in tests / headless smoke).
+    fn toast_push(
+        &self,
+        spec: crate::ui::toast::ToastSpec,
+        cx: &mut Context<Self>,
+    ) -> crate::ui::toast::ToastId {
+        match &self.toast_center {
+            Some(center) => center.update(cx, |c, cx| c.push(spec, cx)),
+            None => 0,
+        }
+    }
+
+    /// Move a progress toast to a terminal state (success/error) in place.
+    fn toast_terminal(
+        &self,
+        id: crate::ui::toast::ToastId,
+        kind: crate::ui::toast::ToastKind,
+        title: String,
+        detail: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(center) = &self.toast_center {
+            center.update(cx, |c, cx| c.update(id, kind, title, detail.map(Into::into), cx));
+        }
     }
 
     // -- routing + palette --------------------------------------------------
@@ -1469,6 +1788,7 @@ impl AppState {
             _pump: None,
         });
         self.ensure_started(cx);
+        self.refresh_git_status(cx);
         cx.notify();
     }
 
@@ -1528,6 +1848,7 @@ impl AppState {
         self.shutdown_active();
         let (provider, model) = self.draft_defaults();
         self.active = Some(Self::build_draft_session(project_id, cwd, provider, model));
+        self.refresh_git_status(cx);
         cx.notify();
     }
 
@@ -1611,6 +1932,7 @@ impl AppState {
                 self.new_terminal(cx);
             }
         }
+        self.refresh_git_status(cx);
         cx.notify();
     }
 
@@ -2455,11 +2777,15 @@ impl AppState {
                     self.persist_meta(&meta, cx);
                 }
                 // The turn may have switched branches (checkout) or made the
-                // first commit; refresh the display-only branch label.
+                // first commit; refresh the display-only branch label and the
+                // git quick-action status.
                 if let Some(active) = self.active.as_mut() {
                     if active.meta.id == session_id {
                         active.git_branch = read_git_branch(&active.meta.cwd);
                     }
+                }
+                if self.active_session_id() == Some(session_id) {
+                    self.refresh_git_status(cx);
                 }
             }
             AgentEvent::Error { message, .. } => {
@@ -2651,6 +2977,19 @@ fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
         Some(head.chars().take(7).collect())
     } else {
         None
+    }
+}
+
+/// The (running, success) toast i18n keys for a git quick-action.
+fn git_action_toast_keys(action: crate::git::GitAction) -> (&'static str, &'static str) {
+    use crate::git::GitAction;
+    match action {
+        GitAction::Commit => ("git.toast.committing", "git.toast.committed"),
+        GitAction::CommitPush => ("git.toast.committing_pushing", "git.toast.committed_pushed"),
+        GitAction::Push => ("git.toast.pushing", "git.toast.pushed"),
+        GitAction::Pull => ("git.toast.pulling", "git.toast.pulled"),
+        GitAction::PublishBranch => ("git.toast.publishing", "git.toast.published"),
+        GitAction::InitializeGit => ("git.toast.initializing", "git.toast.initialized"),
     }
 }
 
