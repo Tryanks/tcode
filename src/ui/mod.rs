@@ -1,3 +1,4 @@
+mod acp_panel;
 mod attachments;
 mod chat;
 mod commit_dialog;

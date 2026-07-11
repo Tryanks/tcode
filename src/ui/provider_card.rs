@@ -96,7 +96,9 @@ impl ProviderCard {
             third_placeholder(provider).to_string(),
             match provider {
                 ProviderKind::Codex => path_string(&settings.shadow_home_path),
-                ProviderKind::ClaudeCode => settings.launch_args.clone().unwrap_or_default(),
+                ProviderKind::ClaudeCode | ProviderKind::Acp => {
+                    settings.launch_args.clone().unwrap_or_default()
+                }
             },
             window,
             cx,
@@ -182,7 +184,7 @@ impl ProviderCard {
                 settings.home_path = home.map(Into::into);
                 match provider {
                     ProviderKind::Codex => settings.shadow_home_path = third.map(Into::into),
-                    ProviderKind::ClaudeCode => settings.launch_args = third,
+                    ProviderKind::ClaudeCode | ProviderKind::Acp => settings.launch_args = third,
                 }
             },
             cx,
@@ -1148,6 +1150,7 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
     match provider {
         ProviderKind::ClaudeCode => Icon::empty().path("icons/claude.svg"),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
+        ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
     }
 }
 
@@ -1155,55 +1158,66 @@ fn default_binary_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        // ACP agents are not configured through this card (they have their own
+        // marketplace cards); these arms only keep the matches total.
+        ProviderKind::Acp => "",
     }
 }
 
 fn home_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "~/.codex",
-        ProviderKind::ClaudeCode => "~",
+        ProviderKind::ClaudeCode | ProviderKind::Acp => "~",
     }
 }
 
 fn home_label(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.codex_home").into_owned(),
-        ProviderKind::ClaudeCode => rust_i18n::t!("providers.claude_home").into_owned(),
+        ProviderKind::ClaudeCode | ProviderKind::Acp => {
+            rust_i18n::t!("providers.claude_home").into_owned()
+        }
     }
 }
 
 fn home_help(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.codex_home_help").into_owned(),
-        ProviderKind::ClaudeCode => rust_i18n::t!("providers.claude_home_help").into_owned(),
+        ProviderKind::ClaudeCode | ProviderKind::Acp => {
+            rust_i18n::t!("providers.claude_home_help").into_owned()
+        }
     }
 }
 
 fn third_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "~/.codex-t3/personal",
-        ProviderKind::ClaudeCode => "e.g. --chrome",
+        ProviderKind::ClaudeCode | ProviderKind::Acp => "e.g. --chrome",
     }
 }
 
 fn third_label(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.shadow_home").into_owned(),
-        ProviderKind::ClaudeCode => rust_i18n::t!("providers.launch_args").into_owned(),
+        ProviderKind::ClaudeCode | ProviderKind::Acp => {
+            rust_i18n::t!("providers.launch_args").into_owned()
+        }
     }
 }
 
 fn third_help(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.shadow_home_help").into_owned(),
-        ProviderKind::ClaudeCode => rust_i18n::t!("providers.launch_args_help").into_owned(),
+        ProviderKind::ClaudeCode | ProviderKind::Acp => {
+            rust_i18n::t!("providers.launch_args_help").into_owned()
+        }
     }
 }
 
 fn custom_model_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "gpt-6.7-codex-ultra-preview",
-        ProviderKind::ClaudeCode => "claude-sonnet-5",
+        ProviderKind::ClaudeCode | ProviderKind::Acp => "claude-sonnet-5",
     }
 }
 

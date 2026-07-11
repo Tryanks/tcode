@@ -77,6 +77,10 @@ pub fn provider_key(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        // ACP agents are not one provider but many: their per-agent settings
+        // live in `Settings::acp_agents`, keyed by registry id. This bucket only
+        // ever holds the shared fallbacks (it is never written by the ACP card).
+        ProviderKind::Acp => "acp",
     }
 }
 
@@ -85,6 +89,7 @@ pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "Codex",
         ProviderKind::ClaudeCode => "Claude",
+        ProviderKind::Acp => "ACP agent",
     }
 }
 
@@ -187,7 +192,9 @@ impl ProviderSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
+// agent crate derives only `PartialEq` for.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +249,11 @@ pub struct Settings {
     /// UI state; absent in legacy files (Group A).
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_visited: std::collections::HashMap<String, u64>,
+    /// ACP agents the user installed from the marketplace (or defined by hand),
+    /// keyed by registry id. Each carries its resolved launch recipe, so a
+    /// session can start without consulting the registry again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acp_agents: BTreeMap<String, crate::acp_registry::InstalledAgent>,
 }
 
 impl Settings {
@@ -270,6 +282,25 @@ impl Settings {
             .filter(|name| !name.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| provider_label(provider).to_string())
+    }
+
+    /// One installed ACP agent, by registry id.
+    pub fn acp_agent(&self, id: &str) -> Option<&crate::acp_registry::InstalledAgent> {
+        self.acp_agents.get(id)
+    }
+
+    /// Every installed ACP agent, in registry-id order (the marketplace and the
+    /// provider rail both render them in this order).
+    pub fn installed_acp_agents(&self) -> Vec<&crate::acp_registry::InstalledAgent> {
+        self.acp_agents.values().collect()
+    }
+
+    /// The ACP agents offered when starting a thread: installed *and* enabled.
+    pub fn enabled_acp_agents(&self) -> Vec<&crate::acp_registry::InstalledAgent> {
+        self.acp_agents
+            .values()
+            .filter(|agent| agent.enabled)
+            .collect()
     }
 
     /// Fold the pre-`providers` binary overrides into the map (once, on load).
@@ -453,6 +484,7 @@ mod tests {
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,
             last_visited: std::collections::HashMap::from([("sess-a".to_string(), 42)]),
+            acp_agents: BTreeMap::new(),
         };
 
         store.save(&expected).unwrap();

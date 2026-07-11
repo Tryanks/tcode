@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
-    LaunchEnv, ModelSpec, OptionSelection, ProviderCommand, ProviderKind, SessionCommand,
-    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
+    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderKind,
+    SessionCommand, SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
+    start_session,
 };
 use gpui::{Context, Entity, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
@@ -277,6 +278,12 @@ pub struct ActiveSession {
     /// `slash_commands` + `skills`; Codex `skills/list`). Feeds the composer's
     /// `/` and `$` menus. In-memory only.
     provider_commands: Vec<ProviderCommand>,
+    /// The agent's self-described options (ACP `modes` / `models` /
+    /// `configOptions`), pushed over the wire at session start and on every
+    /// change. They render through the composer's existing traits picker; the
+    /// native providers describe their options through the model catalog
+    /// instead, so this stays empty for them. In-memory only.
+    provider_options: Vec<OptionDescriptor>,
     /// Diff panel UI state (per-session, in-memory only). `diff_open` is the
     /// right-panel open/closed flag; `right_tab` selects which tab it shows.
     pub diff_open: bool,
@@ -314,6 +321,11 @@ impl ActiveSession {
     /// is applied per turn via [`TurnOptions`] and needs no restart.
     fn options_changed_while_live(&self) -> bool {
         if !matches!(self.runtime, Runtime::Live(_)) {
+            return false;
+        }
+        // ACP agents take option changes live (`session/set_mode` /
+        // `set_model` / `set_config_option`), so nothing ever needs a restart.
+        if self.meta.provider == ProviderKind::Acp {
             return false;
         }
         let ignore_effort = self.meta.provider == ProviderKind::Codex;
@@ -466,8 +478,18 @@ pub struct AppState {
     /// Screenshot-only: which Settings section to open (`general` / `providers` /
     /// `archived`), so each can be captured headlessly.
     pub debug_settings_section: Option<String>,
+    /// Screenshot-only: seed the ACP marketplace's search box.
+    pub debug_acp_search: Option<String>,
     /// Screenshot-only: which provider card starts expanded (`codex` / `claude`).
     pub debug_provider_expanded: Option<String>,
+    /// The ACP agent marketplace: the registry index (from the CDN, cached on
+    /// disk with a one-hour TTL), whether a refresh is in flight, and the last
+    /// failure to show when there is nothing cached to fall back on.
+    pub acp_registry: Option<crate::acp_registry::Registry>,
+    pub acp_registry_loading: bool,
+    pub acp_registry_error: Option<String>,
+    /// Registry ids currently downloading (their marketplace row shows a spinner).
+    pub acp_installing: std::collections::HashSet<String>,
     /// Preview MCP server registration, injected into every session so the agent
     /// can drive the embedded browser. `None` if the server failed to start.
     pub mcp_registration: Option<agent::McpRegistration>,
@@ -564,6 +586,10 @@ impl AppState {
             debug_diff_split: false,
             debug_diff_scope_menu: false,
             debug_review_comment: false,
+            acp_registry: None,
+            acp_registry_loading: false,
+            acp_registry_error: None,
+            acp_installing: std::collections::HashSet::new(),
             mcp_registration: None,
             preview_requests: None,
             pending_preview_url: None,
@@ -576,6 +602,7 @@ impl AppState {
             diff_refresh_generation: 0,
             debug_palette: None,
             debug_settings_section: None,
+            debug_acp_search: None,
             debug_provider_expanded: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
@@ -696,6 +723,23 @@ impl AppState {
             env,
             home: settings.effective_home(),
         }
+    }
+
+    /// The environment a session's child process runs with: the provider card's
+    /// for the native providers, and the installed agent's own rows for an ACP
+    /// session (each ACP agent is configured separately, so the shared
+    /// `ProviderKind::Acp` bucket is not what we want there).
+    fn session_launch_env(&self, meta: &SessionMeta) -> LaunchEnv {
+        if meta.provider != ProviderKind::Acp {
+            return self.launch_env(meta.provider);
+        }
+        let env = meta
+            .acp_agent_id
+            .as_deref()
+            .and_then(|id| self.settings.acp_agent(id))
+            .map(|agent| agent.env.clone())
+            .unwrap_or_default();
+        LaunchEnv { env, home: None }
     }
 
     /// Whether the provider may be used for new sessions (its card's switch).
@@ -1004,6 +1048,21 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// The option descriptors the traits picker should render for the active
+    /// session: the selected model's, or — for an ACP agent, which has no model
+    /// catalog — the ones the agent pushed over the wire.
+    pub fn active_option_descriptors(&self) -> Vec<OptionDescriptor> {
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        if active.meta.provider == ProviderKind::Acp {
+            return active.provider_options.clone();
+        }
+        self.active_model_spec()
+            .map(|spec| spec.options)
+            .unwrap_or_default()
+    }
+
     pub fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         // Persist so the choice survives a restart (save errors are cosmetic).
@@ -1282,6 +1341,209 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    // -- the ACP agent marketplace ------------------------------------------
+
+    /// Load the registry index (cache first, network when stale). Cheap enough
+    /// to call every time the Providers page opens.
+    pub fn refresh_acp_registry(&mut self, cx: &mut Context<Self>) {
+        if self.acp_registry_loading {
+            return;
+        }
+        self.acp_registry_loading = true;
+        let data_dir = self.store.root().clone();
+        // Show the cache instantly; the fetch below refreshes it in place.
+        if self.acp_registry.is_none()
+            && let Some(cached) = crate::acp_registry::cached(&data_dir)
+        {
+            self.acp_registry = Some(cached);
+        }
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || crate::acp_registry::load(&data_dir)).await;
+            let _ = this.update(cx, |state, cx| {
+                state.acp_registry_loading = false;
+                match result {
+                    Ok(registry) => {
+                        state.acp_registry = Some(registry);
+                        state.acp_registry_error = None;
+                    }
+                    Err(err) => {
+                        log::warn!("ACP registry unavailable: {err}");
+                        state.acp_registry_error = Some(err.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The marketplace list: every registry agent except the hidden adapters
+    /// over our own native CLIs.
+    pub fn acp_marketplace(&self) -> Vec<crate::acp_registry::RegistryAgent> {
+        self.acp_registry
+            .as_ref()
+            .map(|registry| {
+                crate::acp_registry::visible_agents(registry)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Download + install one registry agent, with a progress toast.
+    pub fn install_acp_agent(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(agent) = self
+            .acp_marketplace()
+            .into_iter()
+            .find(|agent| agent.id == id)
+        else {
+            return;
+        };
+        if !self.acp_installing.insert(id.clone()) {
+            return;
+        }
+        let toast = self.toast_push(
+            crate::ui::toast::ToastSpec::loading(
+                rust_i18n::t!("providers.acp.installing", name = agent.name).into_owned(),
+            ),
+            cx,
+        );
+        let data_dir = self.store.root().clone();
+        let name = agent.name.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                crate::acp_registry::install(&agent, &data_dir, |_done, _total| {})
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                state.acp_installing.remove(&id);
+                match result {
+                    Ok(installed) => {
+                        state.settings.acp_agents.insert(id.clone(), installed);
+                        let settings = state.settings.clone();
+                        let _ = state.settings_store.save(&settings);
+                        state.toast_terminal(
+                            toast,
+                            crate::ui::toast::ToastKind::Success,
+                            rust_i18n::t!("providers.acp.installed_toast", name = name)
+                                .into_owned(),
+                            None,
+                            cx,
+                        );
+                    }
+                    Err(err) => state.toast_terminal(
+                        toast,
+                        crate::ui::toast::ToastKind::Error,
+                        rust_i18n::t!("providers.acp.install_failed", name = name).into_owned(),
+                        Some(err.to_string()),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Remove an installed ACP agent (its files and its settings entry).
+    pub fn remove_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.settings.acp_agents.remove(id);
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
+        let data_dir = self.store.root().clone();
+        let id = id.to_string();
+        cx.spawn(async move |_this, _cx| {
+            let _ = smol::unblock(move || {
+                if let Err(err) = crate::acp_registry::uninstall(&data_dir, &id) {
+                    log::warn!("could not remove ACP agent {id}: {err}");
+                }
+            })
+            .await;
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Register a user-defined ACP agent (the escape hatch for anything not in
+    /// the registry): an arbitrary command that speaks ACP over its stdio.
+    pub fn add_custom_acp_agent(
+        &mut self,
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let name = name.trim().to_string();
+        let command = command.trim().to_string();
+        if name.is_empty() || command.is_empty() {
+            return;
+        }
+        let id = custom_acp_id(&name);
+        self.settings.acp_agents.insert(
+            id.clone(),
+            crate::acp_registry::InstalledAgent {
+                id,
+                name,
+                version: String::new(),
+                icon: None,
+                launch: agent::AcpLaunch::Custom { command, args, env },
+                archive_sha256: None,
+                enabled: true,
+                env: Vec::new(),
+                launch_args: None,
+            },
+        );
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
+        cx.notify();
+    }
+
+    /// Update one installed ACP agent in place (enable switch, env rows, args).
+    pub fn update_acp_agent(
+        &mut self,
+        id: &str,
+        edit: impl FnOnce(&mut crate::acp_registry::InstalledAgent),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(agent) = self.settings.acp_agents.get_mut(id) {
+            edit(agent);
+            let settings = self.settings.clone();
+            let _ = self.settings_store.save(&settings);
+            cx.notify();
+        }
+    }
+
+    /// Point the active draft at an installed ACP agent (the model picker's
+    /// provider rail). ACP agents have no model catalog: the agent publishes its
+    /// models over the wire once the session starts.
+    pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.meta.provider == ProviderKind::Acp
+            && active.meta.acp_agent_id.as_deref() == Some(id)
+        {
+            return;
+        }
+        active.meta.provider = ProviderKind::Acp;
+        active.meta.acp_agent_id = Some(id.to_string());
+        active.meta.model = None;
+        active.meta.option_selections.clear();
+        active.provider_options.clear();
+        active.pending_ultrathink = false;
+        if active.draft {
+            cx.notify();
+            return;
+        }
+        active.meta.updated_at = now_secs();
+        let meta = active.meta.clone();
+        self.persist_meta(&meta, cx);
     }
 
     /// Push a toast onto the shared overlay, returning its id (0 when the
@@ -2248,9 +2510,13 @@ impl AppState {
         cwd: PathBuf,
         model: Option<String>,
         project_id: Option<String>,
+        // Which installed ACP agent to run (required when `provider` is
+        // `ProviderKind::Acp`, ignored otherwise).
+        acp_agent_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let mut meta = SessionMeta::new(provider, cwd, model);
+        meta.acp_agent_id = acp_agent_id;
         // Smoke mode forces Supervised so the approval path stays exercised even
         // though the app-wide default is now FullAccess (T3 parity). Must be set
         // before `ensure_started` spawns the provider with these launch flags.
@@ -2288,6 +2554,7 @@ impl AppState {
             pending_sends: Vec::new(),
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -2332,6 +2599,7 @@ impl AppState {
             pending_sends: Vec::new(),
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -2426,6 +2694,7 @@ impl AppState {
             pending_sends: Vec::new(),
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -2672,6 +2941,19 @@ impl AppState {
         if id == "reasoningEffort" {
             active.pending_ultrathink = false;
         }
+        // ACP agents apply option changes live: route the choice back to the
+        // agent (`session/set_mode` / `set_model` / `set_config_option`) instead
+        // of waiting for a restart.
+        if active.meta.provider == ProviderKind::Acp
+            && let Runtime::Live(commands) = &active.runtime
+            && let Some(selection) = active.meta.option_selections.iter().find(|s| s.id == id)
+        {
+            let _ = commands.try_send(SessionCommand::SetOption {
+                id: selection.id.clone(),
+                value: selection.value.clone(),
+            });
+            active.live_option_selections = active.meta.option_selections.clone();
+        }
         if active.draft {
             cx.notify();
             return;
@@ -2828,6 +3110,7 @@ impl AppState {
             pending_sends: Vec::new(),
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -3164,7 +3447,7 @@ impl AppState {
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
-        let launch_env = self.launch_env(meta.provider);
+        let launch_env = self.session_launch_env(&meta);
         let mcp_registration = self.mcp_registration.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
@@ -3290,6 +3573,38 @@ impl AppState {
                 .filter(|active| active.meta.id == session_id)
             {
                 active.provider_commands = commands.clone();
+                cx.notify();
+            }
+            return;
+        }
+
+        // The agent's own options (ACP modes / models / config options). Same
+        // deal: session metadata for the traits picker, not timeline content.
+        // The pushed selections become the session's selections, so the picker
+        // shows what the agent is actually running with.
+        if let AgentEvent::ProviderOptions {
+            descriptors,
+            selections,
+        } = &event
+        {
+            if let Some(active) = self
+                .active
+                .as_mut()
+                .filter(|active| active.meta.id == session_id)
+            {
+                active.provider_options = descriptors.clone();
+                for selection in selections {
+                    active
+                        .meta
+                        .option_selections
+                        .retain(|s| s.id != selection.id);
+                    active.meta.option_selections.push(selection.clone());
+                }
+                active.live_option_selections = active.meta.option_selections.clone();
+                let meta = active.meta.clone();
+                if meta.acp_agent_id.is_some() {
+                    self.persist_meta(&meta, cx);
+                }
                 cx.notify();
             }
             return;
@@ -3504,6 +3819,9 @@ fn default_program(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => "codex".into(),
         ProviderKind::ClaudeCode => "claude".into(),
+        // ACP agents carry their own launch recipe (registry `npx` / `binary`,
+        // or a custom command); there is no single bare name for them.
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -3610,6 +3928,11 @@ async fn probe_provider(
             json.as_deref()
                 .and_then(crate::provider_status::parse_codex_auth)
         }
+        // ACP agents expose no version/auth probe: the protocol only reveals
+        // whether credentials are missing at `session/new` time (error -32000),
+        // which the session surfaces then. Their cards are driven by the
+        // marketplace instead of by `probe_provider`.
+        ProviderKind::Acp => None,
     };
 
     // Three outcomes, mirroring T3's status vocabulary:
@@ -3692,6 +4015,21 @@ fn git_action_toast_keys(action: crate::git::GitAction) -> (&'static str, &'stat
 /// Map a model id to its provider, for the draft model-picker → provider link.
 /// `None` (the "Default" row, a Claude entry) and the Claude model ids map to
 /// Claude; the `gpt-*` ids to Codex. Unknown custom ids leave it unchanged.
+/// A stable settings key for a user-defined ACP agent, derived from its name.
+fn custom_acp_id(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("custom:{}", slug.trim_matches('-'))
+}
+
 fn provider_for_model(model: Option<&str>) -> Option<ProviderKind> {
     match model {
         None => Some(ProviderKind::ClaudeCode),
@@ -3869,6 +4207,13 @@ fn session_options(
     mcp_server: Option<agent::McpRegistration>,
 ) -> SessionOptions {
     let provider_settings = settings.provider(meta.provider);
+    // For an ACP session, which agent to launch (and how) comes from the
+    // installed-agent list, keyed by the id the session was created with.
+    let acp_agent: Option<crate::acp_registry::InstalledAgent> = meta
+        .acp_agent_id
+        .as_deref()
+        .and_then(|id| settings.acp_agent(id))
+        .cloned();
     SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
@@ -3884,7 +4229,16 @@ fn session_options(
         extra_args: match meta.provider {
             ProviderKind::ClaudeCode => provider_settings.extra_args(),
             ProviderKind::Codex => Vec::new(),
+            ProviderKind::Acp => acp_agent
+                .as_ref()
+                .map(|agent| agent.extra_args())
+                .unwrap_or_default(),
         },
+        acp: acp_agent.map(|agent| agent::AcpAgent {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            launch: agent.launch.clone(),
+        }),
     }
 }
 
@@ -4154,6 +4508,7 @@ mod tests {
             pending_sends: Vec::new(),
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -4190,6 +4545,7 @@ mod tests {
             pending_sends: vec!["first".into(), "second".into()],
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -4237,6 +4593,7 @@ mod tests {
             pending_sends: Vec::new(),
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
@@ -4279,6 +4636,7 @@ mod tests {
             pending_sends: vec!["do it".into()],
             turn_in_flight: false,
             provider_commands: Vec::new(),
+            provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
