@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-14
+            x2_deferred: false
+          # TODO(X2): remove continue-on-error after cross-platform fixes land.
+          - name: Linux x64 (X2 deferred)
+            os: ubuntu-24.04
+            x2_deferred: true
+          - name: Windows x64 (X2 deferred)
+            os: windows-2022
+            x2_deferred: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.x2_deferred }}
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      TCODE_LIVE_TESTS: 0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev mold \
+            libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev \
+            libvulkan-dev xvfb
+          # The current tree enables preview/webview transitively. X2 is expected
+          # to disable it on Linux, at which point this conditional becomes false.
+          if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends \
+              libgtk-3-dev libwebkit2gtk-4.1-dev
+          fi
+
+      # TODO: make this blocking once the existing workspace is formatted by
+      # current stable rustfmt. Kept visible so new drift is never silent.
+      - name: Check formatting (temporarily non-blocking)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      # TODO: make this blocking after the existing warning backlog is cleared.
+      - name: Run Clippy (temporarily non-blocking)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests (Linux under Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --workspace
+
+      - name: Run workspace tests
+        if: runner.os != 'Linux'
+        run: cargo test --workspace
+
+      - name: Build release binary (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: time cargo build --release --locked
