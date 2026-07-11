@@ -194,6 +194,10 @@ mod tests {
 
     #[test]
     fn detects_install_source_from_path() {
+        // Homebrew does not exist on Windows, where `detect_install_source`
+        // deliberately never reports Brew (it would be an unrunnable update
+        // command), so this expectation is unix-only.
+        #[cfg(not(windows))]
         assert_eq!(
             detect_install_source(&PathBuf::from("/opt/homebrew/bin/codex")),
             InstallSource::Brew
