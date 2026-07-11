@@ -404,8 +404,9 @@ impl Timeline {
                     turn,
                 });
             }
-            // Session metadata (composer menus) — not folded into the timeline.
-            AgentEvent::ProviderCommands { .. } => {}
+            // Session metadata (composer menus / traits picker) — held on the
+            // active session, not folded into the timeline.
+            AgentEvent::ProviderCommands { .. } | AgentEvent::ProviderOptions { .. } => {}
         }
     }
 
@@ -725,6 +726,7 @@ mod tests {
                     changes: changes.clone(),
                     reason: None,
                 },
+                options: Vec::new(),
             }),
         );
 
@@ -1046,6 +1048,7 @@ mod tests {
                     cwd: None,
                     reason: None,
                 },
+                options: Vec::new(),
             }),
         );
         timeline.apply_at(

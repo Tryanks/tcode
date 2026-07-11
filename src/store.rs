@@ -132,6 +132,11 @@ pub struct SessionMeta {
     /// defaults to `Build`.
     #[serde(default)]
     pub interaction_mode: InteractionMode,
+    /// Which ACP agent this session runs (its registry id), when
+    /// `provider == ProviderKind::Acp`. `None` for the native providers, and
+    /// absent in every index file written before ACP existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent_id: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -153,6 +158,7 @@ impl SessionMeta {
             resume_cursor: None,
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::default(),
+            acp_agent_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -238,6 +244,9 @@ impl SessionStore {
         let name = match provider {
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCode => "claude",
+            // ACP agents publish their models over the wire at session start
+            // (`AgentEvent::ProviderOptions`), so there is no catalog to cache.
+            ProviderKind::Acp => "acp",
         };
         self.root.join(format!("models-{name}.json"))
     }

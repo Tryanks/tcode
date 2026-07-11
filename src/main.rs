@@ -2,6 +2,7 @@
 // Debug builds keep the console so `RUST_LOG` output stays visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod acp_registry;
 mod app;
 mod assets;
 mod checkpoints;
@@ -95,6 +96,11 @@ fn main() {
     let debug_settings_section = std::env::args()
         .skip_while(|arg| arg != "--debug-settings-section")
         .nth(1);
+    // Screenshot-only: seed the ACP marketplace's search box (typing cannot be
+    // driven headlessly), so the filtered list can be captured.
+    let debug_acp_search = std::env::args()
+        .skip_while(|arg| arg != "--debug-acp-search")
+        .nth(1);
     // Screenshot-only: expand one provider card (pairs with the above).
     let debug_provider_expanded = std::env::args()
         .skip_while(|arg| arg != "--debug-provider-expanded")
@@ -171,6 +177,7 @@ fn main() {
                 let dscope = debug_diff_scope.clone();
                 let dp = debug_palette.clone();
                 let dsec = debug_settings_section.clone();
+                let dacp = debug_acp_search.clone();
                 let dexp = debug_provider_expanded.clone();
                 app_state.update(cx, |state, _| {
                     state.debug_compose = dc;
@@ -181,6 +188,7 @@ fn main() {
                     state.debug_review_comment = debug_review_comment;
                     state.debug_palette = dp;
                     state.debug_settings_section = dsec;
+                    state.debug_acp_search = dacp;
                     state.debug_provider_expanded = dexp;
                 });
             }
