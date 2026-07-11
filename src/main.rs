@@ -37,6 +37,7 @@ fn main() {
     // Hidden debug/dev flag: open the active session's terminal drawer. This
     // implies --open-latest so it is useful by itself for screenshot checks.
     let open_terminal = std::env::args().any(|arg| arg == "--open-terminal");
+    let terminal_demo = std::env::args().any(|arg| arg == "--terminal-demo");
     // Hidden debug/dev flags: open the settings page / command palette on
     // launch so those surfaces can be screenshotted headlessly.
     let open_settings = std::env::args().any(|arg| arg == "--open-settings");
@@ -159,6 +160,7 @@ fn main() {
                     let _ = cx.update(|cx| smoke::drive(spec, app_state, cx));
                 } else if open_latest
                     || open_terminal
+                    || terminal_demo
                     || open_settings
                     || open_palette
                     || open_plan
@@ -171,7 +173,7 @@ fn main() {
                             if let Some(project_id) = state.create_project(cwd.clone(), cx) {
                                 state.start_draft(project_id, cwd, cx);
                             }
-                        } else if open_latest || open_terminal || open_plan || debug_seed {
+                        } else if open_latest || open_terminal || open_plan || debug_seed || terminal_demo {
                             state.open_latest_session(cx);
                         }
                         if open_diff {
@@ -182,6 +184,9 @@ fn main() {
                         }
                         if open_terminal {
                             state.open_terminal_panel(cx);
+                        }
+                        if terminal_demo {
+                            state.open_terminal_demo(cx);
                         }
                         if open_settings {
                             state.open_settings(cx);
