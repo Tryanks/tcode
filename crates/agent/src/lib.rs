@@ -57,6 +57,42 @@ pub struct SessionOptions {
     /// Codex: `-c mcp_servers.tcode_preview=…`) so the agent can drive the
     /// embedded preview browser. `None` = don't register any preview tooling.
     pub mcp_server: Option<McpRegistration>,
+    /// Per-provider environment (Settings → Providers): extra variables merged
+    /// into the child's environment, plus the home-directory override. See
+    /// [`LaunchEnv`].
+    pub launch_env: LaunchEnv,
+    /// Extra CLI arguments appended at spawn (Claude's "Launch arguments").
+    pub extra_args: Vec<String>,
+}
+
+/// The per-provider environment configured in Settings → Providers, applied to
+/// every child process we spawn for that provider (sessions, `list_models`, and
+/// version/auth probes alike).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchEnv {
+    /// Extra `KEY=VALUE` pairs merged into the child's environment. Later
+    /// entries win, and these override anything inherited from the parent.
+    pub env: Vec<(String, String)>,
+    /// Home-directory override. Provider-specific: Claude gets `HOME` (which
+    /// relocates `.claude.json` / `.claude`), Codex gets `CODEX_HOME`.
+    pub home: Option<PathBuf>,
+}
+
+impl LaunchEnv {
+    /// The complete list of variables to set on a child of `provider`: the
+    /// configured pairs, plus the provider's home variable when an override is
+    /// set (appended last, so it wins over an equivalent hand-written pair).
+    pub fn pairs(&self, provider: ProviderKind) -> Vec<(String, String)> {
+        let mut pairs = self.env.clone();
+        if let Some(home) = &self.home {
+            let key = match provider {
+                ProviderKind::ClaudeCode => "HOME",
+                ProviderKind::Codex => "CODEX_HOME",
+            };
+            pairs.push((key.to_string(), home.to_string_lossy().into_owned()));
+        }
+        pairs
+    }
 }
 
 /// Connection details for the tcode preview MCP server (a streamable-HTTP
@@ -262,14 +298,17 @@ pub struct TurnOptions {
     pub interaction_mode: Option<InteractionMode>,
 }
 
-/// List the provider's models (spawn, query, teardown).
+/// List the provider's models (spawn, query, teardown). `launch_env` carries the
+/// provider's configured environment/home so the catalog reflects the same CLI
+/// (and account) a session would actually run against.
 pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     match provider {
-        ProviderKind::Codex => codex::list_models(binary_path).await,
-        ProviderKind::ClaudeCode => claude::list_models(binary_path).await,
+        ProviderKind::Codex => codex::list_models(binary_path, launch_env).await,
+        ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env).await,
     }
 }
 
@@ -648,6 +687,46 @@ mod mcp_registration_tests {
             Some("Bearer abc123")
         );
         assert!(table.get("bearer_token").is_none());
+    }
+}
+
+#[cfg(test)]
+mod launch_env_tests {
+    use super::*;
+
+    #[test]
+    fn home_maps_to_the_providers_own_variable() {
+        let env = LaunchEnv {
+            env: vec![("FOO".into(), "bar".into())],
+            home: Some(PathBuf::from("/tmp/home")),
+        };
+        assert_eq!(
+            env.pairs(ProviderKind::ClaudeCode),
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("HOME".to_string(), "/tmp/home".to_string()),
+            ]
+        );
+        assert_eq!(
+            env.pairs(ProviderKind::Codex),
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("CODEX_HOME".to_string(), "/tmp/home".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_home_override_leaves_only_the_configured_pairs() {
+        let env = LaunchEnv {
+            env: vec![("ANTHROPIC_BASE_URL".into(), "https://x".into())],
+            home: None,
+        };
+        assert_eq!(
+            env.pairs(ProviderKind::ClaudeCode),
+            vec![("ANTHROPIC_BASE_URL".to_string(), "https://x".to_string())]
+        );
+        assert!(LaunchEnv::default().pairs(ProviderKind::Codex).is_empty());
     }
 }
 

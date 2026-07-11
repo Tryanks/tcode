@@ -39,7 +39,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("--list-models") {
         let provider = parse_provider(args.get(1).map(String::as_str));
         let exit_code = smol::block_on(async move {
-            match list_models(provider, None).await {
+            match list_models(provider, None, Default::default()).await {
                 Ok(models) => {
                     println!("{}", serde_json::to_string_pretty(&models).unwrap());
                     0
@@ -132,6 +132,8 @@ fn main() {
             option_selections,
             interaction_mode,
             mcp_server: None,
+            launch_env: Default::default(),
+            extra_args: Vec::new(),
         };
         let handle = match start_session(provider, opts).await {
             Ok(handle) => handle,

@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
-    ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
-    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus, UserInputOption,
-    UserInputQuestion,
+    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus,
+    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
+    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
+    UserInputOption, UserInputQuestion,
 };
 
 mod developer_instructions;
@@ -72,8 +72,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 /// Spawn `codex app-server`, page through `model/list`, and tear the process
 /// down. Mirrors T3's `requestAllCodexModels` (initial `{}`, then `{cursor}`
 /// until `nextCursor` is empty).
-pub async fn list_models(binary_path: Option<PathBuf>) -> Result<Vec<ModelSpec>, AgentError> {
-    let (mut child, mut stdin, lines) = spawn_server(binary_path.as_deref(), &[])?;
+pub async fn list_models(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> Result<Vec<ModelSpec>, AgentError> {
+    let (mut child, mut stdin, lines) = spawn_server(binary_path.as_deref(), &[], &launch_env)?;
     let result = collect_models(&mut stdin, &lines).await;
     stop_child(&mut child, stdin);
     result
@@ -379,17 +382,20 @@ async fn run_actor(
 ) {
     // Register the embedded preview MCP server (streamable HTTP) via a `-c`
     // config override so the agent can drive the in-app browser.
-    let extra_args: Vec<String> = match &opts.mcp_server {
+    let mut extra_args: Vec<String> = match &opts.mcp_server {
         Some(mcp) => vec!["-c".to_string(), mcp.codex_config_override()],
         None => Vec::new(),
     };
-    let (mut child, mut stdin, lines) = match spawn_server(opts.binary_path.as_deref(), &extra_args) {
-        Ok(parts) => parts,
-        Err(err) => {
-            let _ = ready.send(Err(err)).await;
-            return;
-        }
-    };
+    // Any additional launch arguments configured for this provider.
+    extra_args.extend(opts.extra_args.iter().cloned());
+    let (mut child, mut stdin, lines) =
+        match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
+            Ok(parts) => parts,
+            Err(err) => {
+                let _ = ready.send(Err(err)).await;
+                return;
+            }
+        };
 
     let startup = initialize_and_open_thread(&opts, &mut stdin, &lines).await;
     let (thread_id, model, next_id, provider_commands) = match startup {
@@ -504,15 +510,28 @@ async fn run_actor(
 fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
+    launch_env: &LaunchEnv,
 ) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>), AgentError> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
-    let mut child = Command::new(&binary)
-        .arg("app-server")
+    let mut cmd = Command::new(&binary);
+    cmd.arg("app-server")
         .args(extra_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Per-provider environment (Settings → Providers): custom variables and the
+    // `CODEX_HOME` override (the account-scoped "shadow home", when set).
+    for (key, value) in launch_env.pairs(ProviderKind::Codex) {
+        cmd.env(key, value);
+    }
+    if let Some(home) = &launch_env.home {
+        // Codex refuses to start against a CODEX_HOME that does not exist.
+        if let Err(err) = std::fs::create_dir_all(home) {
+            log::warn!("could not create CODEX_HOME {}: {err}", home.display());
+        }
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
     let stdin = BufWriter::new(

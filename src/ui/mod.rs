@@ -9,6 +9,7 @@ mod workspace_walk;
 mod palette;
 mod plan_panel;
 mod preview_panel;
+pub mod provider_card;
 mod settings_page;
 mod sidebar;
 mod terminal_drawer;

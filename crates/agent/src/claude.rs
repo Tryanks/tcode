@@ -33,9 +33,10 @@ use smol::process::{Command, Stdio};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
-    ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
-    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
+    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus,
+    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
+    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus, UserInputOption,
+    UserInputQuestion,
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
@@ -100,6 +101,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(mcp) = &opts.mcp_server {
         cmd.arg("--mcp-config").arg(mcp.claude_mcp_config_json());
     }
+    // Settings → Providers "Launch arguments", appended last so the user can
+    // override anything we set above.
+    for arg in &opts.extra_args {
+        cmd.arg(arg);
+    }
     log::debug!(
         "claude spawn args: model={:?} effort={:?} settings={:?} ultrathink={} permission-mode={}",
         launch.model_id,
@@ -118,6 +124,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         // top-level invocation.
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
+    // Per-provider environment (Settings → Providers): custom variables and the
+    // `HOME` override that relocates `.claude.json` / `.claude`.
+    for (key, value) in opts.launch_env.pairs(ProviderKind::ClaudeCode) {
+        cmd.env(key, value);
+    }
 
     let mut child = cmd
         .spawn()
@@ -1895,24 +1906,28 @@ fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Run `claude --version` and parse the semver triple; `None` on any failure.
-async fn claude_version(binary: Option<&Path>) -> Option<(u32, u32, u32)> {
+async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
     let bin = binary
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "claude".to_string());
-    let output = Command::new(&bin)
-        .arg("--version")
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--version")
         .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .output()
-        .await
-        .ok()?;
+        .env_remove("CLAUDE_CODE_ENTRYPOINT");
+    for (key, value) in launch_env.pairs(ProviderKind::ClaudeCode) {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().await.ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_semver(&stdout)
 }
 
 /// List Claude's models: the static catalog, gated by the installed CLI version.
-pub async fn list_models(binary_path: Option<PathBuf>) -> Result<Vec<ModelSpec>, AgentError> {
-    let version = claude_version(binary_path.as_deref()).await;
+pub async fn list_models(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> Result<Vec<ModelSpec>, AgentError> {
+    let version = claude_version(binary_path.as_deref(), &launch_env).await;
     Ok(built_in_models()
         .into_iter()
         .filter(|m| model_available(&m.id, version))

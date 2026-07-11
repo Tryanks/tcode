@@ -16,7 +16,6 @@ use gpui_component::{
     ThemeMode as ComponentThemeMode, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
-    input::{Input, InputEvent, InputState},
     popover::Popover,
     switch::Switch,
     v_flex,
@@ -26,6 +25,7 @@ use agent::ProviderKind;
 
 use crate::app::AppState;
 use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
+use crate::ui::provider_card::ProviderCard;
 use crate::ui::window_drag_area;
 
 /// Left inset so branding clears the native macOS traffic lights.
@@ -58,41 +58,15 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
 
 pub struct SettingsPage {
     app_state: Entity<AppState>,
-    claude_input: Entity<InputState>,
-    codex_input: Entity<InputState>,
+    /// One card per provider, in T3's driver order (Codex, then Claude).
+    provider_cards: Vec<(ProviderKind, Entity<ProviderCard>)>,
     section: Section,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsPage {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = app_state.read(cx).settings.clone();
-        let claude_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx)
-                .placeholder(rust_i18n::t!("settings.claude_path.placeholder"));
-            input.set_value(path_string(&settings.claude_binary), window, cx);
-            input
-        });
-        let codex_input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx)
-                .placeholder(rust_i18n::t!("settings.codex_path.placeholder"));
-            input.set_value(path_string(&settings.codex_binary), window, cx);
-            input
-        });
-
-        let subscriptions = vec![
-            cx.observe(&app_state, |_, _, cx| cx.notify()),
-            cx.subscribe(&claude_input, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.commit_binaries(cx);
-                }
-            }),
-            cx.subscribe(&codex_input, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.commit_binaries(cx);
-                }
-            }),
-        ];
+        let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
 
         // Screenshot-only: `--debug-settings-section` opens a specific section.
         let section = match app_state.read(cx).debug_settings_section.as_deref() {
@@ -100,32 +74,31 @@ impl SettingsPage {
             Some("archived") => Section::Archived,
             _ => Section::General,
         };
-        Self {
+        let mut page = Self {
             app_state,
-            claude_input,
-            codex_input,
+            provider_cards: Vec::new(),
             section,
             _subscriptions: subscriptions,
-        }
+        };
+        page.build_provider_cards(window, cx);
+        page
     }
 
-    // -- persistence helpers ------------------------------------------------
-
-    fn commit_binaries(&self, cx: &mut Context<Self>) {
-        let claude = optional_path(&self.claude_input, cx);
-        let codex = optional_path(&self.codex_input, cx);
-        self.app_state.update(cx, |state, cx| {
-            let mut settings = state.settings.clone();
-            let changed =
-                settings.claude_binary != claude || settings.codex_binary != codex;
-            settings.claude_binary = claude;
-            settings.codex_binary = codex;
-            state.update_settings(settings, cx);
-            // A new binary path can change which models are available: refresh.
-            if changed {
-                state.refresh_model_catalogs(cx);
-            }
-        });
+    /// (Re)build the provider cards from current settings — also used after
+    /// "Restore defaults", which invalidates every card's inputs.
+    fn build_provider_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Screenshot-only: `--debug-provider-expanded <codex|claude>` opens one
+        // card's details (clicking the chevron cannot be driven headlessly).
+        let expanded = self.app_state.read(cx).debug_provider_expanded.clone();
+        self.provider_cards = [ProviderKind::Codex, ProviderKind::ClaudeCode]
+            .into_iter()
+            .map(|provider| {
+                let app_state = self.app_state.clone();
+                let open = expanded.as_deref() == Some(crate::settings::provider_key(provider));
+                let card = cx.new(|cx| ProviderCard::new(app_state, provider, open, window, cx));
+                (provider, card)
+            })
+            .collect();
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
@@ -303,12 +276,10 @@ impl SettingsPage {
 
     fn confirm_restore(&self, window: &mut Window, cx: &mut Context<Self>) {
         let app_state = self.app_state.clone();
-        let claude_input = self.claude_input.clone();
-        let codex_input = self.codex_input.clone();
+        let page = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let app_state = app_state.clone();
-            let claude_input = claude_input.clone();
-            let codex_input = codex_input.clone();
+            let page = page.clone();
             alert
                 .title(rust_i18n::t!("settings.restore_title"))
                 .description(rust_i18n::t!("settings.restore_description"))
@@ -321,8 +292,8 @@ impl SettingsPage {
                 )
                 .on_ok(move |_, window, cx| {
                     app_state.update(cx, |state, cx| state.reset_settings(cx));
-                    claude_input.update(cx, |s, cx| s.set_value("", window, cx));
-                    codex_input.update(cx, |s, cx| s.set_value("", window, cx));
+                    // Every provider card's inputs now hold stale overrides.
+                    page.update(cx, |page, cx| page.build_provider_cards(window, cx));
                     apply_theme(ThemeMode::System, window, cx);
                     true
                 })
@@ -392,87 +363,70 @@ impl SettingsPage {
             ))
     }
 
+    /// Settings → Providers: one card per provider inside a single bordered
+    /// container, under a section header carrying the last-checked time and a
+    /// refresh action (T3 §1).
     fn render_providers(&self, cx: &mut Context<Self>) -> gpui::Div {
-        v_flex()
-            .child(self.section_label(rust_i18n::t!("settings.providers_section"), cx))
-            .child(self.input_row(
-                rust_i18n::t!("settings.claude_path.title"),
-                rust_i18n::t!("settings.claude_path.description"),
-                &self.claude_input.clone(),
-                cx,
-            ))
-            .child(self.input_row(
-                rust_i18n::t!("settings.codex_path.title"),
-                rust_i18n::t!("settings.codex_path.description"),
-                &self.codex_input.clone(),
-                cx,
-            ))
-            .child(self.version_row(ProviderKind::ClaudeCode, cx))
-            .child(self.version_row(ProviderKind::Codex, cx))
-    }
-
-    /// A per-provider version/update row (Group C): shows the installed version
-    /// and up-to-date / update-available status, a "Check now" button, and an
-    /// "Update" button when a newer version is available.
-    fn version_row(&self, provider: ProviderKind, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
-        let status = state.provider_version(provider).cloned().unwrap_or_default();
+        let checked_at = state.providers_checked_at();
+        let checking = state.providers_checking();
         let muted = cx.theme().muted_foreground;
 
-        let title = format!("{} version", provider.display_name());
-        let detail = if status.checking {
-            rust_i18n::t!("settings.checking").into_owned()
-        } else if status.update_available {
-            let latest = status.latest.clone().unwrap_or_default();
-            rust_i18n::t!("settings.update_available_row", version = latest).into_owned()
-        } else if let Some(installed) = &status.installed {
-            rust_i18n::t!("settings.up_to_date", version = installed).into_owned()
-        } else {
-            rust_i18n::t!("settings.version_unknown").into_owned()
-        };
-
-        let mut controls = gpui_component::h_flex().gap_2().items_center();
-        if status.update_available {
-            controls = controls.child(
-                Button::new("provider-update")
-                    .primary()
-                    .small()
-                    .loading(status.updating)
-                    .label(rust_i18n::t!("settings.update_button"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.update_provider(provider, cx));
-                    })),
+        let mut header = gpui_component::h_flex()
+            .w_full()
+            .pb_2()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(muted)
+                    .child(rust_i18n::t!("settings.providers_section")),
+            );
+        if let Some(checked_at) = checked_at {
+            let ago = humanize_ago(crate::store::now_secs().saturating_sub(checked_at));
+            header = header.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(rust_i18n::t!("providers.checked", when = ago).into_owned()),
             );
         }
-        controls = controls.child(
-            Button::new("provider-check-now")
-                .outline()
-                .small()
-                .label(rust_i18n::t!("settings.check_now"))
+        header = header.child(
+            Button::new("refresh-providers")
+                .ghost()
+                .xsmall()
+                .loading(checking)
+                .icon(Icon::empty().path("icons/rotate-ccw.svg"))
+                .tooltip(rust_i18n::t!("providers.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state
-                        .update(cx, |state, cx| state.check_provider_versions(cx));
+                    this.app_state.update(cx, |state, cx| {
+                        state.refresh_provider_status(cx);
+                        state.check_provider_versions(cx);
+                    });
                 })),
         );
 
-        self.row_frame(cx)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .pr_4()
-                    .child(div().text_size(px(14.)).font_medium().child(title))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(muted)
-                            .child(detail),
-                    ),
-            )
-            .child(controls)
-            .into_any_element()
+        let mut list = v_flex()
+            .w_full()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .overflow_hidden();
+        for (index, (_, card)) in self.provider_cards.iter().enumerate() {
+            list = list.child(
+                div()
+                    .w_full()
+                    .when(index > 0, |d| {
+                        d.border_t_1().border_color(cx.theme().border)
+                    })
+                    .child(card.clone()),
+            );
+        }
+
+        v_flex().child(header).child(list)
     }
 
     /// Archived Threads: archived sessions grouped by project, each with
@@ -660,18 +614,6 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn input_row(
-        &self,
-        title: impl Into<SharedString>,
-        desc: impl Into<SharedString>,
-        input: &Entity<InputState>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.row_frame(cx)
-            .child(self.row_labels(title, desc, cx))
-            .child(div().w(px(280.)).flex_none().child(Input::new(input)))
-            .into_any_element()
-    }
 
     fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
@@ -863,16 +805,7 @@ impl Render for SettingsPage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn path_string(path: &Option<std::path::PathBuf>) -> String {
-    path.as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-}
 
-fn optional_path(input: &Entity<InputState>, cx: &App) -> Option<std::path::PathBuf> {
-    let value = input.read(cx).value().trim().to_string();
-    (!value.is_empty()).then(|| value.into())
-}
 
 /// Compact relative-time humanizer for the Archived Threads list.
 fn humanize_ago(secs: u64) -> String {
