@@ -18,7 +18,6 @@
 //! and deletes the now-orphaned newer checkpoint refs.
 
 use std::path::Path;
-use std::process::Command;
 
 /// The ref name for one checkpoint (`refs/tcode/checkpoints/<session>/<turn>`).
 fn checkpoint_ref(session_id: &str, turn: usize) -> String {
@@ -32,7 +31,7 @@ fn checkpoint_ref_prefix(session_id: &str) -> String {
 
 /// Whether `cwd` is inside a git working tree (checkpoints only apply there).
 pub fn is_git_repo(cwd: &Path) -> bool {
-    Command::new("git")
+    crate::process::command("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
@@ -44,7 +43,7 @@ pub fn is_git_repo(cwd: &Path) -> bool {
 /// (`GIT_INDEX_FILE`). A deterministic identity is injected so `commit-tree`
 /// works even when the environment has no configured git user.
 fn run_git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process::command("git");
     cmd.args(args)
         .current_dir(cwd)
         .env("GIT_AUTHOR_NAME", "tcode")

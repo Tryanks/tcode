@@ -3522,7 +3522,7 @@ async fn run_capture_env(
     args: &[&str],
     env: &[(String, String)],
 ) -> Option<String> {
-    let mut cmd = smol::process::Command::new(program);
+    let mut cmd = crate::process::async_command(program);
     cmd.args(args)
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
@@ -3643,7 +3643,7 @@ async fn probe_provider(
 /// Spawn `program args…` for a side effect (e.g. an update command) and report
 /// whether it exited successfully.
 async fn run_status(program: &str, args: &[&str]) -> bool {
-    smol::process::Command::new(program)
+    crate::process::async_command(program)
         .args(args)
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")
@@ -3710,7 +3710,7 @@ fn parse_branch_list(output: &str) -> Vec<String> {
 
 /// List local git branches for `cwd` (empty when not a repo / git fails).
 fn list_git_branches(cwd: &std::path::Path) -> Vec<String> {
-    let output = std::process::Command::new("git")
+    let output = crate::process::command("git")
         .args(["for-each-ref", "refs/heads", "--format=%(refname:short)"])
         .current_dir(cwd)
         .output();
@@ -3730,7 +3730,7 @@ enum CheckoutError {
 
 /// Check out `branch` in `cwd` iff the working tree is clean.
 fn checkout_if_clean(cwd: &std::path::Path, branch: &str) -> Result<(), CheckoutError> {
-    let status = std::process::Command::new("git")
+    let status = crate::process::command("git")
         .args(["status", "--porcelain"])
         .current_dir(cwd)
         .output()
@@ -3745,7 +3745,7 @@ fn checkout_if_clean(cwd: &std::path::Path, branch: &str) -> Result<(), Checkout
     if !status.stdout.is_empty() {
         return Err(CheckoutError::Dirty);
     }
-    let checkout = std::process::Command::new("git")
+    let checkout = crate::process::command("git")
         .args(["checkout", branch])
         .current_dir(cwd)
         .output()
@@ -3781,7 +3781,7 @@ fn create_git_worktree(
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let out = std::process::Command::new("git")
+    let out = crate::process::command("git")
         .current_dir(root)
         .args([
             "worktree",
@@ -3802,7 +3802,7 @@ fn create_git_worktree(
 
 /// Remove the worktree at `path` (force), run from the project checkout `root`.
 fn remove_git_worktree(root: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = crate::process::command("git")
         .current_dir(root)
         .args(["worktree", "remove", "--force", &path.to_string_lossy()])
         .output()

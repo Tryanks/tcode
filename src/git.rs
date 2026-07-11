@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Command;
 
 // ---------------------------------------------------------------------------
 // Status model
@@ -542,7 +541,7 @@ fn parse_porcelain_path(line: &str) -> Option<String> {
 /// Run `git <args>` in `cwd`, returning stdout on success or a
 /// `git <cmd> failed: <stderr>` error on non-zero exit / spawn failure.
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
+    let out = crate::process::command("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -644,7 +643,7 @@ pub fn run_claude_headless(binary: Option<&Path>, cwd: &Path, prompt: &str) -> R
     let bin = binary
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "claude".to_string());
-    let out = Command::new(&bin)
+    let out = crate::process::command(&bin)
         .arg("-p")
         .arg(prompt)
         .current_dir(cwd)

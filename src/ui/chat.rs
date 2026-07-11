@@ -1528,7 +1528,7 @@ fn render_commit_footer(
 }
 
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
-    if std::process::Command::new("zed").arg(cwd).spawn().is_err() {
+    if crate::process::command("zed").arg(cwd).spawn().is_err() {
         window.push_notification(
             Notification::error(rust_i18n::t!("errors.zed_cli_missing")),
             cx,
@@ -1538,7 +1538,7 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 
 /// Reveal `cwd` in Finder via `open <cwd>` (macOS); notify on failure.
 fn open_in_finder(cwd: &Path, window: &mut Window, cx: &mut App) {
-    if std::process::Command::new("open").arg(cwd).spawn().is_err() {
+    if crate::process::command("open").arg(cwd).spawn().is_err() {
         window.push_notification(Notification::error(rust_i18n::t!("errors.finder_open")), cx);
     }
 }

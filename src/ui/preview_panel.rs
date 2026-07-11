@@ -187,7 +187,7 @@ impl PreviewPanel {
     fn open_in_system_browser(&self, cx: &Context<Self>) {
         if let Some(id) = self.active_id(cx) {
             if let Some(url) = self.urls.get(&id) {
-                let _ = std::process::Command::new("open").arg(url).spawn();
+                let _ = crate::process::command("open").arg(url).spawn();
             }
         }
     }
@@ -334,7 +334,7 @@ impl PreviewPanel {
         let region = screen_region(window_origin, wv_bounds);
 
         let path = std::env::temp_dir().join(format!("tcode-preview-{}.png", std::process::id()));
-        let status = std::process::Command::new("screencapture")
+        let status = crate::process::command("screencapture")
             .arg("-x")
             .arg("-R")
             .arg(&region)

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use futures_lite::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 use serde_json::{Value, json};
 use smol::io::BufReader;
-use smol::process::{Command, Stdio};
+use smol::process::Stdio;
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -70,7 +70,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // ride the resume-restart machinery).
     let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
 
-    let mut cmd = Command::new(&binary);
+    let mut cmd = crate::process::async_command(&binary);
     cmd.arg("--print")
         .arg("--input-format")
         .arg("stream-json")
@@ -1910,7 +1910,7 @@ async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option
     let bin = binary
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "claude".to_string());
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::async_command(&bin);
     cmd.arg("--version")
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT");
