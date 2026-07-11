@@ -127,6 +127,15 @@ composer:
   output: "输出"
   context_window: "上下文窗口"
   no_usage: "本会话暂无用量信息。"
+  context_window_title: "上下文窗口"
+  compacts_automatically: "%{provider} 会在需要时自动压缩其上下文。"
+  no_files: "没有匹配的文件或文件夹。"
+  no_skills: "未找到技能。试试用 / 浏览提供方命令。"
+  no_command: "没有匹配的命令。"
+  searching: "搜索中…"
+  cmd_model_desc: "打开模型选择器"
+  cmd_plan_desc: "将此会话切换到计划模式"
+  cmd_default_desc: "将此会话切换回普通构建模式"
 approval:
   supervised: "监督模式"
   supervised_description: "执行命令和修改文件前询问。"
@@ -223,3 +232,7 @@ errors:
 notice:
   switched_branch: "已切换到 %{branch}"
   dirty_tree: "工作树中有未提交的更改"
+attach:
+  unsupported_type: "'%{name}' 的文件类型不受支持。请仅附加图片文件。"
+  too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
+  too_many: "每条消息最多只能附加 8 张图片。"

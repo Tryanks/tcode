@@ -1,6 +1,10 @@
+mod attachments;
 mod chat;
 mod composer;
+mod composer_trigger;
+mod context_meter;
 mod diff_panel;
+mod workspace_walk;
 mod palette;
 mod plan_panel;
 mod settings_page;
