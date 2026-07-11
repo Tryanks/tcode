@@ -1,0 +1,249 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - id: version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-$REF_TAG}"
+          case "$tag" in v*) ;; *) echo "Tag must start with v: $tag" >&2; exit 1;; esac
+          version="${tag#v}"
+          prerelease=false
+          case "$version" in *-rc*|*-beta*) prerelease=true;; esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: ${{ matrix.label }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: arm64
+          - label: macOS x64
+            os: macos-14
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x64
+          - label: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x64
+          - label: Windows arm64
+            os: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: arm64
+          - label: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          - label: Linux arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      VERSION: ${{ needs.setup.outputs.version }}
+      RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Install stable Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev mold \
+            libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
+          # If X2 enables preview/webview support on Linux, add GTK3 and
+          # libwebkit2gtk-4.1-dev here too.
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          start=$SECONDS
+          cargo build --release --locked --target "${{ matrix.target }}"
+          elapsed=$((SECONDS - start))
+          echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package macOS app, zip, and DMG
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="dist/tcode.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dmg-root
+          cp "target/${{ matrix.target }}/release/tcode" "$app/Contents/MacOS/tcode"
+          cp assets/icons/app/tcode.icns "$app/Contents/Resources/tcode.icns"
+          chmod +x "$app/Contents/MacOS/tcode"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>tcode</string>
+            <key>CFBundleIconFile</key><string>tcode</string>
+            <key>CFBundleIdentifier</key><string>com.tryanks.tcode</string>
+            <key>CFBundleName</key><string>tcode</string>
+            <key>CFBundleDisplayName</key><string>tcode</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          plutil -lint "$app/Contents/Info.plist"
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
+          cp -R "$app" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -quiet -volname tcode -srcfolder dmg-root -ov -format UDZO \
+            "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
+          rm -rf "dist/tcode.app" dmg-root
+
+      - name: Package Windows zip
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $stage = "dist\tcode-$env:VERSION-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\tcode.exe" "$stage\tcode.exe"
+          @"
+          tcode $env:VERSION
+
+          Microsoft Edge WebView2 Runtime is required (included with Windows 11).
+          "@ | Set-Content "$stage\README.txt"
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\tcode-$env:VERSION-windows-${{ matrix.arch }}.zip"
+          Remove-Item -Recurse -Force $stage
+
+      - name: Package Linux tarball
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist/tcode-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/tcode" "$stage/tcode"
+          cp assets/icons/app/tcode.png "$stage/tcode.png"
+          chmod +x "$stage/tcode"
+          cat > "$stage/com.tryanks.tcode.desktop" <<DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=tcode
+          Comment=Desktop coding agent client
+          Exec=tcode
+          Icon=tcode
+          Terminal=false
+          Categories=Development;
+          DESKTOP
+          cat > "$stage/README.txt" <<README
+          tcode ${VERSION}
+
+          Runtime requirements include ALSA, Fontconfig, Wayland/X11 libraries,
+          libgbm, and a Vulkan loader plus a working Vulkan ICD/graphics driver.
+          README
+          tar -C dist -czf "dist/tcode-${VERSION}-linux-${{ matrix.arch }}.tar.gz" \
+            "tcode-${VERSION}-linux-${{ matrix.arch }}"
+          rm -rf "$stage"
+
+      - name: List packaged files
+        shell: bash
+        run: ls -lh dist
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: [setup, package]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Show release files
+        run: ls -lh dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.setup.outputs.tag }}
+          prerelease: ${{ needs.setup.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
+          body: |
+            ## Platform notes
+
+            - **macOS 12+**: these test builds are not signed or notarized. After moving the app to Applications, clear Gatekeeper quarantine with:
+
+              `xattr -dr com.apple.quarantine /Applications/tcode.app`
+
+            - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
+            - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
+
+            macOS artifacts are architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently produced.
