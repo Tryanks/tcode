@@ -11,13 +11,14 @@ agent = { path = "crates/agent" }
 term = { path = "crates/term" }
 preview-mcp = { path = "crates/preview-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+# `x11`/`wayland` are mandatory on Linux: without them gpui_linux's
+# `current_platform()` hits `unreachable!("At least one of the \"wayland\" or
+# \"x11\" features must be enabled")` at startup. No-ops on macOS/Windows.
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
-gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
-wry = { version = "0.53.3", package = "lb-wry" }
-raw-window-handle = { version = "0.6", features = ["std"] }
 base64 = "0.22"
+chrono = "0.4"
 log = "0.4"
 dirs = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -28,6 +29,16 @@ async-channel = "2"
 env_logger = "0.11"
 rust-i18n = "4"
 sys-locale = "0.3"
+
+# The embedded preview browser (wry). Linux is excluded on purpose: lb-wry's
+# `build_as_child` there is X11-only and needs a GTK main loop (`gtk::init` +
+# `gtk::main_iteration_do` pumped on the UI thread), while gpui's Linux backend
+# runs calloop/xcb and never pumps GTK — the webview would panic or never paint.
+# On Linux the Preview tab renders a placeholder instead (see ui/preview_panel.rs).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
+wry = { version = "0.53.3", package = "lb-wry" }
+raw-window-handle = { version = "0.6", features = ["std"] }
 
 [features]
 default = ["runtime-shaders"]

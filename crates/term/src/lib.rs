@@ -138,16 +138,43 @@ pub struct Terminal {
     cwd: PathBuf,
 }
 
-impl Terminal {
-    /// Spawn `$SHELL` as a login shell in `cwd`.
-    pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
+/// The interactive shell to spawn, as `(program, args)`.
+///
+/// - Unix: `$SHELL` (falling back to `/bin/zsh`) as a **login** shell.
+/// - Windows: `%COMSPEC%` (falling back to `powershell.exe`). `SHELL` is unset
+///   there and `-l` is not a thing — passing either would spawn nothing.
+fn default_shell() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string());
+        (shell, Vec::new())
+    }
+    #[cfg(not(windows))]
+    {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell_name = Path::new(&shell)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("shell")
-            .to_string();
-        Self::spawn_command(cwd, shell, vec!["-l".to_string()], shell_name)
+        (shell, vec!["-l".to_string()])
+    }
+}
+
+/// The tab label for a shell path: its file stem (`/bin/zsh` → `zsh`,
+/// `C:\Windows\system32\cmd.exe` → `cmd`). Both separators are handled
+/// explicitly, so a Windows `%COMSPEC%` still labels correctly (and the label
+/// stays unit-testable from any host).
+fn shell_label(shell: &str) -> String {
+    let name = shell
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("shell");
+    name.rsplit_once('.').map_or(name, |(stem, _)| stem).to_string()
+}
+
+impl Terminal {
+    /// Spawn the platform's default interactive shell in `cwd`.
+    pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
+        let (shell, args) = default_shell();
+        let shell_name = shell_label(&shell);
+        Self::spawn_command(cwd, shell, args, shell_name)
     }
 
     fn spawn_command(
@@ -397,14 +424,48 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// The shell defaults are platform-specific: `$SHELL -l` on Unix, `%COMSPEC%`
+    /// (no `-l`; the flag does not exist there) on Windows.
+    #[test]
+    fn default_shell_matches_the_platform() {
+        let (program, args) = default_shell();
+        if cfg!(windows) {
+            assert!(
+                args.is_empty(),
+                "Windows shells take no login flag, got {args:?}"
+            );
+            assert!(
+                program.to_lowercase().contains("cmd")
+                    || program.to_lowercase().contains("powershell"),
+                "unexpected Windows shell {program}"
+            );
+        } else {
+            assert_eq!(args, vec!["-l".to_string()]);
+            assert!(program.starts_with('/'), "unexpected Unix shell {program}");
+        }
+    }
+
+    #[test]
+    fn shell_label_is_the_file_stem() {
+        assert_eq!(shell_label("/bin/zsh"), "zsh");
+        assert_eq!(shell_label(r"C:\Windows\system32\cmd.exe"), "cmd");
+    }
+
+    /// A shell that runs `script` and exits: `sh -c` on Unix, `cmd /c` on Windows.
     fn command(script: &str) -> Terminal {
-        Terminal::spawn_command(
-            std::env::temp_dir(),
-            "/bin/sh".into(),
-            vec!["-c".into(), script.into()],
-            "sh".into(),
-        )
-        .unwrap()
+        #[cfg(windows)]
+        let (program, args, name) = (
+            "cmd.exe".to_string(),
+            vec!["/c".to_string(), script.to_string()],
+            "cmd".to_string(),
+        );
+        #[cfg(not(windows))]
+        let (program, args, name) = (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), script.to_string()],
+            "sh".to_string(),
+        );
+        Terminal::spawn_command(std::env::temp_dir(), program, args, name).unwrap()
     }
 
     fn wait_until(term: &Terminal, predicate: impl Fn(&TermState) -> bool) -> TermState {
@@ -423,6 +484,9 @@ mod tests {
         }
     }
 
+    /// The PTY tests below drive real shell syntax, so they are split per
+    /// platform: POSIX `sh` scripts on Unix, `cmd` on Windows (ConPTY).
+    #[cfg(unix)]
     #[test]
     fn captures_process_output_and_exit() {
         let term = command("printf 'hello\\n'");
@@ -432,6 +496,17 @@ mod tests {
         assert_eq!(state.exit_code, Some(0));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn captures_process_output_and_exit() {
+        let term = command("echo hello");
+        let state = wait_until(&term, |state| {
+            state.text().contains("hello") && state.exited
+        });
+        assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn resizes_grid() {
         let term = command("sleep 1");
@@ -440,6 +515,16 @@ mod tests {
         assert_eq!((state.cols, state.rows), (42, 9));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn resizes_grid() {
+        let term = command("timeout /t 1 >nul");
+        term.resize(42, 9);
+        let state = term.snapshot();
+        assert_eq!((state.cols, state.rows), (42, 9));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn accepts_input() {
         let term = command("read line; printf '%s\\n' \"$line\"");
@@ -448,12 +533,22 @@ mod tests {
         assert!(state.text().contains("echo tcode-term-ok"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn accepts_input() {
+        let term = command("set /p line= && echo %line%");
+        term.write_input(b"tcode-term-ok\r".to_vec());
+        let state = wait_until(&term, |state| state.text().contains("tcode-term-ok"));
+        assert!(state.text().contains("tcode-term-ok"));
+    }
+
     #[test]
     fn derives_command_label_from_argv0() {
         assert_eq!(derive_command_label("  /usr/bin/cargo test --workspace"), Some("cargo".into()));
         assert_eq!(derive_command_label("   "), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn programmatic_selection_returns_grid_text() {
         let term = command("printf 'alpha\\nbeta\\n'; sleep 1");

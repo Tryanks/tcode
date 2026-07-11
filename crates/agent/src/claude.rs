@@ -1907,9 +1907,11 @@ fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
 
 /// Run `claude --version` and parse the semver triple; `None` on any failure.
 async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
-    let bin = binary
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "claude".to_string());
+    // Resolve through the PATH search (PATHEXT-aware: on Windows the CLI only
+    // exists as `claude.cmd`), falling back to the bare name so the failure is
+    // reported by the OS exactly as before.
+    let bin = crate::resolve_binary(binary, "claude")
+        .unwrap_or_else(|_| std::path::PathBuf::from("claude"));
     let mut cmd = crate::process::async_command(&bin);
     cmd.arg("--version")
         .env_remove("CLAUDECODE")
