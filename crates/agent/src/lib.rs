@@ -28,6 +28,20 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// Whether the provider accepts [`SessionCommand::Steer`] — a message
+    /// injected into a turn that is already running. Queueing works everywhere
+    /// (the app holds the message until the turn ends); steering does not.
+    ///
+    /// ACP has no steering method at all (`session/prompt` is one request per
+    /// turn; only `session/cancel` interrupts), so ACP sessions must fall back
+    /// to queueing.
+    pub fn supports_steering(&self) -> bool {
+        match self {
+            ProviderKind::ClaudeCode | ProviderKind::Codex => true,
+            ProviderKind::Acp => false,
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             ProviderKind::Codex => "Codex",
@@ -512,6 +526,18 @@ pub enum SessionCommand {
     /// live emit `AgentEvent::Warning` and keep the old mode; the UI then
     /// falls back to a resume-restart.
     SetApprovalMode(ApprovalMode),
+    /// Inject a message into the turn that is ALREADY running, so the model
+    /// picks it up at its next opportunity to accept input (typically the next
+    /// tool call). Distinct from queueing, which is an app-level concept: a
+    /// queued message is held and sent as an ordinary [`Self::SendTurn`] once
+    /// the current turn completes.
+    ///
+    /// Only providers whose [`ProviderKind::supports_steering`] is true accept
+    /// this; the others log and ignore it (the UI must not offer it there).
+    Steer {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
     /// Switch Build/Plan interaction mode. Codex applies it on the next
     /// `turn/start`; Claude sends a `set_permission_mode` control request.
     SetInteractionMode(InteractionMode),
