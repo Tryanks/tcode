@@ -873,7 +873,10 @@ impl DiffPanel {
         }
         self.loading_key = Some(key.clone());
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || load_git_diff(&cwd, scope, base.as_deref())).await;
+            let result = crate::blocking::unblock(cx.background_executor(), move || {
+                load_git_diff(&cwd, scope, base.as_deref())
+            })
+            .await;
             let _ = this.update(cx, |panel, cx| {
                 if panel.loading_key.as_ref() == Some(&key) {
                     panel.git_preview = Some(GitPreview {

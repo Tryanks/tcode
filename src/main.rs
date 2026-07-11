@@ -5,6 +5,7 @@
 mod acp_registry;
 mod app;
 mod assets;
+mod blocking;
 mod checkpoints;
 mod git;
 mod process;

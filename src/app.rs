@@ -1209,7 +1209,10 @@ impl AppState {
         self.git_status_generation += 1;
         let generation = self.git_status_generation;
         cx.spawn(async move |this, cx| {
-            let status = smol::unblock(move || crate::git::read_status(&cwd)).await;
+            let status = crate::blocking::unblock(cx.background_executor(), move || {
+                crate::git::read_status(&cwd)
+            })
+            .await;
             let _ = this.update(cx, |state, cx| {
                 if state.git_status_generation == generation
                     && state.active_session_id().map(str::to_string) == session_id
@@ -1275,18 +1278,15 @@ impl AppState {
         };
         let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
         cx.background_executor().spawn(async move {
-            smol::unblock(move || {
-                let (stat, patch) = crate::git::commit_diff_context(&cwd, included.as_deref());
-                let prompt = crate::git::build_commit_prompt(&stat, &patch);
-                let raw = crate::git::run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
-                let message = crate::git::sanitize_commit_message(&raw);
-                if message.is_empty() {
-                    Err("model returned an empty commit message".to_string())
-                } else {
-                    Ok(message)
-                }
-            })
-            .await
+            let (stat, patch) = crate::git::commit_diff_context(&cwd, included.as_deref());
+            let prompt = crate::git::build_commit_prompt(&stat, &patch);
+            let raw = crate::git::run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
+            let message = crate::git::sanitize_commit_message(&raw);
+            if message.is_empty() {
+                Err("model returned an empty commit message".to_string())
+            } else {
+                Ok(message)
+            }
         })
     }
 
@@ -1332,7 +1332,7 @@ impl AppState {
         let retry_feature = feature_branch.clone();
 
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
+            let result = crate::blocking::unblock(cx.background_executor(), move || {
                 crate::git::perform_action(
                     &cwd,
                     action,
@@ -1477,7 +1477,10 @@ impl AppState {
             self.acp_registry = Some(cached);
         }
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || crate::acp_registry::load(&data_dir)).await;
+            let result = crate::blocking::unblock(cx.background_executor(), move || {
+                crate::acp_registry::load(&data_dir)
+            })
+            .await;
             let _ = this.update(cx, |state, cx| {
                 state.acp_registry_loading = false;
                 match result {
@@ -1532,7 +1535,7 @@ impl AppState {
         let data_dir = self.store.root().clone();
         let name = agent.name.clone();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
+            let result = crate::blocking::unblock(cx.background_executor(), move || {
                 crate::acp_registry::install(&agent, &data_dir, |_done, _total| {})
             })
             .await;
@@ -1574,8 +1577,8 @@ impl AppState {
         let _ = self.settings_store.save(&settings);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
-        cx.spawn(async move |_this, _cx| {
-            let _ = smol::unblock(move || {
+        cx.spawn(async move |_this, cx| {
+            crate::blocking::unblock(cx.background_executor(), move || {
                 if let Err(err) = crate::acp_registry::uninstall(&data_dir, &id) {
                     log::warn!("could not remove ACP agent {id}: {err}");
                 }
@@ -2655,7 +2658,7 @@ impl AppState {
         let path_for_task = path.clone();
         let branch_for_task = branch.clone();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
+            let result = crate::blocking::unblock(cx.background_executor(), move || {
                 create_git_worktree(
                     &root_for_task,
                     &path_for_task,
@@ -3592,7 +3595,9 @@ impl AppState {
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
         cx.spawn(async move |this, cx| {
-            let branches = smol::unblock(move || list_git_branches(&cwd)).await;
+            let branches =
+                crate::blocking::unblock(cx.background_executor(), move || list_git_branches(&cwd))
+                    .await;
             let _ = this.update(cx, |state, cx| {
                 if let Some(active) = state.active.as_mut()
                     && active.meta.id == session_id
@@ -3619,7 +3624,10 @@ impl AppState {
         let session_id = active.meta.id.clone();
         let branch_for_task = branch.clone();
         cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || checkout_if_clean(&cwd, &branch_for_task)).await;
+            let result = crate::blocking::unblock(cx.background_executor(), move || {
+                checkout_if_clean(&cwd, &branch_for_task)
+            })
+            .await;
             let _ = this.update(cx, |state, cx| {
                 match result {
                     Ok(()) => {
@@ -4211,10 +4219,9 @@ async fn probe_provider(
                 .clone()
                 .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
             let path = home.map(|home| home.join("auth.json"));
-            let json = match path {
-                Some(path) => smol::unblock(move || std::fs::read_to_string(path).ok()).await,
-                None => None,
-            };
+            // A few KB of local JSON: read it inline rather than bouncing off a
+            // thread pool (see `crate::blocking`).
+            let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref()
                 .and_then(crate::provider_status::parse_codex_auth)
         }

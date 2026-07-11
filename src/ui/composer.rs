@@ -643,7 +643,8 @@ impl Composer {
         cx.spawn(async move |this, cx| {
             let walked = {
                 let cwd = cwd.clone();
-                smol::unblock(move || list_workspace(&cwd)).await
+                crate::blocking::unblock(cx.background_executor(), move || list_workspace(&cwd))
+                    .await
             };
             let _ = this.update(cx, |this, cx| {
                 this.workspace = Some((cwd, walked));
