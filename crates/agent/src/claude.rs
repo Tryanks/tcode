@@ -59,11 +59,10 @@ pub(crate) fn permission_mode_flag(mode: ApprovalMode) -> &'static str {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let binary = opts
-        .binary_path
-        .clone()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "claude".to_string());
+    // Absolute path: a bare name would be resolved against the session cwd we
+    // set below, which breaks PATH lookup (see `resolve_binary`).
+    let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
+    let binary = binary.to_string_lossy().into_owned();
 
     // Resolve model-scoped launch options from the persisted selections
     // (effort/context/fast/thinking are launch-time only; mid-session changes
