@@ -974,6 +974,7 @@ fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
         binary_path,
+        approval_mode: agent::ApprovalMode::default(),
     }
 }
 

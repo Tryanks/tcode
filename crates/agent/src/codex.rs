@@ -429,6 +429,15 @@ impl Actor {
                 .await;
                 Ok(())
             }
+            SessionCommand::SetApprovalMode(mode) => {
+                // Live switching lands with the permission-mode milestone;
+                // until then the UI falls back to a resume-restart.
+                self.emit(AgentEvent::Warning(format!(
+                    "codex: live approval-mode switch to {mode:?} not implemented yet"
+                )))
+                .await;
+                Ok(())
+            }
             SessionCommand::Shutdown => Ok(()),
         }
     }
