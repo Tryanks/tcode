@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod checkpoints;
+mod git;
 mod session;
 mod settings;
 mod smoke;
@@ -67,6 +68,19 @@ fn main() {
         .skip_while(|arg| arg != "--debug-cwd")
         .nth(1)
         .map(std::path::PathBuf::from);
+    // Hidden E2E flags: run a real commit (`--debug-git-commit "msg"`) or
+    // generate a commit message (`--debug-git-genmsg`) on the opened session's
+    // repo, so the git flows can be exercised headlessly. Both imply --open-latest.
+    let debug_git_commit = std::env::args()
+        .skip_while(|arg| arg != "--debug-git-commit")
+        .nth(1);
+    let debug_git_genmsg = std::env::args().any(|arg| arg == "--debug-git-genmsg");
+    // Screenshot-only: open the commit dialog on launch.
+    let debug_git_dialog = std::env::args().any(|arg| arg == "--debug-git-dialog");
+    // Hidden E2E flag: run a non-commit quick-action (push|pull|publish|init).
+    let debug_git_action = std::env::args()
+        .skip_while(|arg| arg != "--debug-git-action")
+        .nth(1);
     let store = store::SessionStore::open_default().expect("failed to open tcode data directory");
 
     gpui_platform::application()
@@ -181,6 +195,10 @@ fn main() {
                     || open_preview.is_some()
                     || open_draft.is_some()
                     || debug_seed
+                    || debug_git_commit.is_some()
+                    || debug_git_genmsg
+                    || debug_git_action.is_some()
+                    || debug_git_dialog
                 {
                     let _ = app_state.update(cx, |state, cx| {
                         if let Some(cwd) = debug_cwd.clone() {
@@ -194,6 +212,10 @@ fn main() {
                             || debug_seed
                             || terminal_demo
                             || open_preview.is_some()
+                            || debug_git_commit.is_some()
+                            || debug_git_genmsg
+                            || debug_git_action.is_some()
+                            || debug_git_dialog
                         {
                             state.open_latest_session(cx);
                         }
@@ -227,6 +249,18 @@ fn main() {
                             {
                                 state.start_draft(project.id, project.root, cx);
                             }
+                        }
+                        if let Some(message) = debug_git_commit.clone() {
+                            state.debug_git_commit(message, cx);
+                        }
+                        if let Some(name) = debug_git_action.clone() {
+                            state.debug_git_action(name, cx);
+                        }
+                        if debug_git_genmsg {
+                            state.debug_git_generate_message(cx);
+                        }
+                        if debug_git_dialog {
+                            state.debug_open_commit_dialog = true;
                         }
                     });
                 }

@@ -1,5 +1,6 @@
 mod attachments;
 mod chat;
+mod commit_dialog;
 mod composer;
 mod composer_trigger;
 mod context_meter;
@@ -11,6 +12,7 @@ mod preview_panel;
 mod settings_page;
 mod sidebar;
 mod terminal_drawer;
+pub(crate) mod toast;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
@@ -28,6 +30,7 @@ use palette::CommandPalette;
 use preview_panel::PreviewPanel;
 use settings_page::SettingsPage;
 use sidebar::SessionsSidebar;
+pub(crate) use toast::ToastCenter;
 
 use crate::app::{AppState, RightTab, Route};
 
@@ -92,6 +95,7 @@ pub struct AppShell {
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
+    toasts: Entity<ToastCenter>,
     /// Tracks the palette's open state across frames so it can be focused on the
     /// open transition.
     palette_was_open: bool,
@@ -136,6 +140,11 @@ impl AppShell {
             .detach();
         }
 
+        // The rich toast overlay, shared with AppState so long-running git flows
+        // can mutate a single progress toast in place.
+        let toasts = cx.new(|_| ToastCenter::new());
+        app_state.update(cx, |state, _| state.set_toast_center(toasts.clone()));
+
         Self {
             sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx)),
             chat: cx.new(|cx| ChatView::new(app_state.clone(), window, cx)),
@@ -143,6 +152,7 @@ impl AppShell {
             preview,
             settings_page: cx.new(|cx| SettingsPage::new(app_state.clone(), window, cx)),
             palette: cx.new(|cx| CommandPalette::new(app_state.clone(), window, cx)),
+            toasts,
             app_state,
             palette_was_open: false,
             _subscriptions: vec![subscription],
@@ -189,6 +199,7 @@ impl Render for AppShell {
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
                 .child(self.settings_page.clone())
+                .child(self.toasts.clone())
                 .children(sheet_layer)
                 .children(dialog_layer)
                 .children(notification_layer);
@@ -267,6 +278,7 @@ impl Render for AppShell {
                     .child(workspace),
             )
             .when(palette_open, |this| this.child(self.palette.clone()))
+            .child(self.toasts.clone())
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)
