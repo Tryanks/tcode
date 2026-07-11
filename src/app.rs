@@ -145,7 +145,7 @@ pub fn group_sessions(
                 .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
                 .cloned()
                 .collect();
-            sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
             ProjectGroup {
                 project: project.clone(),
                 sessions,
@@ -516,7 +516,7 @@ impl AppState {
             log::warn!("failed to persist migrated session index: {err}");
         }
         let mut sessions = file.sessions;
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
@@ -864,17 +864,18 @@ impl AppState {
                     status.latest = latest_pretty.clone();
                     status.update_available = update_available;
                     // Toast once when an update becomes newly available.
-                    if update_available && !already {
-                        if let Some(version) = &latest_pretty {
-                            cx.emit(AppEvent::Notice(
-                                rust_i18n::t!(
-                                    "notice.update_available",
-                                    provider = provider.display_name(),
-                                    version = version
-                                )
-                                .into_owned(),
-                            ));
-                        }
+                    if update_available
+                        && !already
+                        && let Some(version) = &latest_pretty
+                    {
+                        cx.emit(AppEvent::Notice(
+                            rust_i18n::t!(
+                                "notice.update_available",
+                                provider = provider.display_name(),
+                                version = version
+                            )
+                            .into_owned(),
+                        ));
                     }
                     cx.notify();
                 });
@@ -1239,10 +1240,11 @@ impl AppState {
             }
         };
         // PublishBranch needs the branch name; seed the status synchronously.
-        if matches!(action, GitAction::PublishBranch) && self.git_status.is_none() {
-            if let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) {
-                self.git_status = Some(crate::git::read_status(&cwd));
-            }
+        if matches!(action, GitAction::PublishBranch)
+            && self.git_status.is_none()
+            && let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone())
+        {
+            self.git_status = Some(crate::git::read_status(&cwd));
         }
         self.run_git_action(action, None, None, None, cx);
     }
@@ -1363,12 +1365,12 @@ impl AppState {
         };
         let mut turns: Vec<usize> = Vec::new();
         for entry in &active.timeline.entries {
-            if let crate::session::EntryContent::FileChange { changes, .. } = &entry.content {
-                if !changes.is_empty() && turns.last() != Some(&entry.turn) {
-                    if !turns.contains(&entry.turn) {
-                        turns.push(entry.turn);
-                    }
-                }
+            if let crate::session::EntryContent::FileChange { changes, .. } = &entry.content
+                && !changes.is_empty()
+                && turns.last() != Some(&entry.turn)
+                && !turns.contains(&entry.turn)
+            {
+                turns.push(entry.turn);
             }
         }
         turns.sort_unstable();
@@ -1769,7 +1771,7 @@ impl AppState {
         for group in &mut groups {
             group
                 .sessions
-                .sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
+                .sort_by_key(|b| std::cmp::Reverse(b.archived_at));
         }
         groups.retain(|g| !g.sessions.is_empty());
         groups
@@ -1954,12 +1956,11 @@ impl AppState {
             if crate::checkpoints::is_git_repo(&meta.cwd) {
                 crate::checkpoints::delete_all_checkpoint_refs(&meta.cwd, &meta.id);
             }
-            if remove_worktree {
-                if let Some(worktree) = &meta.worktree {
-                    if let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd) {
-                        self.report_error(err, cx);
-                    }
-                }
+            if remove_worktree
+                && let Some(worktree) = &meta.worktree
+                && let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd)
+            {
+                self.report_error(err, cx);
             }
         }
         self.settings.last_visited.remove(session_id);
@@ -2369,13 +2370,13 @@ impl AppState {
     /// Persist the active draft as a real session (no cx; caller notifies).
     /// The session id is preserved, so its already-recorded events line up.
     fn commit_draft(&mut self) -> std::io::Result<()> {
-        if let Some(active) = self.active.as_mut() {
-            if active.draft {
-                active.draft = false;
-                let meta = active.meta.clone();
-                self.store.upsert_meta(&meta)?;
-                self.sessions = self.store.load_index();
-            }
+        if let Some(active) = self.active.as_mut()
+            && active.draft
+        {
+            active.draft = false;
+            let meta = active.meta.clone();
+            self.store.upsert_meta(&meta)?;
+            self.sessions = self.store.load_index();
         }
         Ok(())
     }
@@ -2464,25 +2465,25 @@ impl AppState {
     ) {
         // Group C: a draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
-        if let Some(active) = self.active.as_ref() {
-            if active.draft && !active.preparing_worktree {
-                if let WorkspaceMode::NewWorktree { base } = active.draft_workspace.clone() {
-                    self.begin_worktree_prep(text, attachments, base, cx);
-                    return;
-                }
-            }
+        if let Some(active) = self.active.as_ref()
+            && active.draft
+            && !active.preparing_worktree
+            && let WorkspaceMode::NewWorktree { base } = active.draft_workspace.clone()
+        {
+            self.begin_worktree_prep(text, attachments, base, cx);
+            return;
         }
 
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
-        if self.active_is_draft() {
-            if let Err(err) = self.commit_draft() {
-                self.report_error(
-                    rust_i18n::t!("errors.persist_session", error = err).into_owned(),
-                    cx,
-                );
-                return;
-            }
+        if self.active_is_draft()
+            && let Err(err) = self.commit_draft()
+        {
+            self.report_error(
+                rust_i18n::t!("errors.persist_session", error = err).into_owned(),
+                cx,
+            );
+            return;
         }
 
         let Some(active) = self.active.as_mut() else {
@@ -2985,12 +2986,12 @@ impl AppState {
     /// Open the right panel on the Preview tab (used when the agent drives the
     /// preview so the webview surfaces without a manual toggle).
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            if !(active.diff_open && active.right_tab == RightTab::Preview) {
-                active.diff_open = true;
-                active.right_tab = RightTab::Preview;
-                cx.notify();
-            }
+        if let Some(active) = self.active.as_mut()
+            && !(active.diff_open && active.right_tab == RightTab::Preview)
+        {
+            active.diff_open = true;
+            active.right_tab = RightTab::Preview;
+            cx.notify();
         }
     }
 
@@ -3021,11 +3022,11 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let branches = smol::unblock(move || list_git_branches(&cwd)).await;
             let _ = this.update(cx, |state, cx| {
-                if let Some(active) = state.active.as_mut() {
-                    if active.meta.id == session_id {
-                        active.branches = branches;
-                        cx.notify();
-                    }
+                if let Some(active) = state.active.as_mut()
+                    && active.meta.id == session_id
+                {
+                    active.branches = branches;
+                    cx.notify();
                 }
             });
         })
@@ -3050,10 +3051,10 @@ impl AppState {
             let _ = this.update(cx, |state, cx| {
                 match result {
                     Ok(()) => {
-                        if let Some(active) = state.active.as_mut() {
-                            if active.meta.id == session_id {
-                                active.git_branch = read_git_branch(&active.meta.cwd);
-                            }
+                        if let Some(active) = state.active.as_mut()
+                            && active.meta.id == session_id
+                        {
+                            active.git_branch = read_git_branch(&active.meta.cwd);
                         }
                         cx.emit(AppEvent::Notice(
                             rust_i18n::t!("notice.switched_branch", branch = branch).into_owned(),
@@ -3317,10 +3318,10 @@ impl AppState {
                 // The turn may have switched branches (checkout) or made the
                 // first commit; refresh the display-only branch label and the
                 // git quick-action status.
-                if let Some(active) = self.active.as_mut() {
-                    if active.meta.id == session_id {
-                        active.git_branch = read_git_branch(&active.meta.cwd);
-                    }
+                if let Some(active) = self.active.as_mut()
+                    && active.meta.id == session_id
+                {
+                    active.git_branch = read_git_branch(&active.meta.cwd);
                 }
                 if self.active_session_id() == Some(session_id) {
                     self.refresh_git_status(cx);
@@ -3437,10 +3438,10 @@ impl AppState {
                 cx,
             );
         }
-        if let Some(active) = self.active.as_mut() {
-            if active.meta.id == session_id {
-                active.timeline.apply_at(Some(ts), event);
-            }
+        if let Some(active) = self.active.as_mut()
+            && active.meta.id == session_id
+        {
+            active.timeline.apply_at(Some(ts), event);
         }
     }
 
@@ -3485,10 +3486,10 @@ impl AppState {
 
     pub fn shutdown_active(&mut self) {
         self.persist_terminal_preferences();
-        if let Some(active) = self.active.take() {
-            if let Runtime::Live(commands) = active.runtime {
-                let _ = commands.try_send(SessionCommand::Shutdown);
-            }
+        if let Some(active) = self.active.take()
+            && let Runtime::Live(commands) = active.runtime
+        {
+            let _ = commands.try_send(SessionCommand::Shutdown);
         }
     }
 

@@ -742,7 +742,7 @@ impl ProviderCard {
         let mut swatches = h_flex().gap_2().items_center();
         for (index, preset) in ACCENT_PRESETS.iter().enumerate() {
             let hex = (*preset).to_string();
-            let selected = current.as_deref() == Some(preset.as_ref());
+            let selected = current.as_deref() == Some(*preset);
             let value = u32::from_str_radix(preset.trim_start_matches('#'), 16).unwrap_or(0);
             swatches = swatches.child(
                 div()

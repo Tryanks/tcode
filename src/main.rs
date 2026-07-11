@@ -207,7 +207,7 @@ fn main() {
             let quit_subscription = cx.on_app_quit({
                 let app_state = app_state.clone();
                 move |cx| {
-                    let _ = app_state.update(cx, |state, _| state.shutdown_active());
+                    app_state.update(cx, |state, _| state.shutdown_active());
                     async {}
                 }
             });
@@ -260,7 +260,7 @@ fn main() {
                 });
 
                 if let Some(spec) = smoke_spec {
-                    let _ = cx.update(|cx| smoke::drive(spec, app_state, cx));
+                    cx.update(|cx| smoke::drive(spec, app_state, cx));
                 } else if open_latest
                     || open_terminal
                     || terminal_demo
@@ -275,7 +275,7 @@ fn main() {
                     || debug_git_action.is_some()
                     || debug_git_dialog
                 {
-                    let _ = app_state.update(cx, |state, cx| {
+                    app_state.update(cx, |state, cx| {
                         if let Some(cwd) = debug_cwd.clone() {
                             // Deterministic draft rooted at `cwd` for screenshots.
                             if let Some(project_id) = state.create_project(cwd.clone(), cx) {
@@ -315,15 +315,14 @@ fn main() {
                         if open_palette {
                             state.open_palette(cx);
                         }
-                        if let Some(key) = &open_draft {
-                            if let Some(project) = state
+                        if let Some(key) = &open_draft
+                            && let Some(project) = state
                                 .projects
                                 .iter()
                                 .find(|p| p.id == *key || p.name == *key)
                                 .cloned()
-                            {
-                                state.start_draft(project.id, project.root, cx);
-                            }
+                        {
+                            state.start_draft(project.id, project.root, cx);
                         }
                         if let Some(message) = debug_git_commit.clone() {
                             state.debug_git_commit(message, cx);

@@ -300,7 +300,7 @@ impl SessionStore {
     /// Load the session index (newest first). Empty if missing / unreadable.
     pub fn load_index(&self) -> Vec<SessionMeta> {
         let mut metas = self.read_file().sessions;
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         metas
     }
 
@@ -526,7 +526,7 @@ mod tests {
         let id = "sess-1";
         store
             .append_event(
-                &id,
+                id,
                 1_000,
                 &AgentEvent::TurnStarted {
                     turn_id: "t1".into(),
@@ -535,7 +535,7 @@ mod tests {
             .unwrap();
         store
             .append_event(
-                &id,
+                id,
                 2_000,
                 &AgentEvent::TurnCompleted {
                     turn_id: "t1".into(),
@@ -694,7 +694,7 @@ mod tests {
         let alpha = file
             .projects
             .iter()
-            .find(|p| p.root == PathBuf::from("/work/alpha"))
+            .find(|p| p.root == std::path::Path::new("/work/alpha"))
             .unwrap();
         assert_eq!(alpha.name, "alpha");
         // Both alpha sessions share the same derived project.

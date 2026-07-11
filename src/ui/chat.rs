@@ -292,10 +292,10 @@ impl ChatView {
         }
 
         // 5. Turn timestamp row (finished turns with a known end time).
-        if !turn.running {
-            if let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts)) {
-                column = column.child(self.render_timestamp(ts, cx));
-            }
+        if !turn.running
+            && let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts))
+        {
+            column = column.child(self.render_timestamp(ts, cx));
         }
 
         column.into_any_element()
@@ -542,10 +542,10 @@ impl ChatView {
             } => {
                 // Prefer an input summary; fall back to a snippet of the output.
                 let mut brief = tool_brief(input);
-                if brief.is_empty() {
-                    if let Some(output) = output {
-                        brief = one_line(output);
-                    }
+                if brief.is_empty()
+                    && let Some(output) = output
+                {
+                    brief = one_line(output);
                 }
                 let summary = h_flex()
                     .min_w_0()

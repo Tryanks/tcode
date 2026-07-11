@@ -816,6 +816,7 @@ mod resolve_binary_tests {
     }
 
     /// Windows' "is executable": a regular file (no exec bit exists there).
+    #[cfg(windows)]
     fn is_file(path: &std::path::Path) -> bool {
         path.is_file()
     }
@@ -904,6 +905,7 @@ mod resolve_binary_tests {
     /// (conventionally uppercase: `.EXE`), while the file on disk is usually
     /// lowercase. Both Windows and macOS resolve that case-insensitively, so the
     /// assertions below compare names case-insensitively too.
+    #[cfg(windows)]
     fn resolved_name(path: Option<PathBuf>) -> Option<String> {
         Some(path?.file_name()?.to_string_lossy().to_lowercase())
     }

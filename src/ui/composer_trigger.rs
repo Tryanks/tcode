@@ -64,14 +64,14 @@ pub fn detect_composer_trigger(text: &str, cursor: usize) -> Option<ComposerTrig
             });
         }
         // `^/model(?:\s+(.*))?$`: `/model <query>`.
-        if let Some(after) = line_prefix.strip_prefix("/model") {
-            if after.starts_with(|c: char| c.is_whitespace()) {
-                return Some(ComposerTrigger {
-                    kind: TriggerKind::SlashModel,
-                    query: after.trim().to_string(),
-                    range: line_start..cursor,
-                });
-            }
+        if let Some(after) = line_prefix.strip_prefix("/model")
+            && after.starts_with(|c: char| c.is_whitespace())
+        {
+            return Some(ComposerTrigger {
+                kind: TriggerKind::SlashModel,
+                query: after.trim().to_string(),
+                range: line_start..cursor,
+            });
         }
         // A `/word …` that is not a bare command and not `/model`: fall through.
     }

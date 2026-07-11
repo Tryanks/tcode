@@ -213,10 +213,10 @@ mod native {
         /// Hand the current URL to the OS browser. `cx.open_url` is gpui's
         /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`).
         fn open_in_system_browser(&self, cx: &Context<Self>) {
-            if let Some(id) = self.active_id(cx) {
-                if let Some(url) = self.urls.get(&id) {
-                    cx.open_url(url);
-                }
+            if let Some(id) = self.active_id(cx)
+                && let Some(url) = self.urls.get(&id)
+            {
+                cx.open_url(url);
             }
         }
 
@@ -424,13 +424,12 @@ mod native {
             let active = self.active_id(cx);
 
             // Honor a queued `--open-preview <url>` navigation once a session exists.
-            if active.is_some() {
-                if let Some(url) = self
+            if active.is_some()
+                && let Some(url) = self
                     .app_state
                     .update(cx, |state, _| state.take_pending_preview_url())
-                {
-                    self.navigate(&url, window, cx);
-                }
+            {
+                self.navigate(&url, window, cx);
             }
 
             // Mirror the active session's URL into the address bar when it changes.

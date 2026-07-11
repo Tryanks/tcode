@@ -184,7 +184,6 @@ impl ServerHandler for PreviewTools {
                  automate the page, and capture screenshots."
                     .into(),
             ),
-            ..Default::default()
         }
     }
 }

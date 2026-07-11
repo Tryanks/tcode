@@ -1831,13 +1831,14 @@ impl Composer {
             .bg(cx.theme().background)
             .shadow_sm()
             .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
-                if let Ok(n) = ev.keystroke.key.parse::<usize>() {
-                    if n >= 1 && n <= question_keys.options.len() {
-                        let label = question_keys.options[n - 1].label.clone();
-                        this.ui_toggle_option(&question_keys, label, cx);
-                        if !question_keys.multi_select {
-                            this.ui_auto_advance(&questions_keys, String::new(), cx);
-                        }
+                if let Ok(n) = ev.keystroke.key.parse::<usize>()
+                    && n >= 1
+                    && n <= question_keys.options.len()
+                {
+                    let label = question_keys.options[n - 1].label.clone();
+                    this.ui_toggle_option(&question_keys, label, cx);
+                    if !question_keys.multi_select {
+                        this.ui_auto_advance(&questions_keys, String::new(), cx);
                     }
                 }
             }))
@@ -2826,12 +2827,13 @@ fn render_model_pane(
             if !ev.keystroke.modifiers.platform {
                 return;
             }
-            if let Ok(n) = ev.keystroke.key.parse::<usize>() {
-                if n >= 1 && n <= key_rows.len() {
-                    let id = key_rows[n - 1].id.clone();
-                    app_key.update(cx, |s, cx| s.set_active_model(Some(id), cx));
-                    popover_key.update(cx, |st, cx| st.dismiss(window, cx));
-                }
+            if let Ok(n) = ev.keystroke.key.parse::<usize>()
+                && n >= 1
+                && n <= key_rows.len()
+            {
+                let id = key_rows[n - 1].id.clone();
+                app_key.update(cx, |s, cx| s.set_active_model(Some(id), cx));
+                popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
         })
         .child(rail_col)
@@ -3241,10 +3243,10 @@ fn render_overflow_pane(
         .p_1()
         .gap_0p5()
         .child(item(Icon::new(IconName::Info), context_label(usage)))
-        .child(item(Icon::empty().path(mode_icon), mode_label.into()))
+        .child(item(Icon::empty().path(mode_icon), mode_label))
         .child(item(
             Icon::empty().path(interaction_icon),
-            interaction_label.into_owned().into(),
+            interaction_label.into_owned(),
         ))
         .into_any_element()
 }
@@ -3469,16 +3471,17 @@ fn traits_chip_label(
             } => {
                 // An armed Ultrathink shows in the reasoning segment (it is not
                 // persisted, so it does not resolve as an ordinary selection).
-                if id == "reasoningEffort" && ultrathink_armed {
-                    if let Some(o) = options.iter().find(|o| o.value == "ultrathink") {
-                        parts.push(o.label.clone());
-                        continue;
-                    }
+                if id == "reasoningEffort"
+                    && ultrathink_armed
+                    && let Some(o) = options.iter().find(|o| o.value == "ultrathink")
+                {
+                    parts.push(o.label.clone());
+                    continue;
                 }
-                if let Some(value) = resolved_select_value(id, options, default_value, selections) {
-                    if let Some(o) = options.iter().find(|o| o.value == value) {
-                        parts.push(o.label.clone());
-                    }
+                if let Some(value) = resolved_select_value(id, options, default_value, selections)
+                    && let Some(o) = options.iter().find(|o| o.value == value)
+                {
+                    parts.push(o.label.clone());
                 }
             }
             OptionDescriptor::Boolean {
@@ -3521,14 +3524,14 @@ fn assemble_user_input_answers(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     for (i, question) in questions.iter().enumerate() {
-        if i == current_index {
-            if let Some(text) = custom_current.map(str::trim).filter(|t| !t.is_empty()) {
-                map.insert(
-                    question.id.clone(),
-                    serde_json::Value::String(text.to_string()),
-                );
-                continue;
-            }
+        if i == current_index
+            && let Some(text) = custom_current.map(str::trim).filter(|t| !t.is_empty())
+        {
+            map.insert(
+                question.id.clone(),
+                serde_json::Value::String(text.to_string()),
+            );
+            continue;
         }
         let selected = selections.get(&question.id).cloned().unwrap_or_default();
         let value = if question.multi_select {

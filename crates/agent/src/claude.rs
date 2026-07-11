@@ -1005,10 +1005,10 @@ impl Mapper {
         // ExitPlanMode: capture the proposed plan from the assistant block
         // (deduped against the permission-callback capture).
         if name == "ExitPlanMode" {
-            if let Some(markdown) = extract_exit_plan_markdown(&input) {
-                if let Some(event) = self.capture_proposed_plan(Some(&tool_use_id), markdown) {
-                    return vec![event];
-                }
+            if let Some(markdown) = extract_exit_plan_markdown(&input)
+                && let Some(event) = self.capture_proposed_plan(Some(&tool_use_id), markdown)
+            {
+                return vec![event];
             }
             return Vec::new();
         }
@@ -1167,10 +1167,10 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .unwrap_or(&request_id);
             let mut events = Vec::new();
-            if let Some(markdown) = extract_exit_plan_markdown(&input) {
-                if let Some(event) = self.capture_proposed_plan(Some(tool_use_id), markdown) {
-                    events.push(event);
-                }
+            if let Some(markdown) = extract_exit_plan_markdown(&input)
+                && let Some(event) = self.capture_proposed_plan(Some(tool_use_id), markdown)
+            {
+                events.push(event);
             }
             self.outgoing.push(json!({
                 "type": "control_response",
@@ -1676,10 +1676,10 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
         } if id == "reasoningEffort" => Some((options, default_value)),
         _ => None,
     })?;
-    if let Some(raw) = raw {
-        if options.iter().any(|o| o.value == raw) {
-            return Some(raw.to_owned());
-        }
+    if let Some(raw) = raw
+        && options.iter().any(|o| o.value == raw)
+    {
+        return Some(raw.to_owned());
     }
     default_value.clone()
 }

@@ -344,7 +344,7 @@ pub fn sanitize_branch_fragment(raw: &str) -> String {
 
     let trimmed = collapsed.trim_matches(|c| matches!(c, '.' | '/' | '_' | '-'));
     let capped: String = trimmed.chars().take(48).collect();
-    let capped = capped.trim_end_matches(|c| matches!(c, '.' | '/' | '_' | '-'));
+    let capped = capped.trim_end_matches(['.', '/', '_', '-']);
     if capped.is_empty() {
         "update".to_string()
     } else {
@@ -399,7 +399,7 @@ pub fn sanitize_commit_message(raw: &str) -> String {
     // Strip a leading/trailing ``` fence block if present.
     if let Some(rest) = text.strip_prefix("```") {
         // Drop the fence's info line.
-        let rest = rest.splitn(2, '\n').nth(1).unwrap_or("");
+        let rest = rest.split_once('\n').map(|x| x.1).unwrap_or("");
         text = rest.trim_end().strip_suffix("```").unwrap_or(rest).trim();
     }
     let mut lines = text.lines();
@@ -471,10 +471,10 @@ pub fn parse_status(
             behind = b;
         } else if !line.starts_with('#') && !line.trim().is_empty() {
             has_working_tree_changes = true;
-            if let Some(path) = parse_porcelain_path(line) {
-                if !paths.contains(&path) {
-                    paths.push(path);
-                }
+            if let Some(path) = parse_porcelain_path(line)
+                && !paths.contains(&path)
+            {
+                paths.push(path);
             }
         }
     }
