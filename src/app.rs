@@ -194,6 +194,7 @@ pub enum RightTab {
     #[default]
     Diff,
     Plan,
+    Preview,
 }
 
 /// Provider process state for the active session.
@@ -395,6 +396,15 @@ pub struct AppState {
     /// Screenshot-only: inject a pending image attachment on first render (paste
     /// / drag-drop cannot be driven headlessly).
     pub debug_image: Option<PathBuf>,
+    /// Preview MCP server registration, injected into every session so the agent
+    /// can drive the embedded browser. `None` if the server failed to start.
+    pub mcp_registration: Option<agent::McpRegistration>,
+    /// Automation-request receiver from the preview MCP server. `AppShell` takes
+    /// this once to pump requests into the live `PreviewPanel` WebView.
+    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    /// A URL the preview panel should navigate to on its next render (set by the
+    /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
+    pub pending_preview_url: Option<String>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -450,7 +460,32 @@ impl AppState {
             next_start_generation: 0,
             debug_compose: None,
             debug_image: None,
+            mcp_registration: None,
+            preview_requests: None,
+            pending_preview_url: None,
         }
+    }
+
+    /// Open the Preview tab and queue an initial navigation (dev/testing entry
+    /// point for `--open-preview <url>`).
+    pub fn open_preview_with_url(&mut self, url: String, cx: &mut Context<Self>) {
+        self.pending_preview_url = Some(url);
+        self.open_preview_panel(cx);
+    }
+
+    /// Take the queued preview URL, if any (consumed by `PreviewPanel`).
+    pub fn take_pending_preview_url(&mut self) -> Option<String> {
+        self.pending_preview_url.take()
+    }
+
+    /// Attach the running preview MCP server: its registration (injected into
+    /// every spawned session) and the request receiver (taken by `AppShell`).
+    pub fn attach_preview_mcp(&mut self, server: preview_mcp::PreviewMcpServer) {
+        self.mcp_registration = Some(agent::McpRegistration {
+            url: server.url,
+            bearer_token: server.bearer_token,
+        });
+        self.preview_requests = Some(server.requests);
     }
 
     /// Kick off a background refresh of every provider's model catalog (called
@@ -2087,6 +2122,42 @@ impl AppState {
         }
     }
 
+    /// The header preview toggle: open the Preview tab, switch to it if the
+    /// panel is already open on another tab, else close it.
+    pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            if active.diff_open && active.right_tab == RightTab::Preview {
+                active.diff_open = false;
+                if active.timeline.turn_running {
+                    active.auto_open_suppressed = true;
+                }
+            } else {
+                active.diff_open = true;
+                active.right_tab = RightTab::Preview;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Open the right panel on the Preview tab (used when the agent drives the
+    /// preview so the webview surfaces without a manual toggle).
+    pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            if !(active.diff_open && active.right_tab == RightTab::Preview) {
+                active.diff_open = true;
+                active.right_tab = RightTab::Preview;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Whether the right panel is open on the Preview tab (header button state).
+    pub fn preview_panel_showing(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.diff_open && a.right_tab == RightTab::Preview)
+    }
+
     /// Whether the right panel is open on the Plan tab (header button state).
     pub fn plan_panel_showing(&self) -> bool {
         self.active
@@ -2249,6 +2320,7 @@ impl AppState {
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
+        let mcp_registration = self.mcp_registration.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
             log::info!(
@@ -2261,7 +2333,7 @@ impl AppState {
         }
 
         cx.spawn(async move |this, cx| {
-            let opts = session_options(&meta, &settings);
+            let opts = session_options(&meta, &settings, mcp_registration);
             let result = start_session(meta.provider, opts).await;
             let _ = this.update(cx, |state, cx| {
                 let matches_attempt = state.active.as_ref().is_some_and(|active| {
@@ -2755,7 +2827,11 @@ fn normalized_selections(
     out
 }
 
-fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
+fn session_options(
+    meta: &SessionMeta,
+    settings: &Settings,
+    mcp_server: Option<agent::McpRegistration>,
+) -> SessionOptions {
     let binary_path = match meta.provider {
         ProviderKind::Codex => settings.codex_binary.clone(),
         ProviderKind::ClaudeCode => settings.claude_binary.clone(),
@@ -2768,6 +2844,7 @@ fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
         approval_mode: meta.approval_mode,
         option_selections: meta.option_selections.clone(),
         interaction_mode: meta.interaction_mode,
+        mcp_server,
     }
 }
 
@@ -2900,11 +2977,26 @@ mod tests {
             ..Settings::default()
         };
 
-        let codex_options = session_options(&codex, &settings);
-        let claude_options = session_options(&claude, &settings);
+        let codex_options = session_options(&codex, &settings, None);
+        let claude_options = session_options(&claude, &settings, None);
 
         assert_eq!(codex_options.binary_path, settings.codex_binary);
         assert_eq!(claude_options.binary_path, settings.claude_binary);
+        assert!(codex_options.mcp_server.is_none());
+    }
+
+    #[test]
+    fn session_options_injects_mcp_registration() {
+        let settings = Settings::default();
+        let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
+        let reg = agent::McpRegistration {
+            url: "http://127.0.0.1:7/mcp".into(),
+            bearer_token: "tok".into(),
+        };
+        let opts = session_options(&meta, &settings, Some(reg));
+        let mcp = opts.mcp_server.expect("registration threaded through");
+        assert_eq!(mcp.url, "http://127.0.0.1:7/mcp");
+        assert_eq!(mcp.bearer_token, "tok");
     }
 
     #[test]

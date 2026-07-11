@@ -946,7 +946,12 @@ impl Render for DiffPanel {
             .border_color(cx.theme().border)
             .child(self.render_tab_strip(cx));
         root = match tab {
-            RightTab::Diff => root.child(self.render_toolbar(cx)).child(self.render_body(cx)),
+            // Preview is rendered by its own panel (see ui/mod.rs); the diff
+            // container only handles Diff/Plan, so treat Preview as the diff view
+            // for the unreachable fallback.
+            RightTab::Diff | RightTab::Preview => {
+                root.child(self.render_toolbar(cx)).child(self.render_body(cx))
+            }
             RightTab::Plan => root.child(
                 div()
                     .flex_1()

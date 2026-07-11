@@ -95,6 +95,12 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(session_id) = resume_session_id(&opts.resume) {
         cmd.arg("--resume").arg(session_id);
     }
+    // Register the embedded preview MCP server so the agent can drive the
+    // in-app browser. The token rides in an Authorization header (see
+    // `McpRegistration::claude_mcp_config_json`).
+    if let Some(mcp) = &opts.mcp_server {
+        cmd.arg("--mcp-config").arg(mcp.claude_mcp_config_json());
+    }
     log::debug!(
         "claude spawn args: model={:?} effort={:?} settings={:?} ultrathink={} permission-mode={}",
         launch.model_id,
