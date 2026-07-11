@@ -12,10 +12,10 @@ use agent::{
     ModelSpec, OptionDescriptor, ProviderKind, TokenUsage, UserInputQuestion,
 };
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity, EventEmitter,
-    ExternalPaths, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, PathBuilder,
-    Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
-    img, point, prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
+    EventEmitter, ExternalPaths, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    PathBuilder, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, canvas, div, img, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -30,6 +30,7 @@ use gpui_component::{
 };
 
 use crate::app::{AppState, TerminalContext, WorkspaceMode};
+use crate::session::append_review_comments_to_prompt;
 use crate::ui::attachments::{self, validate_attachment};
 use crate::ui::composer_trigger::{
     ComposerTrigger, TriggerKind, detect_composer_trigger, serialize_composer_file_link,
@@ -44,9 +45,7 @@ const METER_RED: u32 = 0xEF4444;
 const MENU_ROW_CAP: usize = 50;
 
 fn normalize_terminal_context_text(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .trim_matches('\n')
-        .to_string()
+    text.replace("\r\n", "\n").trim_matches('\n').to_string()
 }
 
 pub(crate) fn append_terminal_contexts_to_prompt(
@@ -78,7 +77,10 @@ pub(crate) fn append_terminal_contexts_to_prompt(
     if lines.is_empty() {
         return prompt.to_string();
     }
-    let block = format!("<terminal_context>\n{}\n</terminal_context>", lines.join("\n"));
+    let block = format!(
+        "<terminal_context>\n{}\n</terminal_context>",
+        lines.join("\n")
+    );
     if prompt.is_empty() {
         block
     } else {
@@ -470,7 +472,12 @@ impl Composer {
             .as_ref()
             .map(|active| active.terminal_workspace.contexts.clone())
             .unwrap_or_default();
-        if text.is_empty() && !has_images && terminal_contexts.is_empty() {
+        let review_comments = self.app_state.read(cx).review_comments().to_vec();
+        if text.is_empty()
+            && !has_images
+            && terminal_contexts.is_empty()
+            && review_comments.is_empty()
+        {
             return;
         }
         if self.app_state.read(cx).active.is_none() {
@@ -479,12 +486,14 @@ impl Composer {
         }
         // Intercept the minimal `/`-command set (S1 §4/§7): `/plan` and
         // `/default` switch mode and are stripped; `/model` opens the picker.
-        if terminal_contexts.is_empty() && let Some(command) = slash_command(&text) {
+        if terminal_contexts.is_empty()
+            && let Some(command) = slash_command(&text)
+        {
             input.update(cx, |state, cx| state.set_value("", window, cx));
             match command {
-                SlashCommand::Plan => self
-                    .app_state
-                    .update(cx, |state, cx| state.set_interaction_mode(InteractionMode::Plan, cx)),
+                SlashCommand::Plan => self.app_state.update(cx, |state, cx| {
+                    state.set_interaction_mode(InteractionMode::Plan, cx)
+                }),
                 SlashCommand::Default => self.app_state.update(cx, |state, cx| {
                     state.set_interaction_mode(InteractionMode::Build, cx)
                 }),
@@ -496,6 +505,7 @@ impl Composer {
             return;
         }
         let text = append_terminal_contexts_to_prompt(&text, &terminal_contexts);
+        let text = append_review_comments_to_prompt(&text, &review_comments);
         input.update(cx, |state, cx| state.set_value("", window, cx));
         // Image-only messages get T3's exact synthetic text. Attachments are
         // persisted on disk (see `add_image_*`); the send wire currently carries
@@ -512,6 +522,7 @@ impl Composer {
             if let Some(active) = state.active.as_mut() {
                 active.terminal_workspace.contexts.clear();
             }
+            state.clear_review_comments();
             state.send_turn(sent_text, cx)
         });
         cx.emit(ComposerEvent::Submitted);
@@ -599,7 +610,11 @@ impl Composer {
                     })
                     .collect();
                 let loading = self.workspace_loading && self.workspace.is_none();
-                (rows, rust_i18n::t!("composer.no_files").into_owned(), loading)
+                (
+                    rows,
+                    rust_i18n::t!("composer.no_files").into_owned(),
+                    loading,
+                )
             }
             TriggerKind::Skill => {
                 // Provider skills are not reachable without an agent-crate change
@@ -641,7 +656,11 @@ impl Composer {
                     .collect();
                 // Provider-native commands (Claude slash commands / Codex skills)
                 // require an agent-crate change (frozen); none are listed here.
-                (rows, rust_i18n::t!("composer.no_command").into_owned(), false)
+                (
+                    rows,
+                    rust_i18n::t!("composer.no_command").into_owned(),
+                    false,
+                )
             }
         }
     }
@@ -1222,7 +1241,11 @@ impl Composer {
                             .bg(gpui::black().opacity(0.6))
                             .cursor_pointer()
                             .hover(|s| s.bg(gpui::black().opacity(0.85)))
-                            .child(Icon::new(IconName::Close).xsmall().text_color(gpui::white()))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .xsmall()
+                                    .text_color(gpui::white()),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.remove_image(index, cx);
@@ -1407,9 +1430,8 @@ impl Composer {
                             .child(Icon::new(IconName::Plus).xsmall())
                             .child(rust_i18n::t!("plan.implement_new_thread"))
                             .on_click(move |_, window, cx| {
-                                app_state.update(cx, |state, cx| {
-                                    state.implement_plan_in_new_thread(cx)
-                                });
+                                app_state
+                                    .update(cx, |state, cx| state.implement_plan_in_new_thread(cx));
                                 let _ = &app;
                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
@@ -1486,12 +1508,12 @@ impl Composer {
     /// Keep the per-request question state in sync: reset the index/selections
     /// when a new request arrives (or the pending one resolves).
     fn sync_user_input_state(&mut self, cx: &mut Context<Self>) {
-        let current = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .and_then(|a| a.timeline.pending_user_input.as_ref().map(|(id, _)| id.clone()));
+        let current = self.app_state.read(cx).active.as_ref().and_then(|a| {
+            a.timeline
+                .pending_user_input
+                .as_ref()
+                .map(|(id, _)| id.clone())
+        });
         if current != self.ui_request_id {
             self.ui_request_id = current;
             self.ui_question_index = 0;
@@ -1513,7 +1535,11 @@ impl Composer {
             return div().into_any_element();
         };
         let multi = question.multi_select;
-        let selected = self.ui_selections.get(&question.id).cloned().unwrap_or_default();
+        let selected = self
+            .ui_selections
+            .get(&question.id)
+            .cloned()
+            .unwrap_or_default();
 
         // Header: question header + "N/total" when multiple.
         let header = h_flex()
@@ -1592,10 +1618,12 @@ impl Composer {
                                     .gap_1p5()
                                     .items_center()
                                     .text_size(px(13.))
-                                    .child(div().flex_none().text_color(muted).child(format!(
-                                        "{}",
-                                        opt_index + 1
-                                    )))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(muted)
+                                            .child(format!("{}", opt_index + 1)),
+                                    )
                                     .child(div().font_medium().child(option.label.clone())),
                             )
                             .when(!option.description.is_empty(), |this| {
@@ -1681,11 +1709,7 @@ impl Composer {
                 }
             }))
             .child(header)
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .child(question.question.clone()),
-            )
+            .child(div().text_size(px(14.)).child(question.question.clone()))
             .child(options)
             .when(multi, |this| {
                 this.child(
@@ -1729,7 +1753,12 @@ impl Composer {
     }
 
     /// Single-select auto-advance (~200ms) to the next question (S1 §7).
-    fn ui_auto_advance(&mut self, questions: &[UserInputQuestion], _req: String, cx: &mut Context<Self>) {
+    fn ui_auto_advance(
+        &mut self,
+        questions: &[UserInputQuestion],
+        _req: String,
+        cx: &mut Context<Self>,
+    ) {
         let total = questions.len();
         let at = self.ui_question_index;
         if at + 1 >= total {
@@ -1760,13 +1789,19 @@ impl Composer {
         } else {
             Some(custom.as_str())
         };
-        let answers =
-            assemble_user_input_answers(questions, &self.ui_selections, self.ui_question_index, custom);
-        self.input.update(cx, |state, cx| state.set_value("", window, cx));
+        let answers = assemble_user_input_answers(
+            questions,
+            &self.ui_selections,
+            self.ui_question_index,
+            custom,
+        );
+        self.input
+            .update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_selections.clear();
         self.ui_question_index = 0;
-        self.app_state
-            .update(cx, |state, cx| state.respond_user_input(request_id, answers, cx));
+        self.app_state.update(cx, |state, cx| {
+            state.respond_user_input(request_id, answers, cx)
+        });
         cx.notify();
     }
 
@@ -1911,7 +1946,9 @@ impl Composer {
                                             if worktree_mode {
                                                 // Choose the worktree's base branch.
                                                 state.set_draft_workspace(
-                                                    WorkspaceMode::NewWorktree { base: branch_name },
+                                                    WorkspaceMode::NewWorktree {
+                                                        base: branch_name,
+                                                    },
                                                     cx,
                                                 );
                                             } else {
@@ -1930,7 +1967,8 @@ impl Composer {
 
         // Left: the workspace-mode chip. A draft can pick "Local checkout" vs
         // "New worktree"; a started session shows its locked workspace.
-        let left = self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
+        let left =
+            self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
 
         Some(
             h_flex()
@@ -2057,10 +2095,7 @@ impl Composer {
                         .on_click(move |_, window, cx| {
                             let base = base.clone();
                             app_worktree.update(cx, |state, cx| {
-                                state.set_draft_workspace(
-                                    WorkspaceMode::NewWorktree { base },
-                                    cx,
-                                );
+                                state.set_draft_workspace(WorkspaceMode::NewWorktree { base }, cx);
                             });
                             pop_worktree.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -2375,27 +2410,51 @@ impl Render for Composer {
             .map(|active| active.terminal_workspace.contexts.clone())
             .unwrap_or_default();
         let has_terminal_contexts = !terminal_contexts.is_empty();
-        let context_chips = h_flex()
-            .w_full()
-            .flex_wrap()
-            .gap_1()
-            .children(terminal_contexts.into_iter().map(|context| {
-                let id = context.id;
-                let range = if context.line_start == context.line_end {
-                    format!("L{}", context.line_start)
-                } else {
-                    format!("L{}-L{}", context.line_start, context.line_end)
-                };
-                Button::new(("terminal-context-chip", id))
-                    .ghost()
-                    .small()
-                    .label(format!("{} · {}  ×", context.terminal_label, range))
-                    .tooltip(context.text)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.remove_terminal_context(id, cx));
-                    }))
-            }));
+        let context_chips =
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .gap_1()
+                .children(terminal_contexts.into_iter().map(|context| {
+                    let id = context.id;
+                    let range = if context.line_start == context.line_end {
+                        format!("L{}", context.line_start)
+                    } else {
+                        format!("L{}-L{}", context.line_start, context.line_end)
+                    };
+                    Button::new(("terminal-context-chip", id))
+                        .ghost()
+                        .small()
+                        .label(format!("{} · {}  ×", context.terminal_label, range))
+                        .tooltip(context.text)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.app_state
+                                .update(cx, |state, cx| state.remove_terminal_context(id, cx));
+                        }))
+                }));
+        let review_comments = self.app_state.read(cx).review_comments().to_vec();
+        let has_review_comments = !review_comments.is_empty();
+        let review_chips = h_flex().w_full().flex_wrap().gap_1().children(
+            review_comments
+                .into_iter()
+                .enumerate()
+                .map(|(index, comment)| {
+                    let range = if comment.line_start == comment.line_end {
+                        format!("L{}", comment.line_start)
+                    } else {
+                        format!("L{}-L{}", comment.line_start, comment.line_end)
+                    };
+                    Button::new(("review-comment-chip", index))
+                        .ghost()
+                        .small()
+                        .label(format!("{} {}  ×", comment.file, range))
+                        .tooltip(comment.text)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.app_state
+                                .update(cx, |state, cx| state.remove_review_comment(index, cx));
+                        }))
+                }),
+        );
 
         let card = v_flex()
             .w_full()
@@ -2434,21 +2493,26 @@ impl Render for Composer {
                     _ => {}
                 }
             }))
-            .on_drop(move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
-                let paths: Vec<PathBuf> = paths.paths().to_vec();
-                composer.update(cx, |this, cx| {
-                    for path in paths {
-                        if mime_from_path(&path).starts_with("image/") {
-                            this.add_image_path(path, window, cx);
+            .on_drop(
+                move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                    let paths: Vec<PathBuf> = paths.paths().to_vec();
+                    composer.update(cx, |this, cx| {
+                        for path in paths {
+                            if mime_from_path(&path).starts_with("image/") {
+                                this.add_image_path(path, window, cx);
+                            }
                         }
-                    }
-                });
-            })
+                    });
+                },
+            )
             .when_some(plan_ready_title, |this, title| {
                 this.child(self.render_plan_ready_header(title, cx))
             })
             .when(has_terminal_contexts, |this| {
                 this.child(div().px_3().pt_2().child(context_chips))
+            })
+            .when(has_review_comments, |this| {
+                this.child(div().px_3().pt_2().child(review_chips))
             })
             .child(
                 div()
@@ -3005,7 +3069,8 @@ fn render_traits_pane(
 /// A tiny stable hash of a descriptor id, to keep row element ids unique across
 /// sections without colliding.
 fn descriptor_hash(id: &str) -> usize {
-    id.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize))
+    id.bytes()
+        .fold(0usize, |acc, b| acc.wrapping_add(b as usize))
 }
 
 /// The "⋯" overflow popover: the context chip's usage summary plus the
@@ -3320,7 +3385,10 @@ fn assemble_user_input_answers(
         let selected = selections.get(&question.id).cloned().unwrap_or_default();
         let value = if question.multi_select {
             serde_json::Value::Array(
-                selected.into_iter().map(serde_json::Value::String).collect(),
+                selected
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
             )
         } else {
             serde_json::Value::String(selected.into_iter().next().unwrap_or_default())
@@ -3510,13 +3578,19 @@ mod tests {
             ],
         };
         // Defaults resolve to "High · 200k".
-        assert_eq!(traits_chip_label(&spec, &[], false), Some("High · 200k".into()));
+        assert_eq!(
+            traits_chip_label(&spec, &[], false),
+            Some("High · 200k".into())
+        );
         // A selection overrides the default.
         let sel = vec![agent::OptionSelection {
             id: "contextWindow".into(),
             value: serde_json::Value::String("1m".into()),
         }];
-        assert_eq!(traits_chip_label(&spec, &sel, false), Some("High · 1M".into()));
+        assert_eq!(
+            traits_chip_label(&spec, &sel, false),
+            Some("High · 1M".into())
+        );
 
         // Fast Mode boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
         let fast = agent::ModelSpec {
@@ -3609,7 +3683,8 @@ mod tests {
         assert_eq!(answers["q1"], serde_json::json!("A"));
 
         // An unanswered single-select yields an empty string.
-        let answers = assemble_user_input_answers(&questions, &std::collections::HashMap::new(), 0, None);
+        let answers =
+            assemble_user_input_answers(&questions, &std::collections::HashMap::new(), 0, None);
         assert_eq!(answers["q1"], serde_json::json!(""));
         assert_eq!(answers["q2"], serde_json::json!([]));
     }
