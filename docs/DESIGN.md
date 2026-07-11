@@ -1,7 +1,8 @@
 # tcode design spec
 
-The visual contract for tcode's UI. When code and this doc disagree, fix one of
-them — deliberately.
+The visual contract for tcode's UI, closely modeled on
+[T3 Code](https://t3.gg)'s design (see the acknowledgment in the README). When
+code and this doc disagree, fix one of them — deliberately.
 
 ## Design tokens
 
