@@ -34,7 +34,7 @@ jobs:
           case "$tag" in v*) ;; *) echo "Tag must start with v: $tag" >&2; exit 1;; esac
           version="${tag#v}"
           prerelease=false
-          case "$version" in *-rc*|*-beta*) prerelease=true;; esac
+          case "$version" in *-*) prerelease=true;; esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
@@ -151,8 +151,9 @@ jobs:
             "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
           cp -R "$app" dmg-root/
           ln -s /Applications dmg-root/Applications
-          hdiutil create -quiet -volname tcode -srcfolder dmg-root -ov -format UDZO \
-            "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
+          hdiutil create -volname tcode -srcfolder "$PWD/dmg-root" -ov \
+            -fs HFS+ -format UDZO \
+            "$PWD/dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
           rm -rf "dist/tcode.app" dmg-root
 
       - name: Package Windows zip
