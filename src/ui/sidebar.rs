@@ -90,18 +90,18 @@ impl SessionsSidebar {
             prompt: Some(rust_i18n::t!("sidebar.select_project").into_owned().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = rx.await {
-                if let Some(path) = paths.pop() {
-                    let _ = this.update(cx, |this, cx| {
-                        this.app_state.update(cx, |state, cx| {
-                            // Create the project, then drop into a draft thread
-                            // for it (composer focused, empty timeline).
-                            if let Some(project_id) = state.create_project(path.clone(), cx) {
-                                state.start_draft(project_id, path, cx);
-                            }
-                        });
+            if let Ok(Ok(Some(mut paths))) = rx.await
+                && let Some(path) = paths.pop()
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.app_state.update(cx, |state, cx| {
+                        // Create the project, then drop into a draft thread
+                        // for it (composer focused, empty timeline).
+                        if let Some(project_id) = state.create_project(path.clone(), cx) {
+                            state.start_draft(project_id, path, cx);
+                        }
                     });
-                }
+                });
             }
         })
         .detach();

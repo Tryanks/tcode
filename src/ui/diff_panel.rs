@@ -726,7 +726,7 @@ fn render_file(change: &FileChange, cwd: &Path, theme: &HighlightTheme) -> Rende
     let old_styles = highlight_source(&old_src, lang, theme);
 
     let mut rows = Vec::with_capacity(flat.len());
-    for (item, src) in flat.into_iter().zip(row_src.into_iter()) {
+    for (item, src) in flat.into_iter().zip(row_src) {
         let row = match item {
             FlatItem::Gap(gap) => {
                 rows.push(RenderedRow::Gap(gap));
@@ -980,7 +980,7 @@ impl DiffPanel {
             changes = preview.result.changes.clone();
         }
 
-        let fresh = self.cache.as_ref().map_or(true, |c| {
+        let fresh = self.cache.as_ref().is_none_or(|c| {
             c.session != session || c.scope != scope || c.revision != revision || c.dark != dark
         });
         if fresh {

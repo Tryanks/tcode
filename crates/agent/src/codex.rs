@@ -228,30 +228,30 @@ fn map_model(model: &Value) -> Option<ModelSpec> {
 /// Derive service-tier options from `serviceTiers` (preferred) or, absent that,
 /// `additionalSpeedTiers` (`fast` → `Fast`), matching T3's mapping.
 fn service_tiers(model: &Value) -> Vec<SelectOption> {
-    if let Some(tiers) = model.get("serviceTiers").and_then(Value::as_array) {
-        if !tiers.is_empty() {
-            return tiers
-                .iter()
-                .filter_map(|tier| {
-                    let value = tier.get("id").and_then(Value::as_str)?.to_owned();
-                    let label = tier
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&value)
-                        .to_owned();
-                    let description = tier
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
-                    Some(SelectOption {
-                        value,
-                        label,
-                        description,
-                    })
+    if let Some(tiers) = model.get("serviceTiers").and_then(Value::as_array)
+        && !tiers.is_empty()
+    {
+        return tiers
+            .iter()
+            .filter_map(|tier| {
+                let value = tier.get("id").and_then(Value::as_str)?.to_owned();
+                let label = tier
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&value)
+                    .to_owned();
+                let description = tier
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                Some(SelectOption {
+                    value,
+                    label,
+                    description,
                 })
-                .collect();
-        }
+            })
+            .collect();
     }
     if let Some(speed) = model.get("additionalSpeedTiers").and_then(Value::as_array) {
         return speed
@@ -1014,10 +1014,10 @@ impl Actor {
             } else if matches!(
                 self.pending_requests.remove(&id),
                 Some(PendingRequest::TurnStart)
-            ) {
-                if let Some(turn_id) = value.pointer("/result/turn/id").and_then(Value::as_str) {
-                    self.active_turn.get_or_insert_with(|| turn_id.to_owned());
-                }
+            ) && let Some(turn_id) =
+                value.pointer("/result/turn/id").and_then(Value::as_str)
+            {
+                self.active_turn.get_or_insert_with(|| turn_id.to_owned());
             }
         }
     }
@@ -1141,13 +1141,13 @@ impl Actor {
                     .and_then(Value::as_str)
                     == Some("plan")
                 {
-                    if method == "item/completed" {
-                        if let Some(item) = item_value {
-                            let markdown = string_field(item, "text");
-                            let item_id = string_field(item, "id");
-                            self.emit(AgentEvent::ProposedPlan { item_id, markdown })
-                                .await;
-                        }
+                    if method == "item/completed"
+                        && let Some(item) = item_value
+                    {
+                        let markdown = string_field(item, "text");
+                        let item_id = string_field(item, "id");
+                        self.emit(AgentEvent::ProposedPlan { item_id, markdown })
+                            .await;
                     }
                     return;
                 }

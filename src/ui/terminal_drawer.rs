@@ -88,12 +88,12 @@ impl TerminalDrawer {
                 }
                 return;
             }
-            if keystroke.key.eq_ignore_ascii_case("v") {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    let text = text.replace("\r\n", "\r").replace('\n', "\r");
-                    self.with_terminal(cx, |terminal| terminal.write_input(text.into_bytes()));
-                    cx.stop_propagation();
-                }
+            if keystroke.key.eq_ignore_ascii_case("v")
+                && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+            {
+                let text = text.replace("\r\n", "\r").replace('\n', "\r");
+                self.with_terminal(cx, |terminal| terminal.write_input(text.into_bytes()));
+                cx.stop_propagation();
             }
             return;
         }
@@ -243,16 +243,15 @@ impl TerminalDrawer {
         if selection_id != terminal_id {
             return;
         }
-        if let Some(point) = self.grid_point(terminal_id, event.position) {
-            if let Some(entry) = self
+        if let Some(point) = self.grid_point(terminal_id, event.position)
+            && let Some(entry) = self
                 .app_state
                 .read(cx)
                 .active
                 .as_ref()
                 .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-            {
-                entry.terminal.select(start, point);
-            }
+        {
+            entry.terminal.select(start, point);
         }
         self.selection_anchor = None;
         cx.notify();

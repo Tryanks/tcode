@@ -257,7 +257,7 @@ impl CommandPalette {
             IconName::Inbox,
             Action::CheckUpdates,
         );
-        actions.sort_by(|a, b| b.0.cmp(&a.0));
+        actions.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let mut groups = Vec::new();
         if !actions.is_empty() {
@@ -289,7 +289,7 @@ impl CommandPalette {
                     }
                 }
             }
-            threads.sort_by(|a, b| b.0.cmp(&a.0));
+            threads.sort_by_key(|b| std::cmp::Reverse(b.0));
             if !threads.is_empty() {
                 groups.push(Group {
                     label: rust_i18n::t!("palette.threads").into_owned(),
@@ -602,7 +602,7 @@ mod tests {
             .into_iter()
             .filter_map(|s| fuzzy_score("tog", s).map(|score| (score, s)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
         // Both "Toggle ..." match; "Open settings" does not.
         assert_eq!(scored.len(), 2);
         assert!(scored[0].1.starts_with("Toggle"));

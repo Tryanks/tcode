@@ -48,10 +48,10 @@ impl PlanPanel {
     }
 
     fn sync_markdown(&mut self, markdown: &str, cx: &mut Context<Self>) -> Entity<TextViewState> {
-        if let Some((cached, state)) = &self.md {
-            if cached == markdown {
-                return state.clone();
-            }
+        if let Some((cached, state)) = &self.md
+            && cached == markdown
+        {
+            return state.clone();
         }
         let text = markdown.to_string();
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));

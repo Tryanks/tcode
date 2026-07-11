@@ -623,8 +623,10 @@ mod sidebar_collapse_tests {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert!(!legacy.sidebar_collapsed, "legacy files must open expanded");
 
-        let mut settings = Settings::default();
-        settings.sidebar_collapsed = true;
+        let settings = Settings {
+            sidebar_collapsed: true,
+            ..Settings::default()
+        };
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert!(back.sidebar_collapsed);

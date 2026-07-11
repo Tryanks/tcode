@@ -51,11 +51,14 @@ impl ToastKind {
     }
 }
 
+/// Callback invoked when a toast action button is clicked.
+pub type ToastActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// An action button rendered in a toast's action row.
 #[derive(Clone)]
 pub struct ToastAction {
     pub label: SharedString,
-    pub handler: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub handler: ToastActionHandler,
 }
 
 impl ToastAction {
@@ -275,7 +278,7 @@ impl ToastCenter {
             progress: Some(fraction),
         } = toast.kind
         {
-            let pct = (fraction.clamp(0., 1.) * 100.) as f32;
+            let pct = fraction.clamp(0., 1.) * 100.;
             card = card.child(
                 div()
                     .w_full()
@@ -335,22 +338,20 @@ impl ToastCenter {
         // Action row (copy-detail for errors + caller-supplied actions).
         let mut action_row = h_flex().w_full().gap_2().justify_end();
         let mut has_actions = false;
-        if matches!(toast.kind, ToastKind::Error) {
-            if let Some(detail) = toast.detail.clone() {
-                has_actions = true;
-                action_row = action_row.child(
-                    Button::new(("toast-copy", id as usize))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Copy)
-                        .label(rust_i18n::t!("toast.copy_error"))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                detail.to_string(),
-                            ));
-                        }),
-                );
-            }
+        if matches!(toast.kind, ToastKind::Error)
+            && let Some(detail) = toast.detail.clone()
+        {
+            has_actions = true;
+            action_row = action_row.child(
+                Button::new(("toast-copy", id as usize))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Copy)
+                    .label(rust_i18n::t!("toast.copy_error"))
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.to_string()));
+                    }),
+            );
         }
         for action in &toast.actions {
             has_actions = true;

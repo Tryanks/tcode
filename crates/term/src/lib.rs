@@ -370,7 +370,7 @@ impl Terminal {
 
 /// Derive the compact tab label used after a command is submitted.
 pub fn derive_command_label(command: &str) -> Option<String> {
-    let first = command.trim().split_whitespace().next()?;
+    let first = command.split_whitespace().next()?;
     let first = first.rsplit('/').next().unwrap_or(first);
     (!first.is_empty()).then(|| first.to_string())
 }
