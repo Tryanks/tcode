@@ -5,7 +5,7 @@
 
 use agent::{
     AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, ResumeCursor,
-    ThreadItem, TokenUsage, TurnStatus,
+    ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
 };
 
 pub use crate::store::StoredEvent;
@@ -89,6 +89,10 @@ pub struct Timeline {
     pub turns: Vec<TurnMeta>,
     pub turn_running: bool,
     pub pending_approvals: Vec<ApprovalRequest>,
+    /// The active user-input request (Claude `AskUserQuestion` / Codex
+    /// `requestUserInput`), if the agent is currently blocked on one. Cleared
+    /// when it resolves or the turn ends.
+    pub pending_user_input: Option<(String, Vec<UserInputQuestion>)>,
     pub usage: Option<TokenUsage>,
     pub resume: Option<ResumeCursor>,
     pub provider_session_id: Option<String>,
@@ -117,6 +121,7 @@ impl Timeline {
     pub fn mark_idle(&mut self) {
         self.turn_running = false;
         self.pending_approvals.clear();
+        self.pending_user_input = None;
         for turn in &mut self.turns {
             turn.running = false;
         }
@@ -173,8 +178,9 @@ impl Timeline {
                 if usage.is_some() {
                     self.usage = *usage;
                 }
-                // A finished turn can no longer be waiting on approvals.
+                // A finished turn can no longer be waiting on approvals or input.
                 self.pending_approvals.clear();
+                self.pending_user_input = None;
             }
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)
@@ -191,6 +197,21 @@ impl Timeline {
             }
             AgentEvent::ApprovalResolved { request_id, .. } => {
                 self.pending_approvals.retain(|r| r.id != *request_id);
+            }
+            AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+            } => {
+                self.pending_user_input = Some((request_id.clone(), questions.clone()));
+            }
+            AgentEvent::UserInputResolved { request_id, .. } => {
+                if self
+                    .pending_user_input
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == request_id)
+                {
+                    self.pending_user_input = None;
+                }
             }
             AgentEvent::TokenUsage(usage) => self.usage = Some(*usage),
             AgentEvent::Warning(message) => log::warn!("provider warning: {message}"),
@@ -209,6 +230,7 @@ impl Timeline {
             AgentEvent::SessionClosed { .. } => {
                 self.turn_running = false;
                 self.pending_approvals.clear();
+                self.pending_user_input = None;
                 if let Some(turn) = self.current_turn {
                     self.turns[turn].running = false;
                 }

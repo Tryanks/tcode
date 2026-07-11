@@ -806,6 +806,28 @@ impl AppState {
         cx.notify();
     }
 
+    /// Answer a pending user-input request (Claude `AskUserQuestion` / Codex
+    /// `requestUserInput`). `answers` is keyed by [`UserInputQuestion::id`] with
+    /// string (single-select / free text) or string-array (multi-select) values.
+    pub fn respond_user_input(
+        &mut self,
+        request_id: String,
+        answers: serde_json::Map<String, serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ActiveSession {
+            runtime: Runtime::Live(commands),
+            ..
+        }) = &self.active
+        {
+            let _ = commands.try_send(SessionCommand::RespondUserInput {
+                request_id,
+                answers,
+            });
+        }
+        cx.notify();
+    }
+
     /// Select `model` (None = provider default) for the active session and
     /// persist it. Takes effect on the next provider (re)start; if a provider
     /// is currently live, the next `send_turn` restarts it (see `send_turn`).
@@ -1159,6 +1181,30 @@ impl AppState {
                 AgentEvent::ApprovalRequested(request) if smoke.auto_approve => {
                     log::info!("smoke: auto-approving request {}", request.id);
                     self.respond_approval(request.id.clone(), ApprovalDecision::Approve, cx);
+                }
+                AgentEvent::UserInputRequested {
+                    request_id,
+                    questions,
+                } if smoke.auto_approve => {
+                    // Keep smokes deterministic: answer each question with its
+                    // first option's label (or empty string when the question is
+                    // free-text-only).
+                    let mut answers = serde_json::Map::new();
+                    for question in questions {
+                        let answer = question
+                            .options
+                            .first()
+                            .map(|o| o.label.clone())
+                            .unwrap_or_default();
+                        log::info!(
+                            "smoke: auto-answering user-input {} / {:?} -> {:?}",
+                            request_id,
+                            question.id,
+                            answer
+                        );
+                        answers.insert(question.id.clone(), serde_json::Value::String(answer));
+                    }
+                    self.respond_user_input(request_id.clone(), answers, cx);
                 }
                 AgentEvent::TurnCompleted { status, .. } => {
                     let code = match status {

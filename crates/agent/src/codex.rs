@@ -15,7 +15,7 @@ use crate::{
     DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus, ModelSpec,
     OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderKind, ResumeCursor,
     SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnOptions, TurnStatus,
+    TurnOptions, TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 mod developer_instructions;
@@ -362,6 +362,9 @@ struct Actor {
     next_id: i64,
     pending_requests: HashMap<i64, PendingRequest>,
     approvals: HashMap<String, Value>,
+    /// Pending `item/tool/requestUserInput` requests: canonical request_id → the
+    /// server-to-client JSON-RPC id we must reply to.
+    user_inputs: HashMap<String, Value>,
     items: HashMap<String, ThreadItem>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
@@ -404,6 +407,7 @@ async fn run_actor(
         next_id,
         pending_requests: HashMap::new(),
         approvals: HashMap::new(),
+        user_inputs: HashMap::new(),
         items: HashMap::new(),
         usage_by_turn: HashMap::new(),
         active_turn: None,
@@ -437,7 +441,10 @@ async fn run_actor(
         .await;
 
         match input {
-            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => break None,
+            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => {
+                actor.settle_pending_user_inputs_on_shutdown().await;
+                break None;
+            }
             Input::Command(Ok(command)) => {
                 if let Err(err) = actor.handle_command(command).await {
                     actor
@@ -773,10 +780,13 @@ impl Actor {
                     .await;
                     return Ok(());
                 };
+                // `cancel` is protocol-defined as deny + immediate turn
+                // interruption (S2 §4.2); the others map 1:1.
                 let wire_decision = match decision {
                     ApprovalDecision::Approve => "accept",
                     ApprovalDecision::ApproveForSession => "acceptForSession",
                     ApprovalDecision::Deny => "decline",
+                    ApprovalDecision::Cancel => "cancel",
                 };
                 send_json(
                     &mut self.stdin,
@@ -786,6 +796,35 @@ impl Actor {
                 self.emit(AgentEvent::ApprovalResolved {
                     request_id,
                     decision,
+                })
+                .await;
+                Ok(())
+            }
+            SessionCommand::RespondUserInput {
+                request_id,
+                answers,
+            } => {
+                let Some(json_rpc_id) = self.user_inputs.remove(&request_id) else {
+                    self.emit(AgentEvent::Warning(format!(
+                        "unknown Codex user-input request id: {request_id}"
+                    )))
+                    .await;
+                    return Ok(());
+                };
+                // Native result shape: `{answers: {<qid>: {answers: [<strings>]}}}`
+                // — a single string is wrapped into a 1-element array (S2 §3.2).
+                let mut wire_answers = serde_json::Map::new();
+                for (qid, value) in &answers {
+                    wire_answers.insert(qid.clone(), json!({ "answers": answer_strings(value) }));
+                }
+                send_json(
+                    &mut self.stdin,
+                    &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
+                )
+                .map_err(|e| e.to_string())?;
+                self.emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers,
                 })
                 .await;
                 Ok(())
@@ -865,6 +904,20 @@ impl Actor {
             .get("itemId")
             .and_then(Value::as_str)
             .unwrap_or_default();
+
+        // Structured user-input request: map to a canonical UserInputRequested
+        // and remember the JSON-RPC id so RespondUserInput can reply (S2 §3).
+        if method == "item/tool/requestUserInput" {
+            let questions = parse_codex_user_input(params);
+            self.user_inputs.insert(key.clone(), id);
+            self.emit(AgentEvent::UserInputRequested {
+                request_id: key,
+                questions,
+            })
+            .await;
+            return;
+        }
+
         let kind = match method {
             "item/commandExecution/requestApproval" | "execCommandApproval" => {
                 ApprovalKind::ExecCommand {
@@ -1051,6 +1104,23 @@ impl Actor {
         }
     }
 
+    /// Settle every outstanding `requestUserInput` on teardown: reply with an
+    /// empty `{answers: {}}` result and emit an empty resolution (S2 §4.2).
+    async fn settle_pending_user_inputs_on_shutdown(&mut self) {
+        let pending: Vec<(String, Value)> = self.user_inputs.drain().collect();
+        for (request_id, rpc_id) in pending {
+            let _ = send_json(
+                &mut self.stdin,
+                &json!({ "id": rpc_id, "result": { "answers": {} } }),
+            );
+            self.emit(AgentEvent::UserInputResolved {
+                request_id,
+                answers: serde_json::Map::new(),
+            })
+            .await;
+        }
+    }
+
     async fn emit_delta(&self, params: &Value, kind: DeltaKind) {
         if let (Some(item_id), Some(text)) = (
             params.get("itemId").and_then(Value::as_str),
@@ -1078,6 +1148,76 @@ fn request_id_string(id: &Value) -> String {
     id.as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| id.to_string())
+}
+
+/// Normalize a canonical answer value into the wire array shape. A single
+/// string becomes a 1-element array; an array of strings is kept; anything
+/// else yields an empty array (S2 §3.2).
+fn answer_strings(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Map an `item/tool/requestUserInput` params object into canonical
+/// [`UserInputQuestion`]s (S2 §3.1). Questions missing a non-empty
+/// `id`/`header`/`question` are dropped, as are options with an empty label.
+/// Unlike T3, questions with zero options are KEPT (with `options: []`) so a
+/// free-text-only question still renders — a deliberate fix for T3's
+/// dropped-question bug (S2 §2.2 limitations). `multiSelect` is forced false.
+fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
+    let questions = match params.get("questions").and_then(Value::as_array) {
+        Some(q) => q,
+        None => return Vec::new(),
+    };
+    questions
+        .iter()
+        .filter_map(|q| {
+            let id = q.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+            let header = q
+                .get("header")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?;
+            let question = q
+                .get("question")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?;
+            let options = q
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|opts| {
+                    opts.iter()
+                        .filter_map(|opt| {
+                            let label = opt
+                                .get("label")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())?;
+                            let description = opt
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            Some(UserInputOption {
+                                label: label.to_owned(),
+                                description: description.to_owned(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(UserInputQuestion {
+                id: id.to_owned(),
+                header: header.to_owned(),
+                question: question.to_owned(),
+                options,
+                multi_select: false,
+            })
+        })
+        .collect()
 }
 
 fn map_item(item: &Value) -> Option<ThreadItem> {
@@ -1280,6 +1420,7 @@ mod tests {
                 next_id: 1,
                 pending_requests: HashMap::new(),
                 approvals: HashMap::new(),
+                user_inputs: HashMap::new(),
                 items: HashMap::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
@@ -1560,6 +1701,145 @@ mod tests {
             map_item(&json!({"type":"userMessage","id":"u1","content":[{"type":"text","text":"hello"},{"type":"image","url":"x"}]}))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn request_user_input_maps_questions_and_answer_wire_shape() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            // isOther/isSecret dropped; question missing header dropped; option
+            // with empty label dropped; zero-option question KEPT (options: []).
+            actor
+                .handle_line(
+                    &json!({
+                        "jsonrpc": "2.0",
+                        "id": 55,
+                        "method": "item/tool/requestUserInput",
+                        "params": {
+                            "threadId": "t", "turnId": "turn-1", "itemId": "item-1",
+                            "questions": [
+                                {
+                                    "id": "os",
+                                    "header": "Target",
+                                    "question": "macOS or Linux?",
+                                    "options": [
+                                        {"label": "macOS", "description": "apple"},
+                                        {"label": "", "description": "skip me"}
+                                    ],
+                                    "isOther": true,
+                                    "isSecret": false
+                                },
+                                { "id": "free", "header": "Notes", "question": "Any notes?" },
+                                { "header": "no id", "question": "dropped?" }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+
+            match events.recv().await.unwrap() {
+                AgentEvent::UserInputRequested {
+                    request_id,
+                    questions,
+                } => {
+                    assert_eq!(request_id, "55");
+                    assert_eq!(questions.len(), 2, "question missing id is dropped");
+                    assert_eq!(questions[0].id, "os");
+                    assert_eq!(questions[0].options.len(), 1, "empty-label option dropped");
+                    assert_eq!(questions[0].options[0].label, "macOS");
+                    assert!(!questions[0].multi_select);
+                    // Free-text-only question kept with empty options (T3 bug fix).
+                    assert_eq!(questions[1].id, "free");
+                    assert!(questions[1].options.is_empty());
+                }
+                other => panic!("expected UserInputRequested, got {other:?}"),
+            }
+
+            // Answer: single string wraps into a 1-element array under {answers}.
+            let mut answers = serde_json::Map::new();
+            answers.insert("os".into(), json!("macOS"));
+            answers.insert("free".into(), json!(["a", "b"]));
+            actor
+                .handle_command(SessionCommand::RespondUserInput {
+                    request_id: "55".into(),
+                    answers,
+                })
+                .await
+                .unwrap();
+
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "55"
+            ));
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["id"], 55);
+            assert_eq!(response["result"]["answers"]["os"]["answers"], json!(["macOS"]));
+            assert_eq!(
+                response["result"]["answers"]["free"]["answers"],
+                json!(["a", "b"])
+            );
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn cancel_decision_maps_to_cancel_wire_string() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.approvals.insert("41".into(), json!(41));
+            actor
+                .handle_command(SessionCommand::RespondApproval {
+                    request_id: "41".into(),
+                    decision: ApprovalDecision::Cancel,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ApprovalResolved {
+                    decision: ApprovalDecision::Cancel,
+                    ..
+                }
+            ));
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response, json!({"id": 41, "result": {"decision": "cancel"}}));
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn shutdown_settles_pending_user_input_empty() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.user_inputs.insert("77".into(), json!(77));
+            actor.settle_pending_user_inputs_on_shutdown().await;
+
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, ref answers }
+                    if request_id == "77" && answers.is_empty()
+            ));
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response, json!({"id": 77, "result": {"answers": {}}}));
+            assert!(actor.user_inputs.is_empty());
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]

@@ -623,6 +623,7 @@ impl Composer {
     ) -> AnyElement {
         let summary = match &request.kind {
             ApprovalKind::ExecCommand { .. } => rust_i18n::t!("approval.command_requested"),
+            ApprovalKind::FileRead { .. } => rust_i18n::t!("approval.file_read_requested"),
             ApprovalKind::FileChange { .. } => rust_i18n::t!("approval.file_requested"),
             ApprovalKind::ToolUse { .. } => rust_i18n::t!("approval.tool_requested"),
         };
@@ -659,7 +660,12 @@ impl Composer {
                         ))
                 }))
                 .into_any_element(),
-            ApprovalKind::ToolUse { name, input } => div()
+            ApprovalKind::FileRead { detail } => div()
+                .text_size(px(12.5))
+                .font_family(cx.theme().mono_font_family.clone())
+                .child(detail.clone())
+                .into_any_element(),
+            ApprovalKind::ToolUse { name, input, .. } => div()
                 .text_size(px(12.5))
                 .font_family(cx.theme().mono_font_family.clone())
                 .child(format!("{name} {input}"))

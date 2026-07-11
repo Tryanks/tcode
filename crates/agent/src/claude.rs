@@ -35,7 +35,7 @@ use crate::{
     DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus, ModelSpec,
     OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderKind, ResumeCursor,
     SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus,
+    TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
@@ -174,6 +174,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         ultrathink: launch.ultrathink,
         interaction_mode: opts.interaction_mode,
         base_permission_mode: permission_mode_flag(opts.approval_mode),
+        approval_mode: opts.approval_mode,
     };
     smol::spawn(actor_loop(
         child,
@@ -268,6 +269,7 @@ struct SessionConfig {
     ultrathink: bool,
     interaction_mode: InteractionMode,
     base_permission_mode: &'static str,
+    approval_mode: ApprovalMode,
 }
 
 fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<String> {
@@ -443,6 +445,23 @@ async fn handle_command(
             }
             Flow::Continue
         }
+        SessionCommand::RespondUserInput {
+            request_id,
+            answers,
+        } => {
+            if let Some(response) = mapper.build_user_input_response(&request_id, &answers) {
+                let _ = write_line(stdin, &response).await;
+                let _ = event_tx
+                    .send(AgentEvent::UserInputResolved {
+                        request_id,
+                        answers,
+                    })
+                    .await;
+            } else {
+                log::debug!("claude: RespondUserInput for unknown request {request_id}");
+            }
+            Flow::Continue
+        }
         SessionCommand::SetApprovalMode(mode) => {
             // The CLI's control protocol switches permission mode live via a
             // `set_permission_mode` control_request (same shape the Agent SDK
@@ -450,6 +469,7 @@ async fn handle_command(
             // only a stdin write failure warrants a Warning.
             let flag = permission_mode_flag(mode);
             mapper.base_permission_mode = flag;
+            mapper.full_access = mode == ApprovalMode::FullAccess;
             let msg = mapper.set_permission_mode_request(mode);
             if write_line(stdin, &msg).await.is_err() {
                 let _ = event_tx
@@ -463,6 +483,17 @@ async fn handle_command(
             Flow::Continue
         }
         SessionCommand::Shutdown => {
+            // Settle any pending AskUserQuestion prompts: deny the callback with
+            // T3's cancel message and emit an empty resolution (S2 §4.2).
+            for (request_id, response) in mapper.cancel_pending_user_input() {
+                let _ = write_line(stdin, &response).await;
+                let _ = event_tx
+                    .send(AgentEvent::UserInputResolved {
+                        request_id,
+                        answers: serde_json::Map::new(),
+                    })
+                    .await;
+            }
             let _ = stdin.close().await;
             let _ = child.kill();
             Flow::Break
@@ -507,11 +538,15 @@ enum ToolItem {
 }
 
 /// A pending permission prompt, kept so `RespondApproval` can echo the tool's
-/// (possibly updated) input and, for "approve for session", the tool name.
+/// (possibly updated) input and, for "approve for session", forward the SDK's
+/// `permission_suggestions` verbatim.
 #[derive(Debug, Clone)]
 struct PendingApproval {
-    tool_name: String,
     input: Value,
+    /// `permission_suggestions` from the `can_use_tool` control_request,
+    /// forwarded unchanged as `updatedPermissions` on `ApproveForSession` when
+    /// the SDK supplied a non-empty array (S2 §4.3).
+    suggestions: Option<Value>,
 }
 
 pub(crate) struct Mapper {
@@ -522,6 +557,13 @@ pub(crate) struct Mapper {
     control_counter: usize,
     tool_items: HashMap<String, ToolItem>,
     pending_approvals: HashMap<String, PendingApproval>,
+    /// Pending `AskUserQuestion` prompts: control request_id → the original
+    /// `questions` array, echoed back verbatim in the allow response.
+    pending_user_input: HashMap<String, Value>,
+    /// Whether the session runs in full-access (bypassPermissions) mode, in
+    /// which normal tools that reach `can_use_tool` are auto-allowed with no
+    /// approval event (AskUserQuestion / ExitPlanMode are still handled first).
+    full_access: bool,
     /// Set when we send an `interrupt` control_request; the next non-success
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
@@ -550,6 +592,8 @@ impl Mapper {
             control_counter: 0,
             tool_items: HashMap::new(),
             pending_approvals: HashMap::new(),
+            pending_user_input: HashMap::new(),
+            full_access: false,
             interrupt_pending: false,
             ultrathink: false,
             interaction_mode: InteractionMode::Build,
@@ -565,6 +609,7 @@ impl Mapper {
         self.interaction_mode = config.interaction_mode;
         self.base_permission_mode = config.base_permission_mode;
         self.applied_permission_mode = config.base_permission_mode.to_string();
+        self.full_access = config.approval_mode == ApprovalMode::FullAccess;
     }
 
     /// Drain queued control-response writes for the actor to send.
@@ -630,20 +675,30 @@ impl Mapper {
                 "behavior": "allow",
                 "updatedInput": pending.input,
             }),
-            ApprovalDecision::ApproveForSession => json!({
-                "behavior": "allow",
-                "updatedInput": pending.input,
-                // "always allow" for this tool, scoped to the live session.
-                "updatedPermissions": [{
-                    "type": "addRules",
-                    "rules": [{ "toolName": pending.tool_name }],
-                    "behavior": "allow",
-                    "destination": "session",
-                }],
-            }),
+            ApprovalDecision::ApproveForSession => {
+                // T3 does not synthesize a rule: it forwards the SDK's
+                // `permission_suggestions` verbatim as `updatedPermissions`,
+                // and only when they were supplied (S2 §4.3). Absent
+                // suggestions, this is wire-equivalent to a one-time allow.
+                match &pending.suggestions {
+                    Some(suggestions) => json!({
+                        "behavior": "allow",
+                        "updatedInput": pending.input,
+                        "updatedPermissions": suggestions,
+                    }),
+                    None => json!({
+                        "behavior": "allow",
+                        "updatedInput": pending.input,
+                    }),
+                }
+            }
             ApprovalDecision::Deny => json!({
                 "behavior": "deny",
-                "message": "Denied by user.",
+                "message": "User declined tool execution.",
+            }),
+            ApprovalDecision::Cancel => json!({
+                "behavior": "deny",
+                "message": "User cancelled tool execution.",
             }),
         };
         Some(json!({
@@ -654,6 +709,55 @@ impl Mapper {
                 "response": response,
             }
         }))
+    }
+
+    /// Build the `control_response` allowing a pending `AskUserQuestion` prompt,
+    /// echoing the original `questions` alongside the collected `answers`
+    /// (S2 §1.2 / §2.3). Returns `None` for an unknown request id.
+    fn build_user_input_response(
+        &mut self,
+        request_id: &str,
+        answers: &serde_json::Map<String, Value>,
+    ) -> Option<Value> {
+        let questions = self.pending_user_input.remove(request_id)?;
+        Some(json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {
+                    "behavior": "allow",
+                    "updatedInput": {
+                        "questions": questions,
+                        "answers": answers,
+                    }
+                }
+            }
+        }))
+    }
+
+    /// Drain every pending `AskUserQuestion`, producing `(request_id, deny
+    /// control_response)` pairs with T3's cancel message (S2 §1.2 abort path).
+    fn cancel_pending_user_input(&mut self) -> Vec<(String, Value)> {
+        let pending: Vec<String> = self.pending_user_input.keys().cloned().collect();
+        pending
+            .into_iter()
+            .map(|request_id| {
+                self.pending_user_input.remove(&request_id);
+                let response = json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {
+                            "behavior": "deny",
+                            "message": "User cancelled tool execution.",
+                        }
+                    }
+                });
+                (request_id, response)
+            })
+            .collect()
     }
 
     /// Emit a [`AgentEvent::ProposedPlan`] for a captured plan, deduping across
@@ -1004,7 +1108,20 @@ impl Mapper {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // ExitPlanMode: capture the plan (deduped against the assistant-block
+        // (a) AskUserQuestion → structured user-input flow, in ALL access modes
+        // (its branch precedes the full-access allow branch; S2 §1.1/§1.2).
+        if tool_name == "AskUserQuestion" {
+            let questions_raw = input.get("questions").cloned().unwrap_or_else(|| json!([]));
+            let questions = parse_ask_user_questions(&input);
+            self.pending_user_input
+                .insert(request_id.clone(), questions_raw);
+            return vec![AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+            }];
+        }
+
+        // (b) ExitPlanMode: capture the plan (deduped against the assistant-block
         // capture via the shared `tool_use_id`), then auto-deny with T3's exact
         // message rather than surfacing an approval to the user.
         if tool_name == "ExitPlanMode" {
@@ -1032,10 +1149,32 @@ impl Mapper {
             return events;
         }
 
-        let kind = if tool_name == "Bash" {
-            ApprovalKind::ExecCommand {
+        // (c) Full-access: ordinary SDK permission checks are bypassed, but the
+        // callback stays installed. Any non-special tool that reaches it is
+        // auto-allowed with no approval event (S2 §1.1/§1.2 "full-access allow").
+        if self.full_access {
+            self.outgoing.push(json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "allow",
+                        "updatedInput": input,
+                    }
+                }
+            }));
+            return Vec::new();
+        }
+
+        // (d) Classify per the T3 substring matrix (S2 §1.3).
+        let detail = approval_detail(&tool_name, &input);
+        let kind = match classify_claude_tool(&tool_name) {
+            ClaudeRequestType::FileRead => ApprovalKind::FileRead { detail },
+            ClaudeRequestType::ExecCommand => ApprovalKind::ExecCommand {
                 command: input
                     .get("command")
+                    .or_else(|| input.get("cmd"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
@@ -1044,25 +1183,25 @@ impl Mapper {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 reason,
-            }
-        } else if is_file_tool(&tool_name) {
-            ApprovalKind::FileChange {
+            },
+            ClaudeRequestType::FileChange => ApprovalKind::FileChange {
                 changes: file_changes(&tool_name, &input),
                 reason,
-            }
-        } else {
-            ApprovalKind::ToolUse {
+            },
+            ClaudeRequestType::ToolUse => ApprovalKind::ToolUse {
                 name: tool_name.clone(),
                 input: input.clone(),
-            }
+                detail,
+            },
         };
 
+        let suggestions = request
+            .get("permission_suggestions")
+            .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+            .cloned();
         self.pending_approvals.insert(
             request_id.clone(),
-            PendingApproval {
-                tool_name,
-                input,
-            },
+            PendingApproval { input, suggestions },
         );
 
         vec![AgentEvent::ApprovalRequested(
@@ -1096,6 +1235,164 @@ impl Mapper {
 
 fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+}
+
+/// The reduced canonical request type our approval kinds distinguish. T3's
+/// item classification has more buckets (collab/mcp/web-search/image) but its
+/// request conversion collapses everything except read-only, command, and
+/// file-change into the dynamic fallback (S2 §1.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeRequestType {
+    FileRead,
+    ExecCommand,
+    FileChange,
+    ToolUse,
+}
+
+/// Whether a tool name classifies as a collab/subagent item (S2 §1.3 rule 1).
+fn is_agent_tool(normalized: &str) -> bool {
+    normalized.contains("agent") || normalized == "task"
+}
+
+/// Classify a tool name into its canonical approval request type using T3's
+/// ordered, substring-based matcher (S2 §1.3). The read-only predicate is
+/// checked first (so `WebSearch` → `FileRead` via `"search"`), then the ordered
+/// item classification; only command and file-change buckets get a dedicated
+/// kind — agent / mcp / web-search / image / default all fall through to the
+/// dynamic `ToolUse`.
+fn classify_claude_tool(name: &str) -> ClaudeRequestType {
+    let n = name.to_lowercase();
+    if n == "read"
+        || n.contains("read file")
+        || n.contains("view")
+        || n.contains("grep")
+        || n.contains("glob")
+        || n.contains("search")
+    {
+        return ClaudeRequestType::FileRead;
+    }
+    if is_agent_tool(&n) {
+        return ClaudeRequestType::ToolUse;
+    }
+    if n.contains("bash") || n.contains("command") || n.contains("shell") || n.contains("terminal")
+    {
+        return ClaudeRequestType::ExecCommand;
+    }
+    if n.contains("edit")
+        || n.contains("write")
+        || n.contains("file")
+        || n.contains("patch")
+        || n.contains("replace")
+        || n.contains("create")
+        || n.contains("delete")
+    {
+        return ClaudeRequestType::FileChange;
+    }
+    // "mcp" / "websearch" / "web search" / "image" all resolve to the dynamic
+    // fallback after request conversion.
+    ClaudeRequestType::ToolUse
+}
+
+/// Construct the approval `detail` string per the S2 §1.3 ordered rules.
+fn approval_detail(tool_name: &str, input: &Value) -> String {
+    // 1. A command string (`command` or `cmd`).
+    if let Some(cmd) = input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .and_then(Value::as_str)
+    {
+        let clipped: String = cmd.trim().chars().take(400).collect();
+        return format!("{tool_name}: {clipped}");
+    }
+    // 2. Collab/subagent item: description, else first 200 chars of prompt,
+    //    prefixed with `subagent_type: ` when present.
+    if is_agent_tool(&tool_name.to_lowercase()) {
+        let body = input
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                input
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .map(|p| p.chars().take(200).collect())
+                    .unwrap_or_default()
+            });
+        return match input
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            Some(subtype) => format!("{subtype}: {body}"),
+            None => body,
+        };
+    }
+    // 3. Serialize the full input, clipping to 400 chars with an ellipsis.
+    let json = serde_json::to_string(input).unwrap_or_default();
+    if json.chars().count() <= 400 {
+        format!("{tool_name}: {json}")
+    } else {
+        let clipped: String = json.chars().take(397).collect();
+        format!("{tool_name}: {clipped}...")
+    }
+}
+
+/// Parse `AskUserQuestion` tool input into canonical [`UserInputQuestion`]s
+/// (S2 §1.2). `id` is the complete question text (falling back to `q-<index>`);
+/// options and empty labels are preserved (the Claude side does not filter).
+fn parse_ask_user_questions(input: &Value) -> Vec<UserInputQuestion> {
+    let questions = match input.get("questions").and_then(Value::as_array) {
+        Some(q) => q,
+        None => return Vec::new(),
+    };
+    questions
+        .iter()
+        .enumerate()
+        .map(|(index, q)| {
+            let question_text = q.get("question").and_then(Value::as_str);
+            let id = match question_text {
+                Some(t) if !t.is_empty() => t.to_owned(),
+                _ => format!("q-{index}"),
+            };
+            let header = q
+                .get("header")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Question {}", index + 1));
+            let question = question_text.unwrap_or("").to_owned();
+            let options = q
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|opts| {
+                    opts.iter()
+                        .map(|opt| UserInputOption {
+                            label: opt
+                                .get("label")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                            description: opt
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let multi_select = q
+                .get("multiSelect")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            UserInputQuestion {
+                id,
+                header,
+                question,
+                options,
+                multi_select,
+            }
+        })
+        .collect()
 }
 
 /// Derive canonical [`FileChange`]s from a file-editing tool's input.
@@ -1974,7 +2271,8 @@ mod tests {
     }
 
     #[test]
-    fn deny_and_session_approval_shapes() {
+    fn deny_cancel_and_session_approval_wire_strings() {
+        // Deny → T3's exact "declined" message.
         let mut m = Mapper::new();
         feed(
             &mut m,
@@ -1984,7 +2282,27 @@ mod tests {
             .build_approval_response("req-d", ApprovalDecision::Deny)
             .unwrap();
         assert_eq!(deny["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            deny["response"]["response"]["message"],
+            "User declined tool execution."
+        );
 
+        // Cancel → deny with the exact "cancelled" message (no interrupt).
+        let mut mc = Mapper::new();
+        feed(
+            &mut mc,
+            r#"{"type":"control_request","request_id":"req-c","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
+        );
+        let cancel = mc
+            .build_approval_response("req-c", ApprovalDecision::Cancel)
+            .unwrap();
+        assert_eq!(cancel["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            cancel["response"]["response"]["message"],
+            "User cancelled tool execution."
+        );
+
+        // ApproveForSession with NO permission_suggestions → plain allow.
         let mut m2 = Mapper::new();
         feed(
             &mut m2,
@@ -1994,14 +2312,214 @@ mod tests {
             .build_approval_response("req-s", ApprovalDecision::ApproveForSession)
             .unwrap();
         assert_eq!(sess["response"]["response"]["behavior"], "allow");
+        assert!(sess["response"]["response"].get("updatedPermissions").is_none());
+
+        // ApproveForSession WITH suggestions → forwarded verbatim.
+        let mut m3 = Mapper::new();
+        feed(
+            &mut m3,
+            r#"{"type":"control_request","request_id":"req-p","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]}}"#,
+        );
+        let sess = m3
+            .build_approval_response("req-p", ApprovalDecision::ApproveForSession)
+            .unwrap();
         assert_eq!(
             sess["response"]["response"]["updatedPermissions"][0]["type"],
-            "addRules"
+            "setMode"
         );
         assert_eq!(
-            sess["response"]["response"]["updatedPermissions"][0]["rules"][0]["toolName"],
-            "Bash"
+            sess["response"]["response"]["updatedPermissions"][0]["mode"],
+            "acceptEdits"
         );
+    }
+
+    #[test]
+    fn classification_matrix_covers_t3_substring_quirks() {
+        use ClaudeRequestType::*;
+        let cases = [
+            ("Read", FileRead),             // exact lowercase "read"
+            ("Read File", FileRead),        // "read file" substring
+            ("ReadFile", FileChange),       // no space → "file" classifies it as file_change
+            ("View", FileRead),
+            ("ViewImage", FileRead),        // "view" wins before "image"
+            ("Grep", FileRead),
+            ("Glob", FileRead),
+            ("WebSearch", FileRead),        // "search" predicate wins over web_search
+            ("codebase_search", FileRead),
+            ("WebFetch", ToolUse),          // neither search nor read-only recognizes it
+            ("Bash", ExecCommand),
+            ("run_shell", ExecCommand),
+            ("terminal", ExecCommand),
+            ("some_command", ExecCommand),
+            ("Edit", FileChange),
+            ("Write", FileChange),
+            ("MultiEdit", FileChange),
+            ("delete_thing", FileChange),
+            ("TodoWrite", FileChange),      // "write"
+            ("TaskCreate", FileChange),     // "create"
+            ("TaskUpdate", ToolUse),        // no classification substring
+            ("TaskList", ToolUse),
+            ("Task", ToolUse),              // agent item, falls through
+            ("some_agent", ToolUse),
+            ("subagent_run", ToolUse),
+            ("mcp__server__tool", ToolUse),
+            ("view_image", FileRead),       // "view" still wins
+            ("image_tool", ToolUse),        // image → dynamic
+            ("MysteryTool", ToolUse),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                classify_claude_tool(name),
+                expected,
+                "classifying {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_detail_construction_rules() {
+        // 1. command → "<tool>: <trimmed, first 400 chars>".
+        let d = approval_detail("Bash", &json!({ "command": "  echo hi  " }));
+        assert_eq!(d, "Bash: echo hi");
+        let long = "x".repeat(500);
+        let d = approval_detail("Bash", &json!({ "cmd": long }));
+        assert_eq!(d, format!("Bash: {}", "x".repeat(400)));
+
+        // 2. subagent item: description preferred, prefixed with subagent_type.
+        let d = approval_detail(
+            "Task",
+            &json!({ "subagent_type": "explore", "description": "find refs", "prompt": "ignored" }),
+        );
+        assert_eq!(d, "explore: find refs");
+        // prompt fallback (first 200 chars), no subagent_type prefix.
+        let d = approval_detail("Task", &json!({ "prompt": "y".repeat(300) }));
+        assert_eq!(d, "y".repeat(200));
+
+        // 3. otherwise serialize input; ≤400 keeps full JSON.
+        let d = approval_detail("Weird", &json!({ "a": 1 }));
+        assert_eq!(d, "Weird: {\"a\":1}");
+        // >400 → first 397 chars + "..."
+        let big = json!({ "blob": "z".repeat(500) });
+        let d = approval_detail("Weird", &big);
+        assert!(d.starts_with("Weird: "));
+        assert!(d.ends_with("..."));
+    }
+
+    #[test]
+    fn ask_user_question_parse_and_answer_wire_shape() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-9","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which color?","header":"Color","options":[{"label":"Red","description":"warm"},{"label":"Blue","description":""}],"multiSelect":false},{"header":"Free"}]}}}"#,
+        );
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+            } => {
+                assert_eq!(request_id, "ctrl-9");
+                assert_eq!(questions.len(), 2);
+                // id = complete question text.
+                assert_eq!(questions[0].id, "Which color?");
+                assert_eq!(questions[0].header, "Color");
+                assert_eq!(questions[0].options.len(), 2);
+                assert_eq!(questions[0].options[0].label, "Red");
+                assert_eq!(questions[0].options[1].description, "");
+                assert!(!questions[0].multi_select);
+                // Missing question text → id fallback q-<index>, header kept.
+                assert_eq!(questions[1].id, "q-1");
+                assert_eq!(questions[1].header, "Free");
+                assert!(questions[1].options.is_empty());
+            }
+            other => panic!("expected UserInputRequested, got {other:?}"),
+        }
+
+        // Answer: allow with {questions: <original>, answers: <provided>}.
+        let mut answers = serde_json::Map::new();
+        answers.insert("Which color?".into(), json!("Red"));
+        let resp = m
+            .build_user_input_response("ctrl-9", &answers)
+            .expect("response for known request");
+        assert_eq!(resp["response"]["subtype"], "success");
+        assert_eq!(resp["response"]["request_id"], "ctrl-9");
+        assert_eq!(resp["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            resp["response"]["response"]["updatedInput"]["answers"]["Which color?"],
+            "Red"
+        );
+        // Original questions echoed back verbatim.
+        assert_eq!(
+            resp["response"]["response"]["updatedInput"]["questions"][0]["header"],
+            "Color"
+        );
+        // Consumed once.
+        assert!(m.build_user_input_response("ctrl-9", &answers).is_none());
+    }
+
+    #[test]
+    fn ask_user_question_cancel_on_teardown() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-x","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
+        );
+        let cancels = m.cancel_pending_user_input();
+        assert_eq!(cancels.len(), 1);
+        let (id, resp) = &cancels[0];
+        assert_eq!(id, "ctrl-x");
+        assert_eq!(resp["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            resp["response"]["response"]["message"],
+            "User cancelled tool execution."
+        );
+        // Drained: no longer answerable.
+        let empty = serde_json::Map::new();
+        assert!(m.build_user_input_response("ctrl-x", &empty).is_none());
+    }
+
+    #[test]
+    fn full_access_auto_allows_without_event() {
+        let mut m = Mapper::new();
+        m.full_access = true;
+        let evs = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"req-fa","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
+        );
+        assert!(evs.is_empty(), "full-access emits no approval event");
+        let outgoing = m.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["response"]["request_id"], "req-fa");
+        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            outgoing[0]["response"]["response"]["updatedInput"]["command"],
+            "ls"
+        );
+        // AskUserQuestion still surfaces even in full-access.
+        let evs = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"req-q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
+        );
+        assert!(matches!(evs[0], AgentEvent::UserInputRequested { .. }));
+    }
+
+    #[test]
+    fn read_tool_maps_to_file_read_kind() {
+        let mut m = Mapper::new();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"req-r","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/tmp/a.txt"}}}"#,
+        );
+        match &evs[0] {
+            AgentEvent::ApprovalRequested(req) => match &req.kind {
+                ApprovalKind::FileRead { detail } => {
+                    assert!(detail.starts_with("Read: "), "detail was {detail:?}")
+                }
+                other => panic!("expected FileRead, got {other:?}"),
+            },
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        }
     }
 
     #[test]
