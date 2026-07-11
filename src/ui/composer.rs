@@ -8,9 +8,9 @@ use std::rc::Rc;
 use std::path::PathBuf;
 
 use agent::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, Attachment, FileChangeKind,
-    InteractionMode, ModelSpec, OptionDescriptor, ProviderCommandKind, ProviderKind, TokenUsage,
-    UserInputQuestion,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest, Attachment,
+    FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommandKind,
+    ProviderKind, TokenUsage, UserInputQuestion,
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
@@ -101,11 +101,15 @@ const CONTROL_ROW_COMPACT_BELOW: f32 = 520.;
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
 #[derive(Clone)]
 struct ModelRow {
-    /// Provider-native model id (the favorites key + selection value).
+    /// Provider-native model id (the favorites key + selection value), or the
+    /// ACP agent's registry id when `acp` is set.
     id: String,
     /// Display name.
     name: String,
     provider: ProviderKind,
+    /// This row starts a session with an installed ACP agent rather than
+    /// selecting a model (ACP agents own their model list).
+    acp: bool,
 }
 
 /// The platform's "secondary" modifier as the composer spells it: gpui binds
@@ -146,6 +150,8 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
             .text_color(rgb(CLAUDE_TINT)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
         ProviderKind::Acp => Icon::empty(),
+        // Installed ACP agents render the registry's own icon where we have
+        // it; the rail falls back to this generic mark.
     }
 }
 
@@ -195,10 +201,14 @@ fn approval_mode_meta(mode: ApprovalMode) -> (String, String, &'static str) {
 }
 
 /// Which rail filter the model picker is showing.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum PickerRail {
     Favorites,
     Provider(ProviderKind),
+    /// One installed ACP agent (by registry id). ACP agents have no model
+    /// catalog — the agent publishes its models over the wire once the session
+    /// is up — so this rail lists the agent itself.
+    Acp(String),
 }
 
 pub enum ComposerEvent {
@@ -936,14 +946,20 @@ impl Composer {
 
     /// The rail the picker shows: an explicit user choice, else Favorites when
     /// any favorites exist (S1 §2), else the active provider.
-    fn rail_for(&self, provider: ProviderKind, has_favorites: bool) -> PickerRail {
-        self.picker_rail.unwrap_or({
-            if has_favorites {
-                PickerRail::Favorites
-            } else {
-                PickerRail::Provider(provider)
-            }
-        })
+    fn rail_for(
+        &self,
+        provider: ProviderKind,
+        agent_id: Option<&str>,
+        has_favorites: bool,
+    ) -> PickerRail {
+        if let Some(rail) = self.picker_rail.clone() {
+            return rail;
+        }
+        match (provider, agent_id) {
+            (ProviderKind::Acp, Some(id)) => PickerRail::Acp(id.to_string()),
+            _ if has_favorites => PickerRail::Favorites,
+            _ => PickerRail::Provider(provider),
+        }
     }
 
     // -- control-row popovers ----------------------------------------------
@@ -951,8 +967,12 @@ impl Composer {
     /// The model-picker button + popover (anchored above, ~360px).
     fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let app_state = self.app_state.read(cx);
-        let (provider, current_model) = match &app_state.active {
-            Some(active) => (active.meta.provider, active.meta.model.clone()),
+        let (provider, current_model, acp_agent_id) = match &app_state.active {
+            Some(active) => (
+                active.meta.provider,
+                active.meta.model.clone(),
+                active.meta.acp_agent_id.clone(),
+            ),
             None => return div().into_any_element(),
         };
         let catalog = app_state.models_for(provider);
@@ -969,8 +989,8 @@ impl Composer {
             .into_iter()
             .flat_map(|p| app_state.picker_models(p))
             .any(|m| m.favorite);
-        let rail = self.rail_for(provider, has_favorites);
-        let all_rows: Vec<ModelRow> = match rail {
+        let rail = self.rail_for(provider, acp_agent_id.as_deref(), has_favorites);
+        let all_rows: Vec<ModelRow> = match &rail {
             PickerRail::Favorites => [ProviderKind::Codex, ProviderKind::ClaudeCode]
                 .into_iter()
                 .flat_map(|p| {
@@ -982,16 +1002,31 @@ impl Composer {
                             id: m.id,
                             name: m.name,
                             provider: p,
+                            acp: false,
                         })
                 })
                 .collect(),
             PickerRail::Provider(p) => app_state
-                .picker_models(p)
+                .picker_models(*p)
                 .into_iter()
                 .map(|m| ModelRow {
                     id: m.id,
                     name: m.name,
-                    provider: p,
+                    provider: *p,
+                    acp: false,
+                })
+                .collect(),
+            // One row: "use this agent". Its models arrive as ProviderOptions
+            // once the session starts and render in the traits picker.
+            PickerRail::Acp(id) => app_state
+                .settings
+                .acp_agent(id)
+                .into_iter()
+                .map(|agent| ModelRow {
+                    id: agent.id.clone(),
+                    name: agent.name.clone(),
+                    provider: ProviderKind::Acp,
+                    acp: true,
                 })
                 .collect(),
         };
@@ -1008,7 +1043,17 @@ impl Composer {
         let app_entity = self.app_state.clone();
         let model_search = self.model_search.clone();
         let pending_restart = app_state.model_pending_restart();
-        let selected = current_model.clone();
+        // On an ACP rail the "selected" row is the agent itself.
+        let selected = match provider {
+            ProviderKind::Acp => acp_agent_id.clone(),
+            _ => current_model.clone(),
+        };
+        let acp_rail_agents: Vec<(String, String)> = app_state
+            .settings
+            .enabled_acp_agents()
+            .into_iter()
+            .map(|agent| (agent.id.clone(), agent.name.clone()))
+            .collect();
 
         let trigger = Button::new("model-picker").ghost().compact().child(
             h_flex()
@@ -1035,10 +1080,13 @@ impl Composer {
                 let composer = composer.clone();
                 let selected = selected.clone();
                 let popover = cx.entity();
+                let rail = rail.clone();
+                let acp_rail_agents = acp_rail_agents.clone();
                 render_model_pane(
                     &rows,
                     &selected,
                     rail,
+                    &acp_rail_agents,
                     pending_restart,
                     loading,
                     &app_entity,
@@ -1055,8 +1103,21 @@ impl Composer {
     /// the current model has no descriptors.
     fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let app_state = self.app_state.read(cx);
-        let Some(spec) = app_state.active_model_spec() else {
+        // Native providers describe their options through the model catalog; ACP
+        // agents push theirs over the wire (`AgentEvent::ProviderOptions`). Both
+        // arrive as `OptionDescriptor`s and render through this one picker.
+        let descriptors = app_state.active_option_descriptors();
+        if descriptors.is_empty() {
             return div().into_any_element();
+        }
+        let spec = match app_state.active_model_spec() {
+            Some(spec) => spec,
+            None => ModelSpec {
+                id: String::new(),
+                display_name: String::new(),
+                is_default: false,
+                options: descriptors,
+            },
         };
         let selections = app_state.active_option_selections();
         let ultrathink_armed = app_state.ultrathink_armed();
@@ -2499,57 +2560,107 @@ impl Composer {
                         .child(detail),
                 )
             })
-            .child(
-                // T3 order (S2 §4): Cancel turn, Decline, Always allow this
-                // session, Approve once.
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Button::new("approval-cancel")
-                            .ghost()
-                            .small()
-                            .label(rust_i18n::t!("approval.cancel_turn"))
-                            .text_color(cx.theme().muted_foreground)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("approval-deny")
-                            .ghost()
-                            .small()
-                            .label(rust_i18n::t!("approval.decline"))
-                            .text_color(cx.theme().danger)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("approval-always")
-                            .ghost()
-                            .small()
-                            .label(rust_i18n::t!("approval.always_allow_session"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(
-                                    always_id.clone(),
-                                    ApprovalDecision::ApproveForSession,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        Button::new("approval-approve")
-                            .primary()
-                            .small()
-                            .label(rust_i18n::t!("approval.approve_once"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
-                            })),
-                    ),
-            )
+            .when(!request.options.is_empty(), |this| {
+                // An ACP agent sends its own option list: render exactly those
+                // buttons (the labels are the agent's), ordered rejections-first
+                // like our fixed four, and answer with the chosen option id.
+                let mut row = h_flex().w_full().gap_2().items_center();
+                let mut options = request.options.clone();
+                options.sort_by_key(|option| match option.kind {
+                    ApprovalOptionKind::RejectAlways => 0,
+                    ApprovalOptionKind::RejectOnce => 1,
+                    ApprovalOptionKind::AllowAlways => 2,
+                    ApprovalOptionKind::AllowOnce => 3,
+                });
+                let last = options.len().saturating_sub(1);
+                for (index, option) in options.into_iter().enumerate() {
+                    let request_id = request.id.clone();
+                    let option_id = option.id.clone();
+                    let rejects = matches!(
+                        option.kind,
+                        ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
+                    );
+                    let button = Button::new(gpui::SharedString::from(format!(
+                        "approval-option-{}",
+                        option.id
+                    )))
+                    .small()
+                    .label(option.label.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.respond(
+                            request_id.clone(),
+                            ApprovalDecision::Option(option_id.clone()),
+                            cx,
+                        );
+                    }));
+                    // The agent's preferred (last) option is the primary action.
+                    let button = if index == last {
+                        button.primary()
+                    } else if rejects {
+                        button.ghost().text_color(cx.theme().danger)
+                    } else {
+                        button.ghost()
+                    };
+                    if index == 1 {
+                        row = row.child(div().flex_1());
+                    }
+                    row = row.child(button);
+                }
+                this.child(row)
+            })
+            .when(request.options.is_empty(), |this| {
+                this.child(
+                    // T3 order (S2 §4): Cancel turn, Decline, Always allow this
+                    // session, Approve once.
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Button::new("approval-cancel")
+                                .ghost()
+                                .small()
+                                .label(rust_i18n::t!("approval.cancel_turn"))
+                                .text_color(cx.theme().muted_foreground)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
+                                })),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("approval-deny")
+                                .ghost()
+                                .small()
+                                .label(rust_i18n::t!("approval.decline"))
+                                .text_color(cx.theme().danger)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("approval-always")
+                                .ghost()
+                                .small()
+                                .label(rust_i18n::t!("approval.always_allow_session"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(
+                                        always_id.clone(),
+                                        ApprovalDecision::ApproveForSession,
+                                        cx,
+                                    );
+                                })),
+                        )
+                        .child(
+                            Button::new("approval-approve")
+                                .primary()
+                                .small()
+                                .label(rust_i18n::t!("approval.approve_once"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
+                                })),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -2844,6 +2955,8 @@ fn render_model_pane(
     rows: &[ModelRow],
     selected: &Option<String>,
     rail: PickerRail,
+    // (id, name) of every installed+enabled ACP agent — one rail entry each.
+    acp_agents: &[(String, String)],
     pending_restart: bool,
     loading: bool,
     app_entity: &Entity<AppState>,
@@ -2855,7 +2968,7 @@ fn render_model_pane(
     let muted = cx.theme().muted_foreground;
 
     // Left rail: favorites star + one glyph per provider.
-    let rail_icon = |id: &'static str,
+    let rail_icon = |id: gpui::SharedString,
                      icon: Icon,
                      active: bool,
                      target: PickerRail,
@@ -2877,6 +2990,7 @@ fn render_model_pane(
                     .text_color(if active { cx.theme().foreground } else { muted }),
             )
             .on_click(move |_, _, cx| {
+                let target = target.clone();
                 composer.update(cx, |c, cx| {
                     c.picker_rail = Some(target);
                     cx.notify();
@@ -2885,7 +2999,7 @@ fn render_model_pane(
             .into_any_element()
     };
 
-    let rail_col = v_flex()
+    let mut rail_col = v_flex()
         .flex_none()
         .py_2()
         .px_1p5()
@@ -2893,26 +3007,36 @@ fn render_model_pane(
         .border_r_1()
         .border_color(cx.theme().border)
         .child(rail_icon(
-            "rail-fav",
+            "rail-fav".into(),
             Icon::new(IconName::Star),
             rail == PickerRail::Favorites,
             PickerRail::Favorites,
             cx,
         ))
         .child(rail_icon(
-            "rail-claude",
+            "rail-claude".into(),
             tinted_provider_glyph(ProviderKind::ClaudeCode, app_entity.read(cx)),
             rail == PickerRail::Provider(ProviderKind::ClaudeCode),
             PickerRail::Provider(ProviderKind::ClaudeCode),
             cx,
         ))
         .child(rail_icon(
-            "rail-codex",
+            "rail-codex".into(),
             tinted_provider_glyph(ProviderKind::Codex, app_entity.read(cx)),
             rail == PickerRail::Provider(ProviderKind::Codex),
             PickerRail::Provider(ProviderKind::Codex),
             cx,
         ));
+    // …then one entry per installed ACP agent (Settings → Providers → ACP Agents).
+    for (id, _name) in acp_agents {
+        rail_col = rail_col.child(rail_icon(
+            gpui::SharedString::from(format!("rail-acp-{id}")),
+            Icon::empty().path("icons/box.svg"),
+            rail == PickerRail::Acp(id.clone()),
+            PickerRail::Acp(id.clone()),
+            cx,
+        ));
+    }
 
     // Main pane: search + rows.
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
@@ -3000,7 +3124,8 @@ fn render_model_row(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let is_current = selected.as_deref() == Some(row.id.as_str());
-    let is_fav = app_entity.read(cx).is_favorite_model(&row.id);
+    let is_acp = row.acp;
+    let is_fav = !is_acp && app_entity.read(cx).is_favorite_model(&row.id);
     let name = row.name.clone();
     let id = row.id.clone();
     let fav_id = row.id.clone();
@@ -3021,7 +3146,11 @@ fn render_model_row(
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().muted))
         .on_click(move |_, window, cx| {
-            app_select.update(cx, |s, cx| s.set_active_model(Some(id.clone()), cx));
+            if is_acp {
+                app_select.update(cx, |s, cx| s.set_active_acp_agent(&id, cx));
+            } else {
+                app_select.update(cx, |s, cx| s.set_active_model(Some(id.clone()), cx));
+            }
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })
         .child(

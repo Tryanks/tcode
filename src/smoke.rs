@@ -19,6 +19,8 @@ const SMOKE_TIMEOUT: Duration = Duration::from_secs(180);
 pub enum SmokeSpec {
     New {
         provider: ProviderKind,
+        /// Which ACP agent to run, when `provider == Acp` (`--smoke "acp:<id>|…"`).
+        acp_agent_id: Option<String>,
         cwd: PathBuf,
         prompt: String,
     },
@@ -34,15 +36,22 @@ pub fn parse_args() -> Option<SmokeSpec> {
         Some("--smoke") => {
             let spec = args.next().unwrap_or_else(|| usage());
             let mut parts = spec.splitn(3, '|');
-            let provider = match parts.next() {
-                Some("codex") => ProviderKind::Codex,
-                Some("claude") => ProviderKind::ClaudeCode,
+            // `acp:<agent-id>` runs an installed ACP agent; the two native
+            // providers keep their bare names.
+            let (provider, acp_agent_id) = match parts.next() {
+                Some("codex") => (ProviderKind::Codex, None),
+                Some("claude") => (ProviderKind::ClaudeCode, None),
+                Some(token) if token.starts_with("acp:") => (
+                    ProviderKind::Acp,
+                    Some(token.trim_start_matches("acp:").to_string()),
+                ),
                 _ => usage(),
             };
             let cwd = PathBuf::from(parts.next().unwrap_or_else(|| usage()));
             let prompt = parts.next().unwrap_or_else(|| usage()).to_string();
             Some(SmokeSpec::New {
                 provider,
+                acp_agent_id,
                 cwd,
                 prompt,
             })
@@ -57,7 +66,7 @@ pub fn parse_args() -> Option<SmokeSpec> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: tcode [--smoke \"<codex|claude>|<cwd>|<prompt>\"] [--smoke-resume \"<prompt>\"]"
+        "usage: tcode [--smoke \"<codex|claude|acp:<agent-id>>|<cwd>|<prompt>\"] [--smoke-resume \"<prompt>\"]"
     );
     std::process::exit(2);
 }
@@ -75,15 +84,18 @@ pub fn drive(spec: SmokeSpec, app_state: Entity<AppState>, cx: &mut App) {
         match spec {
             SmokeSpec::New {
                 provider,
+                acp_agent_id,
                 cwd,
                 prompt,
             } => {
                 log::info!(
                     "smoke: creating {} session in {}",
-                    provider.display_name(),
+                    acp_agent_id
+                        .clone()
+                        .unwrap_or(provider.display_name().to_string()),
                     cwd.display()
                 );
-                state.create_session(provider, cwd, None, None, cx);
+                state.create_session(provider, cwd, None, None, acp_agent_id, cx);
                 state.send_turn(prompt, Vec::new(), cx);
             }
             SmokeSpec::Resume { prompt } => {

@@ -18,6 +18,8 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
         ProviderKind::ClaudeCode => "@anthropic-ai/claude-code",
         ProviderKind::Codex => "@openai/codex",
         // ACP agents ship on their own cadence; no single npm package.
+        // ACP agents are versioned by the registry, not by npm: their update
+        // path is "install the newer version from the marketplace".
         ProviderKind::Acp => "",
     }
 }
@@ -109,6 +111,11 @@ fn brew_formula(provider: ProviderKind) -> &'static str {
 /// | Homebrew | `brew upgrade codex` | `brew upgrade claude-code` |
 /// | native | — (no self-update) | `claude update` |
 pub fn update_command(provider: ProviderKind, source: InstallSource) -> Option<Vec<String>> {
+    // ACP agents update through the marketplace (Settings → Providers), not a
+    // package manager.
+    if provider == ProviderKind::Acp {
+        return None;
+    }
     let s = |v: &str| v.to_string();
     let pkg = || format!("{}@latest", npm_package(provider));
     match (provider, source) {
