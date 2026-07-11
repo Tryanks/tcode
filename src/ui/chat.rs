@@ -57,6 +57,9 @@ pub struct ChatView {
     follow: bool,
     /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
     _tick: Option<Task<()>>,
+    /// Whether the proposed-plan card's "Copied!" confirmation is showing (2s).
+    plan_copied: bool,
+    _plan_copied_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +102,8 @@ impl ChatView {
             session_key: None,
             follow: true,
             _tick: None,
+            plan_copied: false,
+            _plan_copied_task: None,
             _subscriptions: subscriptions,
         }
     }
@@ -120,6 +125,10 @@ impl ChatView {
                         }
                         _ => {}
                     }
+                }
+                // The proposed-plan card renders its markdown too.
+                if let Some(plan) = &active.timeline.proposed_plan {
+                    texts.push((format!("plan:{}", plan.item_id), plan.markdown.clone()));
                 }
             }
             (session_key, texts, running)
@@ -238,6 +247,19 @@ impl ChatView {
             if let EntryContent::Assistant { text } = &entry.content {
                 column = column.child(self.render_assistant(&entry.id, text, cx));
             }
+        }
+
+        // 3b. Proposed-plan card (the captured plan for this turn).
+        if let Some((item_id, markdown)) = {
+            let state = self.app_state.read(cx);
+            state
+                .active
+                .as_ref()
+                .and_then(|a| a.timeline.proposed_plan.as_ref())
+                .filter(|plan| plan.turn == index)
+                .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
+        } {
+            column = column.child(self.render_proposed_plan_card(index, &item_id, &markdown, cx));
         }
 
         // 4. CHANGED FILES card (aggregated across the turn's file changes).
@@ -656,6 +678,153 @@ impl ChatView {
         card.into_any_element()
     }
 
+    /// The inline proposed-plan timeline card (S1 §5): a "Plan" badge, title,
+    /// markdown body (collapsible when long), and Copy / Download / Save actions.
+    fn render_proposed_plan_card(
+        &self,
+        turn: usize,
+        item_id: &str,
+        markdown: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = crate::session::plan_title(markdown)
+            .unwrap_or_else(|| rust_i18n::t!("plan.proposed_plan").into_owned());
+        let long = markdown.chars().count() > 900 || markdown.lines().count() > 20;
+        let collapse_key = format!("plan-card-{turn}");
+        let collapsed = long && self.expanded.contains(&collapse_key);
+
+        let body: AnyElement = if collapsed {
+            div().into_any_element()
+        } else if let Some(md) = self.md_states.get(&format!("plan:{item_id}")) {
+            div()
+                .w_full()
+                .text_size(px(14.))
+                .line_height(px(22.))
+                .child(TextView::new(&md.state).selectable(true))
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .child(markdown.to_string())
+                .into_any_element()
+        };
+
+        let md_copy = markdown.to_string();
+        let md_download = markdown.to_string();
+        let md_save = markdown.to_string();
+        let copied = self.plan_copied;
+
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_4()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .px_2()
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(cx.theme().primary)
+                            .text_color(cx.theme().primary_foreground)
+                            .text_size(px(11.))
+                            .font_medium()
+                            .child(rust_i18n::t!("plan.badge")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(px(15.))
+                            .font_semibold()
+                            .child(title),
+                    )
+                    .when(long, |this| {
+                        let key = collapse_key.clone();
+                        this.child(
+                            Button::new(("plan-collapse", turn))
+                                .ghost()
+                                .xsmall()
+                                .label(if collapsed {
+                                    rust_i18n::t!("plan.expand")
+                                } else {
+                                    rust_i18n::t!("plan.collapse")
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_expanded(&key, cx);
+                                })),
+                        )
+                    }),
+            )
+            .child(body)
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        Button::new(("plan-copy", turn))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Copy)
+                            .label(if copied {
+                                rust_i18n::t!("plan.copied")
+                            } else {
+                                rust_i18n::t!("plan.copy")
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let md = md_copy.clone();
+                                this.app_state.update(cx, |s, cx| s.copy_plan(md, cx));
+                                this.mark_plan_copied(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("plan-download", turn))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::empty().path("icons/download.svg"))
+                            .label(rust_i18n::t!("plan.download"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let md = md_download.clone();
+                                this.app_state.update(cx, |s, cx| s.download_plan(md, cx));
+                            })),
+                    )
+                    .child(
+                        Button::new(("plan-save", turn))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::HardDrive)
+                            .label(rust_i18n::t!("plan.save_workspace"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let md = md_save.clone();
+                                this.app_state
+                                    .update(cx, |s, cx| s.save_plan_to_workspace(md, cx));
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn mark_plan_copied(&mut self, cx: &mut Context<Self>) {
+        self.plan_copied = true;
+        self._plan_copied_task = Some(cx.spawn(async move |this, cx| {
+            smol::Timer::after(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.plan_copied = false;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     fn render_timestamp(&self, ts: u64, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .w_full()
@@ -720,7 +889,11 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        let diff_open = self.app_state.read(cx).diff_panel_open();
+        let diff_showing = {
+            let state = self.app_state.read(cx);
+            state.diff_panel_open() && state.right_tab() == crate::app::RightTab::Diff
+        };
+        let plan_showing = self.app_state.read(cx).plan_panel_showing();
         let terminal_open = self.app_state.read(cx).terminal_panel_open();
         window_drag_area("chat-header-drag", base, window, cx)
             .child(title_el)
@@ -745,12 +918,25 @@ impl ChatView {
                                     })),
                             )
                             .child(
+                                Button::new("plan-panel")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::Map)
+                                    .selected(plan_showing)
+                                    .tooltip(rust_i18n::t!("chat.toggle_plan"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.app_state
+                                            .update(cx, |state, cx| state.toggle_plan_panel(cx));
+                                    })),
+                            )
+                            .child(
                                 Button::new("diff-panel")
                                     .ghost()
                                     .small()
                                     .compact()
                                     .icon(IconName::PanelRight)
-                                    .selected(diff_open)
+                                    .selected(diff_showing)
                                     .tooltip(rust_i18n::t!("chat.toggle_diff"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.app_state

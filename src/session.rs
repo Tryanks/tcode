@@ -4,8 +4,8 @@
 //! UI renders identically in both cases.
 
 use agent::{
-    AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, ResumeCursor,
-    ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
+    AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, PlanStep,
+    ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
 };
 
 pub use crate::store::StoredEvent;
@@ -81,6 +81,17 @@ pub enum EntryContent {
     },
 }
 
+/// A proposed plan captured this session (Codex plan item / Claude
+/// `ExitPlanMode`). Streaming deltas accumulate into `markdown`; a `ProposedPlan`
+/// event replaces it with the final text.
+#[derive(Debug, Clone, Default)]
+pub struct ProposedPlan {
+    pub item_id: String,
+    pub markdown: String,
+    /// Index into [`Timeline::turns`] of the turn that produced it.
+    pub turn: usize,
+}
+
 /// Folded view of a session's event history.
 #[derive(Debug, Clone, Default)]
 pub struct Timeline {
@@ -89,6 +100,13 @@ pub struct Timeline {
     pub turns: Vec<TurnMeta>,
     pub turn_running: bool,
     pub pending_approvals: Vec<ApprovalRequest>,
+    /// The latest proposed plan captured this session, if any. Survives replay
+    /// (it is the accept/refine anchor) until a newer plan supersedes it.
+    pub proposed_plan: Option<ProposedPlan>,
+    /// The latest structured plan/task list (`PlanUpdated`), if any.
+    pub plan_steps: Vec<PlanStep>,
+    /// The explanation string from the latest `PlanUpdated`, if any.
+    pub plan_explanation: Option<String>,
     /// The active user-input request (Claude `AskUserQuestion` / Codex
     /// `requestUserInput`), if the agent is currently blocked on one. Cleared
     /// when it resolves or the turn ends.
@@ -235,11 +253,33 @@ impl Timeline {
                     self.turns[turn].running = false;
                 }
             }
-            // Plan / proposed-plan surfaces are consumed by the composer-fidelity
-            // UI slice (next); the timeline model does not render them yet.
-            AgentEvent::PlanUpdated { .. }
-            | AgentEvent::ProposedPlanDelta { .. }
-            | AgentEvent::ProposedPlan { .. } => {}
+            AgentEvent::PlanUpdated {
+                steps, explanation, ..
+            } => {
+                self.plan_steps = steps.clone();
+                self.plan_explanation = explanation.clone();
+            }
+            AgentEvent::ProposedPlanDelta { item_id, text } => {
+                let turn = self.ensure_turn(ts);
+                match &mut self.proposed_plan {
+                    Some(plan) if plan.item_id == *item_id => plan.markdown.push_str(text),
+                    _ => {
+                        self.proposed_plan = Some(ProposedPlan {
+                            item_id: item_id.clone(),
+                            markdown: text.clone(),
+                            turn,
+                        });
+                    }
+                }
+            }
+            AgentEvent::ProposedPlan { item_id, markdown } => {
+                let turn = self.ensure_turn(ts);
+                self.proposed_plan = Some(ProposedPlan {
+                    item_id: item_id.clone(),
+                    markdown: markdown.clone(),
+                    turn,
+                });
+            }
         }
     }
 
@@ -389,6 +429,29 @@ impl Timeline {
             turn,
         });
     }
+}
+
+/// Extract a plan's title from its markdown: the text of the first ATX heading
+/// (`#`…`######`), else `None` (callers fall back to a localized "Proposed
+/// plan"). Leading `#`s and surrounding whitespace are stripped.
+pub fn plan_title(markdown: &str) -> Option<String> {
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            let heading = rest.trim_start_matches('#').trim();
+            if !heading.is_empty() {
+                return Some(heading.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The exact implementation prompt sent when a proposed plan is accepted
+/// (`Implement` / `Implement in a new thread`): the T3 verbatim prefix plus the
+/// trimmed plan markdown.
+pub fn implement_prompt(markdown: &str) -> String {
+    format!("PLEASE IMPLEMENT THIS PLAN:\n{}", markdown.trim())
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
@@ -739,6 +802,100 @@ mod tests {
         cold.mark_idle();
         assert!(!cold.turn_running);
         assert!(cold.turns.iter().all(|t| !t.running));
+    }
+
+    #[test]
+    fn plan_title_extracts_first_heading() {
+        assert_eq!(
+            plan_title("# Refactor the parser\n\nBody text"),
+            Some("Refactor the parser".to_string())
+        );
+        assert_eq!(
+            plan_title("intro line\n### Step one\nmore"),
+            Some("Step one".to_string())
+        );
+        // No heading -> None (caller supplies the localized fallback).
+        assert_eq!(plan_title("just a paragraph\nsecond line"), None);
+        // Empty heading is skipped.
+        assert_eq!(plan_title("#\n# Real title"), Some("Real title".to_string()));
+    }
+
+    #[test]
+    fn implement_prompt_uses_verbatim_prefix() {
+        assert_eq!(
+            implement_prompt("  # Plan\nDo the thing\n  "),
+            "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nDo the thing"
+        );
+    }
+
+    #[test]
+    fn proposed_plan_deltas_accumulate_then_finalize() {
+        let mut timeline = Timeline::default();
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ProposedPlanDelta {
+                item_id: "plan-1".into(),
+                text: "# Plan\n".into(),
+            },
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ProposedPlanDelta {
+                item_id: "plan-1".into(),
+                text: "step one".into(),
+            },
+        );
+        let plan = timeline.proposed_plan.as_ref().unwrap();
+        assert_eq!(plan.markdown, "# Plan\nstep one");
+        assert_eq!(plan.turn, 0);
+
+        // The final ProposedPlan replaces the accumulated text.
+        timeline.apply_at(
+            None,
+            &AgentEvent::ProposedPlan {
+                item_id: "plan-1".into(),
+                markdown: "# Plan\nstep one\nstep two".into(),
+            },
+        );
+        assert_eq!(
+            timeline.proposed_plan.as_ref().unwrap().markdown,
+            "# Plan\nstep one\nstep two"
+        );
+        // The proposed plan survives replay's mark_idle (it is the accept anchor).
+        timeline.mark_idle();
+        assert!(timeline.proposed_plan.is_some());
+    }
+
+    #[test]
+    fn plan_updated_tracks_latest_steps() {
+        use agent::PlanStepStatus;
+        let mut timeline = Timeline::default();
+        timeline.apply_at(
+            None,
+            &AgentEvent::PlanUpdated {
+                turn_id: Some("t".into()),
+                explanation: Some("Working".into()),
+                steps: vec![
+                    PlanStep {
+                        step: "a".into(),
+                        status: PlanStepStatus::Completed,
+                    },
+                    PlanStep {
+                        step: "b".into(),
+                        status: PlanStepStatus::InProgress,
+                    },
+                ],
+            },
+        );
+        assert_eq!(timeline.plan_steps.len(), 2);
+        assert_eq!(timeline.plan_explanation.as_deref(), Some("Working"));
+        assert_eq!(timeline.plan_steps[1].status, PlanStepStatus::InProgress);
     }
 
     #[test]

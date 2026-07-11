@@ -2,6 +2,7 @@ mod chat;
 mod composer;
 mod diff_panel;
 mod palette;
+mod plan_panel;
 mod settings_page;
 mod sidebar;
 mod terminal_drawer;

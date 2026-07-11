@@ -88,6 +88,11 @@ pub struct Settings {
     /// dialog on by default. Surfaced as the "Delete confirmation" toggle.
     #[serde(default)]
     pub skip_delete_confirmation: bool,
+    /// When true, the right-side plan/task panel opens automatically the first
+    /// time steps appear in a turn (unless the user closed it during that turn).
+    /// Absent in legacy files (defaults to off).
+    #[serde(default)]
+    pub auto_open_task_panel: bool,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -151,6 +156,7 @@ mod tests {
             theme_mode: ThemeMode::Dark,
             word_wrap_diffs: true,
             skip_delete_confirmation: true,
+            auto_open_task_panel: true,
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,

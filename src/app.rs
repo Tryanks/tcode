@@ -1,10 +1,12 @@
 //! Application state: session registry, active session runtime, event pump.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, InteractionMode, ItemContent, ProviderKind,
-    SessionCommand, SessionOptions, ThreadItem, TurnStatus, start_session,
+    AgentEvent, ApprovalDecision, ApprovalMode, InteractionMode, ItemContent, ModelSpec,
+    OptionSelection, ProviderKind, SessionCommand, SessionOptions, ThreadItem, TurnOptions,
+    TurnStatus, list_models, start_session,
 };
 use gpui::{Context, EventEmitter, Task};
 
@@ -85,6 +87,15 @@ pub enum Route {
     Settings,
 }
 
+/// Which tab the right-side panel shows (it hosts the diff view and the
+/// plan/task view). Persisted per active session, in memory only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightTab {
+    #[default]
+    Diff,
+    Plan,
+}
+
 /// Provider process state for the active session.
 enum Runtime {
     /// Not started yet — stored session opened (replay only) or brand new.
@@ -116,14 +127,31 @@ pub struct ActiveSession {
     /// Codex binds the mode at thread start, so a mid-session change leaves this
     /// stale and forces a resume-restart before the next turn.
     live_approval_mode: Option<ApprovalMode>,
+    /// The option selections the live provider was started with (reasoning
+    /// effort, context window, fast mode, …). A mid-session change to a
+    /// launch-time option forces a resume-restart before the next turn; Codex's
+    /// reasoning effort is the exception (it applies per turn, see `send_turn`).
+    live_option_selections: Vec<OptionSelection>,
+    /// A transient "the next send should be an Ultrathink turn" flag, set when
+    /// the user picks Ultrathink in the traits picker. It is never persisted
+    /// (T3: Ultrathink is a prompt-prefix mode, not an option) and is cleared
+    /// after one send.
+    pending_ultrathink: bool,
+    /// Whether the current proposed plan has been accepted for implementation
+    /// (drives the composer back out of its plan-ready state).
+    plan_implemented: bool,
     pending_sends: Vec<String>,
     turn_in_flight: bool,
-    /// Diff panel UI state (per-session, in-memory only). Open/closed, the
-    /// full-width "expand" toggle, and the explicitly-selected turn (None means
-    /// "follow the latest turn that has file changes", resolved on demand).
+    /// Diff panel UI state (per-session, in-memory only). `diff_open` is the
+    /// right-panel open/closed flag; `right_tab` selects which tab it shows.
     pub diff_open: bool,
     pub diff_expanded: bool,
     pub diff_selected_turn: Option<usize>,
+    /// Which tab the right panel shows (Diff or Plan/Tasks).
+    pub right_tab: RightTab,
+    /// Set when the user manually closed the right panel during the current
+    /// turn, so `auto_open_task_panel` doesn't re-open it until the next turn.
+    auto_open_suppressed: bool,
     /// Bottom terminal drawer state and its lazily-spawned per-session PTY.
     pub terminal_open: bool,
     pub terminal_height: f32,
@@ -145,6 +173,33 @@ impl ActiveSession {
     fn approval_mode_changed_while_live(&self) -> bool {
         matches!(self.runtime, Runtime::Live(_))
             && Some(self.meta.approval_mode) != self.live_approval_mode
+    }
+
+    /// Whether a launch-time option (reasoning effort for Claude, context
+    /// window, fast mode, thinking, …) changed while the provider is live, so
+    /// the next turn must restart it. Codex's reasoning effort is excluded: it
+    /// is applied per turn via [`TurnOptions`] and needs no restart.
+    fn options_changed_while_live(&self) -> bool {
+        if !matches!(self.runtime, Runtime::Live(_)) {
+            return false;
+        }
+        let ignore_effort = self.meta.provider == ProviderKind::Codex;
+        normalized_selections(&self.meta.option_selections, ignore_effort)
+            != normalized_selections(&self.live_option_selections, ignore_effort)
+    }
+
+    /// Per-turn overrides derived from the session's persisted state: Codex
+    /// reasoning effort (applied per turn) and the Build/Plan interaction mode.
+    fn turn_options(&self) -> TurnOptions {
+        let effort = if self.meta.provider == ProviderKind::Codex {
+            codex_effort_selection(&self.meta.option_selections)
+        } else {
+            None
+        };
+        TurnOptions {
+            effort,
+            interaction_mode: Some(self.meta.interaction_mode),
+        }
     }
 
     /// Tear down the live provider and return to `Idle` so the next
@@ -170,11 +225,9 @@ impl ActiveSession {
         let Some(text) = self.pending_sends.first().cloned() else {
             return Ok(false);
         };
+        let options = Some(self.turn_options());
         commands
-            .try_send(SessionCommand::SendTurn {
-                text,
-                options: None,
-            })
+            .try_send(SessionCommand::SendTurn { text, options })
             .map_err(|_| ())?;
         self.pending_sends.remove(0);
         self.turn_in_flight = true;
@@ -211,6 +264,13 @@ pub struct AppState {
     pub route: Route,
     /// Whether the command palette (⌘K) overlay is showing.
     pub palette_open: bool,
+    /// Per-provider model catalog (from `agent::list_models`): loaded instantly
+    /// from the persisted cache, then refreshed in the background at start and
+    /// whenever a binary path changes. Absent entry = never fetched.
+    pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+    /// Providers whose catalog is currently being fetched (drives the picker's
+    /// "Loading models…" row when the cache is also empty).
+    pub models_loading: HashMap<ProviderKind, bool>,
     next_start_generation: u64,
 }
 
@@ -228,6 +288,16 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        // Seed the model picker from the persisted cache so it is instant and
+        // works offline; a background refresh (see `refresh_model_catalogs`)
+        // updates it once the providers respond.
+        let mut model_catalogs = HashMap::new();
+        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+            let cached = store.load_models(provider);
+            if !cached.is_empty() {
+                model_catalogs.insert(provider, cached);
+            }
+        }
         log::info!(
             "loaded {} stored session(s) in {} project(s) from {}",
             sessions.len(),
@@ -245,8 +315,77 @@ impl AppState {
             sidebar_collapsed: false,
             route: Route::Chat,
             palette_open: false,
+            model_catalogs,
+            models_loading: HashMap::new(),
             next_start_generation: 0,
         }
+    }
+
+    /// Kick off a background refresh of every provider's model catalog (called
+    /// at app start and after a binary-path change). Results update
+    /// `model_catalogs` and are persisted so the next launch is instant.
+    pub fn refresh_model_catalogs(&mut self, cx: &mut Context<Self>) {
+        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+            let binary = match provider {
+                ProviderKind::Codex => self.settings.codex_binary.clone(),
+                ProviderKind::ClaudeCode => self.settings.claude_binary.clone(),
+            };
+            self.models_loading.insert(provider, true);
+            let store = self.store.clone();
+            cx.spawn(async move |this, cx| {
+                let result = list_models(provider, binary).await;
+                let _ = this.update(cx, |state, cx| {
+                    state.models_loading.insert(provider, false);
+                    match result {
+                        Ok(models) if !models.is_empty() => {
+                            if let Err(err) = store.save_models(provider, &models) {
+                                log::warn!("failed to persist {provider:?} model catalog: {err}");
+                            }
+                            state.model_catalogs.insert(provider, models);
+                        }
+                        Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
+                        Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The cached model catalog for `provider` (empty when never fetched).
+    pub fn models_for(&self, provider: ProviderKind) -> &[ModelSpec] {
+        self.model_catalogs
+            .get(&provider)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Whether `provider`'s catalog is being fetched and no cache exists yet
+    /// (so the picker should show the "Loading models…" placeholder).
+    pub fn models_loading(&self, provider: ProviderKind) -> bool {
+        self.models_loading.get(&provider).copied().unwrap_or(false)
+            && self.models_for(provider).is_empty()
+    }
+
+    /// The [`ModelSpec`] for the active session's selected model, if the catalog
+    /// contains it (drives the traits picker's descriptors).
+    pub fn active_model_spec(&self) -> Option<ModelSpec> {
+        let active = self.active.as_ref()?;
+        let model = active.meta.model.as_deref()?;
+        self.models_for(active.meta.provider)
+            .iter()
+            .find(|m| m.id == model)
+            .cloned()
+    }
+
+    /// The active session's persisted option selections (empty for none).
+    pub fn active_option_selections(&self) -> Vec<OptionSelection> {
+        self.active
+            .as_ref()
+            .map(|a| a.meta.option_selections.clone())
+            .unwrap_or_default()
     }
 
     pub fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
@@ -341,7 +480,17 @@ impl AppState {
     /// selection defaults to the latest turn with changes.
     pub fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
-            active.diff_open = !active.diff_open;
+            // The header diff button focuses the Diff tab: opening (or switching
+            // tabs while already open) shows diffs; a second click closes.
+            if active.diff_open && active.right_tab == RightTab::Diff {
+                active.diff_open = false;
+                if active.timeline.turn_running {
+                    active.auto_open_suppressed = true;
+                }
+            } else {
+                active.diff_open = true;
+                active.right_tab = RightTab::Diff;
+            }
             cx.notify();
         }
     }
@@ -350,6 +499,7 @@ impl AppState {
     pub fn open_diff_for_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.diff_open = true;
+            active.right_tab = RightTab::Diff;
             active.diff_selected_turn = Some(turn);
             cx.notify();
         }
@@ -360,6 +510,7 @@ impl AppState {
     pub fn open_diff_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.diff_open = true;
+            active.right_tab = RightTab::Diff;
             cx.notify();
         }
     }
@@ -427,6 +578,10 @@ impl AppState {
     pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.diff_open = false;
+            // Closing during a turn suppresses auto-open for the rest of it.
+            if active.timeline.turn_running {
+                active.auto_open_suppressed = true;
+            }
             cx.notify();
         }
     }
@@ -575,11 +730,16 @@ impl AppState {
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,
@@ -612,11 +772,16 @@ impl AppState {
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,
@@ -693,11 +858,16 @@ impl AppState {
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,
@@ -747,11 +917,21 @@ impl AppState {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        active.pending_sends.push(text);
+        // Ultrathink is a per-send prompt-prefix mode (never persisted): prepend
+        // it to the text sent to the provider (the recorded user message above
+        // stays clean) and disarm it.
+        let sent_text = if active.pending_ultrathink {
+            active.pending_ultrathink = false;
+            format!("Ultrathink:\n{text}")
+        } else {
+            text
+        };
+        active.pending_sends.push(sent_text);
         // If the user switched models — or a provider that can't switch its
-        // approval mode live (Codex) had its mode changed — while the provider
-        // is live, restart it first: the queued turn then flushes on the fresh
-        // process, resumed from the stored cursor with the current model + mode.
+        // approval mode live (Codex) had its mode changed, or a launch-time
+        // option changed — while the provider is live, restart it first: the
+        // queued turn then flushes on the fresh process, resumed from the stored
+        // cursor with the current model + options + mode.
         if active.model_changed_while_live() {
             log::info!(
                 "model changed to {:?} while live; restarting provider before next turn",
@@ -763,6 +943,9 @@ impl AppState {
                 "approval mode changed to {:?} while live; restarting provider before next turn",
                 active.meta.approval_mode
             );
+            active.shutdown_to_idle();
+        } else if active.options_changed_while_live() {
+            log::info!("launch-time option changed while live; restarting provider before next turn");
             active.shutdown_to_idle();
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
@@ -846,6 +1029,10 @@ impl AppState {
                 active.meta.provider = provider;
             }
             active.meta.model = model;
+            // A different model has different option descriptors: drop stale
+            // selections so each resolves to the new model's defaults.
+            active.meta.option_selections.clear();
+            active.pending_ultrathink = false;
             cx.notify();
             return;
         }
@@ -853,9 +1040,337 @@ impl AppState {
             return;
         }
         active.meta.model = model;
+        active.meta.option_selections.clear();
+        active.pending_ultrathink = false;
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
+    }
+
+    // -- traits (option selections) -----------------------------------------
+
+    /// Set (or clear) the persisted value of one option descriptor for the
+    /// active session. `value` is a string (select) or bool (boolean); passing
+    /// `None` removes the selection so it resolves back to its default. Takes
+    /// effect per the restart machinery (see `send_turn`).
+    pub fn set_active_option(
+        &mut self,
+        id: &str,
+        value: Option<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.meta.option_selections.retain(|s| s.id != id);
+        if let Some(value) = value {
+            active.meta.option_selections.push(OptionSelection {
+                id: id.to_string(),
+                value,
+            });
+        }
+        // Selecting a real reasoning effort supersedes a pending Ultrathink.
+        if id == "reasoningEffort" {
+            active.pending_ultrathink = false;
+        }
+        if active.draft {
+            cx.notify();
+            return;
+        }
+        active.meta.updated_at = now_secs();
+        let meta = active.meta.clone();
+        self.persist_meta(&meta, cx);
+    }
+
+    /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
+    /// T3 does not persist this as an option (it resolves back to the default),
+    /// so it lives as a transient per-send flag.
+    pub fn select_ultrathink(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            active.pending_ultrathink = true;
+            cx.notify();
+        }
+    }
+
+    /// Whether an Ultrathink turn is currently armed for the active session.
+    pub fn ultrathink_armed(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.pending_ultrathink)
+    }
+
+    /// Whether a live launch-time option change will restart the provider on the
+    /// next turn (for the traits popover's "restart" note).
+    pub fn options_pending_restart(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(ActiveSession::options_changed_while_live)
+    }
+
+    // -- interaction mode (Build / Plan) ------------------------------------
+
+    /// The active session's Build/Plan interaction mode (`Build` when none).
+    pub fn active_interaction_mode(&self) -> InteractionMode {
+        self.active
+            .as_ref()
+            .map(|a| a.meta.interaction_mode)
+            .unwrap_or_default()
+    }
+
+    /// Set the Build/Plan interaction mode for the active session. Both
+    /// providers switch live (Codex per turn, Claude via a control request), so
+    /// no restart is scheduled.
+    pub fn set_interaction_mode(&mut self, mode: InteractionMode, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.meta.interaction_mode == mode {
+            return;
+        }
+        active.meta.interaction_mode = mode;
+        if let Runtime::Live(commands) = &active.runtime {
+            let _ = commands.try_send(SessionCommand::SetInteractionMode(mode));
+        }
+        if active.draft {
+            cx.notify();
+            return;
+        }
+        active.meta.updated_at = now_secs();
+        let meta = active.meta.clone();
+        self.persist_meta(&meta, cx);
+    }
+
+    /// Toggle Build ↔ Plan (the chip click and Shift+Tab).
+    pub fn toggle_interaction_mode(&mut self, cx: &mut Context<Self>) {
+        let next = match self.active_interaction_mode() {
+            InteractionMode::Build => InteractionMode::Plan,
+            InteractionMode::Plan => InteractionMode::Build,
+        };
+        self.set_interaction_mode(next, cx);
+    }
+
+    // -- proposed-plan flow -------------------------------------------------
+
+    /// The active session's captured proposed plan (markdown), if it is in the
+    /// composer's "plan ready" state (present and not yet implemented).
+    pub fn plan_ready_markdown(&self) -> Option<String> {
+        let active = self.active.as_ref()?;
+        if active.plan_implemented {
+            return None;
+        }
+        active
+            .timeline
+            .proposed_plan
+            .as_ref()
+            .map(|p| p.markdown.clone())
+    }
+
+    /// Accept the proposed plan: send the verbatim implementation prompt, switch
+    /// to Build mode, and clear the composer's plan-ready state.
+    pub fn implement_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(markdown) = self.plan_ready_markdown() else {
+            return;
+        };
+        if let Some(active) = self.active.as_mut() {
+            active.plan_implemented = true;
+        }
+        self.set_interaction_mode(InteractionMode::Build, cx);
+        self.send_turn(crate::session::implement_prompt(&markdown), cx);
+    }
+
+    /// Accept the proposed plan in a fresh thread in the same project (same
+    /// cwd/model/options, Build mode) titled "Implement <plan title>".
+    pub fn implement_plan_in_new_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let Some(plan) = active.timeline.proposed_plan.as_ref() else {
+            return;
+        };
+        let markdown = plan.markdown.clone();
+        let title = match crate::session::plan_title(&markdown) {
+            Some(t) => rust_i18n::t!("plan.implement_titled", title = t).into_owned(),
+            None => rust_i18n::t!("plan.implement_untitled").into_owned(),
+        };
+        let provider = active.meta.provider;
+        let cwd = active.meta.cwd.clone();
+        let model = active.meta.model.clone();
+        let option_selections = active.meta.option_selections.clone();
+        let approval_mode = active.meta.approval_mode;
+        let project_id = active.meta.project_id.clone();
+
+        let mut meta = SessionMeta::new(provider, cwd, model);
+        meta.title = title;
+        meta.option_selections = option_selections;
+        meta.approval_mode = approval_mode;
+        meta.interaction_mode = InteractionMode::Build;
+        meta.project_id = project_id;
+        if let Err(err) = self.store.upsert_meta(&meta) {
+            self.report_error(
+                rust_i18n::t!("errors.persist_session", error = err).into_owned(),
+                cx,
+            );
+        }
+        self.sessions = self.store.load_index();
+        self.shutdown_active();
+        let git_branch = read_git_branch(&meta.cwd);
+        self.active = Some(ActiveSession {
+            meta,
+            timeline: Timeline::default(),
+            git_branch,
+            branches: Vec::new(),
+            draft: false,
+            runtime: Runtime::Idle,
+            live_model: None,
+            live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
+            pending_sends: Vec::new(),
+            turn_in_flight: false,
+            diff_open: false,
+            diff_expanded: false,
+            diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
+            terminal_open: false,
+            terminal_height: 240.,
+            terminal: None,
+            _pump: None,
+        });
+        self.send_turn(crate::session::implement_prompt(&markdown), cx);
+        cx.notify();
+    }
+
+    /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
+    pub fn copy_plan(&mut self, markdown: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown));
+    }
+
+    /// Write the plan markdown to `PLAN-<n>.md` in the session cwd, choosing the
+    /// lowest unused index ("Save to workspace"). Emits a success/error notice.
+    pub fn save_plan_to_workspace(&mut self, markdown: String, cx: &mut Context<Self>) {
+        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+            return;
+        };
+        let mut n = 1;
+        let path = loop {
+            let candidate = cwd.join(format!("PLAN-{n}.md"));
+            if !candidate.exists() {
+                break candidate;
+            }
+            n += 1;
+            if n > 9999 {
+                break cwd.join("PLAN.md");
+            }
+        };
+        match std::fs::write(&path, markdown) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                cx.emit(AppEvent::Notice(
+                    rust_i18n::t!("plan.saved_workspace", file = name).into_owned(),
+                ));
+            }
+            Err(err) => self.report_error(
+                rust_i18n::t!("errors.persist_event", error = err).into_owned(),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Save the plan markdown to the user's Downloads directory (falling back to
+    /// the session cwd) with a title-derived filename ("Download as markdown").
+    pub fn download_plan(&mut self, markdown: String, cx: &mut Context<Self>) {
+        let title = crate::session::plan_title(&markdown)
+            .unwrap_or_else(|| rust_i18n::t!("plan.proposed_plan").into_owned());
+        let filename = format!("{}.md", sanitize_filename(&title));
+        let dir = dirs::download_dir()
+            .or_else(|| self.active.as_ref().map(|a| a.meta.cwd.clone()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let path = dir.join(filename);
+        match std::fs::write(&path, markdown) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                cx.emit(AppEvent::Notice(
+                    rust_i18n::t!("plan.saved_workspace", file = name).into_owned(),
+                ));
+            }
+            Err(err) => self.report_error(
+                rust_i18n::t!("errors.persist_event", error = err).into_owned(),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// The active session's latest structured plan steps and proposed plan (for
+    /// the plan/task panel).
+    pub fn plan_steps(&self) -> Vec<agent::PlanStep> {
+        self.active
+            .as_ref()
+            .map(|a| a.timeline.plan_steps.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn proposed_plan_markdown(&self) -> Option<String> {
+        self.active
+            .as_ref()
+            .and_then(|a| a.timeline.proposed_plan.as_ref())
+            .map(|p| p.markdown.clone())
+    }
+
+    // -- right panel tabs ---------------------------------------------------
+
+    pub fn right_tab(&self) -> RightTab {
+        self.active
+            .as_ref()
+            .map(|a| a.right_tab)
+            .unwrap_or_default()
+    }
+
+    /// Whether the right panel should offer a "Plan" tab (a proposed plan
+    /// exists or the session is in Plan mode); otherwise the tab is "Tasks".
+    pub fn plan_tab_active_label(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| {
+            a.timeline.proposed_plan.is_some() || a.meta.interaction_mode == InteractionMode::Plan
+        })
+    }
+
+    /// Switch the right panel's tab without changing its open state.
+    pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            active.right_tab = tab;
+            cx.notify();
+        }
+    }
+
+    /// The header plan/task toggle: open the Plan tab, switch to it if already
+    /// open on another tab, else close it.
+    pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            if active.diff_open && active.right_tab == RightTab::Plan {
+                active.diff_open = false;
+                if active.timeline.turn_running {
+                    active.auto_open_suppressed = true;
+                }
+            } else {
+                active.diff_open = true;
+                active.right_tab = RightTab::Plan;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Whether the right panel is open on the Plan tab (header button state).
+    pub fn plan_panel_showing(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.diff_open && a.right_tab == RightTab::Plan)
     }
 
     // -- git branch picker (checkout row) -----------------------------------
@@ -1009,6 +1524,7 @@ impl AppState {
         // with so a later switch can detect the mismatch and restart.
         active.live_model = active.meta.model.clone();
         active.live_approval_mode = Some(active.meta.approval_mode);
+        active.live_option_selections = active.meta.option_selections.clone();
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
@@ -1160,6 +1676,32 @@ impl AppState {
         }
 
         self.record_event(session_id, &event, cx);
+
+        // Plan surfaces: a fresh proposed plan re-arms the composer's plan-ready
+        // state; a new turn clears the per-turn auto-open suppression; the first
+        // structured plan update of a turn may auto-open the task panel.
+        let auto_open = self.settings.auto_open_task_panel;
+        if let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.meta.id == session_id)
+        {
+            match &event {
+                AgentEvent::TurnStarted { .. } => active.auto_open_suppressed = false,
+                AgentEvent::ProposedPlan { .. } | AgentEvent::ProposedPlanDelta { .. } => {
+                    active.plan_implemented = false;
+                }
+                AgentEvent::PlanUpdated { .. } => {
+                    let already_showing =
+                        active.diff_open && active.right_tab == RightTab::Plan;
+                    if auto_open && !active.auto_open_suppressed && !already_showing {
+                        active.diff_open = true;
+                        active.right_tab = RightTab::Plan;
+                    }
+                }
+                _ => {}
+            }
+        }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             let dispatch_failed = self
@@ -1393,6 +1935,50 @@ fn checkout_if_clean(cwd: &std::path::Path, branch: &str) -> Result<(), Checkout
     Ok(())
 }
 
+/// A filesystem-safe filename fragment: replace path separators and control
+/// characters with `-`, collapse runs, and cap the length.
+fn sanitize_filename(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    out = out.trim().trim_matches('-').to_string();
+    if out.is_empty() {
+        out = "plan".to_string();
+    }
+    out.chars().take(80).collect()
+}
+
+/// The reasoning-effort selection value, if any (Codex applies it per turn).
+fn codex_effort_selection(selections: &[OptionSelection]) -> Option<String> {
+    selections
+        .iter()
+        .find(|s| s.id == "reasoningEffort")
+        .and_then(|s| s.value.as_str().map(str::to_string))
+}
+
+/// Selections sorted by id for order-independent comparison, optionally dropping
+/// the reasoning-effort entry (which, for Codex, applies per turn and never
+/// forces a restart).
+fn normalized_selections(
+    selections: &[OptionSelection],
+    ignore_effort: bool,
+) -> Vec<(String, serde_json::Value)> {
+    let mut out: Vec<(String, serde_json::Value)> = selections
+        .iter()
+        .filter(|s| !(ignore_effort && s.id == "reasoningEffort"))
+        .map(|s| (s.id.clone(), s.value.clone()))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
     let binary_path = match meta.provider {
         ProviderKind::Codex => settings.codex_binary.clone(),
@@ -1404,9 +1990,8 @@ fn session_options(meta: &SessionMeta, settings: &Settings) -> SessionOptions {
         resume: meta.resume_cursor.clone(),
         binary_path,
         approval_mode: meta.approval_mode,
-        // Not yet persisted per-session; UI wiring is the next slice.
-        option_selections: Vec::new(),
-        interaction_mode: InteractionMode::default(),
+        option_selections: meta.option_selections.clone(),
+        interaction_mode: meta.interaction_mode,
     }
 }
 
@@ -1561,11 +2146,16 @@ mod tests {
             runtime: Runtime::Live(commands),
             live_model: None,
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,
@@ -1591,11 +2181,16 @@ mod tests {
             runtime: Runtime::Live(commands),
             live_model: None,
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: vec!["first".into(), "second".into()],
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,
@@ -1632,11 +2227,16 @@ mod tests {
             runtime: Runtime::Starting { generation: 2 },
             live_model: None,
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,
@@ -1668,11 +2268,16 @@ mod tests {
             // Process was started on "opus"; the user has since picked "sonnet".
             live_model: Some("opus".into()),
             live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
             pending_sends: vec!["do it".into()],
             turn_in_flight: false,
             diff_open: false,
             diff_expanded: false,
             diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
             terminal_open: false,
             terminal_height: 240.,
             terminal: None,

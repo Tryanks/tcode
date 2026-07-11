@@ -15,9 +15,9 @@ use std::path::Path;
 
 use agent::{FileChange, FileChangeKind};
 use gpui::{
-    AnyElement, Context, Entity, HighlightStyle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
-    StyledText, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _,
+    Styled as _, StyledText, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Rope, Selectable as _, Sizable as _, StyledExt as _,
@@ -28,8 +28,9 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::AppState;
+use crate::app::{AppState, RightTab};
 use crate::session::EntryContent;
+use crate::ui::plan_panel::PlanPanel;
 
 // ---------------------------------------------------------------------------
 // Unified-diff parser
@@ -432,6 +433,8 @@ struct DiffCache {
 
 pub struct DiffPanel {
     app_state: Entity<AppState>,
+    /// The Plan/Tasks tab content (the other tab in this right panel).
+    plan: Entity<PlanPanel>,
     vscroll: ScrollHandle,
     /// Soft-wrap toggle for long code lines (the one real toolbar button).
     wrap: bool,
@@ -443,9 +446,11 @@ impl DiffPanel {
     pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         // Soft-wrap defaults to the user's "Word wrap in diffs" setting.
         let wrap = app_state.read(cx).settings.word_wrap_diffs;
+        let plan = cx.new(|cx| PlanPanel::new(app_state.clone(), cx));
         let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
         Self {
             app_state,
+            plan,
             vscroll: ScrollHandle::new(),
             wrap,
             cache: None,
@@ -508,9 +513,44 @@ impl DiffPanel {
     // -- top strip (tab look + right icon cluster) --------------------------
 
     fn render_tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let expanded = self.app_state.read(cx).diff_panel_expanded();
+        let state = self.app_state.read(cx);
+        let expanded = state.diff_panel_expanded();
+        let active = state.right_tab();
+        // The second tab is "Plan" when a plan exists or the session is in Plan
+        // mode, else "Tasks" (S1 §6).
+        let plan_label = if state.plan_tab_active_label() {
+            rust_i18n::t!("plan.tab_plan")
+        } else {
+            rust_i18n::t!("plan.tab_tasks")
+        };
         let app = self.app_state.clone();
         let app2 = self.app_state.clone();
+        let app_diff = self.app_state.clone();
+        let app_plan = self.app_state.clone();
+        let muted = cx.theme().muted_foreground;
+        let tab_active = cx.theme().tab_active;
+
+        let tab = |id: &'static str,
+                   icon: IconName,
+                   label: gpui::SharedString,
+                   is_active: bool,
+                   cx: &mut Context<Self>|
+         -> gpui::Stateful<gpui::Div> {
+            h_flex()
+                .id(id)
+                .h(px(28.))
+                .px_2p5()
+                .gap_1p5()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .font_medium()
+                .when(is_active, |s| s.bg(tab_active))
+                .when(!is_active, |s| s.text_color(muted).hover(|s| s.bg(cx.theme().muted)))
+                .child(Icon::new(icon).xsmall().text_color(muted))
+                .child(label)
+        };
 
         h_flex()
             .flex_none()
@@ -521,31 +561,29 @@ impl DiffPanel {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            // "Diff" tab (active) + "+" (no-op).
             .child(
-                h_flex()
-                    .h(px(28.))
-                    .px_2p5()
-                    .gap_1p5()
-                    .items_center()
-                    .rounded(px(6.))
-                    .bg(cx.theme().tab_active)
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(
-                        Icon::new(IconName::File)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(rust_i18n::t!("diff.title")),
+                tab(
+                    "diff-tab",
+                    IconName::File,
+                    rust_i18n::t!("diff.title").into_owned().into(),
+                    active == RightTab::Diff,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    app_diff.update(cx, |state, cx| state.set_right_tab(RightTab::Diff, cx));
+                }),
             )
             .child(
-                Button::new("diff-add-panel")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Plus)
-                    .tooltip(rust_i18n::t!("diff.more_panels")),
+                tab(
+                    "plan-tab",
+                    IconName::Map,
+                    plan_label.into_owned().into(),
+                    active == RightTab::Plan,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    app_plan.update(cx, |state, cx| state.set_right_tab(RightTab::Plan, cx));
+                }),
             )
             // Right icon cluster: expand toggle, a layout no-op, close.
             .child(div().flex_1())
@@ -898,16 +936,25 @@ impl DiffPanel {
 impl Render for DiffPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
-        v_flex()
+        let tab = self.app_state.read(cx).right_tab();
+        let mut root = v_flex()
             .size_full()
             .min_w_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .border_l_1()
             .border_color(cx.theme().border)
-            .child(self.render_tab_strip(cx))
-            .child(self.render_toolbar(cx))
-            .child(self.render_body(cx))
+            .child(self.render_tab_strip(cx));
+        root = match tab {
+            RightTab::Diff => root.child(self.render_toolbar(cx)).child(self.render_body(cx)),
+            RightTab::Plan => root.child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.plan.clone()),
+            ),
+        };
+        root
     }
 }
 

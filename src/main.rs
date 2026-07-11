@@ -30,6 +30,9 @@ fn main() {
     // Hidden debug/dev flag: also open the diff panel on launch (pairs with
     // --open-latest; lets the diff panel be screenshotted headlessly).
     let open_diff = std::env::args().any(|arg| arg == "--open-diff");
+    // Hidden debug/dev flag: open the right panel on the Plan/Tasks tab (pairs
+    // with --open-latest; lets the plan panel be screenshotted headlessly).
+    let open_plan = std::env::args().any(|arg| arg == "--open-plan");
     // Hidden debug/dev flag: open the active session's terminal drawer. This
     // implies --open-latest so it is useful by itself for screenshot checks.
     let open_terminal = std::env::args().any(|arg| arg == "--open-terminal");
@@ -64,6 +67,9 @@ fn main() {
             Theme::global_mut(cx).apply_config(&dark);
 
             let app_state = cx.new(|_| app::AppState::new(store));
+            // Refresh the model catalogs in the background so the picker shows
+            // real, up-to-date models (the persisted cache serves until then).
+            app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
@@ -130,14 +136,18 @@ fn main() {
                     || open_terminal
                     || open_settings
                     || open_palette
+                    || open_plan
                     || open_draft.is_some()
                 {
                     let _ = app_state.update(cx, |state, cx| {
-                        if open_latest || open_terminal {
+                        if open_latest || open_terminal || open_plan {
                             state.open_latest_session(cx);
                         }
                         if open_diff {
                             state.open_diff_panel(cx);
+                        }
+                        if open_plan {
+                            state.toggle_plan_panel(cx);
                         }
                         if open_terminal {
                             state.open_terminal_panel(cx);
