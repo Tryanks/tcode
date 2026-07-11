@@ -24,7 +24,9 @@ fn parse_provider(arg: Option<&str>) -> ProviderKind {
         Some("codex") => ProviderKind::Codex,
         Some("claude") => ProviderKind::ClaudeCode,
         _ => {
-            eprintln!("usage: probe <codex|claude> <prompt> [cwd] [mode] [--mode plan] [--effort v]");
+            eprintln!(
+                "usage: probe <codex|claude> <prompt> [cwd] [mode] [--mode plan] [--effort v]"
+            );
             eprintln!("       probe --list-models <codex|claude>");
             std::process::exit(2);
         }

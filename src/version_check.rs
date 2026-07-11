@@ -151,7 +151,10 @@ fn parse_semver_token(token: &str) -> Option<(u32, u32, u32)> {
     let minor: u32 = parts.next()?.parse().ok()?;
     let patch: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     // Reject a bare "1" or a two-part-only line masquerading as a version.
-    core.matches('.').count().ge(&1).then_some((major, minor, patch))
+    core.matches('.')
+        .count()
+        .ge(&1)
+        .then_some((major, minor, patch))
 }
 
 /// Whether `latest` is strictly newer than `installed` (both parsed from raw
@@ -200,9 +203,7 @@ mod tests {
             InstallSource::Native
         );
         assert_eq!(
-            detect_install_source(&PathBuf::from(
-                "/Users/x/.nvm/versions/node/v20/bin/codex"
-            )),
+            detect_install_source(&PathBuf::from("/Users/x/.nvm/versions/node/v20/bin/codex")),
             InstallSource::Npm
         );
         assert_eq!(
@@ -224,15 +225,11 @@ mod tests {
     #[test]
     fn detects_install_source_from_windows_paths() {
         assert_eq!(
-            detect_install_source(&PathBuf::from(
-                r"C:\Users\x\AppData\Roaming\npm\claude.cmd"
-            )),
+            detect_install_source(&PathBuf::from(r"C:\Users\x\AppData\Roaming\npm\claude.cmd")),
             InstallSource::Npm
         );
         assert_eq!(
-            detect_install_source(&PathBuf::from(
-                r"C:\Users\x\AppData\Local\pnpm\codex.cmd"
-            )),
+            detect_install_source(&PathBuf::from(r"C:\Users\x\AppData\Local\pnpm\codex.cmd")),
             InstallSource::Pnpm
         );
         assert_eq!(

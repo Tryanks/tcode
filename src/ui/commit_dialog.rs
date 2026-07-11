@@ -145,7 +145,12 @@ impl CommitDialog {
     pub fn confirm_label(&self, cx: &App) -> String {
         if self.on_default_branch && self.create_feature_branch {
             let branch = crate::git::feature_branch_name(
-                self.message.read(cx).value().lines().next().unwrap_or("update"),
+                self.message
+                    .read(cx)
+                    .value()
+                    .lines()
+                    .next()
+                    .unwrap_or("update"),
             );
             return rust_i18n::t!("git.commit.confirm_feature", branch = branch).into_owned();
         }
@@ -223,7 +228,12 @@ impl Render for CommitDialog {
             .items_center()
             .text_size(px(12.))
             .text_color(muted)
-            .child(Icon::empty().path("icons/git-branch.svg").xsmall().text_color(muted))
+            .child(
+                Icon::empty()
+                    .path("icons/git-branch.svg")
+                    .xsmall()
+                    .text_color(muted),
+            )
             .child(rust_i18n::t!("git.commit.branch"))
             .child(
                 div()
@@ -275,20 +285,16 @@ impl Render for CommitDialog {
         }
 
         // Changed-files list.
-        let files_header = h_flex()
-            .w_full()
-            .justify_between()
-            .items_center()
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
-                    .child(rust_i18n::t!(
-                        "git.commit.files_count",
-                        count = self.files.len()
-                    )),
-            );
+        let files_header = h_flex().w_full().justify_between().items_center().child(
+            div()
+                .text_size(px(11.))
+                .font_medium()
+                .text_color(muted)
+                .child(rust_i18n::t!(
+                    "git.commit.files_count",
+                    count = self.files.len()
+                )),
+        );
         let mut file_rows = v_flex().w_full().gap_0p5();
         if self.files.is_empty() {
             file_rows = file_rows.child(
@@ -311,19 +317,15 @@ impl Render for CommitDialog {
             .max_h(px(180.))
             .child(file_rows);
         body = body.child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(files_header)
-                .child(
-                    div()
-                        .w_full()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .p_1()
-                        .child(file_list),
-                ),
+            v_flex().w_full().gap_1().child(files_header).child(
+                div()
+                    .w_full()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .p_1()
+                    .child(file_list),
+            ),
         );
 
         // Commit-message textarea + regenerate control.

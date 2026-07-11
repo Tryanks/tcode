@@ -75,7 +75,10 @@ mod tests {
 
     #[test]
     fn parse_full_url() {
-        assert_eq!(parse_port_input("http://localhost:5173/app?x=1"), Some(5173));
+        assert_eq!(
+            parse_port_input("http://localhost:5173/app?x=1"),
+            Some(5173)
+        );
         assert_eq!(parse_port_input("https://127.0.0.1:8443/"), Some(8443));
     }
 

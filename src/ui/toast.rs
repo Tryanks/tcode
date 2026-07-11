@@ -217,11 +217,7 @@ impl ToastCenter {
             let _ = this.update(cx, |center, cx| {
                 // Only dismiss if the toast is still in the same terminal state
                 // (a later `update` back to Loading re-arms nothing and keeps it).
-                if center
-                    .toasts
-                    .iter()
-                    .any(|t| t.id == id && t.kind == kind)
-                {
+                if center.toasts.iter().any(|t| t.id == id && t.kind == kind) {
                     center.dismiss(id, cx);
                 }
             });
@@ -397,11 +393,10 @@ impl Render for ToastCenter {
             .iter()
             .map(|toast| self.render_toast(toast, cx).into_any_element())
             .collect();
-        div().absolute().bottom(px(16.)).right(px(16.)).child(
-            v_flex()
-                .gap_2()
-                .items_end()
-                .children(items),
-        )
+        div()
+            .absolute()
+            .bottom(px(16.))
+            .right(px(16.))
+            .child(v_flex().gap_2().items_end().children(items))
     }
 }

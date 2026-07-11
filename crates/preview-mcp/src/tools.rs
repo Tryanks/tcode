@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, header::AUTHORIZATION};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -102,7 +102,9 @@ impl PreviewTools {
     }
 
     /// Evaluate a JavaScript expression in the page and return its value.
-    #[tool(description = "Evaluate a JavaScript expression in the preview page and return its value.")]
+    #[tool(
+        description = "Evaluate a JavaScript expression in the preview page and return its value."
+    )]
     async fn preview_evaluate(
         &self,
         Parameters(params): Parameters<EvaluateParams>,
@@ -124,7 +126,9 @@ impl PreviewTools {
     }
 
     /// Type text into the first element matching a CSS selector.
-    #[tool(description = "Type text into the first element matching a CSS selector in the preview page.")]
+    #[tool(
+        description = "Type text into the first element matching a CSS selector in the preview page."
+    )]
     async fn preview_type(
         &self,
         Parameters(params): Parameters<TypeParams>,
@@ -156,8 +160,8 @@ impl PreviewTools {
         log::info!("preview-mcp: tool invoked: {op:?}");
         match self.broker.invoke(op).await {
             Ok(PreviewReply::Json(value)) => {
-                let text = serde_json::to_string_pretty(&value)
-                    .unwrap_or_else(|_| value.to_string());
+                let text =
+                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
                 CallToolResult::success(vec![Content::text(text)])
             }
             Ok(PreviewReply::Image { mime, data_base64 }) => {
@@ -208,9 +212,7 @@ pub async fn serve(
         service,
         token: Arc::new(token),
     };
-    let app = Router::new()
-        .route("/mcp", any(handle))
-        .with_state(state);
+    let app = Router::new().route("/mcp", any(handle)).with_state(state);
 
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
@@ -327,7 +329,10 @@ mod tests {
             "preview_snapshot",
             "preview_screenshot",
         ] {
-            assert!(names.contains(&expected.to_string()), "missing tool {expected}");
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing tool {expected}"
+            );
         }
     }
 }

@@ -51,8 +51,9 @@ mod native {
     use gpui_component::{
         ActiveTheme as _, IconName, Sizable as _,
         button::{Button, ButtonVariants as _},
+        h_flex,
         input::{Input, InputEvent, InputState},
-        h_flex, v_flex,
+        v_flex,
     };
     use gpui_wry::WebView;
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
@@ -631,7 +632,10 @@ const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on ma
 /// Compute a `screencapture -R x,y,w,h` region string from the window origin and
 /// the WebView's window-relative bounds. macOS-only, like its one caller.
 #[cfg(target_os = "macos")]
-fn screen_region(window_origin: gpui::Point<gpui::Pixels>, wv: gpui::Bounds<gpui::Pixels>) -> String {
+fn screen_region(
+    window_origin: gpui::Point<gpui::Pixels>,
+    wv: gpui::Bounds<gpui::Pixels>,
+) -> String {
     let x = f32::from(window_origin.x + wv.origin.x).round() as i32;
     let y = f32::from(window_origin.y + wv.origin.y).round() as i32;
     let w = f32::from(wv.size.width).round() as i32;

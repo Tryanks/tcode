@@ -102,10 +102,7 @@ pub fn detect_composer_trigger(text: &str, cursor: usize) -> Option<ComposerTrig
 
 /// The basename of a `/`- or `\`-separated path.
 pub fn basename(path: &str) -> &str {
-    let idx = path
-        .rfind(['/', '\\'])
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let idx = path.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
     &path[idx..]
 }
 
@@ -120,7 +117,8 @@ fn escape_markdown_link_label(label: &str) -> String {
 /// escape everything else per UTF-8 byte.
 fn encode_uri(s: &str) -> String {
     // Chars `encodeURI` leaves untouched.
-    const KEEP: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'();,/?:@&=+$#";
+    const KEEP: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'();,/?:@&=+$#";
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         if KEEP.contains(&b) {

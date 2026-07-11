@@ -135,7 +135,11 @@ async fn collect_models(
 
 /// Map one `model/list` entry to a [`ModelSpec`]; `None` for hidden models.
 fn map_model(model: &Value) -> Option<ModelSpec> {
-    if model.get("hidden").and_then(Value::as_bool).unwrap_or(false) {
+    if model
+        .get("hidden")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return None;
     }
     let id = model.get("model").and_then(Value::as_str)?.to_owned();
@@ -713,7 +717,11 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
             let description = skill
                 .get("description")
                 .and_then(Value::as_str)
-                .or_else(|| skill.pointer("/interface/shortDescription").and_then(Value::as_str))
+                .or_else(|| {
+                    skill
+                        .pointer("/interface/shortDescription")
+                        .and_then(Value::as_str)
+                })
                 .map(str::to_owned)
                 .filter(|s| !s.is_empty());
             out.push(ProviderCommand {
@@ -842,7 +850,10 @@ impl Actor {
             InteractionMode::Plan => plan_mode_instructions(),
             InteractionMode::Build => default_mode_instructions(),
         };
-        let model = self.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let model = self
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
         params["collaborationMode"] = json!({
             "mode": mode_str,
             "settings": {
@@ -1125,7 +1136,11 @@ impl Actor {
                 let item_value = params.get("item");
                 // Proposed-plan item (`ThreadItem::Plan { id, text }`): a
                 // completed plan item is the finalized `<proposed_plan>` block.
-                if item_value.and_then(|i| i.get("type")).and_then(Value::as_str) == Some("plan") {
+                if item_value
+                    .and_then(|i| i.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("plan")
+                {
                     if method == "item/completed" {
                         if let Some(item) = item_value {
                             let markdown = string_field(item, "text");
@@ -1138,7 +1153,9 @@ impl Actor {
                 }
                 // Context-compaction marker item (`type: "contextCompaction"`):
                 // surface the "Context compacted" work-log row once, on completion.
-                if item_value.and_then(|i| i.get("type")).and_then(Value::as_str)
+                if item_value
+                    .and_then(|i| i.get("type"))
+                    .and_then(Value::as_str)
                     == Some("contextCompaction")
                 {
                     if method == "item/completed" {
@@ -1311,7 +1328,10 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
     questions
         .iter()
         .filter_map(|q| {
-            let id = q.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+            let id = q
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?;
             let header = q
                 .get("header")
                 .and_then(Value::as_str)
@@ -1509,9 +1529,7 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
 fn map_usage(value: &Value) -> Option<TokenUsage> {
     let last = value.get("last")?;
     // The session-cumulative running total lives in a sibling `total` object.
-    let total_processed_tokens = value
-        .pointer("/total/totalTokens")
-        .and_then(Value::as_u64);
+    let total_processed_tokens = value.pointer("/total/totalTokens").and_then(Value::as_u64);
     Some(TokenUsage {
         input_tokens: last.get("inputTokens").and_then(Value::as_u64),
         cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_u64),
@@ -1625,7 +1643,10 @@ mod tests {
 
     #[test]
     fn hidden_model_is_skipped_and_speed_tiers_adapt() {
-        assert!(map_model(&json!({"model": "secret", "displayName": "secret", "hidden": true})).is_none());
+        assert!(
+            map_model(&json!({"model": "secret", "displayName": "secret", "hidden": true}))
+                .is_none()
+        );
 
         // No serviceTiers → adapt additionalSpeedTiers (`fast` → `Fast`).
         let spec = map_model(&json!({
@@ -1681,7 +1702,10 @@ mod tests {
         let params = actor.build_turn_params("hi", Some(&opts), &[]);
         assert!(params.get("effort").is_none());
         assert_eq!(params["collaborationMode"]["mode"], "default");
-        assert_eq!(params["collaborationMode"]["settings"]["reasoning_effort"], "medium");
+        assert_eq!(
+            params["collaborationMode"]["settings"]["reasoning_effort"],
+            "medium"
+        );
         assert!(
             params["collaborationMode"]["settings"]["developer_instructions"]
                 .as_str()
@@ -1731,7 +1755,10 @@ mod tests {
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].name, "browser:control");
         assert_eq!(commands[0].kind, ProviderCommandKind::Skill);
-        assert_eq!(commands[0].description.as_deref(), Some("drive the browser"));
+        assert_eq!(
+            commands[0].description.as_deref(),
+            Some("drive the browser")
+        );
         // Falls back to interface.shortDescription when `description` is absent.
         assert_eq!(commands[1].name, "dataviz");
         assert_eq!(commands[1].description.as_deref(), Some("charts"));
@@ -1972,7 +1999,10 @@ mod tests {
             };
             let response: Value = serde_json::from_str(&response).unwrap();
             assert_eq!(response["id"], 55);
-            assert_eq!(response["result"]["answers"]["os"]["answers"], json!(["macOS"]));
+            assert_eq!(
+                response["result"]["answers"]["os"]["answers"],
+                json!(["macOS"])
+            );
             assert_eq!(
                 response["result"]["answers"]["free"]["answers"],
                 json!(["a", "b"])
@@ -2006,7 +2036,10 @@ mod tests {
                 panic!("expected echoed response")
             };
             let response: Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(response, json!({"id": 41, "result": {"decision": "cancel"}}));
+            assert_eq!(
+                response,
+                json!({"id": 41, "result": {"decision": "cancel"}})
+            );
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();

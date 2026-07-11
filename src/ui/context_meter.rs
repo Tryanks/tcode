@@ -81,9 +81,15 @@ mod tests {
 
     #[test]
     fn percentage_and_overload() {
-        assert_eq!(used_percentage(&usage(Some(100_000), Some(200_000))), Some(50.0));
+        assert_eq!(
+            used_percentage(&usage(Some(100_000), Some(200_000))),
+            Some(50.0)
+        );
         // Capped at 100 even past the window.
-        assert_eq!(used_percentage(&usage(Some(300_000), Some(200_000))), Some(100.0));
+        assert_eq!(
+            used_percentage(&usage(Some(300_000), Some(200_000))),
+            Some(100.0)
+        );
         // Unknown window → None.
         assert_eq!(used_percentage(&usage(Some(100), None)), None);
         assert!(is_overloaded(95.0));

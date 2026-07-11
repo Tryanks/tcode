@@ -634,25 +634,24 @@ impl Composer {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // filtered by the `$`-query prefix.
                 let query = trigger.query.to_lowercase();
-                let rows = self
-                    .app_state
-                    .read(cx)
-                    .active_provider_commands()
-                    .iter()
-                    .filter(|c| c.kind == ProviderCommandKind::Skill)
-                    .filter(|c| query.is_empty() || c.name.to_lowercase().contains(&query))
-                    .take(MENU_ROW_CAP)
-                    .map(|c| MenuRow {
-                        primary: format!("${}", c.name),
-                        secondary: c
-                            .description
-                            .clone()
-                            .unwrap_or_else(|| rust_i18n::t!("composer.run_skill").into_owned()),
-                        icon: MenuIcon::Skill,
-                        accept: MenuAccept::InsertSkill(c.name.clone()),
-                        group: Some("composer.group_skills"),
-                    })
-                    .collect();
+                let rows =
+                    self.app_state
+                        .read(cx)
+                        .active_provider_commands()
+                        .iter()
+                        .filter(|c| c.kind == ProviderCommandKind::Skill)
+                        .filter(|c| query.is_empty() || c.name.to_lowercase().contains(&query))
+                        .take(MENU_ROW_CAP)
+                        .map(|c| MenuRow {
+                            primary: format!("${}", c.name),
+                            secondary: c.description.clone().unwrap_or_else(|| {
+                                rust_i18n::t!("composer.run_skill").into_owned()
+                            }),
+                            icon: MenuIcon::Skill,
+                            accept: MenuAccept::InsertSkill(c.name.clone()),
+                            group: Some("composer.group_skills"),
+                        })
+                        .collect();
                 (
                     rows,
                     rust_i18n::t!("composer.no_skills").into_owned(),
@@ -709,7 +708,11 @@ impl Composer {
                             group: Some("composer.group_provider"),
                         }),
                 );
-                (rows, rust_i18n::t!("composer.no_command").into_owned(), false)
+                (
+                    rows,
+                    rust_i18n::t!("composer.no_command").into_owned(),
+                    false,
+                )
             }
         }
     }
@@ -2894,9 +2897,7 @@ fn render_model_row(
                         .items_center()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(
-                            tinted_provider_glyph(row.provider, app_entity.read(cx)).xsmall(),
-                        )
+                        .child(tinted_provider_glyph(row.provider, app_entity.read(cx)).xsmall())
                         .child(provider_short(row.provider)),
                 ),
         )

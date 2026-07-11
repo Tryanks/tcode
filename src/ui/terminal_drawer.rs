@@ -5,8 +5,7 @@ use gpui::{
     FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
     ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, StyledText, Task,
-    UnderlineStyle, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    UnderlineStyle, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _,
@@ -167,7 +166,11 @@ impl TerminalDrawer {
             .into_any_element()
     }
 
-    fn grid_point(&self, terminal_id: u64, position: gpui::Point<Pixels>) -> Option<(usize, usize)> {
+    fn grid_point(
+        &self,
+        terminal_id: u64,
+        position: gpui::Point<Pixels>,
+    ) -> Option<(usize, usize)> {
         let bounds = *self.grid_bounds.borrow().get(&terminal_id)?;
         let x = (f32::from(position.x - bounds.left()) - 8.).max(0.);
         let y = (f32::from(position.y - bounds.top()) - 4.).max(0.);
@@ -182,7 +185,9 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
-        let Some(point) = self.grid_point(terminal_id, event.position) else { return };
+        let Some(point) = self.grid_point(terminal_id, event.position) else {
+            return;
+        };
         self.app_state.update(cx, |state, cx| {
             state.activate_terminal(terminal_id, cx);
             if let Some(entry) = state
@@ -204,11 +209,15 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((selection_id, start)) = self.selection_anchor else { return };
+        let Some((selection_id, start)) = self.selection_anchor else {
+            return;
+        };
         if selection_id != terminal_id || !event.dragging() {
             return;
         }
-        let Some(point) = self.grid_point(terminal_id, event.position) else { return };
+        let Some(point) = self.grid_point(terminal_id, event.position) else {
+            return;
+        };
         if let Some(entry) = self
             .app_state
             .read(cx)
@@ -228,7 +237,9 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((selection_id, start)) = self.selection_anchor else { return };
+        let Some((selection_id, start)) = self.selection_anchor else {
+            return;
+        };
         if selection_id != terminal_id {
             return;
         }
@@ -292,17 +303,19 @@ impl TerminalDrawer {
             .px_2()
             .py_1()
             .border_1()
-            .border_color(if self
-                .app_state
-                .read(cx)
-                .active
-                .as_ref()
-                .is_some_and(|active| active.terminal_workspace.active_id == Some(terminal_id))
-            {
-                cx.theme().primary.opacity(0.45)
-            } else {
-                cx.theme().border
-            })
+            .border_color(
+                if self
+                    .app_state
+                    .read(cx)
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.terminal_workspace.active_id == Some(terminal_id))
+                {
+                    cx.theme().primary.opacity(0.45)
+                } else {
+                    cx.theme().border
+                },
+            )
             .on_prepaint(move |bounds, _window, cx| {
                 grid_bounds.borrow_mut().insert(terminal_id, bounds);
                 let cols = (f32::from(bounds.size.width) / CELL_WIDTH).floor().max(2.) as usize;
@@ -344,7 +357,11 @@ impl TerminalDrawer {
                         .top(px((row as f32 * LINE_HEIGHT + 8.).min(170.)))
                         .small()
                         .label(rust_i18n::t!("terminal.add_context"))
-                        .tooltip(format!("{} · {}", label, rust_i18n::t!("terminal.selection")))
+                        .tooltip(format!(
+                            "{} · {}",
+                            label,
+                            rust_i18n::t!("terminal.selection")
+                        ))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.app_state.update(cx, |state, cx| {
                                 state.capture_terminal_selection(terminal_id, cx)
@@ -375,7 +392,13 @@ impl Render for TerminalDrawer {
                     workspace
                         .terminals
                         .iter()
-                        .map(|entry| (entry.id, entry.terminal.label(), entry.terminal.snapshot().exited))
+                        .map(|entry| {
+                            (
+                                entry.id,
+                                entry.terminal.label(),
+                                entry.terminal.snapshot().exited,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                     workspace.active_id,
                     workspace.active_id.and_then(|id| workspace.split_for(id)),
@@ -396,11 +419,20 @@ impl Render for TerminalDrawer {
                     .px_2()
                     .rounded(px(6.))
                     .cursor_pointer()
-                    .bg(if selected { cx.theme().muted } else { cx.theme().background })
+                    .bg(if selected {
+                        cx.theme().muted
+                    } else {
+                        cx.theme().background
+                    })
                     .border_1()
-                    .border_color(if selected { cx.theme().primary.opacity(0.45) } else { cx.theme().border })
+                    .border_color(if selected {
+                        cx.theme().primary.opacity(0.45)
+                    } else {
+                        cx.theme().border
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| state.activate_terminal(id, cx));
+                        this.app_state
+                            .update(cx, |state, cx| state.activate_terminal(id, cx));
                     }))
                     .child(
                         div()
@@ -408,7 +440,11 @@ impl Render for TerminalDrawer {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(px(11.))
-                            .text_color(if *exited { cx.theme().muted_foreground } else { cx.theme().foreground })
+                            .text_color(if *exited {
+                                cx.theme().muted_foreground
+                            } else {
+                                cx.theme().foreground
+                            })
                             .child(label.clone()),
                     )
                     .child(
@@ -419,7 +455,8 @@ impl Render for TerminalDrawer {
                             .icon(IconName::Close)
                             .tooltip(rust_i18n::t!("terminal.close_tab"))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.app_state.update(cx, |state, cx| state.close_terminal(close_id, cx));
+                                this.app_state
+                                    .update(cx, |state, cx| state.close_terminal(close_id, cx));
                             })),
                     ),
             );
@@ -494,7 +531,8 @@ impl Render for TerminalDrawer {
                         rust_i18n::t!("terminal.new")
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| state.new_terminal(cx))
+                        this.app_state
+                            .update(cx, |state, cx| state.new_terminal(cx))
                     })),
             )
             .child(
@@ -505,7 +543,8 @@ impl Render for TerminalDrawer {
                     .icon(IconName::Close)
                     .tooltip(rust_i18n::t!("terminal.close"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| state.close_terminal_panel(cx))
+                        this.app_state
+                            .update(cx, |state, cx| state.close_terminal_panel(cx))
                     })),
             );
 
@@ -514,18 +553,25 @@ impl Render for TerminalDrawer {
                 let first = resizable_panel().child(self.render_terminal(split.first, cx));
                 let second = resizable_panel().child(self.render_terminal(split.second, cx));
                 match split.direction {
-                    TerminalSplitDirection::Horizontal => h_resizable(("terminal-split-h", split.first))
-                        .child(first)
-                        .child(second)
-                        .into_any_element(),
-                    TerminalSplitDirection::Vertical => v_resizable(("terminal-split-v", split.first))
-                        .child(first)
-                        .child(second)
-                        .into_any_element(),
+                    TerminalSplitDirection::Horizontal => {
+                        h_resizable(("terminal-split-h", split.first))
+                            .child(first)
+                            .child(second)
+                            .into_any_element()
+                    }
+                    TerminalSplitDirection::Vertical => {
+                        v_resizable(("terminal-split-v", split.first))
+                            .child(first)
+                            .child(second)
+                            .into_any_element()
+                    }
                 }
             }
             (Some(id), None) => self.render_terminal(id, cx),
-            _ => div().p_3().child(rust_i18n::t!("terminal.starting")).into_any_element(),
+            _ => div()
+                .p_3()
+                .child(rust_i18n::t!("terminal.starting"))
+                .into_any_element(),
         };
 
         v_flex()
@@ -535,7 +581,13 @@ impl Render for TerminalDrawer {
             .font_family("SF Mono")
             .text_size(px(FONT_SIZE))
             .child(header)
-            .child(div().track_focus(&self.focus_handle).flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .track_focus(&self.focus_handle)
+                    .flex_1()
+                    .min_h_0()
+                    .child(body),
+            )
     }
 }
 

@@ -5,7 +5,6 @@ mod composer;
 mod composer_trigger;
 mod context_meter;
 mod diff_panel;
-mod workspace_walk;
 mod palette;
 mod plan_panel;
 mod preview_panel;
@@ -14,6 +13,7 @@ mod settings_page;
 mod sidebar;
 mod terminal_drawer;
 pub(crate) mod toast;
+mod workspace_walk;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,

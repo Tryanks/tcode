@@ -72,8 +72,10 @@ pub fn create_checkpoint(cwd: &Path, session_id: &str, turn: usize) -> Result<St
     let has_head = run_git(cwd, &["rev-parse", "--verify", "--quiet", "HEAD"], None)
         .map(|sha| !sha.trim().is_empty())
         .unwrap_or(false);
-    let tmp_index =
-        std::env::temp_dir().join(format!("tcode-ckpt-index-{session_id}-{}", uuid::Uuid::new_v4()));
+    let tmp_index = std::env::temp_dir().join(format!(
+        "tcode-ckpt-index-{session_id}-{}",
+        uuid::Uuid::new_v4()
+    ));
     // Seed the scratch index from HEAD (when present) then stage the whole
     // worktree over it, so `write-tree` captures the current tree exactly.
     let staged = (|| {
@@ -97,7 +99,11 @@ pub fn create_checkpoint(cwd: &Path, session_id: &str, turn: usize) -> Result<St
         return Err("git commit-tree returned an empty commit oid".into());
     }
 
-    run_git(cwd, &["update-ref", &checkpoint_ref(session_id, turn), &commit], None)?;
+    run_git(
+        cwd,
+        &["update-ref", &checkpoint_ref(session_id, turn), &commit],
+        None,
+    )?;
     Ok(commit)
 }
 
@@ -108,7 +114,15 @@ pub fn create_checkpoint(cwd: &Path, session_id: &str, turn: usize) -> Result<St
 pub fn restore_checkpoint(cwd: &Path, commit: &str) -> Result<(), String> {
     run_git(
         cwd,
-        &["restore", "--source", commit, "--worktree", "--staged", "--", "."],
+        &[
+            "restore",
+            "--source",
+            commit,
+            "--worktree",
+            "--staged",
+            "--",
+            ".",
+        ],
         None,
     )?;
     run_git(cwd, &["clean", "-fd", "--", "."], None)?;
@@ -152,7 +166,12 @@ pub fn delete_all_checkpoint_refs(cwd: &Path, session_id: &str) {
 pub fn checkpoint_ref_exists(cwd: &Path, session_id: &str, turn: usize) -> bool {
     run_git(
         cwd,
-        &["rev-parse", "--verify", "--quiet", &checkpoint_ref(session_id, turn)],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &checkpoint_ref(session_id, turn),
+        ],
         None,
     )
     .map(|sha| !sha.trim().is_empty())
@@ -198,7 +217,10 @@ mod tests {
         // Reverting restores the tracked file and (T3 `git clean -fd` semantics)
         // removes files created after the checkpoint.
         restore_checkpoint(&root, &commit).unwrap();
-        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "original\n");
+        assert_eq!(
+            fs::read_to_string(root.join("a.txt")).unwrap(),
+            "original\n"
+        );
         assert!(
             !root.join("b.txt").exists(),
             "restore should clean files created after the checkpoint (git clean -fd)"

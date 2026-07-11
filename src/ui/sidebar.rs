@@ -131,11 +131,15 @@ impl SessionsSidebar {
             state.set_value(&title, window, cx);
             state.focus(window, cx);
         });
-        let sub = cx.subscribe_in(&input, window, |this, _input, event, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
-            InputEvent::Blur => this.cancel_rename(cx),
-            _ => {}
-        });
+        let sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, _input, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
+                InputEvent::Blur => this.cancel_rename(cx),
+                _ => {}
+            },
+        );
         self.renaming = Some(RenameState {
             session_id,
             input,
@@ -507,12 +511,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .group_hover(group_key.clone(), |s| s.invisible())
-                            .child(
-                                div()
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(cx.theme().primary),
-                            ),
+                            .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
                     )
                 })
                 .child(
@@ -629,12 +628,7 @@ impl SessionsSidebar {
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         let row = if let Some(input) = renaming {
-            row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Input::new(&input).small()),
-            )
+            row.child(div().flex_1().min_w_0().child(Input::new(&input).small()))
         } else {
             row.when(unread && !working, |row| {
                 row.child(
@@ -827,9 +821,7 @@ fn proceed_delete(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    let orphan = app_state
-        .read(cx)
-        .worktree_orphaned_by_delete(&session_id);
+    let orphan = app_state.read(cx).worktree_orphaned_by_delete(&session_id);
     let Some(worktree) = orphan else {
         app_state.update(cx, |state, cx| {
             state.delete_session(&session_id, false, cx);
