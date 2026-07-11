@@ -107,8 +107,10 @@ jobs:
             build-essential clang cmake pkg-config libssl-dev libzstd-dev mold \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
-          # If X2 enables preview/webview support on Linux, add GTK3 and
-          # libwebkit2gtk-4.1-dev here too.
+          if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends \
+              libgtk-3-dev libwebkit2gtk-4.1-dev
+          fi
 
       - name: Build release binary
         shell: bash
