@@ -25,8 +25,12 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
 pub enum InstallSource {
     /// Homebrew (`/opt/homebrew/…`, `/usr/local/…`, `…/Cellar/…`).
     Brew,
-    /// A global npm/pnpm/bun/volta/fnm/nvm install.
+    /// A global npm (or npm-compatible: nvm/volta/fnm) install.
     Npm,
+    /// A global Bun install (`~/.bun/bin`).
+    Bun,
+    /// A global pnpm install (`~/Library/pnpm`, `~/.pnpm`, the pnpm store).
+    Pnpm,
     /// The provider's native installer (e.g. `~/.local/bin`).
     Native,
     #[default]
@@ -34,6 +38,9 @@ pub enum InstallSource {
 }
 
 /// Guess the install source from a resolved binary path.
+///
+/// Order matters: Bun and pnpm both keep global bins in their own directories,
+/// so they are matched before the generic npm/node patterns.
 pub fn detect_install_source(path: &Path) -> InstallSource {
     let p = path.to_string_lossy();
     if p.contains("/Cellar/")
@@ -42,12 +49,14 @@ pub fn detect_install_source(path: &Path) -> InstallSource {
         || p.contains("/usr/local/Cellar/")
     {
         InstallSource::Brew
+    } else if p.contains("/.bun/") || p.contains("/bun/install/") {
+        InstallSource::Bun
+    } else if p.contains("/.pnpm") || p.contains("/pnpm/") || p.contains("/Library/pnpm") {
+        InstallSource::Pnpm
     } else if p.contains("/node_modules/")
         || p.contains("/.nvm/")
         || p.contains("/.volta/")
         || p.contains("/fnm")
-        || p.contains("/.pnpm")
-        || p.contains("/.bun/")
         || p.contains("/npm/")
         || p.contains("/lib/node_modules/")
     {
@@ -59,31 +68,46 @@ pub fn detect_install_source(path: &Path) -> InstallSource {
     }
 }
 
+/// The Homebrew formula that ships each provider.
+fn brew_formula(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::ClaudeCode => "claude-code",
+        ProviderKind::Codex => "codex",
+    }
+}
+
 /// The command (program + args) that updates the provider for a given install
-/// source, or `None` when we don't know how to update it (the UI then shows a
-/// copyable manual instruction). Mapping:
-/// - Brew: `brew upgrade <formula>`
-/// - Npm: `npm install -g <pkg>@latest`
-/// - Native (Claude): `claude update`
+/// source, or `None` when we don't know how to update it (an unrecognized
+/// explicit binary path is manual-only, exactly as in T3). Mapping (T3 §3):
+///
+/// | Source | Codex | Claude |
+/// |---|---|---|
+/// | npm | `npm install -g @openai/codex@latest` | `npm install -g @anthropic-ai/claude-code@latest` |
+/// | Bun | `bun i -g @openai/codex@latest` | `bun i -g @anthropic-ai/claude-code@latest` |
+/// | pnpm | `pnpm add -g @openai/codex@latest` | `pnpm add -g @anthropic-ai/claude-code@latest` |
+/// | Homebrew | `brew upgrade codex` | `brew upgrade claude-code` |
+/// | native | — (no self-update) | `claude update` |
 pub fn update_command(provider: ProviderKind, source: InstallSource) -> Option<Vec<String>> {
     let s = |v: &str| v.to_string();
+    let pkg = || format!("{}@latest", npm_package(provider));
     match (provider, source) {
-        (ProviderKind::ClaudeCode, InstallSource::Brew) => {
-            Some(vec![s("brew"), s("upgrade"), s("claude-code")])
+        (provider, InstallSource::Brew) => {
+            Some(vec![s("brew"), s("upgrade"), s(brew_formula(provider))])
         }
-        (ProviderKind::Codex, InstallSource::Brew) => {
-            Some(vec![s("brew"), s("upgrade"), s("codex")])
-        }
-        (provider, InstallSource::Npm) => Some(vec![
-            s("npm"),
-            s("install"),
-            s("-g"),
-            format!("{}@latest", npm_package(provider)),
-        ]),
+        (_, InstallSource::Npm) => Some(vec![s("npm"), s("install"), s("-g"), pkg()]),
+        (_, InstallSource::Bun) => Some(vec![s("bun"), s("i"), s("-g"), pkg()]),
+        (_, InstallSource::Pnpm) => Some(vec![s("pnpm"), s("add"), s("-g"), pkg()]),
         (ProviderKind::ClaudeCode, InstallSource::Native) => Some(vec![s("claude"), s("update")]),
-        // Native Codex has no documented self-update subcommand; fall through.
+        // Native Codex has no documented self-update subcommand, and an
+        // unrecognized path is manual-only (no command to show or run).
         _ => None,
     }
+}
+
+/// The same command rendered as the copyable one-liner shown in the update
+/// popover's code block (`None` when the source is manual-only).
+pub fn update_command_string(provider: ProviderKind, source: InstallSource) -> Option<String> {
+    update_command(provider, source).map(|parts| parts.join(" "))
 }
 
 /// Parse the first semver-looking `MAJOR.MINOR.PATCH` token out of a version
@@ -164,17 +188,64 @@ mod tests {
             InstallSource::Npm
         );
         assert_eq!(
+            detect_install_source(&PathBuf::from("/Users/x/.bun/bin/claude")),
+            InstallSource::Bun
+        );
+        assert_eq!(
+            detect_install_source(&PathBuf::from("/Users/x/Library/pnpm/codex")),
+            InstallSource::Pnpm
+        );
+        assert_eq!(
             detect_install_source(&PathBuf::from("/usr/bin/codex")),
             InstallSource::Unknown
         );
     }
 
+    /// The exact command table from the T3 Providers spec (§3), for every
+    /// detected source × provider pair we support.
     #[test]
-    fn maps_update_commands() {
-        assert_eq!(
-            update_command(ProviderKind::Codex, InstallSource::Brew),
-            Some(vec!["brew".into(), "upgrade".into(), "codex".into()])
-        );
+    fn maps_update_commands_per_source_and_provider() {
+        use InstallSource::*;
+        use ProviderKind::*;
+        let table: [(ProviderKind, InstallSource, Option<&str>); 12] = [
+            (Codex, Npm, Some("npm install -g @openai/codex@latest")),
+            (
+                ClaudeCode,
+                Npm,
+                Some("npm install -g @anthropic-ai/claude-code@latest"),
+            ),
+            (Codex, Bun, Some("bun i -g @openai/codex@latest")),
+            (
+                ClaudeCode,
+                Bun,
+                Some("bun i -g @anthropic-ai/claude-code@latest"),
+            ),
+            (Codex, Pnpm, Some("pnpm add -g @openai/codex@latest")),
+            (
+                ClaudeCode,
+                Pnpm,
+                Some("pnpm add -g @anthropic-ai/claude-code@latest"),
+            ),
+            (Codex, Brew, Some("brew upgrade codex")),
+            (ClaudeCode, Brew, Some("brew upgrade claude-code")),
+            (ClaudeCode, Native, Some("claude update")),
+            // Native Codex has no documented self-update subcommand.
+            (Codex, Native, None),
+            // An unrecognized path is manual-only in T3: no command at all.
+            (Codex, Unknown, None),
+            (ClaudeCode, Unknown, None),
+        ];
+        for (provider, source, expected) in table {
+            assert_eq!(
+                update_command_string(provider, source).as_deref(),
+                expected,
+                "{provider:?} / {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_command_parts_match_the_rendered_string() {
         assert_eq!(
             update_command(ProviderKind::ClaudeCode, InstallSource::Npm),
             Some(vec![
@@ -184,11 +255,5 @@ mod tests {
                 "@anthropic-ai/claude-code@latest".into()
             ])
         );
-        assert_eq!(
-            update_command(ProviderKind::ClaudeCode, InstallSource::Native),
-            Some(vec!["claude".into(), "update".into()])
-        );
-        // Native Codex has no known self-update command.
-        assert_eq!(update_command(ProviderKind::Codex, InstallSource::Native), None);
     }
 }

@@ -2,6 +2,8 @@ mod app;
 mod assets;
 mod checkpoints;
 mod git;
+mod provider_models;
+mod provider_status;
 mod session;
 mod settings;
 mod smoke;
@@ -88,6 +90,10 @@ fn main() {
     let debug_settings_section = std::env::args()
         .skip_while(|arg| arg != "--debug-settings-section")
         .nth(1);
+    // Screenshot-only: expand one provider card (pairs with the above).
+    let debug_provider_expanded = std::env::args()
+        .skip_while(|arg| arg != "--debug-provider-expanded")
+        .nth(1);
     // Screenshot-only: open a deterministic draft rooted at this cwd (so the
     // `@`-mention walk lists a known repo, independent of the newest session).
     let debug_cwd = std::env::args()
@@ -147,6 +153,9 @@ fn main() {
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(cx);
                 }
+                // Probe each provider's install + auth state for the Settings →
+                // Providers cards (independent of the update-check toggle).
+                state.refresh_provider_status(cx);
             });
             {
                 let dc = debug_compose.clone();
@@ -154,6 +163,7 @@ fn main() {
                 let dscope = debug_diff_scope.clone();
                 let dp = debug_palette.clone();
                 let dsec = debug_settings_section.clone();
+                let dexp = debug_provider_expanded.clone();
                 app_state.update(cx, |state, _| {
                     state.debug_compose = dc;
                     state.debug_image = di;
@@ -163,6 +173,7 @@ fn main() {
                     state.debug_review_comment = debug_review_comment;
                     state.debug_palette = dp;
                     state.debug_settings_section = dsec;
+                    state.debug_provider_expanded = dexp;
                 });
             }
             let debug_seed = debug_compose.is_some()

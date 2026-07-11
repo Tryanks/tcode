@@ -125,6 +125,16 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
     }
 }
 
+/// The provider glyph tinted with the accent configured on its Settings →
+/// Providers card, falling back to the provider's own brand tint.
+fn tinted_provider_glyph(provider: ProviderKind, app_state: &AppState) -> Icon {
+    let glyph = provider_glyph(provider);
+    match app_state.provider_accent(provider) {
+        Some(accent) => glyph.text_color(accent),
+        None => glyph,
+    }
+}
+
 /// The three approval modes in display order, each with its label, one-line
 /// description (exact UI copy), and chip icon (lock → pencil → unlock).
 const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
@@ -234,6 +244,11 @@ struct MenuRow {
     secondary: String,
     icon: MenuIcon,
     accept: MenuAccept,
+    /// The group this row belongs to (T3 §5: the `/` menu is grouped
+    /// `Built-in` / `Provider`; the `$` menu is a single `Skills` group). A
+    /// header is rendered above the first row of each group. `None` = ungrouped
+    /// (the `@` file menu).
+    group: Option<&'static str>,
 }
 
 /// T3's provider display name (used by the context meter's compaction line).
@@ -605,6 +620,7 @@ impl Composer {
                             MenuIcon::File
                         },
                         accept: MenuAccept::InsertPath(e.rel_path.clone()),
+                        group: None,
                     })
                     .collect();
                 let loading = self.workspace_loading && self.workspace.is_none();
@@ -628,9 +644,13 @@ impl Composer {
                     .take(MENU_ROW_CAP)
                     .map(|c| MenuRow {
                         primary: format!("${}", c.name),
-                        secondary: c.description.clone().unwrap_or_default(),
+                        secondary: c
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| rust_i18n::t!("composer.run_skill").into_owned()),
                         icon: MenuIcon::Skill,
                         accept: MenuAccept::InsertSkill(c.name.clone()),
+                        group: Some("composer.group_skills"),
                     })
                     .collect();
                 (
@@ -666,6 +686,7 @@ impl Composer {
                         secondary: rust_i18n::t!(desc).into_owned(),
                         icon: MenuIcon::Command,
                         accept,
+                        group: Some("composer.group_builtin"),
                     })
                     .collect();
                 // Provider-native slash commands (Claude `slash_commands`), shown
@@ -680,9 +701,12 @@ impl Composer {
                         .take(MENU_ROW_CAP)
                         .map(|c| MenuRow {
                             primary: format!("/{}", c.name),
-                            secondary: c.description.clone().unwrap_or_default(),
+                            secondary: c.description.clone().unwrap_or_else(|| {
+                                rust_i18n::t!("composer.run_provider_command").into_owned()
+                            }),
                             icon: MenuIcon::Command,
                             accept: MenuAccept::InsertCommand(c.name.clone()),
+                            group: Some("composer.group_provider"),
                         }),
                 );
                 (rows, rust_i18n::t!("composer.no_command").into_owned(), false)
@@ -881,45 +905,49 @@ impl Composer {
             None => return div().into_any_element(),
         };
         let catalog = app_state.models_for(provider);
-        let display = current_model_name(catalog, current_model.as_deref());
+        // The picker honors the provider card's Models section: hidden models
+        // are gone, custom slugs are present, and the persisted order (plus
+        // favorites-first) decides the sequence.
+        let resolved = app_state.picker_models(provider);
+        let display = current_model_name_resolved(&resolved, catalog, current_model.as_deref());
 
-        // Build the filtered + favorites-first row list for the current frame.
-        // Favorites open first when any exist (S1 §2).
+        // Build the filtered row list for the current frame. Favorites open
+        // first when any exist (S1 §2).
         let query = self.model_search.read(cx).value().to_lowercase();
-        let has_favorites = app_state
-            .model_catalogs
-            .values()
-            .flatten()
-            .any(|m| app_state.is_favorite_model(&m.id));
+        let has_favorites = [ProviderKind::Codex, ProviderKind::ClaudeCode]
+            .into_iter()
+            .flat_map(|p| app_state.picker_models(p))
+            .any(|m| m.favorite);
         let rail = self.rail_for(provider, has_favorites);
         let all_rows: Vec<ModelRow> = match rail {
-            PickerRail::Favorites => app_state
-                .model_catalogs
-                .iter()
-                .flat_map(|(p, models)| {
-                    models.iter().map(move |m| ModelRow {
-                        id: m.id.clone(),
-                        name: m.display_name.clone(),
-                        provider: *p,
-                    })
+            PickerRail::Favorites => [ProviderKind::Codex, ProviderKind::ClaudeCode]
+                .into_iter()
+                .flat_map(|p| {
+                    app_state
+                        .picker_models(p)
+                        .into_iter()
+                        .filter(|m| m.favorite)
+                        .map(move |m| ModelRow {
+                            id: m.id,
+                            name: m.name,
+                            provider: p,
+                        })
                 })
-                .filter(|r| app_state.is_favorite_model(&r.id))
                 .collect(),
             PickerRail::Provider(p) => app_state
-                .models_for(p)
-                .iter()
+                .picker_models(p)
+                .into_iter()
                 .map(|m| ModelRow {
-                    id: m.id.clone(),
-                    name: m.display_name.clone(),
+                    id: m.id,
+                    name: m.name,
                     provider: p,
                 })
                 .collect(),
         };
-        let mut rows: Vec<ModelRow> = all_rows
+        let rows: Vec<ModelRow> = all_rows
             .into_iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
             .collect();
-        rows.sort_by_key(|r| !app_state.is_favorite_model(&r.id));
         let loading = app_state.models_loading(provider)
             && matches!(rail, PickerRail::Provider(_))
             && rows.is_empty()
@@ -936,7 +964,7 @@ impl Composer {
                 .gap_1p5()
                 .items_center()
                 .text_size(px(13.))
-                .child(provider_glyph(provider).small())
+                .child(tinted_provider_glyph(provider, app_state).small())
                 .child(div().font_medium().child(display))
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -1176,7 +1204,27 @@ impl Composer {
                     }),
             );
         } else {
+            // T3 §5: the `/` menu groups rows under `Built-in` / `Provider`
+            // headers, and `$` under `Skills`. A header is emitted whenever the
+            // group changes; headers are not selectable, so row indices (and the
+            // arrow-key highlight) still index `rows` directly.
+            let mut last_group: Option<&'static str> = None;
             for (index, row) in rows.iter().enumerate() {
+                if let Some(group) = row.group
+                    && last_group != Some(group)
+                {
+                    last_group = Some(group);
+                    list = list.child(
+                        div()
+                            .px_2()
+                            .pt_1p5()
+                            .pb_0p5()
+                            .text_size(px(10.))
+                            .font_medium()
+                            .text_color(muted)
+                            .child(rust_i18n::t!(group).into_owned()),
+                    );
+                }
                 let is_active = index == highlight;
                 let icon = match row.icon {
                     MenuIcon::File => Icon::empty().path("icons/file.svg"),
@@ -2700,14 +2748,14 @@ fn render_model_pane(
         ))
         .child(rail_icon(
             "rail-claude",
-            provider_glyph(ProviderKind::ClaudeCode),
+            tinted_provider_glyph(ProviderKind::ClaudeCode, app_entity.read(cx)),
             rail == PickerRail::Provider(ProviderKind::ClaudeCode),
             PickerRail::Provider(ProviderKind::ClaudeCode),
             cx,
         ))
         .child(rail_icon(
             "rail-codex",
-            provider_glyph(ProviderKind::Codex),
+            tinted_provider_glyph(ProviderKind::Codex, app_entity.read(cx)),
             rail == PickerRail::Provider(ProviderKind::Codex),
             PickerRail::Provider(ProviderKind::Codex),
             cx,
@@ -2846,7 +2894,9 @@ fn render_model_row(
                         .items_center()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(provider_glyph(row.provider).xsmall())
+                        .child(
+                            tinted_provider_glyph(row.provider, app_entity.read(cx)).xsmall(),
+                        )
                         .child(provider_short(row.provider)),
                 ),
         )
@@ -3504,6 +3554,23 @@ fn current_model_name(catalog: &[ModelSpec], model: Option<&str>) -> String {
             .unwrap_or_else(|| id.to_string()),
         None => rust_i18n::t!("composer.default_model").into_owned(),
     }
+}
+
+/// The picker button's label: the resolved row's name (so a custom slug shows
+/// its own name), else the catalog's, else the raw id.
+fn current_model_name_resolved(
+    resolved: &[crate::provider_models::ResolvedModel],
+    catalog: &[ModelSpec],
+    model: Option<&str>,
+) -> String {
+    let Some(id) = model else {
+        return rust_i18n::t!("composer.default_model").into_owned();
+    };
+    resolved
+        .iter()
+        .find(|m| m.id == id)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| current_model_name(catalog, Some(id)))
 }
 
 /// Compact token count, e.g. 42_000 -> "42k", 1_500_000 -> "1.5M".
