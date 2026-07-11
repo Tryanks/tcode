@@ -5,14 +5,19 @@ use std::path::PathBuf;
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
-    ModelSpec, OptionSelection, ProviderCommand, ProviderKind, SessionCommand, SessionOptions,
-    ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
+    LaunchEnv, ModelSpec, OptionSelection, ProviderCommand, ProviderKind, SessionCommand,
+    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
 };
 use gpui::{Context, Entity, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
+use crate::provider_models::ResolvedModel;
+use crate::provider_status::{
+    AuthStatus, ProviderAuth, ProviderSnapshot, ProviderStatusKind, StatusSummary,
+    failed_cli_message, indeterminate_auth_message, missing_cli_message, unauthenticated_message,
+};
 use crate::session::{ReviewComment, Timeline};
-use crate::settings::{ProjectSort, Settings, SettingsStore};
+use crate::settings::{ProjectSort, ProviderSettings, Settings, SettingsStore};
 use crate::store::{
     Checkpoint, Project, SessionMeta, SessionStore, WorktreeInfo, now_millis, now_secs,
 };
@@ -462,6 +467,8 @@ pub struct AppState {
     /// Screenshot-only: which Settings section to open (`general` / `providers` /
     /// `archived`), so each can be captured headlessly.
     pub debug_settings_section: Option<String>,
+    /// Screenshot-only: which provider card starts expanded (`codex` / `claude`).
+    pub debug_provider_expanded: Option<String>,
     /// Preview MCP server registration, injected into every session so the agent
     /// can drive the embedded browser. `None` if the server failed to start.
     pub mcp_registration: Option<agent::McpRegistration>,
@@ -495,6 +502,9 @@ pub struct AppState {
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
+    /// Per-provider install/auth probe results, driving the Settings → Providers
+    /// card status dot + summary line. Absent until the first probe lands.
+    pub provider_snapshots: HashMap<ProviderKind, ProviderSnapshot>,
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -566,7 +576,9 @@ impl AppState {
             diff_refresh_generation: 0,
             debug_palette: None,
             debug_settings_section: None,
+            debug_provider_expanded: None,
             provider_versions: HashMap::new(),
+            provider_snapshots: HashMap::new(),
         }
     }
 
@@ -597,14 +609,12 @@ impl AppState {
     /// `model_catalogs` and are persisted so the next launch is instant.
     pub fn refresh_model_catalogs(&mut self, cx: &mut Context<Self>) {
         for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
-            let binary = match provider {
-                ProviderKind::Codex => self.settings.codex_binary.clone(),
-                ProviderKind::ClaudeCode => self.settings.claude_binary.clone(),
-            };
+            let binary = self.settings.provider(provider).binary_path;
+            let launch_env = self.launch_env(provider);
             self.models_loading.insert(provider, true);
             let store = self.store.clone();
             cx.spawn(async move |this, cx| {
-                let result = list_models(provider, binary).await;
+                let result = list_models(provider, binary, launch_env).await;
                 let _ = this.update(cx, |state, cx| {
                     state.models_loading.insert(provider, false);
                     match result {
@@ -649,11 +659,152 @@ impl AppState {
     /// Resolve the binary path for a provider: the settings override, else a
     /// PATH lookup of the bare command name.
     fn resolve_provider_binary(&self, provider: ProviderKind) -> Option<PathBuf> {
-        let (over, name) = match provider {
-            ProviderKind::Codex => (self.settings.codex_binary.clone(), "codex"),
-            ProviderKind::ClaudeCode => (self.settings.claude_binary.clone(), "claude"),
-        };
-        over.or_else(|| which_in_path(name))
+        self.settings
+            .provider(provider)
+            .binary_path
+            .or_else(|| which_in_path(&default_program(provider)))
+    }
+
+    // -- per-provider configuration (Settings → Providers) ------------------
+
+    /// The provider's environment as configured on its card: the plaintext env
+    /// rows, their sensitive counterparts read back out of `secrets.json`, and
+    /// the home override. Applied to every child we spawn for this provider.
+    pub fn launch_env(&self, provider: ProviderKind) -> LaunchEnv {
+        let settings = self.settings.provider(provider);
+        let secrets = self.settings_store.provider_secrets(provider);
+        let env = settings
+            .env
+            .iter()
+            .filter(|var| !var.name.trim().is_empty())
+            .filter_map(|var| {
+                let value = if var.sensitive {
+                    // Sensitive rows keep their value only in secrets.json; a
+                    // row whose secret was never saved contributes nothing.
+                    secrets.get(&var.name).cloned()?
+                } else {
+                    var.value.clone()
+                };
+                Some((var.name.trim().to_string(), value))
+            })
+            .collect();
+        LaunchEnv {
+            env,
+            home: settings.effective_home(),
+        }
+    }
+
+    /// Whether the provider may be used for new sessions (its card's switch).
+    pub fn provider_enabled(&self, provider: ProviderKind) -> bool {
+        self.settings.provider(provider).enabled
+    }
+
+    /// This provider's card settings (defaults when never configured).
+    pub fn provider_settings(&self, provider: ProviderKind) -> ProviderSettings {
+        self.settings.provider(provider)
+    }
+
+    /// Persist a mutation to one provider's card settings.
+    ///
+    /// This is called on every keystroke of the card's text fields, so it only
+    /// writes settings.json. Anything that has to re-run the CLI (the model
+    /// catalog, the status probe) is deferred to [`Self::reload_provider`],
+    /// which the card fires once the field is committed (blur / Enter).
+    pub fn update_provider_settings(
+        &mut self,
+        provider: ProviderKind,
+        mutate: impl FnOnce(&mut ProviderSettings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = self.settings.clone();
+        mutate(settings.provider_mut(provider));
+        self.update_settings(settings, cx);
+    }
+
+    /// Re-run everything that depends on *how* a provider's CLI is launched
+    /// (binary path, home, environment): its model catalog and its status probe.
+    pub fn reload_provider(&mut self, _provider: ProviderKind, cx: &mut Context<Self>) {
+        self.refresh_model_catalogs(cx);
+        self.refresh_provider_status(cx);
+    }
+
+    /// Store (or clear) one sensitive env value in `secrets.json`.
+    pub fn set_provider_secret(
+        &mut self,
+        provider: ProviderKind,
+        name: &str,
+        value: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = self.settings_store.set_secret(provider, name, value) {
+            self.report_error(
+                rust_i18n::t!("errors.persist_settings", error = err).into_owned(),
+                cx,
+            );
+            return;
+        }
+        cx.notify();
+    }
+
+    /// The provider's accent color (`#rrggbb`), when one is configured. Tints
+    /// the provider glyph in the composer + model picker.
+    pub fn provider_accent(&self, provider: ProviderKind) -> Option<gpui::Rgba> {
+        let raw = self.settings.provider(provider).accent_color?;
+        parse_hex_color(&raw)
+    }
+
+    // -- provider status snapshots (Settings → Providers card) --------------
+
+    pub fn provider_snapshot(&self, provider: ProviderKind) -> Option<&ProviderSnapshot> {
+        self.provider_snapshots.get(&provider)
+    }
+
+    /// The derived status dot + headline/detail for a provider's card.
+    pub fn provider_summary(&self, provider: ProviderKind) -> StatusSummary {
+        crate::provider_status::summarize(
+            self.provider_snapshot(provider),
+            self.provider_enabled(provider),
+        )
+    }
+
+    /// The most recent probe time across providers (the section's "Checked …").
+    pub fn providers_checked_at(&self) -> Option<u64> {
+        self.provider_snapshots
+            .values()
+            .filter_map(|s| s.checked_at)
+            .max()
+    }
+
+    /// Whether any provider probe is currently in flight (spins the refresh icon).
+    pub fn providers_checking(&self) -> bool {
+        self.provider_snapshots.values().any(|s| s.checking)
+            || self.provider_versions.values().any(|s| s.checking)
+    }
+
+    /// Probe every provider: is the CLI there, what version, and who is signed
+    /// in? Runs the same `--version` call the version check uses, plus the
+    /// provider's own auth surface (`claude auth status --json`; Codex's
+    /// `auth.json`), both under the provider's configured env/home.
+    pub fn refresh_provider_status(&mut self, cx: &mut Context<Self>) {
+        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+            let snapshot = self.provider_snapshots.entry(provider).or_default();
+            if snapshot.checking {
+                continue;
+            }
+            snapshot.checking = true;
+            let binary = self.resolve_provider_binary(provider);
+            let launch_env = self.launch_env(provider);
+            cx.spawn(async move |this, cx| {
+                let probed = probe_provider(provider, binary, launch_env).await;
+                log::info!("probe {provider:?} -> {probed:?}");
+                let _ = this.update(cx, |state, cx| {
+                    state.provider_snapshots.insert(provider, probed);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     /// Check every provider's installed vs. latest version in the background,
@@ -677,8 +828,9 @@ impl AppState {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| default_program(provider));
             let package = crate::version_check::npm_package(provider);
+            let env = self.launch_env(provider).pairs(provider);
             cx.spawn(async move |this, cx| {
-                let installed = run_capture(&program, &["--version"]).await;
+                let installed = run_capture_env(&program, &["--version"], &env).await;
                 let latest = run_capture("npm", &["view", package, "version"]).await;
                 let _ = this.update(cx, |state, cx| {
                     let update_available = match (&installed, &latest) {
@@ -801,6 +953,26 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// The provider's full model list for the Settings → Providers "Models"
+    /// section: catalog + custom slugs, in the user's order, hidden rows flagged.
+    pub fn resolved_models(&self, provider: ProviderKind) -> Vec<ResolvedModel> {
+        crate::provider_models::resolve_models(
+            self.models_for(provider),
+            &self.settings.provider(provider),
+            &self.settings.favorite_models,
+        )
+    }
+
+    /// The provider's model list as the composer's picker sees it: the same
+    /// resolution, minus the models hidden on the provider card.
+    pub fn picker_models(&self, provider: ProviderKind) -> Vec<ResolvedModel> {
+        crate::provider_models::picker_models(
+            self.models_for(provider),
+            &self.settings.provider(provider),
+            &self.settings.favorite_models,
+        )
+    }
+
     /// Whether `provider`'s catalog is being fetched and no cache exists yet
     /// (so the picker should show the "Loading models…" placeholder).
     pub fn models_loading(&self, provider: ProviderKind) -> bool {
@@ -916,7 +1088,7 @@ impl AppState {
                 .background_executor()
                 .spawn(async { Err("no active session".to_string()) });
         };
-        let binary = self.settings.claude_binary.clone();
+        let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
         cx.background_executor().spawn(async move {
             smol::unblock(move || {
                 let (stat, patch) = crate::git::commit_diff_context(&cwd, included.as_deref());
@@ -2976,6 +3148,7 @@ impl AppState {
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
+        let launch_env = self.launch_env(meta.provider);
         let mcp_registration = self.mcp_registration.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
@@ -2989,7 +3162,7 @@ impl AppState {
         }
 
         cx.spawn(async move |this, cx| {
-            let opts = session_options(&meta, &settings, mcp_registration);
+            let opts = session_options(&meta, &settings, launch_env, mcp_registration);
             let result = start_session(meta.provider, opts).await;
             let _ = this.update(cx, |state, cx| {
                 let matches_attempt = state.active.as_ref().is_some_and(|active| {
@@ -3335,18 +3508,131 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 /// failure. The nested-Claude markers are stripped so `claude --version` behaves
 /// like a top-level invocation.
 async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
-    let output = smol::process::Command::new(program)
-        .args(args)
+    run_capture_env(program, args, &[]).await
+}
+
+/// [`run_capture`] with extra environment variables applied to the child.
+async fn run_capture_env(
+    program: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Option<String> {
+    let mut cmd = smol::process::Command::new(program);
+    cmd.args(args)
         .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .output()
-        .await
-        .ok()?;
+        .env_remove("CLAUDE_CODE_ENTRYPOINT");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let output = cmd.output().await.ok()?;
     if !output.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+/// Parse a `#rrggbb` accent color into a gpui color; `None` when malformed.
+fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
+    let hex = raw.trim().trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    Some(gpui::rgb(value))
+}
+
+/// Probe one provider: locate the CLI, read its version, and ask it (or its
+/// credential store) who is signed in.
+///
+/// Auth sources, both verified against the installed CLIs (2026-07):
+/// - Claude: `claude auth status --json` →
+///   `{loggedIn, authMethod, apiProvider, email, orgId, orgName, subscriptionType}`.
+/// - Codex: `$CODEX_HOME/auth.json` → `auth_mode` plus, for ChatGPT logins, an
+///   `id_token` JWT carrying the account email and `chatgpt_plan_type`.
+///   (`codex login status` prints only "Logged in using ChatGPT" — no email,
+///   no plan, and it has no `--json` mode.)
+async fn probe_provider(
+    provider: ProviderKind,
+    binary: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> ProviderSnapshot {
+    let checked_at = Some(now_secs());
+    let Some(binary) = binary else {
+        return ProviderSnapshot {
+            checked_at,
+            installed: false,
+            status: Some(ProviderStatusKind::Error),
+            message: Some(missing_cli_message(provider)),
+            ..ProviderSnapshot::default()
+        };
+    };
+    let program = binary.to_string_lossy().into_owned();
+    let env = launch_env.pairs(provider);
+
+    let Some(raw_version) = run_capture_env(&program, &["--version"], &env).await else {
+        return ProviderSnapshot {
+            checked_at,
+            installed: true,
+            status: Some(ProviderStatusKind::Error),
+            message: Some(failed_cli_message(provider)),
+            ..ProviderSnapshot::default()
+        };
+    };
+    let version = crate::version_check::parse_version(&raw_version)
+        .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+        .or(Some(raw_version));
+
+    let auth = match provider {
+        ProviderKind::ClaudeCode => run_capture_env(&program, &["auth", "status", "--json"], &env)
+            .await
+            .as_deref()
+            .and_then(crate::provider_status::parse_claude_auth),
+        ProviderKind::Codex => {
+            let home = launch_env
+                .home
+                .clone()
+                .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
+            let path = home.map(|home| home.join("auth.json"));
+            let json = match path {
+                Some(path) => smol::unblock(move || std::fs::read_to_string(path).ok()).await,
+                None => None,
+            };
+            json.as_deref()
+                .and_then(crate::provider_status::parse_codex_auth)
+        }
+    };
+
+    // Three outcomes, mirroring T3's status vocabulary:
+    // - signed out  → error   ("Not authenticated" + the CLI's login hint)
+    // - unreadable  → warning ("Needs attention" + "could not verify")
+    // - signed in   → ready   ("Authenticated as …")
+    let (status, message, auth) = match &auth {
+        Some(a) if a.status == AuthStatus::Unauthenticated => (
+            ProviderStatusKind::Error,
+            Some(unauthenticated_message(provider)),
+            auth,
+        ),
+        Some(_) => (ProviderStatusKind::Ready, None, auth),
+        None => (
+            ProviderStatusKind::Warning,
+            Some(indeterminate_auth_message(provider)),
+            Some(ProviderAuth {
+                status: AuthStatus::Unknown,
+                label: None,
+                email: None,
+            }),
+        ),
+    };
+    ProviderSnapshot {
+        checked_at,
+        installed: true,
+        version,
+        status: Some(status),
+        message,
+        auth,
+        checking: false,
+    }
 }
 
 /// Spawn `program args…` for a side effect (e.g. an update command) and report
@@ -3570,21 +3856,26 @@ fn normalized_selections(
 fn session_options(
     meta: &SessionMeta,
     settings: &Settings,
+    launch_env: LaunchEnv,
     mcp_server: Option<agent::McpRegistration>,
 ) -> SessionOptions {
-    let binary_path = match meta.provider {
-        ProviderKind::Codex => settings.codex_binary.clone(),
-        ProviderKind::ClaudeCode => settings.claude_binary.clone(),
-    };
+    let provider_settings = settings.provider(meta.provider);
     SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
-        binary_path,
+        binary_path: provider_settings.binary_path.clone(),
         approval_mode: meta.approval_mode,
         option_selections: meta.option_selections.clone(),
         interaction_mode: meta.interaction_mode,
         mcp_server,
+        launch_env,
+        // Claude's "Launch arguments" (Codex has no such field, so this is empty
+        // for it unless a future card adds one).
+        extra_args: match meta.provider {
+            ProviderKind::ClaudeCode => provider_settings.extra_args(),
+            ProviderKind::Codex => Vec::new(),
+        },
     }
 }
 
@@ -3711,18 +4002,109 @@ mod tests {
             PathBuf::from("/tmp/project"),
             None,
         );
-        let settings = Settings {
-            codex_binary: Some(PathBuf::from("/custom/codex")),
-            claude_binary: Some(PathBuf::from("/custom/claude")),
-            ..Settings::default()
-        };
+        let mut settings = Settings::default();
+        settings.provider_mut(ProviderKind::Codex).binary_path =
+            Some(PathBuf::from("/custom/codex"));
+        settings.provider_mut(ProviderKind::ClaudeCode).binary_path =
+            Some(PathBuf::from("/custom/claude"));
 
-        let codex_options = session_options(&codex, &settings, None);
-        let claude_options = session_options(&claude, &settings, None);
+        let codex_options = session_options(&codex, &settings, LaunchEnv::default(), None);
+        let claude_options = session_options(&claude, &settings, LaunchEnv::default(), None);
 
-        assert_eq!(codex_options.binary_path, settings.codex_binary);
-        assert_eq!(claude_options.binary_path, settings.claude_binary);
+        assert_eq!(
+            codex_options.binary_path,
+            Some(PathBuf::from("/custom/codex"))
+        );
+        assert_eq!(
+            claude_options.binary_path,
+            Some(PathBuf::from("/custom/claude"))
+        );
         assert!(codex_options.mcp_server.is_none());
+    }
+
+    /// Settings → Providers env/home/launch-args must reach the spawn options,
+    /// and the home override must land on the provider's own variable.
+    #[test]
+    fn provider_env_home_and_launch_args_reach_session_options() {
+        let mut settings = Settings::default();
+        let claude = settings.provider_mut(ProviderKind::ClaudeCode);
+        claude.home_path = Some(PathBuf::from("/tmp/claude-home"));
+        claude.launch_args = Some("--chrome --verbose".into());
+        let codex = settings.provider_mut(ProviderKind::Codex);
+        codex.shadow_home_path = Some(PathBuf::from("/tmp/codex-shadow"));
+
+        let launch_env = LaunchEnv {
+            env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
+            home: settings
+                .provider(ProviderKind::ClaudeCode)
+                .effective_home(),
+        };
+        let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
+        let opts = session_options(&meta, &settings, launch_env, None);
+        assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
+        assert_eq!(
+            opts.launch_env.pairs(ProviderKind::ClaudeCode),
+            vec![
+                ("ANTHROPIC_BASE_URL".to_string(), "https://proxy.test".to_string()),
+                ("HOME".to_string(), "/tmp/claude-home".to_string()),
+            ]
+        );
+
+        // Codex takes its shadow home as CODEX_HOME, and has no launch args.
+        let launch_env = LaunchEnv {
+            env: Vec::new(),
+            home: settings.provider(ProviderKind::Codex).effective_home(),
+        };
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
+        let opts = session_options(&meta, &settings, launch_env, None);
+        assert!(opts.extra_args.is_empty());
+        assert_eq!(
+            opts.launch_env.pairs(ProviderKind::Codex),
+            vec![("CODEX_HOME".to_string(), "/tmp/codex-shadow".to_string())]
+        );
+    }
+
+    /// Sensitive env rows contribute their value from `secrets.json`, never from
+    /// settings.json (which stores an empty value for them).
+    #[test]
+    fn launch_env_merges_secrets_for_sensitive_rows() {
+        let root = std::env::temp_dir().join(format!("tcode-env-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        let mut settings = state.settings.clone();
+        settings.provider_mut(ProviderKind::ClaudeCode).env = vec![
+            crate::settings::EnvVar {
+                name: "PLAIN".into(),
+                value: "visible".into(),
+                sensitive: false,
+            },
+            crate::settings::EnvVar {
+                name: "ANTHROPIC_API_KEY".into(),
+                value: String::new(),
+                sensitive: true,
+            },
+            // A sensitive row whose secret was never saved contributes nothing.
+            crate::settings::EnvVar {
+                name: "UNSET_SECRET".into(),
+                value: String::new(),
+                sensitive: true,
+            },
+        ];
+        state.settings = settings;
+        state
+            .settings_store
+            .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", Some("sk-x"))
+            .unwrap();
+
+        let env = state.launch_env(ProviderKind::ClaudeCode).env;
+        assert_eq!(
+            env,
+            vec![
+                ("PLAIN".to_string(), "visible".to_string()),
+                ("ANTHROPIC_API_KEY".to_string(), "sk-x".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3733,7 +4115,7 @@ mod tests {
             url: "http://127.0.0.1:7/mcp".into(),
             bearer_token: "tok".into(),
         };
-        let opts = session_options(&meta, &settings, Some(reg));
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), Some(reg));
         let mcp = opts.mcp_server.expect("registration threaded through");
         assert_eq!(mcp.url, "http://127.0.0.1:7/mcp");
         assert_eq!(mcp.bearer_token, "tok");
