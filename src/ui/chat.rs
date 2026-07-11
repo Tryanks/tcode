@@ -13,7 +13,8 @@ use gpui::{
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
     WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::DialogButtonProps,
     h_flex,
     notification::Notification,
     popover::Popover,
@@ -220,7 +221,7 @@ impl ChatView {
         // 1. User messages (right-aligned bubbles).
         for entry in entries {
             if let EntryContent::User { text } = &entry.content {
-                column = column.child(self.render_user(text, cx));
+                column = column.child(self.render_user(index, text, cx));
             }
         }
 
@@ -293,22 +294,79 @@ impl ChatView {
         column.into_any_element()
     }
 
-    fn render_user(&self, text: &str, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
+    fn render_user(&self, turn: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
+        // A user bubble whose turn has a checkpoint gets a hover "revert"
+        // affordance (Group B): rewind the thread to just before this message.
+        let has_checkpoint = self.app_state.read(cx).turn_has_checkpoint(turn);
+        let turn_running = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .is_some_and(|a| a.timeline.turn_running);
+        let group_key = format!("user-turn-{turn}");
+        let mut row = h_flex()
+            .group(group_key.clone())
             .w_full()
             .justify_end()
-            .child(
+            .items_center()
+            .gap_2();
+
+        if has_checkpoint && !turn_running {
+            let app_state = self.app_state.clone();
+            row = row.child(
                 div()
-                    .max_w_3_4()
-                    .px_4()
-                    .py_3()
-                    .rounded_xl()
-                    .bg(cx.theme().muted)
-                    .text_color(cx.theme().foreground)
-                    .text_size(px(15.))
-                    .child(text.to_string()),
-            )
-            .into_any_element()
+                    .invisible()
+                    .group_hover(group_key.clone(), |s| s.visible())
+                    .child(
+                        Button::new(("revert", turn))
+                            .ghost()
+                            .xsmall()
+                            .compact()
+                            .icon(
+                                Icon::empty()
+                                    .path("icons/rotate-ccw.svg")
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .tooltip(rust_i18n::t!("checkpoint.revert_tooltip"))
+                            .on_click(move |_, window, cx| {
+                                let app_state = app_state.clone();
+                                window.open_alert_dialog(cx, move |alert, _, _| {
+                                    let app_state = app_state.clone();
+                                    alert
+                                        .title(rust_i18n::t!("checkpoint.revert_title", turn = turn))
+                                        .description(rust_i18n::t!("checkpoint.revert_description"))
+                                        .button_props(
+                                            DialogButtonProps::default()
+                                                .ok_variant(ButtonVariant::Danger)
+                                                .ok_text(rust_i18n::t!("checkpoint.revert_action"))
+                                                .cancel_text(rust_i18n::t!("settings.cancel"))
+                                                .show_cancel(true),
+                                        )
+                                        .on_ok(move |_, _, cx| {
+                                            app_state.update(cx, |state, cx| {
+                                                state.revert_to_turn(turn, cx);
+                                            });
+                                            true
+                                        })
+                                });
+                            }),
+                    ),
+            );
+        }
+
+        row.child(
+            div()
+                .max_w_3_4()
+                .px_4()
+                .py_3()
+                .rounded_xl()
+                .bg(cx.theme().muted)
+                .text_color(cx.theme().foreground)
+                .text_size(px(15.))
+                .child(text.to_string()),
+        )
+        .into_any_element()
     }
 
     fn render_assistant(&self, id: &str, text: &str, _cx: &mut Context<Self>) -> AnyElement {

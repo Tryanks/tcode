@@ -65,6 +65,32 @@ pub fn project_name_from_root(root: &std::path::Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
+/// Where a session's worktree lives, when it runs in dedicated-worktree mode
+/// (Group C). The session's `cwd` is the worktree path; this records what it was
+/// derived from so the worktree can be cleaned up on deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    /// The main project checkout the worktree was created from (its git root).
+    pub root_project_path: PathBuf,
+    /// The base branch/ref the worktree was branched from.
+    pub base: String,
+    /// The branch created for this worktree (`tcode/<session-id>`).
+    pub branch: String,
+}
+
+/// One per-turn checkpoint: a hidden git ref capturing the working tree before a
+/// user turn was dispatched (Group B). `turn` is the timeline turn index the
+/// checkpoint belongs to (the user message that starts it); `commit` is the
+/// snapshot commit behind `refs/tcode/checkpoints/<session>/<turn>`;
+/// `event_offset` is the number of JSONL events that existed before this turn's
+/// user message, so a revert can truncate the log deterministically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub turn: usize,
+    pub commit: String,
+    pub event_offset: usize,
+}
+
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -76,6 +102,19 @@ pub struct SessionMeta {
     pub project_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Set when the thread is archived (unix secs). Archived threads vanish from
+    /// the sidebar and are reversible from Settings → Archived Threads. Absent in
+    /// legacy files (defaults to "not archived"). (Group A)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<u64>,
+    /// Dedicated-worktree mode metadata, when the session runs in its own git
+    /// worktree instead of the project checkout. Absent = local checkout. (Group C)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeInfo>,
+    /// Per-turn checkpoints captured before each user turn (Group B). Absent in
+    /// legacy files (defaults to none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<Checkpoint>,
     /// The user-facing permission model for this session. Older index files
     /// predate the field; a missing value defaults to `ApprovalMode::default()`
     /// (now `FullAccess`, matching T3).
@@ -107,6 +146,9 @@ impl SessionMeta {
             cwd,
             project_id: None,
             model,
+            archived_at: None,
+            worktree: None,
+            checkpoints: Vec::new(),
             approval_mode: ApprovalMode::default(),
             resume_cursor: None,
             option_selections: Vec::new(),
@@ -352,6 +394,42 @@ impl SessionStore {
             }
         }
         events
+    }
+
+    /// Count the persisted events for a session (number of parseable JSONL
+    /// lines). Used to record a checkpoint's `event_offset` before a turn's user
+    /// message is appended, so a later revert can truncate deterministically.
+    pub fn event_count(&self, id: &str) -> usize {
+        self.read_events(id).len()
+    }
+
+    /// Truncate a session's JSONL log to its first `keep` events, discarding the
+    /// rest (used by revert-to-checkpoint). Rewrites the file atomically. A
+    /// `keep` at or beyond the current length is a no-op.
+    pub fn truncate_events(&self, id: &str, keep: usize) -> std::io::Result<()> {
+        let path = self.events_path(id);
+        let events = self.read_events(id);
+        if keep >= events.len() {
+            return Ok(());
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        {
+            let mut file = File::create(&tmp)?;
+            for stored in events.iter().take(keep) {
+                let line = match stored.ts {
+                    Some(ts) => serde_json::to_string(&EventEnvelope {
+                        ts,
+                        event: stored.event.clone(),
+                    }),
+                    None => serde_json::to_string(&stored.event),
+                }
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                file.write_all(line.as_bytes())?;
+                file.write_all(b"\n")?;
+            }
+            file.flush()?;
+        }
+        fs::rename(&tmp, &path)
     }
 
     /// Remove a session from the index and delete its event log.
@@ -666,6 +744,74 @@ mod tests {
         let twice = migrate_index(once.clone());
         assert_eq!(twice.projects.len(), 1);
         assert_eq!(once.sessions[0].project_id, twice.sessions[0].project_id);
+    }
+
+    #[test]
+    fn archived_at_and_worktree_default_absent_and_roundtrip() {
+        // Legacy index entry without the new fields loads with them absent.
+        let legacy = serde_json::json!({
+            "id": "s1", "title": "One", "provider": "codex",
+            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
+        });
+        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.archived_at, None);
+        assert_eq!(meta.worktree, None);
+        assert!(meta.checkpoints.is_empty());
+
+        // Absent fields are skipped on serialize (keeps legacy files clean).
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("archived_at"));
+        assert!(!json.contains("worktree"));
+        assert!(!json.contains("checkpoints"));
+
+        // A populated meta round-trips every new field.
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt"), None);
+        meta.archived_at = Some(1234);
+        meta.worktree = Some(WorktreeInfo {
+            root_project_path: PathBuf::from("/proj"),
+            base: "main".into(),
+            branch: "tcode/abc".into(),
+        });
+        meta.checkpoints = vec![Checkpoint {
+            turn: 2,
+            commit: "deadbeef".into(),
+            event_offset: 7,
+        }];
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.archived_at, Some(1234));
+        assert_eq!(back.worktree, meta.worktree);
+        assert_eq!(back.checkpoints, meta.checkpoints);
+    }
+
+    #[test]
+    fn truncate_events_keeps_prefix_and_rewrites_log() {
+        let store = SessionStore::open_at(temp_root()).unwrap();
+        let id = "trunc";
+        for turn in 0..4 {
+            store
+                .append_event(
+                    id,
+                    turn as u64,
+                    &AgentEvent::TurnStarted {
+                        turn_id: format!("t{turn}"),
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(store.event_count(id), 4);
+
+        // Keeping the first 2 events discards the tail.
+        store.truncate_events(id, 2).unwrap();
+        let events = store.read_events(id);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].ts, Some(0));
+        assert_eq!(events[1].ts, Some(1));
+
+        // A keep beyond the length is a no-op.
+        store.truncate_events(id, 10).unwrap();
+        assert_eq!(store.event_count(id), 2);
+        let _ = fs::remove_dir_all(store.root());
     }
 
     #[test]

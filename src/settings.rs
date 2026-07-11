@@ -103,6 +103,12 @@ pub struct Settings {
     /// Sidebar PROJECTS ordering (cycled by the sort button).
     #[serde(default)]
     pub project_sort: ProjectSort,
+    /// Per-session last-visited time (unix secs), keyed by session id. A session
+    /// whose `updated_at` exceeds its last-visited time (and isn't active) shows
+    /// an unread dot. Opening a thread refreshes it; "Mark unread" clears it.
+    /// UI state; absent in legacy files (Group A).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub last_visited: std::collections::HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +166,7 @@ mod tests {
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,
+            last_visited: std::collections::HashMap::from([("sess-a".to_string(), 42)]),
         };
 
         store.save(&expected).unwrap();

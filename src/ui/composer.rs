@@ -27,7 +27,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::AppState;
+use crate::app::{AppState, WorkspaceMode};
 
 /// Claude's warm brand tint for the starburst glyph.
 const CLAUDE_TINT: u32 = 0xD97757;
@@ -579,6 +579,22 @@ impl Composer {
                 .into_any_element();
         }
 
+        // Group C: while the first send is creating a worktree, show a disabled
+        // "Preparing worktree…" pill instead of the send button.
+        if self.app_state.read(cx).preparing_worktree() {
+            return h_flex()
+                .gap_2()
+                .items_center()
+                .child(Spinner::new().small().color(cx.theme().primary))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(rust_i18n::t!("composer.preparing_worktree")),
+                )
+                .into_any_element();
+        }
+
         let has_text = !self.input.read(cx).value().trim().is_empty();
         let (bg, fg) = if has_text {
             (cx.theme().primary, cx.theme().primary_foreground)
@@ -1031,17 +1047,34 @@ impl Composer {
     // -- below-card + approval ---------------------------------------------
 
     fn render_checkout_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (branch, branches, turn_running) = {
+        let (branch, branches, turn_running, is_draft, worktree_base, worktree) = {
             let state = self.app_state.read(cx);
             let active = state.active.as_ref()?;
-            let branch = active.git_branch.clone()?;
+            // Worktrees have a `.git` file (not dir), so `read_git_branch` yields
+            // None; fall back to the recorded worktree branch so the row shows.
+            let branch = active
+                .git_branch
+                .clone()
+                .or_else(|| active.meta.worktree.as_ref().map(|w| w.branch.clone()))?;
+            // The base the worktree draft will branch from (Some in worktree mode).
+            let worktree_base = match state.draft_workspace_mode() {
+                Some(WorkspaceMode::NewWorktree { base }) => Some(base),
+                _ => None,
+            };
             (
                 branch,
                 active.branches.clone(),
                 active.timeline.turn_running,
+                active.draft,
+                worktree_base,
+                active.meta.worktree.clone(),
             )
         };
         let muted = cx.theme().muted_foreground;
+        // In worktree draft mode the right-hand picker chooses the *base* branch
+        // (its current value is the chosen base, defaulting to the live branch).
+        let picker_current = worktree_base.clone().unwrap_or_else(|| branch.clone());
+        let worktree_mode = worktree_base.is_some();
 
         // The branch chip: a popover listing local branches. While a turn runs
         // the selector is disabled (it just shows a "wait" tooltip).
@@ -1057,13 +1090,13 @@ impl Composer {
                         .text_size(px(12.))
                         .text_color(muted)
                         .child(Icon::empty().path("icons/git-branch.svg").xsmall())
-                        .child(branch),
+                        .child(picker_current.clone()),
                 )
                 .into_any_element()
         } else {
             let app_open = self.app_state.clone();
             let app_content = self.app_state.clone();
-            let current = branch.clone();
+            let current = picker_current.clone();
             let trigger = Button::new("branch-picker").ghost().compact().child(
                 h_flex()
                     .gap_1p5()
@@ -1071,7 +1104,7 @@ impl Composer {
                     .text_size(px(12.))
                     .text_color(muted)
                     .child(Icon::empty().path("icons/git-branch.svg").xsmall())
-                    .child(branch)
+                    .child(picker_current.clone())
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
             Popover::new("branch-popover")
@@ -1094,6 +1127,17 @@ impl Composer {
                         .overflow_hidden()
                         .p_1()
                         .gap_0p5();
+                    if worktree_mode {
+                        col = col.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .text_size(px(11.))
+                                .font_medium()
+                                .text_color(muted)
+                                .child(rust_i18n::t!("composer.worktree_base")),
+                        );
+                    }
                     if branches.is_empty() {
                         col = col.child(
                             div()
@@ -1138,7 +1182,15 @@ impl Composer {
                                     .on_click(move |_, window, cx| {
                                         let branch_name = branch_name.clone();
                                         app_pick.update(cx, |state, cx| {
-                                            state.checkout_branch(branch_name, cx);
+                                            if worktree_mode {
+                                                // Choose the worktree's base branch.
+                                                state.set_draft_workspace(
+                                                    WorkspaceMode::NewWorktree { base: branch_name },
+                                                    cx,
+                                                );
+                                            } else {
+                                                state.checkout_branch(branch_name, cx);
+                                            }
                                         });
                                         pop.update(cx, |st, cx| st.dismiss(window, cx));
                                     }),
@@ -1150,6 +1202,10 @@ impl Composer {
                 .into_any_element()
         };
 
+        // Left: the workspace-mode chip. A draft can pick "Local checkout" vs
+        // "New worktree"; a started session shows its locked workspace.
+        let left = self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
+
         Some(
             h_flex()
                 .w_full()
@@ -1159,16 +1215,133 @@ impl Composer {
                 .justify_between()
                 .text_size(px(12.))
                 .text_color(muted)
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .items_center()
-                        .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
-                        .child(rust_i18n::t!("composer.local_checkout")),
-                )
+                .child(left)
                 .child(right)
                 .into_any_element(),
         )
+    }
+
+    /// The left-hand workspace chip: a draft can pick current checkout vs a new
+    /// dedicated worktree; a started session shows its locked workspace.
+    fn render_workspace_chip(
+        &self,
+        is_draft: bool,
+        worktree_mode: bool,
+        has_worktree: bool,
+        base_default: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let label = if worktree_mode || has_worktree {
+            rust_i18n::t!("composer.new_worktree")
+        } else {
+            rust_i18n::t!("composer.local_checkout")
+        };
+
+        // Started sessions show a static, locked workspace label.
+        if !is_draft {
+            return h_flex()
+                .gap_1p5()
+                .items_center()
+                .text_color(muted)
+                .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
+                .child(label)
+                .into_any_element();
+        }
+
+        let app_content = self.app_state.clone();
+        let base_default = base_default.to_string();
+        let trigger = Button::new("workspace-picker").ghost().compact().child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
+                .child(label)
+                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+        );
+        Popover::new("workspace-popover")
+            .anchor(Anchor::BottomLeft)
+            .trigger(trigger)
+            .content(move |_state, _window, cx| {
+                let popover = cx.entity();
+                let app_local = app_content.clone();
+                let app_worktree = app_content.clone();
+                let pop_local = popover.clone();
+                let pop_worktree = popover.clone();
+                let base = base_default.clone();
+                let workspace_row = |label: gpui::SharedString,
+                                     selected: bool,
+                                     cx: &mut Context<PopoverState>|
+                 -> gpui::Div {
+                    h_flex()
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .text_size(px(13.))
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .child(div().flex_1().min_w_0().child(label))
+                        .when(selected, |this| {
+                            this.child(
+                                Icon::new(IconName::Check)
+                                    .xsmall()
+                                    .text_color(cx.theme().primary),
+                            )
+                        })
+                };
+                v_flex()
+                    .w(px(200.))
+                    .p_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(11.))
+                            .font_medium()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("composer.workspace")),
+                    )
+                    .child(
+                        workspace_row(
+                            rust_i18n::t!("composer.local_checkout").into_owned().into(),
+                            false,
+                            cx,
+                        )
+                        .id("workspace-local")
+                        .on_click(move |_, window, cx| {
+                            app_local.update(cx, |state, cx| {
+                                state.set_draft_workspace(WorkspaceMode::LocalCheckout, cx);
+                            });
+                            pop_local.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
+                    )
+                    .child(
+                        workspace_row(
+                            rust_i18n::t!("composer.new_worktree").into_owned().into(),
+                            false,
+                            cx,
+                        )
+                        .id("workspace-worktree")
+                        .on_click(move |_, window, cx| {
+                            let base = base.clone();
+                            app_worktree.update(cx, |state, cx| {
+                                state.set_draft_workspace(
+                                    WorkspaceMode::NewWorktree { base },
+                                    cx,
+                                );
+                            });
+                            pop_worktree.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
+                    )
+                    .into_any_element()
+            })
+            .into_any_element()
     }
 
     fn render_approval_panel(

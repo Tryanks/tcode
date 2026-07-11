@@ -1,5 +1,6 @@
 mod app;
 mod assets;
+mod checkpoints;
 mod session;
 mod settings;
 mod smoke;

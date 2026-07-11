@@ -12,7 +12,7 @@ use gpui::{Context, EventEmitter, Task};
 
 use crate::session::Timeline;
 use crate::settings::{ProjectSort, Settings, SettingsStore};
-use crate::store::{Project, SessionMeta, SessionStore, now_millis, now_secs};
+use crate::store::{Checkpoint, Project, SessionMeta, SessionStore, WorktreeInfo, now_millis, now_secs};
 
 const TITLE_MAX_CHARS: usize = 40;
 
@@ -140,6 +140,12 @@ pub struct ActiveSession {
     /// Whether the current proposed plan has been accepted for implementation
     /// (drives the composer back out of its plan-ready state).
     plan_implemented: bool,
+    /// Draft-only (Group C): run in the current checkout or a new dedicated
+    /// worktree. Chosen in the checkout row before the first send; locked after.
+    pub draft_workspace: WorkspaceMode,
+    /// Group C: set while the first send is creating a worktree in the
+    /// background (drives the composer's "Preparing worktree…" action).
+    preparing_worktree: bool,
     pending_sends: Vec<String>,
     turn_in_flight: bool,
     /// Diff panel UI state (per-session, in-memory only). `diff_open` is the
@@ -248,6 +254,17 @@ impl ActiveSession {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SmokeMode {
     pub auto_approve: bool,
+}
+
+/// The workspace a draft thread will run in (Group C): the project checkout, or
+/// a new dedicated git worktree branched from `base`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WorkspaceMode {
+    #[default]
+    LocalCheckout,
+    NewWorktree {
+        base: String,
+    },
 }
 
 pub struct AppState {
@@ -600,9 +617,34 @@ impl AppState {
         }
     }
 
-    /// Sessions grouped by project for the sidebar.
+    /// Sessions grouped by project for the sidebar (archived threads excluded).
     pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
-        group_sessions(&self.projects, &self.sessions, self.settings.project_sort)
+        let visible: Vec<SessionMeta> = self
+            .sessions
+            .iter()
+            .filter(|m| m.archived_at.is_none())
+            .cloned()
+            .collect();
+        group_sessions(&self.projects, &visible, self.settings.project_sort)
+    }
+
+    /// Archived sessions grouped by project (for Settings → Archived Threads),
+    /// newest archive time first within each group. Empty groups are dropped.
+    pub fn archived_groups(&self) -> Vec<ProjectGroup> {
+        let archived: Vec<SessionMeta> = self
+            .sessions
+            .iter()
+            .filter(|m| m.archived_at.is_some())
+            .cloned()
+            .collect();
+        let mut groups = group_sessions(&self.projects, &archived, self.settings.project_sort);
+        for group in &mut groups {
+            group
+                .sessions
+                .sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
+        }
+        groups.retain(|g| !g.sessions.is_empty());
+        groups
     }
 
     /// The current sidebar sort mode (for the sort button tooltip/label).
@@ -676,10 +718,91 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn delete_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    // -- archive / delete / rename / unread (Group A) -----------------------
+
+    /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
+    /// its turn is running (returns without changing anything so the caller's
+    /// tooltip stands). The active thread is closed back to the empty state.
+    pub fn archive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.turn_running_for(session_id) {
+            return;
+        }
         if self.active_session_id() == Some(session_id) {
             self.shutdown_active();
         }
+        if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
+            meta.archived_at = Some(now_secs());
+            let meta = meta.clone();
+            self.persist_meta(&meta, cx);
+        }
+    }
+
+    /// Restore an archived thread (Settings → Archived Threads → Unarchive).
+    pub fn unarchive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
+            meta.archived_at = None;
+            let meta = meta.clone();
+            self.persist_meta(&meta, cx);
+        }
+    }
+
+    /// Rename a thread (context-menu inline edit). Empty titles are rejected.
+    pub fn rename_session(&mut self, session_id: &str, title: &str, cx: &mut Context<Self>) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
+            active.meta.title = title.to_string();
+        }
+        if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
+            meta.title = title.to_string();
+            meta.updated_at = now_secs();
+            let meta = meta.clone();
+            self.persist_meta(&meta, cx);
+        }
+    }
+
+    /// The worktree that deleting `session_id` would orphan (i.e. it is the only
+    /// remaining session bound to that worktree), if any — drives the "also
+    /// remove the worktree?" confirmation.
+    pub fn worktree_orphaned_by_delete(&self, session_id: &str) -> Option<crate::store::WorktreeInfo> {
+        let meta = self.sessions.iter().find(|m| m.id == session_id)?;
+        let worktree = meta.worktree.clone()?;
+        let others = self.sessions.iter().any(|m| {
+            m.id != session_id && m.worktree.as_ref().is_some_and(|w| w.branch == worktree.branch)
+        });
+        (!others).then_some(worktree)
+    }
+
+    /// Permanently delete a thread: stop the provider, close its terminal, remove
+    /// its checkpoint refs, delete meta + JSONL, and (when `remove_worktree`)
+    /// remove the git worktree it was the last user of.
+    pub fn delete_session(
+        &mut self,
+        session_id: &str,
+        remove_worktree: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
+        if self.active_session_id() == Some(session_id) {
+            // shutdown_active drops the ActiveSession (and its terminal PTY).
+            self.shutdown_active();
+        }
+        if let Some(meta) = &meta {
+            // Best-effort checkpoint ref cleanup in the session cwd.
+            if crate::checkpoints::is_git_repo(&meta.cwd) {
+                crate::checkpoints::delete_all_checkpoint_refs(&meta.cwd, &meta.id);
+            }
+            if remove_worktree {
+                if let Some(worktree) = &meta.worktree {
+                    if let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd) {
+                        self.report_error(err, cx);
+                    }
+                }
+            }
+        }
+        self.settings.last_visited.remove(session_id);
         if let Err(err) = self.store.remove_session(session_id) {
             self.report_error(
                 rust_i18n::t!("errors.delete_session", error = err).into_owned(),
@@ -687,8 +810,249 @@ impl AppState {
             );
             return;
         }
+        // Persist the pruned last-visited map (ignore save errors — cosmetic).
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
         self.sessions = self.store.load_index();
         cx.notify();
+    }
+
+    /// Whether a turn is currently running for `session_id` (only the active
+    /// session can be running).
+    pub fn turn_running_for(&self, session_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.meta.id == session_id && a.timeline.turn_running)
+    }
+
+    /// Record that a thread has been visited now (clears its unread dot).
+    fn mark_visited(&mut self, session_id: &str) {
+        self.settings
+            .last_visited
+            .insert(session_id.to_string(), now_secs());
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
+    }
+
+    /// Mark a thread unread (context menu): set its last-visited just below its
+    /// update time so the dot reappears.
+    pub fn mark_session_unread(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let updated = self
+            .sessions
+            .iter()
+            .find(|m| m.id == session_id)
+            .map(|m| m.updated_at)
+            .unwrap_or(0);
+        self.settings
+            .last_visited
+            .insert(session_id.to_string(), updated.saturating_sub(1));
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
+        cx.notify();
+    }
+
+    /// Whether a thread shows an unread dot: it has been visited before, its
+    /// update time is newer than that visit, and it is not the active thread.
+    pub fn session_unread(&self, session_id: &str) -> bool {
+        if self.active_session_id() == Some(session_id) {
+            return false;
+        }
+        let Some(meta) = self.sessions.iter().find(|m| m.id == session_id) else {
+            return false;
+        };
+        self.settings
+            .last_visited
+            .get(session_id)
+            .is_some_and(|&visited| meta.updated_at > visited)
+    }
+
+    /// Whether any non-archived thread in `project_id` is unread (project dot).
+    pub fn project_has_unread(&self, project_id: &str) -> bool {
+        self.sessions.iter().any(|m| {
+            m.archived_at.is_none()
+                && m.project_id.as_deref() == Some(project_id)
+                && self.session_unread(&m.id)
+        })
+    }
+
+    // -- checkpoints + revert (Group B) -------------------------------------
+
+    /// Snapshot the pre-turn working tree into a hidden git ref so the turn the
+    /// just-recorded user message opened can later be reverted. `event_offset`
+    /// is the JSONL length before that message, used as the revert truncation
+    /// boundary. Runs synchronously so the snapshot precedes any file edits.
+    fn capture_checkpoint(&mut self, session_id: &str, event_offset: usize, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) else {
+            return;
+        };
+        let cwd = active.meta.cwd.clone();
+        let Some(turn) = active.timeline.entries.last().map(|e| e.turn) else {
+            return;
+        };
+        // A second queued send can land in the same open turn — checkpoint once.
+        if active.meta.checkpoints.iter().any(|c| c.turn == turn) {
+            return;
+        }
+        if !crate::checkpoints::is_git_repo(&cwd) {
+            return;
+        }
+        match crate::checkpoints::create_checkpoint(&cwd, session_id, turn) {
+            Ok(commit) => {
+                if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
+                    active.meta.checkpoints.push(Checkpoint {
+                        turn,
+                        commit,
+                        event_offset,
+                    });
+                    let meta = active.meta.clone();
+                    self.persist_meta(&meta, cx);
+                }
+            }
+            Err(err) => log::warn!("failed to create checkpoint: {err}"),
+        }
+    }
+
+    /// Whether the given timeline turn has a checkpoint (its user bubble then
+    /// gets the hover "revert" affordance).
+    pub fn turn_has_checkpoint(&self, turn: usize) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|a| a.meta.checkpoints.iter().any(|c| c.turn == turn))
+    }
+
+    /// Revert the active thread to the checkpoint captured before `turn`:
+    /// restore the worktree, discard newer messages/turns from the log, drop the
+    /// newer checkpoint refs, and roll the provider session back to idle. Blocked
+    /// while a turn runs.
+    pub fn revert_to_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+        let (session_id, cwd, checkpoint) = {
+            let Some(active) = self.active.as_ref() else {
+                return;
+            };
+            if active.timeline.turn_running {
+                cx.emit(AppEvent::Error(
+                    rust_i18n::t!("checkpoint.revert_blocked").into_owned(),
+                ));
+                return;
+            }
+            let Some(cp) = active.meta.checkpoints.iter().find(|c| c.turn == turn).cloned() else {
+                return;
+            };
+            (active.meta.id.clone(), active.meta.cwd.clone(), cp)
+        };
+
+        if let Err(err) = crate::checkpoints::restore_checkpoint(&cwd, &checkpoint.commit) {
+            self.report_error(err, cx);
+            return;
+        }
+        crate::checkpoints::delete_checkpoint_refs_from(&cwd, &session_id, turn);
+        if let Err(err) = self.store.truncate_events(&session_id, checkpoint.event_offset) {
+            self.report_error(
+                rust_i18n::t!("errors.persist_event", error = err).into_owned(),
+                cx,
+            );
+            return;
+        }
+
+        // Re-fold the truncated timeline and roll the session back to idle.
+        let events = self.store.read_events(&session_id);
+        let mut timeline = Timeline::fold_events(events);
+        timeline.mark_idle();
+        if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
+            active.shutdown_to_idle();
+            active.meta.checkpoints.retain(|c| c.turn < turn);
+            active.meta.resume_cursor = None;
+            active.meta.updated_at = now_secs();
+            active.timeline = timeline;
+            active.git_branch = read_git_branch(&active.meta.cwd);
+            active.pending_sends.clear();
+            active.plan_implemented = false;
+            let meta = active.meta.clone();
+            self.persist_meta(&meta, cx);
+        }
+        cx.emit(AppEvent::Notice(
+            rust_i18n::t!("checkpoint.reverted").into_owned(),
+        ));
+        cx.notify();
+    }
+
+    // -- worktree mode (Group C) --------------------------------------------
+
+    /// The active draft's workspace mode, or `None` when there is no draft (a
+    /// started session's workspace is locked).
+    pub fn draft_workspace_mode(&self) -> Option<WorkspaceMode> {
+        self.active
+            .as_ref()
+            .filter(|a| a.draft)
+            .map(|a| a.draft_workspace.clone())
+    }
+
+    /// Whether a worktree is being prepared for the active thread's first send.
+    pub fn preparing_worktree(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.preparing_worktree)
+    }
+
+    /// Choose the draft's workspace mode (checkout-row picker). No-op unless the
+    /// active thread is an unstarted draft.
+    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut().filter(|a| a.draft) {
+            active.draft_workspace = mode;
+            cx.notify();
+        }
+    }
+
+    /// Kick off background worktree creation for a draft's first send, then send
+    /// the queued text once it is ready. Sets the "Preparing worktree…" state.
+    fn begin_worktree_prep(&mut self, text: String, base: String, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.preparing_worktree = true;
+        let session_id = active.meta.id.clone();
+        let root = active.meta.cwd.clone();
+        cx.notify();
+
+        let path = worktree_path_for(&session_id);
+        let branch = format!("tcode/{session_id}");
+        let base_for_task = base.clone();
+        let root_for_task = root.clone();
+        let path_for_task = path.clone();
+        let branch_for_task = branch.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                create_git_worktree(&root_for_task, &path_for_task, &branch_for_task, &base_for_task)
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                let Some(active) = state
+                    .active
+                    .as_mut()
+                    .filter(|a| a.meta.id == session_id && a.draft)
+                else {
+                    return;
+                };
+                active.preparing_worktree = false;
+                match result {
+                    Ok(worktree_path) => {
+                        active.meta.cwd = worktree_path.clone();
+                        active.meta.worktree = Some(WorktreeInfo {
+                            root_project_path: root,
+                            base,
+                            branch,
+                        });
+                        active.draft_workspace = WorkspaceMode::LocalCheckout;
+                        active.git_branch = read_git_branch(&worktree_path);
+                        // Now that the worktree exists, run the deferred send.
+                        state.send_turn(text, cx);
+                    }
+                    Err(err) => {
+                        active.draft_workspace = WorkspaceMode::LocalCheckout;
+                        state.report_error(err, cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// Create a new session, make it active, and start its provider process.
@@ -733,6 +1097,8 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -775,6 +1141,8 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -837,6 +1205,7 @@ impl AppState {
             return;
         };
         self.shutdown_active();
+        self.mark_visited(session_id);
         let events = self.store.read_events(&meta.id);
         let mut timeline = Timeline::fold_events(events);
         // The provider process is gone; stale approvals / running turns can't
@@ -861,6 +1230,8 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -887,6 +1258,17 @@ impl AppState {
 
     /// Submit a user turn. Starts the provider lazily if needed.
     pub fn send_turn(&mut self, text: String, cx: &mut Context<Self>) {
+        // Group C: a draft in worktree mode creates its worktree in the
+        // background on first send, then re-enters send_turn once ready.
+        if let Some(active) = self.active.as_ref() {
+            if active.draft && !active.preparing_worktree {
+                if let WorkspaceMode::NewWorktree { base } = active.draft_workspace.clone() {
+                    self.begin_worktree_prep(text, base, cx);
+                    return;
+                }
+            }
+        }
+
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
         if self.active_is_draft() {
@@ -904,6 +1286,10 @@ impl AppState {
         };
         let session_id = active.meta.id.clone();
 
+        // Group B: the JSONL length before this turn's user message — the revert
+        // truncation boundary — captured before the message is appended.
+        let checkpoint_offset = self.store.event_count(&session_id);
+
         // Record the user message as a synthetic canonical event so replay
         // renders it identically (providers don't echo user input).
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
@@ -911,6 +1297,9 @@ impl AppState {
             content: ItemContent::UserMessage { text: text.clone() },
         });
         self.record_event(&session_id, &user_event, cx);
+
+        // Group B: snapshot the pre-turn working tree for this turn's revert.
+        self.capture_checkpoint(&session_id, checkpoint_offset, cx);
 
         self.maybe_adopt_title(cx);
 
@@ -1224,6 +1613,8 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -1935,6 +2326,60 @@ fn checkout_if_clean(cwd: &std::path::Path, branch: &str) -> Result<(), Checkout
     Ok(())
 }
 
+/// The path a session's dedicated worktree lives at (`~/.tcode/worktrees/<id>`),
+/// falling back to a temp dir when the home directory is unknown.
+fn worktree_path_for(session_id: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".tcode")
+        .join("worktrees")
+        .join(session_id)
+}
+
+/// Create a dedicated worktree at `path` branching `branch` from `base`, run
+/// from the project checkout `root`. Returns the created worktree path.
+fn create_git_worktree(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    branch: &str,
+    base: &str,
+) -> Result<PathBuf, String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            &path.to_string_lossy(),
+            base,
+        ])
+        .output()
+        .map_err(|e| rust_i18n::t!("errors.worktree_add", error = e).into_owned())?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(rust_i18n::t!("errors.worktree_add", error = stderr.trim()).into_owned());
+    }
+    Ok(path.to_path_buf())
+}
+
+/// Remove the worktree at `path` (force), run from the project checkout `root`.
+fn remove_git_worktree(root: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
+        .output()
+        .map_err(|e| rust_i18n::t!("errors.worktree_remove", error = e).into_owned())?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(rust_i18n::t!("errors.worktree_remove", error = stderr.trim()).into_owned());
+    }
+    Ok(())
+}
+
 /// A filesystem-safe filename fragment: replace path separators and control
 /// characters with `-`, collapse runs, and cap the length.
 fn sanitize_filename(name: &str) -> String {
@@ -2149,6 +2594,8 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -2184,6 +2631,8 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: vec!["first".into(), "second".into()],
             turn_in_flight: false,
             diff_open: false,
@@ -2230,6 +2679,8 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
@@ -2271,6 +2722,8 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
             pending_sends: vec!["do it".into()],
             turn_in_flight: false,
             diff_open: false,
@@ -2298,6 +2751,83 @@ mod tests {
         active.runtime = Runtime::Live(async_channel::unbounded().0);
         active.live_model = active.meta.model.clone();
         assert!(!active.model_changed_while_live());
+    }
+
+    #[test]
+    fn archived_hidden_from_sidebar_and_unread_logic() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-archive-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        let project = Project {
+            id: "p1".into(),
+            name: "Proj".into(),
+            root: PathBuf::from("/p"),
+            created_at: 1,
+        };
+        state.projects = vec![project.clone()];
+        let mut visible = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
+        visible.project_id = Some(project.id.clone());
+        visible.updated_at = 100;
+        let mut archived = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
+        archived.project_id = Some(project.id.clone());
+        archived.updated_at = 100;
+        archived.archived_at = Some(50);
+        state.sessions = vec![visible.clone(), archived.clone()];
+
+        // Sidebar groups exclude archived; the Archived view includes only it.
+        let groups = state.grouped_sessions();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].sessions.len(), 1);
+        assert_eq!(groups[0].sessions[0].id, visible.id);
+        let arch = state.archived_groups();
+        assert_eq!(arch.len(), 1);
+        assert_eq!(arch[0].sessions.len(), 1);
+        assert_eq!(arch[0].sessions[0].id, archived.id);
+
+        // Unread: never-visited is not unread; visited-before-update is unread;
+        // visited-at-or-after-update clears it.
+        assert!(!state.session_unread(&visible.id));
+        state.settings.last_visited.insert(visible.id.clone(), 50);
+        assert!(state.session_unread(&visible.id));
+        assert!(state.project_has_unread(&project.id));
+        state.settings.last_visited.insert(visible.id.clone(), 100);
+        assert!(!state.session_unread(&visible.id));
+        assert!(!state.project_has_unread(&project.id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn worktree_orphan_detected_only_for_last_session() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-wt-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        let worktree = WorktreeInfo {
+            root_project_path: PathBuf::from("/proj"),
+            base: "main".into(),
+            branch: "tcode/shared".into(),
+        };
+        let mut a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt"), None);
+        a.worktree = Some(worktree.clone());
+        let mut b = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt"), None);
+        b.worktree = Some(worktree.clone());
+        let solo = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/plain"), None);
+
+        // Two sessions share the worktree: deleting one does not orphan it.
+        state.sessions = vec![a.clone(), b.clone(), solo.clone()];
+        assert!(state.worktree_orphaned_by_delete(&a.id).is_none());
+        // A session with no worktree never reports an orphan.
+        assert!(state.worktree_orphaned_by_delete(&solo.id).is_none());
+        // Once it's the last session on the worktree, deleting it orphans it.
+        state.sessions = vec![a.clone(), solo];
+        assert_eq!(
+            state.worktree_orphaned_by_delete(&a.id).map(|w| w.branch),
+            Some("tcode/shared".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
