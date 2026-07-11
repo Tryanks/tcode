@@ -97,6 +97,16 @@ fn main() {
     let debug_queue = std::env::args()
         .skip_while(|arg| arg != "--debug-queue")
         .nth(1);
+    // Hidden E2E flag: `--debug-edit-resend "<text>"` runs Edit & resend on the
+    // opened session's LAST user message (the hover action row cannot be clicked
+    // headlessly): the thread is rewound to just before that message — worktree
+    // restored from its checkpoint, JSONL truncated, provider session rolled back
+    // — and `<text>` is sent as a fresh turn. Implies --open-latest.
+    let debug_edit_resend = std::env::args()
+        .skip_while(|arg| arg != "--debug-edit-resend")
+        .nth(1);
+    // Screenshot-only: open the inline message editor on the last user message.
+    let debug_edit_open = std::env::args().any(|arg| arg == "--debug-edit-open");
     // Screenshot-only: seed the command palette query (pairs with --open-palette).
     let debug_palette = std::env::args()
         .skip_while(|arg| arg != "--debug-palette")
@@ -210,7 +220,9 @@ fn main() {
                 || debug_review_comment
                 || debug_live
                 || debug_send.is_some()
-                || debug_queue.is_some();
+                || debug_queue.is_some()
+                || debug_edit_resend.is_some()
+                || debug_edit_open;
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
@@ -364,6 +376,12 @@ fn main() {
                             for message in queued.split('|').filter(|m| !m.trim().is_empty()) {
                                 state.send_turn(message.trim().to_string(), Vec::new(), cx);
                             }
+                        }
+                        if debug_edit_open {
+                            state.debug_edit_open = true;
+                        }
+                        if let Some(text) = debug_edit_resend.clone() {
+                            state.debug_edit_resend(text, cx);
                         }
                     });
                 }

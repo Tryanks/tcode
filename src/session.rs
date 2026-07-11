@@ -559,6 +559,28 @@ impl Timeline {
     }
 }
 
+/// The index in a session's stored event log of the event that introduces the
+/// **first user message of `turn`** — i.e. the JSONL truncation boundary for
+/// rewinding the thread to just before that message (revert / edit & resend).
+///
+/// A checkpoint records this offset when it is captured (`Checkpoint::event_offset`);
+/// this recomputes it by replaying the log, which is what makes rewinding work in
+/// a cwd that has no git checkpoints at all. The two agree — see the tests.
+pub fn turn_user_event_offset(events: &[StoredEvent], turn: usize) -> Option<usize> {
+    let mut timeline = Timeline::default();
+    for (index, stored) in events.iter().enumerate() {
+        let before = timeline.entries.len();
+        timeline.apply_at(stored.ts, &stored.event);
+        let opened_turn = timeline.entries[before..]
+            .iter()
+            .any(|entry| matches!(entry.content, EntryContent::User { .. }) && entry.turn == turn);
+        if opened_turn {
+            return Some(index);
+        }
+    }
+    None
+}
+
 /// Extract a plan's title from its markdown: the text of the first ATX heading
 /// (`#`…`######`), else `None` (callers fall back to a localized "Proposed
 /// plan"). Leading `#`s and surrounding whitespace are stripped.

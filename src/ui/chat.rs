@@ -11,11 +11,12 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
-    WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
+    input::{Input, InputEvent, InputState},
     notification::Notification,
     popover::Popover,
     text::{TextView, TextViewState},
@@ -39,6 +40,12 @@ const CONTENT_MAX_WIDTH: f32 = 768.;
 const CONTENT_MIN_PADDING: f32 = 24.;
 /// How many activity rows to show before the "+N previous log entrys" expander.
 const WORKLOG_VISIBLE_ROWS: usize = 2;
+/// Height reserved under every message for its (hover-revealed) action row, so
+/// revealing it never shifts the timeline.
+const ACTION_ROW_HEIGHT: f32 = 24.;
+/// Vertical rhythm between turns. Turns are separated by space and typographic
+/// hierarchy alone — there is deliberately no rule/divider under the user bubble.
+const TURN_GAP: f32 = 44.;
 
 /// Markdown state that grows with streaming deltas (stream_markdown pattern).
 ///
@@ -125,12 +132,24 @@ impl MdState {
     }
 }
 
+/// An open inline "Edit & resend" editor on a user message.
+struct MessageEditor {
+    /// The timeline turn the edited message opened (the rewind boundary).
+    turn: usize,
+    /// The edited message's entry id (a turn can hold more than one).
+    entry_id: String,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
 pub struct ChatView {
     app_state: Entity<AppState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
     scroll_handle: ScrollHandle,
     md_states: HashMap<String, MdState>,
+    /// The open inline message editor, if any (at most one at a time).
+    editor: Option<MessageEditor>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
     session_key: Option<String>,
@@ -140,9 +159,10 @@ pub struct ChatView {
     follow: bool,
     /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
     _tick: Option<Task<()>>,
-    /// Whether the proposed-plan card's "Copied!" confirmation is showing (2s).
-    plan_copied: bool,
-    _plan_copied_task: Option<Task<()>>,
+    /// Which copy button is currently showing its "Copied!" confirmation (2s):
+    /// the copy target's key (`plan`, `user:<id>`, `assistant:<id>`).
+    copied: Option<String>,
+    _copied_task: Option<Task<()>>,
     /// The live commit dialog entity while it is open (kept alive across frames).
     commit_dialog: Option<Entity<CommitDialog>>,
     _subscriptions: Vec<Subscription>,
@@ -183,12 +203,13 @@ impl ChatView {
             terminal_drawer,
             scroll_handle: ScrollHandle::new(),
             md_states: HashMap::new(),
+            editor: None,
             expanded: HashSet::new(),
             session_key: None,
             follow: true,
             _tick: None,
-            plan_copied: false,
-            _plan_copied_task: None,
+            copied: None,
+            _copied_task: None,
             commit_dialog: None,
             _subscriptions: subscriptions,
         }
@@ -233,6 +254,7 @@ impl ChatView {
         if session_changed {
             self.md_states.clear();
             self.expanded.clear();
+            self.editor = None;
             self.session_key = session_key;
             // A freshly opened session starts pinned to the latest content.
             self.follow = true;
@@ -289,20 +311,38 @@ impl ChatView {
     // -- turn rendering -----------------------------------------------------
 
     /// Render one turn ("Work Log" section) and its surrounding blocks.
+    ///
+    /// `pinned` carries the ids of the last user / last assistant message in the
+    /// whole timeline: their action rows stay visible instead of waiting for a
+    /// hover, so Copy (and Edit / Revert) are never invisible-and-hover-only.
     fn render_turn(
         &self,
         index: usize,
         turn: &TurnMeta,
         cwd: &Path,
         entries: &[&TimelineEntry],
+        pinned: (Option<&str>, Option<&str>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut column = v_flex().w_full().gap_3();
+        let mut column = v_flex().w_full().gap_4();
 
-        // 1. User messages (right-aligned bubbles).
+        // 1. User messages (right-aligned bubbles + their action row).
+        // Only the turn's FIRST user message opens it — a steered/queued message
+        // can join a turn already in progress — so it alone carries the rewind
+        // actions (Edit & resend / Revert), whose boundary is the turn.
+        let mut head_seen = false;
         for entry in entries {
             if let EntryContent::User { text } = &entry.content {
-                column = column.child(self.render_user(index, text, cx));
+                let is_head = !head_seen;
+                head_seen = true;
+                column = column.child(self.render_user(
+                    index,
+                    &entry.id,
+                    text,
+                    is_head,
+                    pinned.0 == Some(entry.id.as_str()),
+                    cx,
+                ));
             }
         }
 
@@ -328,7 +368,12 @@ impl ChatView {
         // 3. Assistant markdown.
         for entry in entries {
             if let EntryContent::Assistant { text } = &entry.content {
-                column = column.child(self.render_assistant(&entry.id, text, cx));
+                column = column.child(self.render_assistant(
+                    &entry.id,
+                    text,
+                    pinned.1 == Some(entry.id.as_str()),
+                    cx,
+                ));
             }
         }
 
@@ -376,100 +421,351 @@ impl ChatView {
         column.into_any_element()
     }
 
-    fn render_user(&self, turn: usize, text: &str, cx: &mut Context<Self>) -> AnyElement {
-        // A user bubble whose turn has a checkpoint gets a hover "revert"
-        // affordance (Group B): rewind the thread to just before this message.
-        let has_checkpoint = self.app_state.read(cx).turn_has_checkpoint(turn);
+    /// A user message: the right-aligned bubble plus its action row (Copy ·
+    /// Edit & resend · Revert). The row's height is always reserved, so revealing
+    /// it on hover never shifts the timeline; it is revealed for `pinned` (the
+    /// last user message) so the actions are reachable without hovering.
+    ///
+    /// While this message is being edited the bubble is replaced by the inline
+    /// editor.
+    fn render_user(
+        &self,
+        turn: usize,
+        entry_id: &str,
+        text: &str,
+        is_head: bool,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.entry_id == entry_id)
+        {
+            return self.render_message_editor(turn, cx);
+        }
+
+        let group_key = SharedString::from(format!("user-{entry_id}"));
         let turn_running = self
             .app_state
             .read(cx)
             .active
             .as_ref()
             .is_some_and(|a| a.timeline.turn_running);
-        let group_key = format!("user-turn-{turn}");
-        let mut row = h_flex()
-            .group(group_key.clone())
-            .w_full()
-            .justify_end()
-            .items_center()
-            .gap_2();
+        // Only the message that opened the turn can rewind it, and only a turn
+        // with a checkpoint can restore the worktree (Group B).
+        let has_checkpoint = is_head && self.app_state.read(cx).turn_has_checkpoint(turn);
 
-        if has_checkpoint && !turn_running {
-            let app_state = self.app_state.clone();
-            row = row.child(
-                div()
-                    .invisible()
-                    .group_hover(group_key.clone(), |s| s.visible())
-                    .child(
-                        Button::new(("revert", turn))
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(
-                                Icon::empty()
-                                    .path("icons/rotate-ccw.svg")
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .tooltip(rust_i18n::t!("checkpoint.revert_tooltip"))
-                            .on_click(move |_, window, cx| {
-                                let app_state = app_state.clone();
-                                window.open_alert_dialog(cx, move |alert, _, _| {
-                                    let app_state = app_state.clone();
-                                    alert
-                                        .title(rust_i18n::t!(
-                                            "checkpoint.revert_title",
-                                            turn = turn
-                                        ))
-                                        .description(rust_i18n::t!("checkpoint.revert_description"))
-                                        .button_props(
-                                            DialogButtonProps::default()
-                                                .ok_variant(ButtonVariant::Danger)
-                                                .ok_text(rust_i18n::t!("checkpoint.revert_action"))
-                                                .cancel_text(rust_i18n::t!("settings.cancel"))
-                                                .show_cancel(true),
-                                        )
-                                        .on_ok(move |_, _, cx| {
-                                            app_state.update(cx, |state, cx| {
-                                                state.revert_to_turn(turn, cx);
-                                            });
-                                            true
-                                        })
-                                });
-                            }),
-                    ),
+        let mut actions = h_flex()
+            .gap_1()
+            .items_center()
+            .justify_end()
+            .child(self.render_copy_button(&format!("user:{entry_id}"), text.to_string(), cx));
+
+        if is_head {
+            let edit_text = text.to_string();
+            let edit_id = entry_id.to_string();
+            actions = actions.child(
+                Button::new(SharedString::from(format!("edit-{entry_id}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::empty().path("icons/pencil.svg"))
+                    .label(rust_i18n::t!("chat.edit_message"))
+                    .disabled(turn_running)
+                    .tooltip(if turn_running {
+                        rust_i18n::t!("chat.edit_blocked")
+                    } else {
+                        rust_i18n::t!("chat.edit_message_tooltip")
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_edit(turn, edit_id.clone(), edit_text.clone(), window, cx);
+                    })),
             );
         }
 
-        row.child(
-            div()
-                .max_w_3_4()
-                .px_4()
-                .py_3()
-                .rounded_xl()
-                .bg(cx.theme().muted)
-                .text_color(cx.theme().foreground)
-                .text_size(px(15.))
-                .child(text.to_string()),
-        )
-        .into_any_element()
+        if has_checkpoint {
+            let app_state = self.app_state.clone();
+            actions = actions.child(
+                Button::new(SharedString::from(format!("revert-{entry_id}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::empty().path("icons/rotate-ccw.svg"))
+                    .label(rust_i18n::t!("checkpoint.revert_action"))
+                    .disabled(turn_running)
+                    .tooltip(if turn_running {
+                        rust_i18n::t!("checkpoint.revert_blocked")
+                    } else {
+                        rust_i18n::t!("checkpoint.revert_tooltip")
+                    })
+                    .on_click(move |_, window, cx| {
+                        let app_state = app_state.clone();
+                        window.open_alert_dialog(cx, move |alert, _, _| {
+                            let app_state = app_state.clone();
+                            alert
+                                .title(rust_i18n::t!("checkpoint.revert_title", turn = turn))
+                                .description(rust_i18n::t!("checkpoint.revert_description"))
+                                .button_props(
+                                    DialogButtonProps::default()
+                                        .ok_variant(ButtonVariant::Danger)
+                                        .ok_text(rust_i18n::t!("checkpoint.revert_action"))
+                                        .cancel_text(rust_i18n::t!("settings.cancel"))
+                                        .show_cancel(true),
+                                )
+                                .on_ok(move |_, _, cx| {
+                                    app_state.update(cx, |state, cx| {
+                                        state.revert_to_turn(turn, cx);
+                                    });
+                                    true
+                                })
+                        });
+                    }),
+            );
+        }
+
+        v_flex()
+            .group(group_key.clone())
+            .w_full()
+            .items_end()
+            .gap(px(2.))
+            .child(
+                div()
+                    .max_w_3_4()
+                    .px_4()
+                    .py_3()
+                    .rounded_xl()
+                    .bg(cx.theme().muted)
+                    .text_color(cx.theme().foreground)
+                    .text_size(px(15.))
+                    .child(text.to_string()),
+            )
+            .child(self.reserve_action_row(actions, group_key, pinned))
+            .into_any_element()
     }
 
-    fn render_assistant(&self, id: &str, text: &str, _cx: &mut Context<Self>) -> AnyElement {
+    /// An assistant message: the rendered markdown plus a hover-revealed Copy
+    /// action (raw text, not the rendered markdown). Same reserved-height row as
+    /// the user bubble, so nothing jumps.
+    fn render_assistant(
+        &self,
+        id: &str,
+        text: &str,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let content: AnyElement = if let Some(md) = self.md_states.get(id) {
             TextView::new(&md.state).selectable(true).into_any_element()
         } else {
             div().child(text.to_string()).into_any_element()
         };
-        div()
+        let group_key = SharedString::from(format!("assistant-{id}"));
+        let actions = h_flex()
+            .gap_1()
+            .items_center()
+            .child(self.render_copy_button(&format!("assistant:{id}"), text.to_string(), cx));
+
+        v_flex()
+            .group(group_key.clone())
             .w_full()
-            .text_size(px(15.))
-            .line_height(px(26.))
-            .child(content)
+            .items_start()
+            .gap(px(2.))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(15.))
+                    .line_height(px(26.))
+                    .child(content),
+            )
+            .child(self.reserve_action_row(actions, group_key, pinned))
             .into_any_element()
     }
 
-    /// The Work Log section: a top divider, activity rows (collapsible), and a
-    /// "Worked for XmYYs" footer (or a live "Working for Ns" indicator).
+    /// Wrap a message's action row so it occupies its height whether or not it is
+    /// showing (no layout shift on hover) and is revealed by hovering the message
+    /// — or unconditionally when `pinned` (the newest message of its kind).
+    fn reserve_action_row(
+        &self,
+        actions: gpui::Div,
+        group_key: SharedString,
+        pinned: bool,
+    ) -> impl IntoElement {
+        div()
+            .h(px(ACTION_ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .when(!pinned, |this| {
+                this.invisible()
+                    .group_hover(group_key, |style| style.visible())
+            })
+            .child(actions)
+    }
+
+    /// A Copy button for one message: puts the RAW text on the clipboard and
+    /// flips to "Copied!" for 2s (the plan card's confirmation, shared).
+    fn render_copy_button(
+        &self,
+        key: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let copied = self.copied.as_deref() == Some(key);
+        let mark = key.to_string();
+        Button::new(SharedString::from(format!("copy-{key}")))
+            .ghost()
+            .xsmall()
+            .icon(if copied {
+                IconName::Check
+            } else {
+                IconName::Copy
+            })
+            .label(if copied {
+                rust_i18n::t!("chat.copied")
+            } else {
+                rust_i18n::t!("chat.copy")
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.write_to_clipboard(copy_payload(&text));
+                this.mark_copied(mark.clone(), cx);
+            }))
+    }
+
+    // -- edit & resend ------------------------------------------------------
+
+    /// Open the inline editor on a user message, seeded with its original text.
+    fn start_edit(
+        &mut self,
+        turn: usize,
+        entry_id: String,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(1, 12)
+                .submit_on_enter(true)
+                .default_value(text)
+        });
+        // Enter (without shift) resends; Esc is handled on the editor's wrapper.
+        let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                this.confirm_edit(window, cx);
+            }
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.editor = Some(MessageEditor {
+            turn,
+            entry_id,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.editor = None;
+        cx.notify();
+    }
+
+    /// Resend the edited text: the thread rewinds to the state just before the
+    /// edited message (worktree + transcript + provider session) and the new text
+    /// is sent as a fresh turn.
+    fn confirm_edit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        let text = editor.input.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let turn = editor.turn;
+        self.app_state
+            .update(cx, |state, cx| state.edit_and_resend_turn(turn, text, cx));
+        self.follow = true;
+        self.scroll_handle.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// The inline editor that replaces a user bubble while it is being edited:
+    /// a multi-line input (Enter resends, Esc cancels) + explicit Cancel / Resend.
+    fn render_message_editor(&self, turn: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(editor) = self.editor.as_ref().filter(|e| e.turn == turn) else {
+            return div().into_any_element();
+        };
+        let running = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .is_some_and(|a| a.timeline.turn_running);
+
+        v_flex()
+            .id(("message-editor", turn))
+            .w_full()
+            .gap_2()
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key.as_str() == "escape" {
+                    this.cancel_edit(cx);
+                }
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(cx.theme().primary)
+                    .bg(cx.theme().background)
+                    .text_size(px(15.))
+                    .child(Input::new(&editor.input).appearance(false)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(rust_i18n::t!("chat.edit_hint")),
+                    )
+                    .child(
+                        Button::new("edit-cancel")
+                            .ghost()
+                            .xsmall()
+                            .label(rust_i18n::t!("settings.cancel"))
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx))),
+                    )
+                    .child(
+                        Button::new("edit-resend")
+                            .primary()
+                            .xsmall()
+                            .label(rust_i18n::t!("chat.resend"))
+                            .disabled(running)
+                            .tooltip(if running {
+                                rust_i18n::t!("chat.edit_blocked")
+                            } else {
+                                rust_i18n::t!("chat.resend_tooltip")
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.confirm_edit(window, cx)),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The Work Log section: activity rows (collapsible) and a "Worked for XmYYs"
+    /// footer (or a live "Working for Ns" indicator).
+    ///
+    /// It used to hang off a hairline that ran right under the user bubble; the
+    /// rule is gone. Turns read as separate because of the space around them
+    /// (`TURN_GAP`) and the uppercase 11px label that opens the section — rhythm
+    /// and hierarchy, not another line.
     fn render_work_log(
         &self,
         index: usize,
@@ -483,12 +779,7 @@ impl ChatView {
         let expanded = turn.running || self.expanded.contains(&section_key);
         let muted = cx.theme().muted_foreground;
 
-        let mut section = v_flex()
-            .w_full()
-            .pt_4()
-            .gap_2()
-            .border_t_1()
-            .border_color(cx.theme().border);
+        let mut section = v_flex().w_full().gap_2();
 
         if expanded {
             if !turn.running {
@@ -497,7 +788,7 @@ impl ChatView {
                         .text_size(px(11.))
                         .font_medium()
                         .text_color(muted)
-                        .child(rust_i18n::t!("chat.work_log")),
+                        .child(rust_i18n::t!("chat.work_log").to_uppercase()),
                 );
             }
 
@@ -866,7 +1157,7 @@ impl ChatView {
         let md_copy = markdown.to_string();
         let md_download = markdown.to_string();
         let md_save = markdown.to_string();
-        let copied = self.plan_copied;
+        let copied = self.copied.as_deref() == Some("plan");
 
         v_flex()
             .w_full()
@@ -937,7 +1228,7 @@ impl ChatView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
                                 this.app_state.update(cx, |s, cx| s.copy_plan(md, cx));
-                                this.mark_plan_copied(cx);
+                                this.mark_copied("plan".into(), cx);
                             })),
                     )
                     .child(
@@ -967,13 +1258,17 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn mark_plan_copied(&mut self, cx: &mut Context<Self>) {
-        self.plan_copied = true;
-        self._plan_copied_task = Some(cx.spawn(async move |this, cx| {
+    /// Show the "Copied!" confirmation on the copy button identified by `key` for
+    /// 2s (T3's confirmation). One at a time: a second copy re-arms the timer.
+    fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
+        self.copied = Some(key.clone());
+        self._copied_task = Some(cx.spawn(async move |this, cx| {
             smol::Timer::after(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
-                this.plan_copied = false;
-                cx.notify();
+                if this.copied.as_deref() == Some(key.as_str()) {
+                    this.copied = None;
+                    cx.notify();
+                }
             });
         }));
         cx.notify();
@@ -1452,6 +1747,31 @@ impl Render for ChatView {
             self.open_commit_dialog(GitAction::Commit, window, cx);
         }
 
+        // Screenshot-only: `--debug-edit-open` opens the inline message editor on
+        // the last user message (a hover + click is not drivable headlessly).
+        // Consumed once.
+        let open_editor = self.app_state.update(cx, |state, _| {
+            let armed = state.debug_edit_open && state.active.is_some();
+            if armed {
+                state.debug_edit_open = false;
+            }
+            armed
+        });
+        if open_editor
+            && let Some((turn, id, text)) = self.app_state.read(cx).active.as_ref().and_then(|a| {
+                a.timeline
+                    .entries
+                    .iter()
+                    .rev()
+                    .find_map(|e| match &e.content {
+                        EntryContent::User { text } => Some((e.turn, e.id.clone(), text.clone())),
+                        _ => None,
+                    })
+            })
+        {
+            self.start_edit(turn, id, text, window, cx);
+        }
+
         let active = {
             let state = self.app_state.read(cx);
             state.active.as_ref().map(|active| {
@@ -1489,18 +1809,32 @@ impl Render for ChatView {
         // `CONTENT_MAX_WIDTH`; horizontal padding lives on the centering wrapper
         // (below) so the column shrinks gracefully — never clipping — when the
         // diff panel narrows the chat region.
+        // The newest user / assistant message: their action rows stay visible
+        // (hover is not the only way to reach Copy / Edit / Revert).
+        let last_user_id = entries
+            .iter()
+            .rev()
+            .find(|e| matches!(e.content, EntryContent::User { .. }))
+            .map(|e| e.id.clone());
+        let last_assistant_id = entries
+            .iter()
+            .rev()
+            .find(|e| matches!(e.content, EntryContent::Assistant { .. }))
+            .map(|e| e.id.clone());
+        let pinned = (last_user_id.as_deref(), last_assistant_id.as_deref());
+
         let mut column = v_flex()
             .w_full()
             .max_w(px(CONTENT_MAX_WIDTH))
             .py_6()
-            .gap_8();
+            .gap(px(TURN_GAP));
         for (index, turn) in turns.iter().enumerate() {
             let turn_entries: Vec<&TimelineEntry> =
                 entries.iter().filter(|e| e.turn == index).collect();
             if turn_entries.is_empty() {
                 continue;
             }
-            column = column.child(self.render_turn(index, turn, &cwd, &turn_entries, cx));
+            column = column.child(self.render_turn(index, turn, &cwd, &turn_entries, pinned, cx));
         }
 
         let main = v_flex()
@@ -1564,6 +1898,13 @@ impl Render for ChatView {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The clipboard payload of a message's Copy action: the message's **raw text**
+/// (the markdown source a message was written in / streamed as), never the
+/// rendered document the timeline draws. See `copy_puts_raw_text_on_the_clipboard`.
+fn copy_payload(text: &str) -> ClipboardItem {
+    ClipboardItem::new_string(text.to_string())
+}
 
 fn chevron(open: bool) -> IconName {
     if open {
@@ -1796,10 +2137,29 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MdState, MdSync, md_sync, relativize};
+    use super::{MdState, MdSync, copy_payload, md_sync, relativize};
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::text::TextViewState;
     use std::path::Path;
+
+    /// A message's Copy action puts the RAW text on the clipboard — the markdown
+    /// source, not the document the timeline renders from it (which drops the
+    /// syntax: `**bold**` renders as "bold").
+    #[gpui::test]
+    fn copy_puts_raw_text_on_the_clipboard(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let raw = "Done — **bold**, `code` and:\n\n- one\n- two\n";
+
+        let payload = copy_payload(raw);
+        assert_eq!(payload.text().as_deref(), Some(raw));
+
+        // The rendered document is a different (lossy) string; copying it would
+        // be the bug this test exists to prevent.
+        let md = cx.update(|cx| MdState::new(raw, false, cx));
+        let rendered = rendered(&md.state, cx);
+        assert_ne!(rendered, raw);
+        assert!(!rendered.contains("**"));
+    }
 
     #[test]
     fn relativize_strips_cwd_prefix() {
