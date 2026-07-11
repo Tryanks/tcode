@@ -9,12 +9,112 @@ use agent::{
     TurnStatus, list_models, start_session,
 };
 use gpui::{Context, EventEmitter, Task};
+use serde::{Deserialize, Serialize};
 
 use crate::session::Timeline;
 use crate::settings::{ProjectSort, Settings, SettingsStore};
 use crate::store::{Project, SessionMeta, SessionStore, now_millis, now_secs};
 
 const TITLE_MAX_CHARS: usize = 40;
+pub const MAX_TERMINALS_PER_SESSION: usize = 6;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct TerminalPreferences {
+    open: bool,
+    height: f32,
+    count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSplitDirection {
+    Horizontal,
+    Vertical,
+}
+
+pub struct TerminalEntry {
+    pub id: u64,
+    pub terminal: term::Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSplit {
+    pub first: u64,
+    pub second: u64,
+    pub direction: TerminalSplitDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalContext {
+    pub id: u64,
+    pub terminal_label: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub text: String,
+}
+
+pub struct TerminalWorkspace {
+    pub open: bool,
+    pub height: f32,
+    pub terminals: Vec<TerminalEntry>,
+    pub active_id: Option<u64>,
+    pub splits: Vec<TerminalSplit>,
+    pub contexts: Vec<TerminalContext>,
+    next_id: u64,
+    next_context_id: u64,
+}
+
+impl Default for TerminalWorkspace {
+    fn default() -> Self {
+        Self {
+            open: false,
+            height: 240.,
+            terminals: Vec::new(),
+            active_id: None,
+            splits: Vec::new(),
+            contexts: Vec::new(),
+            next_id: 1,
+            next_context_id: 1,
+        }
+    }
+}
+
+impl TerminalWorkspace {
+    pub fn active(&self) -> Option<&TerminalEntry> {
+        let id = self.active_id?;
+        self.terminals.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn terminal(&self, id: u64) -> Option<&TerminalEntry> {
+        self.terminals.iter().find(|entry| entry.id == id)
+    }
+
+    fn push(&mut self, terminal: term::Terminal) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.terminals.push(TerminalEntry { id, terminal });
+        self.active_id = Some(id);
+        id
+    }
+
+    pub fn split_for(&self, terminal_id: u64) -> Option<TerminalSplit> {
+        self.splits
+            .iter()
+            .copied()
+            .find(|split| split.first == terminal_id || split.second == terminal_id)
+    }
+
+    pub fn add_context(&mut self, label: String, selection: term::SelectedText) {
+        let id = self.next_context_id;
+        self.next_context_id += 1;
+        self.contexts.push(TerminalContext {
+            id,
+            terminal_label: label,
+            line_start: selection.line_start,
+            line_end: selection.line_end,
+            text: selection.text,
+        });
+    }
+}
 
 /// A project and its sessions, ready for the sidebar (newest activity first).
 #[derive(Debug, Clone)]
@@ -152,10 +252,8 @@ pub struct ActiveSession {
     /// Set when the user manually closed the right panel during the current
     /// turn, so `auto_open_task_panel` doesn't re-open it until the next turn.
     auto_open_suppressed: bool,
-    /// Bottom terminal drawer state and its lazily-spawned per-session PTY.
-    pub terminal_open: bool,
-    pub terminal_height: f32,
-    pub terminal: Option<term::Terminal>,
+    /// Bottom terminal drawer state and its lazily-spawned per-session PTYs.
+    pub terminal_workspace: TerminalWorkspace,
     _pump: Option<Task<()>>,
 }
 
@@ -271,6 +369,8 @@ pub struct AppState {
     /// Providers whose catalog is currently being fetched (drives the picker's
     /// "Loading models…" row when the cache is also empty).
     pub models_loading: HashMap<ProviderKind, bool>,
+    terminal_preferences_path: PathBuf,
+    terminal_preferences: HashMap<String, TerminalPreferences>,
     next_start_generation: u64,
 }
 
@@ -288,6 +388,11 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        let terminal_preferences_path = store.root().join("terminal-ui.json");
+        let terminal_preferences = std::fs::read(&terminal_preferences_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         // Seed the model picker from the persisted cache so it is instant and
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
@@ -317,6 +422,8 @@ impl AppState {
             palette_open: false,
             model_catalogs,
             models_loading: HashMap::new(),
+            terminal_preferences_path,
+            terminal_preferences,
             next_start_generation: 0,
         }
     }
@@ -517,10 +624,39 @@ impl AppState {
 
     // -- terminal drawer (per-session, in-memory) --------------------------
 
+    fn persist_terminal_preferences(&mut self) {
+        if let Some(active) = self.active.as_ref() {
+            let workspace = &active.terminal_workspace;
+            self.terminal_preferences.insert(
+                active.meta.id.clone(),
+                TerminalPreferences {
+                    open: workspace.open,
+                    height: workspace.height,
+                    count: workspace.terminals.len(),
+                },
+            );
+        }
+        match serde_json::to_vec_pretty(&self.terminal_preferences) {
+            Ok(bytes) => {
+                if let Err(error) = std::fs::write(&self.terminal_preferences_path, bytes) {
+                    log::warn!("failed to persist terminal UI state: {error}");
+                }
+            }
+            Err(error) => log::warn!("failed to encode terminal UI state: {error}"),
+        }
+    }
+
+    pub fn set_terminal_height(&mut self, height: f32) {
+        if let Some(active) = self.active.as_mut() {
+            active.terminal_workspace.height = height;
+            self.persist_terminal_preferences();
+        }
+    }
+
     pub fn terminal_panel_open(&self) -> bool {
         self.active
             .as_ref()
-            .is_some_and(|active| active.terminal_open)
+            .is_some_and(|active| active.terminal_workspace.open)
     }
 
     pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
@@ -535,9 +671,11 @@ impl AppState {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        if active.terminal.is_none() {
+        if active.terminal_workspace.terminals.is_empty() {
             match term::Terminal::spawn(&active.meta.cwd) {
-                Ok(terminal) => active.terminal = Some(terminal),
+                Ok(terminal) => {
+                    active.terminal_workspace.push(terminal);
+                }
                 Err(error) => {
                     self.report_error(
                         rust_i18n::t!("errors.terminal_start", error = error).into_owned(),
@@ -547,13 +685,15 @@ impl AppState {
                 }
             }
         }
-        active.terminal_open = true;
+        active.terminal_workspace.open = true;
+        self.persist_terminal_preferences();
         cx.notify();
     }
 
     pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
-            active.terminal_open = false;
+            active.terminal_workspace.open = false;
+            self.persist_terminal_preferences();
             cx.notify();
         }
     }
@@ -562,16 +702,166 @@ impl AppState {
         let Some(active) = self.active.as_mut() else {
             return;
         };
+        let active_id = active.terminal_workspace.active_id;
         match term::Terminal::spawn(&active.meta.cwd) {
             Ok(terminal) => {
-                active.terminal = Some(terminal);
-                active.terminal_open = true;
+                if let Some(entry) = active
+                    .terminal_workspace
+                    .terminals
+                    .iter_mut()
+                    .find(|entry| Some(entry.id) == active_id)
+                {
+                    entry.terminal = terminal;
+                } else {
+                    active.terminal_workspace.push(terminal);
+                }
+                active.terminal_workspace.open = true;
+                self.persist_terminal_preferences();
                 cx.notify();
             }
             Err(error) => self.report_error(
                 rust_i18n::t!("errors.terminal_restart", error = error).into_owned(),
                 cx,
             ),
+        }
+    }
+
+    pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else { return };
+        if active.terminal_workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION {
+            return;
+        }
+        match term::Terminal::spawn(&active.meta.cwd) {
+            Ok(terminal) => {
+                active.terminal_workspace.push(terminal);
+                active.terminal_workspace.open = true;
+                self.persist_terminal_preferences();
+                cx.notify();
+            }
+            Err(error) => self.report_error(
+                rust_i18n::t!("errors.terminal_start", error = error).into_owned(),
+                cx,
+            ),
+        }
+    }
+
+    pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else { return };
+        if active.terminal_workspace.terminal(terminal_id).is_some() {
+            active.terminal_workspace.active_id = Some(terminal_id);
+            cx.notify();
+        }
+    }
+
+    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else { return };
+        let workspace = &mut active.terminal_workspace;
+        workspace.terminals.retain(|entry| entry.id != terminal_id);
+        workspace
+            .splits
+            .retain(|split| split.first != terminal_id && split.second != terminal_id);
+        if workspace.active_id == Some(terminal_id) {
+            workspace.active_id = workspace.terminals.last().map(|entry| entry.id);
+        }
+        if workspace.terminals.is_empty() {
+            workspace.open = false;
+        }
+        self.persist_terminal_preferences();
+        cx.notify();
+    }
+
+    pub fn split_terminal(
+        &mut self,
+        direction: TerminalSplitDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active.as_mut() else { return };
+        let workspace = &mut active.terminal_workspace;
+        let Some(first) = workspace.active_id else { return };
+        if workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION
+            || workspace.split_for(first).is_some()
+        {
+            return;
+        }
+        match term::Terminal::spawn(&active.meta.cwd) {
+            Ok(terminal) => {
+                let second = workspace.push(terminal);
+                workspace.splits.push(TerminalSplit {
+                    first,
+                    second,
+                    direction,
+                });
+                self.persist_terminal_preferences();
+                cx.notify();
+            }
+            Err(error) => self.report_error(
+                rust_i18n::t!("errors.terminal_start", error = error).into_owned(),
+                cx,
+            ),
+        }
+    }
+
+    pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else { return };
+        let Some(entry) = active.terminal_workspace.terminal(terminal_id) else { return };
+        let label = entry.terminal.label();
+        let selection = entry.terminal.selected_text();
+        if let Some(selection) = selection {
+            active.terminal_workspace.add_context(label, selection);
+            cx.notify();
+        }
+    }
+
+    /// Hidden visual-QA fixture: two live PTYs in a split plus a captured chip.
+    pub fn open_terminal_demo(&mut self, cx: &mut Context<Self>) {
+        self.open_terminal_panel(cx);
+        self.split_terminal(TerminalSplitDirection::Horizontal, cx);
+        let Some((first, second)) = self.active.as_ref().and_then(|active| {
+            let split = active.terminal_workspace.splits.first()?;
+            Some((split.first, split.second))
+        }) else {
+            return;
+        };
+        if let Some(active) = self.active.as_ref() {
+            if let Some(entry) = active.terminal_workspace.terminal(first) {
+                entry
+                    .terminal
+                    .write_input(b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec());
+            }
+            if let Some(entry) = active.terminal_workspace.terminal(second) {
+                entry
+                    .terminal
+                    .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
+            }
+        }
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(700)).await;
+            let _ = this.update(cx, |state, cx| {
+                let selected = state.active.as_ref().and_then(|active| {
+                    let entry = active.terminal_workspace.terminal(first)?;
+                    let snapshot = entry.terminal.snapshot();
+                    let row = snapshot
+                        .text()
+                        .lines()
+                        .position(|line| line.contains("select this output"))?;
+                    entry.terminal.select((row, 0), (row, 17));
+                    Some(())
+                });
+                if selected.is_some() {
+                    state.capture_terminal_selection(first, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn remove_terminal_context(&mut self, context_id: u64, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            active
+                .terminal_workspace
+                .contexts
+                .retain(|context| context.id != context_id);
+            cx.notify();
         }
     }
 
@@ -740,9 +1030,7 @@ impl AppState {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
         self.ensure_started(cx);
@@ -782,9 +1070,7 @@ impl AppState {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
     }
@@ -848,6 +1134,11 @@ impl AppState {
             timeline.entries.len(),
             meta.resume_cursor.is_some()
         );
+        let terminal_preferences = self.terminal_preferences.get(&meta.id).copied();
+        let mut terminal_workspace = TerminalWorkspace::default();
+        if let Some(preferences) = terminal_preferences {
+            terminal_workspace.height = preferences.height.clamp(120., 600.);
+        }
         let git_branch = read_git_branch(&meta.cwd);
         self.active = Some(ActiveSession {
             meta,
@@ -868,11 +1159,18 @@ impl AppState {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace,
             _pump: None,
         });
+        if terminal_preferences.is_some_and(|preferences| preferences.open) {
+            self.open_terminal_panel(cx);
+            let count = terminal_preferences
+                .map(|preferences| preferences.count.clamp(1, MAX_TERMINALS_PER_SESSION))
+                .unwrap_or(1);
+            for _ in 1..count {
+                self.new_terminal(cx);
+            }
+        }
         cx.notify();
     }
 
@@ -1231,9 +1529,7 @@ impl AppState {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
         self.send_turn(crate::session::implement_prompt(&markdown), cx);
@@ -1828,6 +2124,7 @@ impl AppState {
     }
 
     pub fn shutdown_active(&mut self) {
+        self.persist_terminal_preferences();
         if let Some(active) = self.active.take() {
             if let Runtime::Live(commands) = active.runtime {
                 let _ = commands.try_send(SessionCommand::Shutdown);
@@ -2156,9 +2453,7 @@ mod tests {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
 
@@ -2191,9 +2486,7 @@ mod tests {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
 
@@ -2237,9 +2530,7 @@ mod tests {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
 
@@ -2278,9 +2569,7 @@ mod tests {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_open: false,
-            terminal_height: 240.,
-            terminal: None,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
 

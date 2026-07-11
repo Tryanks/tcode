@@ -13,6 +13,8 @@ use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
     grid::{Dimensions, Scroll},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
     sync::FairMutex,
     term::{Config, cell::Flags},
     tty,
@@ -39,6 +41,14 @@ pub struct Cell {
     pub italic: bool,
     pub underline: bool,
     pub inverse: bool,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedText {
+    pub line_start: usize,
+    pub line_end: usize,
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +125,8 @@ struct Shared {
     title: String,
     exited: bool,
     exit_code: Option<i32>,
+    command_line: String,
+    command_label: Option<String>,
 }
 
 /// A single PTY-backed terminal. Clones share the same process and grid.
@@ -175,6 +187,8 @@ impl Terminal {
             title: shell_name.clone(),
             exited: false,
             exit_code: None,
+            command_line: String::new(),
+            command_label: None,
         }));
         event_loop.spawn();
 
@@ -189,6 +203,7 @@ impl Terminal {
                         Event::ChildExit(code) => {
                             shared.exited = true;
                             shared.exit_code = Some(code);
+                            shared.command_label = None;
                         }
                         _ => {}
                     }
@@ -211,8 +226,20 @@ impl Terminal {
         &self.cwd
     }
 
+    /// Shell name, temporarily replaced by the argv0 of the last submitted command.
+    pub fn label(&self) -> String {
+        self.shared
+            .lock()
+            .unwrap()
+            .command_label
+            .clone()
+            .unwrap_or_else(|| self.shell_name.clone())
+    }
+
     pub fn write_input(&self, bytes: impl Into<Vec<u8>>) {
-        let _ = self.notifier.0.send(Msg::Input(bytes.into().into()));
+        let bytes = bytes.into();
+        track_command_input(&mut self.shared.lock().unwrap(), &bytes);
+        let _ = self.notifier.0.send(Msg::Input(bytes.into()));
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
@@ -235,6 +262,38 @@ impl Terminal {
         self.term.lock().scroll_display(Scroll::Delta(lines));
     }
 
+    /// Start or update a simple selection using zero-based visible grid coordinates.
+    pub fn select(&self, start: (usize, usize), end: (usize, usize)) {
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = |(row, col): (usize, usize)| {
+            Point::new(Line(row as i32 - offset), Column(col.min(term.columns() - 1)))
+        };
+        let mut selection = Selection::new(SelectionType::Simple, point(start), Side::Left);
+        selection.update(point(end), Side::Right);
+        term.selection = Some(selection);
+    }
+
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
+    pub fn selected_text(&self) -> Option<SelectedText> {
+        let term = self.term.lock();
+        let range = term.selection.as_ref()?.to_range(&term)?;
+        let history = term.history_size() as i32;
+        let line_number = |line: Line| (history + line.0 + 1).max(1) as usize;
+        let text = term.selection_to_string()?.trim_matches('\n').to_string();
+        if text.is_empty() {
+            return None;
+        }
+        Some(SelectedText {
+            line_start: line_number(range.start.line),
+            line_end: line_number(range.end.line),
+            text,
+        })
+    }
+
     pub fn snapshot(&self) -> TermState {
         let term = self.term.lock();
         let content = term.renderable_content();
@@ -246,6 +305,7 @@ impl Terminal {
         } else {
             None
         };
+        let selection = content.selection;
         let cells = content
             .display_iter
             .map(|indexed| {
@@ -258,6 +318,7 @@ impl Terminal {
                     italic: cell.flags.contains(Flags::ITALIC),
                     underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                     inverse: cell.flags.contains(Flags::INVERSE),
+                    selected: selection.is_some_and(|range| range.contains(indexed.point)),
                 }
             })
             .collect();
@@ -271,6 +332,33 @@ impl Terminal {
             exited: shared.exited,
             exit_code: shared.exit_code,
             display_offset: content.display_offset,
+        }
+    }
+}
+
+/// Derive the compact tab label used after a command is submitted.
+pub fn derive_command_label(command: &str) -> Option<String> {
+    let first = command.trim().split_whitespace().next()?;
+    let first = first.rsplit('/').next().unwrap_or(first);
+    (!first.is_empty()).then(|| first.to_string())
+}
+
+fn track_command_input(shared: &mut Shared, bytes: &[u8]) {
+    for &byte in bytes {
+        match byte {
+            3 => {
+                shared.command_line.clear();
+                shared.command_label = None;
+            }
+            b'\r' | b'\n' => {
+                shared.command_label = derive_command_label(&shared.command_line);
+                shared.command_line.clear();
+            }
+            0x7f | 0x08 => {
+                shared.command_line.pop();
+            }
+            0x20..=0x7e => shared.command_line.push(byte as char),
+            _ => {}
         }
     }
 }
@@ -358,5 +446,24 @@ mod tests {
         term.write_input(b"echo tcode-term-ok\r".to_vec());
         let state = wait_until(&term, |state| state.text().contains("echo tcode-term-ok"));
         assert!(state.text().contains("echo tcode-term-ok"));
+    }
+
+    #[test]
+    fn derives_command_label_from_argv0() {
+        assert_eq!(derive_command_label("  /usr/bin/cargo test --workspace"), Some("cargo".into()));
+        assert_eq!(derive_command_label("   "), None);
+    }
+
+    #[test]
+    fn programmatic_selection_returns_grid_text() {
+        let term = command("printf 'alpha\\nbeta\\n'; sleep 1");
+        let state = wait_until(&term, |state| state.text().contains("beta"));
+        let alpha_row = state.text().lines().position(|line| line.contains("alpha")).unwrap();
+        let beta_row = state.text().lines().position(|line| line.contains("beta")).unwrap();
+        term.select((alpha_row, 0), (beta_row, 3));
+        let selected = term.selected_text().unwrap();
+        assert_eq!(selected.text, "alpha\nbeta");
+        assert_eq!(selected.line_end, selected.line_start + 1);
+        assert!(term.snapshot().cells.iter().any(|cell| cell.selected));
     }
 }
