@@ -5,15 +5,17 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use std::path::PathBuf;
+
 use agent::{
     ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, FileChangeKind, InteractionMode,
     ModelSpec, OptionDescriptor, ProviderKind, TokenUsage, UserInputQuestion,
 };
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity, EventEmitter,
+    ExternalPaths, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, PathBuilder,
+    Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
+    img, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -28,6 +30,18 @@ use gpui_component::{
 };
 
 use crate::app::{AppState, WorkspaceMode};
+use crate::ui::attachments::{self, validate_attachment};
+use crate::ui::composer_trigger::{
+    ComposerTrigger, TriggerKind, detect_composer_trigger, serialize_composer_file_link,
+};
+use crate::ui::context_meter;
+use crate::ui::workspace_walk::{PathEntry, filter_entries, list_workspace};
+
+/// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
+const METER_BLUE: u32 = 0x3B82F6;
+const METER_RED: u32 = 0xEF4444;
+/// Maximum rows shown in a trigger (`@`/`/`/`$`) menu.
+const MENU_ROW_CAP: usize = 50;
 
 /// Claude's warm brand tint for the starburst glyph.
 const CLAUDE_TINT: u32 = 0xD97757;
@@ -130,6 +144,109 @@ fn slash_command(text: &str) -> Option<SlashCommand> {
     }
 }
 
+/// A pending image attachment: validated, persisted to the session attachments
+/// dir, and shown in the composer thumbnail strip. Kept per active session.
+#[derive(Clone)]
+struct PendingImage {
+    /// On-disk path of the persisted copy (also the thumbnail image source).
+    path: PathBuf,
+    /// Display name.
+    name: String,
+}
+
+/// Which glyph a trigger-menu row shows.
+#[derive(Clone, Copy)]
+enum MenuIcon {
+    File,
+    Folder,
+    Command,
+    /// Skill rows — wired for when provider skills become reachable (the agent
+    /// crate is frozen; no skills are listed today, see the reported gap).
+    #[allow(dead_code)]
+    Skill,
+}
+
+/// What accepting a trigger-menu row does.
+#[derive(Clone)]
+enum MenuAccept {
+    /// Insert the serialized `[basename](path)` mention for this relative path.
+    InsertPath(String),
+    /// Insert `$<name> ` for this skill. Wired for when provider skills become
+    /// reachable (agent crate frozen — see reported contract gap).
+    #[allow(dead_code)]
+    InsertSkill(String),
+    /// Insert `/<name> ` for this provider command. Wired for when provider
+    /// slash commands become reachable (agent crate frozen — see reported gap).
+    #[allow(dead_code)]
+    InsertCommand(String),
+    /// Strip the `/model` command and open the model picker.
+    OpenModelPicker,
+    /// Strip the command and switch interaction mode.
+    SetMode(InteractionMode),
+}
+
+/// One selectable row in a trigger (`@`/`/`/`$`) menu.
+#[derive(Clone)]
+struct MenuRow {
+    /// Bold primary text (basename / command label).
+    primary: String,
+    /// Muted secondary text (parent path / description).
+    secondary: String,
+    icon: MenuIcon,
+    accept: MenuAccept,
+}
+
+/// T3's provider display name (used by the context meter's compaction line).
+fn provider_display_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::ClaudeCode => "Claude",
+        ProviderKind::Codex => "Codex",
+    }
+}
+
+/// Guess a file extension for a persisted attachment from its MIME type,
+/// falling back to the source name's extension, then `png`.
+fn image_extension(mime: &str, name: &str) -> String {
+    let from_mime = match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/tiff" | "image/tif" => "tiff",
+        _ => "",
+    };
+    if !from_mime.is_empty() {
+        return from_mime.to_string();
+    }
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_else(|| "png".to_string())
+}
+
+/// Best-effort MIME type from a file extension (for drag/drop of image files).
+fn mime_from_path(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 pub struct Composer {
     app_state: Entity<AppState>,
     input: Entity<InputState>,
@@ -161,6 +278,29 @@ pub struct Composer {
     /// Whether the current render was scheduled by our own animation-frame
     /// request (vs. an external trigger). Used to stop the convergence loop.
     raf_pending: bool,
+    /// The inline trigger (`@`/`/`/`$`) active at the cursor, recomputed on every
+    /// input change. Drives the trigger menu.
+    active_trigger: Option<ComposerTrigger>,
+    /// Highlighted row index within the open trigger menu (arrows + hover).
+    menu_highlight: usize,
+    /// The trigger identity the menu was last shown for; when it changes the
+    /// highlight resets and any Escape-dismissal clears.
+    menu_last_key: Option<String>,
+    /// Set when Escape dismissed the menu (until the query changes).
+    menu_dismissed: bool,
+    /// Cached workspace listing for the active session cwd (for `@`-mentions),
+    /// loaded lazily in the background the first time a mention trigger opens.
+    workspace: Option<(PathBuf, Vec<PathEntry>)>,
+    workspace_loading: bool,
+    /// Pending image attachments for the active session, validated + persisted to
+    /// disk. Cleared on send and whenever the active session changes.
+    pending_images: Vec<PendingImage>,
+    /// The session id `pending_images` belongs to (reset the strip on switch).
+    images_session: Option<String>,
+    /// Index of the image shown in the expanded-preview overlay, if any.
+    image_preview: Option<usize>,
+    /// Whether the one-shot screenshot debug seed has been applied.
+    debug_applied: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -183,11 +323,21 @@ impl Composer {
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
                 match event {
                     InputEvent::PressEnter { shift: false, .. } => {
-                        let input = input.clone();
-                        this.submit(&input, window, cx);
+                        // Enter accepts the highlighted trigger-menu row when the
+                        // menu is open, otherwise submits the turn.
+                        if this.menu_visible(cx) {
+                            this.accept_menu(this.menu_highlight, window, cx);
+                        } else {
+                            let input = input.clone();
+                            this.submit(&input, window, cx);
+                        }
                     }
-                    // Re-render so the send button reflects whether there's text.
-                    InputEvent::Change => cx.notify(),
+                    // Recompute the active `@`/`/`/`$` trigger and re-render (also
+                    // refreshes the send button's has-text state).
+                    InputEvent::Change => {
+                        this.recompute_trigger(cx);
+                        cx.notify();
+                    }
                     _ => {}
                 }
             }),
@@ -213,8 +363,53 @@ impl Composer {
             control_width: Rc::new(Cell::new(None)),
             prev_seen_width: None,
             raf_pending: false,
+            active_trigger: None,
+            menu_highlight: 0,
+            menu_last_key: None,
+            menu_dismissed: false,
+            workspace: None,
+            workspace_loading: false,
+            pending_images: Vec::new(),
+            images_session: None,
+            image_preview: None,
+            debug_applied: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Apply the one-shot screenshot debug seed (`--debug-compose` / `--debug-image`).
+    fn apply_debug_seed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.debug_applied {
+            return;
+        }
+        let (compose, image) = {
+            let state = self.app_state.read(cx);
+            (state.debug_compose.clone(), state.debug_image.clone())
+        };
+        if compose.is_none() && image.is_none() {
+            // Nothing to seed, but only latch once a session exists so the seed
+            // survives the initial empty frame.
+            if self.app_state.read(cx).active.is_some() {
+                self.debug_applied = true;
+            }
+            return;
+        }
+        if self.app_state.read(cx).active.is_none() {
+            return;
+        }
+        self.debug_applied = true;
+        if let Some(text) = compose {
+            let len = text.len();
+            self.input.update(cx, |state, cx| {
+                state.set_value(text, window, cx);
+                state.set_selected_range(len..len, cx);
+            });
+            self.recompute_trigger(cx);
+        }
+        if let Some(path) = image {
+            self.add_image_path(path, window, cx);
+        }
+        cx.notify();
     }
 
     fn submit(&mut self, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
@@ -224,7 +419,8 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        let has_images = !self.pending_images.is_empty();
+        if text.is_empty() && !has_images {
             return;
         }
         if self.app_state.read(cx).active.is_none() {
@@ -250,10 +446,293 @@ impl Composer {
             return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
+        // Image-only messages get T3's exact synthetic text. Attachments are
+        // persisted on disk (see `add_image_*`); the send wire currently carries
+        // only text, so the images themselves are not transmitted (contract gap:
+        // `SessionCommand::SendTurn` needs an `attachments` field — see report).
+        let sent_text = if text.is_empty() && has_images {
+            attachments::image_only_message().to_string()
+        } else {
+            text
+        };
+        self.pending_images.clear();
+        self.image_preview = None;
         self.app_state
-            .update(cx, |state, cx| state.send_turn(text, cx));
+            .update(cx, |state, cx| state.send_turn(sent_text, cx));
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
+    }
+
+    // -- inline triggers (@ mentions / $ skills / commands) ----------------
+
+    /// Whether a trigger menu should currently be shown.
+    fn menu_visible(&self, _cx: &App) -> bool {
+        self.active_trigger.is_some() && !self.menu_dismissed
+    }
+
+    /// Recompute the active trigger from the input text + cursor, resetting the
+    /// highlight (and un-dismissing) when the trigger identity changes, and
+    /// lazily loading the workspace listing for `@`-mentions.
+    fn recompute_trigger(&mut self, cx: &mut Context<Self>) {
+        let (text, cursor) = {
+            let state = self.input.read(cx);
+            (state.value().to_string(), state.cursor())
+        };
+        let trigger = detect_composer_trigger(&text, cursor);
+        let key = trigger
+            .as_ref()
+            .map(|t| format!("{:?}\u{1}{}", t.kind, t.query));
+        if key != self.menu_last_key {
+            self.menu_highlight = 0;
+            self.menu_dismissed = false;
+            self.menu_last_key = key;
+        }
+        if matches!(trigger.as_ref().map(|t| t.kind), Some(TriggerKind::Path)) {
+            self.ensure_workspace(cx);
+        }
+        self.active_trigger = trigger;
+    }
+
+    /// Load the workspace file/folder listing for the active session cwd in the
+    /// background (gitignore-respected), the first time a mention menu opens.
+    fn ensure_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(cwd) = self.app_state.read(cx).active_cwd() else {
+            return;
+        };
+        if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
+            return;
+        }
+        self.workspace_loading = true;
+        cx.spawn(async move |this, cx| {
+            let walked = {
+                let cwd = cwd.clone();
+                smol::unblock(move || list_workspace(&cwd)).await
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.workspace = Some((cwd, walked));
+                this.workspace_loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Build the rows for the currently active trigger menu, plus its empty-state
+    /// copy and whether it is still loading.
+    fn menu_rows(&self, _cx: &App) -> (Vec<MenuRow>, String, bool) {
+        let Some(trigger) = self.active_trigger.as_ref() else {
+            return (Vec::new(), String::new(), false);
+        };
+        match trigger.kind {
+            TriggerKind::Path => {
+                let entries = self
+                    .workspace
+                    .as_ref()
+                    .map(|(_, e)| e.as_slice())
+                    .unwrap_or(&[]);
+                let rows = filter_entries(entries, &trigger.query, MENU_ROW_CAP)
+                    .into_iter()
+                    .map(|e| MenuRow {
+                        primary: e.basename.clone(),
+                        secondary: e.parent.clone(),
+                        icon: if e.is_dir {
+                            MenuIcon::Folder
+                        } else {
+                            MenuIcon::File
+                        },
+                        accept: MenuAccept::InsertPath(e.rel_path.clone()),
+                    })
+                    .collect();
+                let loading = self.workspace_loading && self.workspace.is_none();
+                (rows, rust_i18n::t!("composer.no_files").into_owned(), loading)
+            }
+            TriggerKind::Skill => {
+                // Provider skills are not reachable without an agent-crate change
+                // (frozen). List nothing; show T3's exact empty copy.
+                (
+                    Vec::new(),
+                    rust_i18n::t!("composer.no_skills").into_owned(),
+                    false,
+                )
+            }
+            TriggerKind::SlashCommand | TriggerKind::SlashModel => {
+                let query = trigger.query.to_lowercase();
+                let builtins: [(&str, &str, MenuAccept); 3] = [
+                    (
+                        "model",
+                        "composer.cmd_model_desc",
+                        MenuAccept::OpenModelPicker,
+                    ),
+                    (
+                        "plan",
+                        "composer.cmd_plan_desc",
+                        MenuAccept::SetMode(InteractionMode::Plan),
+                    ),
+                    (
+                        "default",
+                        "composer.cmd_default_desc",
+                        MenuAccept::SetMode(InteractionMode::Build),
+                    ),
+                ];
+                let rows = builtins
+                    .into_iter()
+                    .filter(|(name, _, _)| query.is_empty() || name.starts_with(&query))
+                    .map(|(name, desc, accept)| MenuRow {
+                        primary: format!("/{name}"),
+                        secondary: rust_i18n::t!(desc).into_owned(),
+                        icon: MenuIcon::Command,
+                        accept,
+                    })
+                    .collect();
+                // Provider-native commands (Claude slash commands / Codex skills)
+                // require an agent-crate change (frozen); none are listed here.
+                (rows, rust_i18n::t!("composer.no_command").into_owned(), false)
+            }
+        }
+    }
+
+    /// Replace the active trigger's text range in the input with `replacement`.
+    fn replace_trigger(&mut self, replacement: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(trigger) = self.active_trigger.clone() else {
+            return;
+        };
+        let replacement = replacement.to_string();
+        self.input.update(cx, |state, cx| {
+            state.set_selected_range(trigger.range.clone(), cx);
+            state.replace(replacement.clone(), window, cx);
+        });
+    }
+
+    /// Accept the trigger-menu row at `index`.
+    fn accept_menu(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let (rows, _, _) = self.menu_rows(cx);
+        let Some(row) = rows.get(index).cloned() else {
+            return;
+        };
+        match &row.accept {
+            MenuAccept::InsertPath(path) => {
+                let link = format!("{} ", serialize_composer_file_link(path));
+                self.replace_trigger(&link, window, cx);
+            }
+            MenuAccept::InsertSkill(name) => self.replace_trigger(&format!("${name} "), window, cx),
+            MenuAccept::InsertCommand(name) => {
+                self.replace_trigger(&format!("/{name} "), window, cx)
+            }
+            MenuAccept::OpenModelPicker => {
+                self.replace_trigger("", window, cx);
+                self.model_picker_token = self.model_picker_token.wrapping_add(1);
+            }
+            MenuAccept::SetMode(mode) => {
+                let mode = *mode;
+                self.replace_trigger("", window, cx);
+                self.app_state
+                    .update(cx, |state, cx| state.set_interaction_mode(mode, cx));
+            }
+        }
+        self.active_trigger = None;
+        self.menu_dismissed = true;
+        cx.notify();
+    }
+
+    // -- image attachments --------------------------------------------------
+
+    /// Reset the thumbnail strip when the active session changes (its pending
+    /// images belong to a specific session).
+    fn sync_images_session(&mut self, cx: &mut Context<Self>) {
+        let id = self
+            .app_state
+            .read(cx)
+            .active_session_id()
+            .map(str::to_string);
+        if id != self.images_session {
+            self.images_session = id;
+            self.pending_images.clear();
+            self.image_preview = None;
+        }
+    }
+
+    /// Validate `bytes` against the type/size/count limits and, if ok, persist a
+    /// copy to the session attachments dir and add it to the pending strip.
+    fn add_image_bytes(
+        &mut self,
+        name: String,
+        mime: String,
+        bytes: Vec<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) =
+            validate_attachment(&name, &mime, bytes.len() as u64, self.pending_images.len())
+        {
+            window.push_notification(Notification::error(err.message()), cx);
+            return;
+        }
+        let ext = image_extension(&mime, &name);
+        match self.app_state.read(cx).save_attachment(&bytes, &ext) {
+            Ok(path) => {
+                self.pending_images.push(PendingImage { path, name });
+                cx.notify();
+            }
+            Err(err) => window.push_notification(
+                Notification::error(
+                    rust_i18n::t!("errors.persist_event", error = err).into_owned(),
+                ),
+                cx,
+            ),
+        }
+    }
+
+    /// Add an image from a dropped file path (reads + re-validates it).
+    fn add_image_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_string());
+        let mime = mime_from_path(&path);
+        match std::fs::read(&path) {
+            Ok(bytes) => self.add_image_bytes(name, mime, bytes, window, cx),
+            Err(err) => window.push_notification(
+                Notification::error(
+                    rust_i18n::t!("errors.persist_event", error = err).into_owned(),
+                ),
+                cx,
+            ),
+        }
+    }
+
+    /// Pull an image off the clipboard (⌘V with image content), if present.
+    fn paste_clipboard_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        for entry in &item.entries {
+            match entry {
+                ClipboardEntry::Image(image) => {
+                    let mime = image.format().mime_type().to_string();
+                    let bytes = image.bytes().to_vec();
+                    self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
+                }
+                ClipboardEntry::ExternalPaths(paths) => {
+                    for path in paths.paths() {
+                        if mime_from_path(path).starts_with("image/") {
+                            self.add_image_path(path.clone(), window, cx);
+                        }
+                    }
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+    }
+
+    fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.pending_images.len() {
+            let removed = self.pending_images.remove(index);
+            let _ = std::fs::remove_file(&removed.path);
+            if self.image_preview == Some(index) {
+                self.image_preview = None;
+            }
+            cx.notify();
+        }
     }
 
     /// The active session's pending user-input request, if any.
@@ -466,31 +945,36 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The context-usage chip + popover.
-    fn render_context_chip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let usage = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .and_then(|a| a.timeline.usage);
-        let label = context_label(usage);
-        let muted = cx.theme().muted_foreground;
+    /// The circular context-window meter (ring showing used%, red > 90%) + a
+    /// hover/click popover (T3's `ContextWindowMeter`).
+    fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (usage, provider) = {
+            let state = self.app_state.read(cx);
+            (
+                state.active.as_ref().and_then(|a| a.timeline.usage),
+                state.active.as_ref().map(|a| a.meta.provider),
+            )
+        };
+        let pct = usage.and_then(|u| context_meter::used_percentage(&u));
+        let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
+        let ring_color: Hsla = if overloaded {
+            rgb(METER_RED).into()
+        } else {
+            rgb(METER_BLUE).into()
+        };
+        let mut track = cx.theme().muted_foreground;
+        track.a = 0.35;
 
-        let trigger = Button::new("context-chip").ghost().compact().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+        let trigger = Button::new("context-meter").ghost().compact().child(
+            div()
+                .size(px(16.))
+                .child(ring_canvas(pct.unwrap_or(0.0), ring_color, track)),
         );
 
         Popover::new("context-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
-            .content(move |_, _, cx| render_context_pane(usage, cx))
+            .content(move |_, _, cx| render_context_meter_pane(usage, provider, pct, cx))
             .into_any_element()
     }
 
@@ -548,6 +1032,193 @@ impl Composer {
             .trigger(trigger)
             .content(move |_, _, cx| render_overflow_pane(usage, mode, interaction, cx))
             .into_any_element()
+    }
+
+    // -- trigger menu + image strip ----------------------------------------
+
+    /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
+    /// card. `None` when no trigger is active (or it was dismissed).
+    fn render_trigger_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.menu_visible(cx) {
+            return None;
+        }
+        let (rows, empty_text, loading) = self.menu_rows(cx);
+        let muted = cx.theme().muted_foreground;
+        let highlight = self.menu_highlight.min(rows.len().saturating_sub(1));
+
+        let mut list = v_flex().w_full().p_1().gap_0p5();
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2p5()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(if loading {
+                        rust_i18n::t!("composer.searching").into_owned()
+                    } else {
+                        empty_text
+                    }),
+            );
+        } else {
+            for (index, row) in rows.iter().enumerate() {
+                let is_active = index == highlight;
+                let icon = match row.icon {
+                    MenuIcon::File => Icon::empty().path("icons/file.svg"),
+                    MenuIcon::Folder => Icon::empty().path("icons/folder-closed.svg"),
+                    MenuIcon::Command => Icon::empty().path("icons/box.svg"),
+                    MenuIcon::Skill => Icon::empty().path("icons/ruler.svg"),
+                };
+                list = list.child(
+                    h_flex()
+                        .id(("menu-row", index))
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .when(is_active, |s| s.bg(cx.theme().accent))
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .child(icon.small().text_color(muted))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(13.))
+                                .font_medium()
+                                .child(row.primary.clone()),
+                        )
+                        .when(!row.secondary.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(12.))
+                                    .text_color(muted)
+                                    .child(row.secondary.clone()),
+                            )
+                        })
+                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            if this.menu_highlight != index {
+                                this.menu_highlight = index;
+                                cx.notify();
+                            }
+                        }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.accept_menu(index, window, cx);
+                        })),
+                );
+            }
+        }
+
+        Some(
+            div()
+                .w_full()
+                .max_h(px(288.))
+                .overflow_hidden()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .shadow_lg()
+                .child(list)
+                .into_any_element(),
+        )
+    }
+
+    /// The 64px thumbnail strip above the control row (T3), when images are
+    /// attached; each thumbnail opens an expanded preview and has a remove `x`.
+    fn render_image_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.pending_images.is_empty() {
+            return None;
+        }
+        let mut row = h_flex().w_full().px_4().pt_3().gap_2().flex_wrap();
+        for (index, image) in self.pending_images.iter().enumerate() {
+            let path = image.path.clone();
+            row = row.child(
+                div()
+                    .id(("thumb", index))
+                    .relative()
+                    .size(px(64.))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .cursor_pointer()
+                    .child(img(path).size(px(64.)).rounded(px(8.)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.image_preview = Some(index);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(("thumb-x", index))
+                            .absolute()
+                            .top(px(2.))
+                            .right(px(2.))
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(gpui::black().opacity(0.6))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(gpui::black().opacity(0.85)))
+                            .child(Icon::new(IconName::Close).xsmall().text_color(gpui::white()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_image(index, cx);
+                            })),
+                    ),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
+    /// The expanded image preview overlay (click backdrop / `x` to close).
+    fn render_image_preview(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let index = self.image_preview?;
+        let image = self.pending_images.get(index)?;
+        let path = image.path.clone();
+        let name = image.name.clone();
+        Some(
+            div()
+                .id("image-preview")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::black().opacity(0.7))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.image_preview = None;
+                    cx.notify();
+                }))
+                .child(
+                    v_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .max_w(px(420.))
+                                .max_h(px(420.))
+                                .rounded(px(12.))
+                                .overflow_hidden()
+                                .child(img(path).max_w(px(420.)).max_h(px(420.))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(gpui::white())
+                                .child(name),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     // -- send / stop --------------------------------------------------------
@@ -1534,6 +2205,8 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_user_input_state(cx);
+        self.sync_images_session(cx);
+        self.apply_debug_seed(window, cx);
         let (turn_running, approval, approval_count) = {
             let state = self.app_state.read(cx);
             match &state.active {
@@ -1592,7 +2265,7 @@ impl Render for Composer {
                 .child(self.render_model_picker(cx))
                 .child(self.render_traits_picker(cx))
                 .child(divider())
-                .child(self.render_context_chip(cx))
+                .child(self.render_context_meter(cx))
                 .child(self.render_permission_picker(cx))
                 .child(self.render_mode_chip(cx))
                 .child(div().flex_1())
@@ -1637,6 +2310,8 @@ impl Render for Composer {
 
         let user_input = self.pending_user_input(cx);
 
+        // Dropping image files onto the card attaches them (T3 drag-drop).
+        let composer = cx.entity();
         let card = v_flex()
             .w_full()
             .rounded(px(16.))
@@ -1644,6 +2319,46 @@ impl Render for Composer {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .shadow_sm()
+            // ⌘V with image clipboard content, and arrow/Escape trigger-menu
+            // navigation (fires after the input's own key actions).
+            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                let key = ev.keystroke.key.as_str();
+                if key == "v" && ev.keystroke.modifiers.platform {
+                    this.paste_clipboard_image(window, cx);
+                    return;
+                }
+                if !this.menu_visible(cx) {
+                    return;
+                }
+                let (rows, _, _) = this.menu_rows(cx);
+                match key {
+                    "up" => {
+                        this.menu_highlight = this.menu_highlight.saturating_sub(1);
+                        cx.notify();
+                    }
+                    "down" => {
+                        if !rows.is_empty() {
+                            this.menu_highlight = (this.menu_highlight + 1).min(rows.len() - 1);
+                        }
+                        cx.notify();
+                    }
+                    "escape" => {
+                        this.menu_dismissed = true;
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }))
+            .on_drop(move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
+                let paths: Vec<PathBuf> = paths.paths().to_vec();
+                composer.update(cx, |this, cx| {
+                    for path in paths {
+                        if mime_from_path(&path).starts_with("image/") {
+                            this.add_image_path(path, window, cx);
+                        }
+                    }
+                });
+            })
             .when_some(plan_ready_title, |this, title| {
                 this.child(self.render_plan_ready_header(title, cx))
             })
@@ -1654,9 +2369,11 @@ impl Render for Composer {
                     .pb_1()
                     .child(Input::new(&self.input).appearance(false)),
             )
+            .children(self.render_image_strip(cx))
             .child(control_row);
 
         v_flex()
+            .relative()
             .flex_shrink_0()
             .px_4()
             .pt_2()
@@ -1676,8 +2393,10 @@ impl Render for Composer {
             .when_some(user_input, |this, (request_id, questions)| {
                 this.child(self.render_user_input_panel(request_id, questions, cx))
             })
+            .children(self.render_trigger_menu(cx))
             .child(card)
             .children(self.render_checkout_row(cx))
+            .children(self.render_image_preview(cx))
     }
 }
 
@@ -2244,62 +2963,151 @@ fn render_overflow_pane(
         .into_any_element()
 }
 
-fn render_context_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState>) -> AnyElement {
+/// The circular context-window meter's popover (T3's `ContextWindowMeter`
+/// hover card): title, percentage · used/max, a progress bar, and the
+/// "<Provider> automatically compacts its context when needed." line.
+fn render_context_meter_pane(
+    usage: Option<TokenUsage>,
+    provider: Option<ProviderKind>,
+    pct: Option<f32>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let row = |label: String, value: String, cx: &mut Context<PopoverState>| -> AnyElement {
+    let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
+    let bar_color: Hsla = if overloaded {
+        rgb(METER_RED).into()
+    } else {
+        rgb(METER_BLUE).into()
+    };
+    let mut pane = v_flex().w(px(256.)).p_3().gap_2();
+
+    // Header: "Context Window" + "N% · used/max" (or just used tokens).
+    let used = usage.as_ref().and_then(context_meter::used_tokens);
+    let max = usage.and_then(|u| u.context_window);
+    let pct_label = context_meter::format_percentage(pct);
+    let stat: AnyElement = match (max, pct_label.clone()) {
+        (Some(max), Some(pct_label)) => h_flex()
+            .gap_1()
+            .text_size(px(11.))
+            .text_color(muted)
+            .child(pct_label)
+            .child("·")
+            .child(format!(
+                "{}/{}",
+                context_meter::format_tokens(used),
+                context_meter::format_tokens(Some(max))
+            ))
+            .into_any_element(),
+        _ => div()
+            .text_size(px(11.))
+            .text_color(muted)
+            .child(context_meter::format_tokens(used))
+            .into_any_element(),
+    };
+    pane = pane.child(
         h_flex()
             .w_full()
             .justify_between()
-            .gap_4()
-            .text_size(px(12.))
-            .child(div().text_color(muted).child(label))
-            .child(div().text_color(cx.theme().foreground).child(value))
-            .into_any_element()
-    };
-
-    let mut pane = v_flex().w(px(240.)).p_3().gap_1().child(
-        div()
-            .pb_1()
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(muted)
-            .child(rust_i18n::t!("composer.context_heading")),
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(muted)
+                    .child(rust_i18n::t!("composer.context_window_title")),
+            )
+            .child(stat),
     );
 
-    match usage {
-        Some(u) => {
-            pane = pane
-                .child(row(
-                    rust_i18n::t!("composer.used").into_owned(),
-                    opt_tokens(u.used_tokens.or(u.input_tokens)),
-                    cx,
-                ))
-                .child(row(
-                    rust_i18n::t!("composer.cached").into_owned(),
-                    opt_tokens(u.cached_input_tokens),
-                    cx,
-                ))
-                .child(row(
-                    rust_i18n::t!("composer.output").into_owned(),
-                    opt_tokens(u.output_tokens),
-                    cx,
-                ))
-                .child(row(
-                    rust_i18n::t!("composer.context_window").into_owned(),
-                    opt_tokens(u.context_window),
-                    cx,
-                ));
-        }
-        None => {
-            pane = pane.child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(muted)
-                    .child(rust_i18n::t!("composer.no_usage")),
-            );
+    // Progress bar (only when the window size is known).
+    if max.is_some() {
+        let fraction = pct.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0;
+        pane = pane.child(
+            div()
+                .w_full()
+                .h(px(6.))
+                .rounded_full()
+                .bg(cx.theme().muted)
+                .child(
+                    div()
+                        .h_full()
+                        .rounded_full()
+                        .bg(bar_color)
+                        .w(gpui::relative(fraction)),
+                ),
+        );
+    }
+
+    // "<Provider> automatically compacts its context when needed." Both Claude
+    // and Codex compact automatically, so the line always shows for a known
+    // provider (our TokenUsage carries no explicit `compactsAutomatically` flag
+    // — see the reported contract gap; no `Total processed` field either).
+    if let Some(provider) = provider {
+        pane = pane.child(
+            div()
+                .pt_1()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(rust_i18n::t!(
+                    "composer.compacts_automatically",
+                    provider = provider_display_name(provider)
+                )),
+        );
+    }
+
+    pane.into_any_element()
+}
+
+/// Draw the small progress ring: a muted full-circle track plus a `pct`-swept
+/// arc (starting at 12 o'clock), sampled as a stroked polyline.
+fn ring_canvas(pct: f32, fg: Hsla, track: Hsla) -> impl IntoElement {
+    canvas(
+        move |_, _, _| {},
+        move |bounds: Bounds<Pixels>, _, window, _| {
+            let center = bounds.center();
+            let radius = px(6.5);
+            let width = px(2.5);
+            if let Some(path) = stroked_arc(center, radius, 0.0, 360.0, width) {
+                window.paint_path(path, track);
+            }
+            let pct = pct.clamp(0.0, 100.0);
+            if pct > 0.0 {
+                let end = -90.0 + pct / 100.0 * 360.0;
+                if let Some(path) = stroked_arc(center, radius, -90.0, end, width) {
+                    window.paint_path(path, fg);
+                }
+            }
+        },
+    )
+    .size(px(16.))
+}
+
+/// Build a stroked arc path from `start_deg` to `end_deg` (degrees, clockwise
+/// from 3 o'clock) as a sampled polyline of the given stroke width.
+fn stroked_arc(
+    center: gpui::Point<Pixels>,
+    radius: Pixels,
+    start_deg: f32,
+    end_deg: f32,
+    width: Pixels,
+) -> Option<gpui::Path<Pixels>> {
+    let mut builder = PathBuilder::stroke(width);
+    let steps = 48;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let angle = (start_deg + (end_deg - start_deg) * t).to_radians();
+        let p = point(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        );
+        if i == 0 {
+            builder.move_to(p);
+        } else {
+            builder.line_to(p);
         }
     }
-    pane.into_any_element()
+    builder.build().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -2455,10 +3263,6 @@ fn compact_tokens(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-fn opt_tokens(n: Option<u64>) -> String {
-    n.map(compact_tokens).unwrap_or_else(|| "—".to_string())
 }
 
 /// The context chip label: "42k / 200k" when both known, "200k" when only the
