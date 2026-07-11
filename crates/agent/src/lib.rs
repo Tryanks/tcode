@@ -139,6 +139,54 @@ pub struct SelectOption {
     pub description: Option<String>,
 }
 
+/// Resolve a provider binary to an absolute path before spawning.
+///
+/// Every provider spawn sets `current_dir(cwd)`, and a bare program name plus a
+/// working-directory change makes PATH resolution unreliable (it fails outright
+/// when PATH holds unexpanded entries such as `~/.dotnet/tools`). Resolving the
+/// binary ourselves against the parent's PATH keeps the lookup deterministic.
+pub(crate) fn resolve_binary(
+    binary_path: Option<&std::path::Path>,
+    default_name: &str,
+) -> Result<PathBuf, AgentError> {
+    if let Some(path) = binary_path {
+        return Ok(path.to_path_buf());
+    }
+    // An explicit path component means "use this as given" (no PATH search).
+    if default_name.contains(std::path::MAIN_SEPARATOR) {
+        return Ok(PathBuf::from(default_name));
+    }
+    let path_var = std::env::var_os("PATH")
+        .ok_or_else(|| AgentError::Spawn(format!("`{default_name}` not found: PATH is unset")))?;
+    for dir in std::env::split_paths(&path_var) {
+        // Skip unexpanded/relative entries — they are meaningless to us and
+        // would resolve against the child's cwd.
+        if !dir.is_absolute() {
+            continue;
+        }
+        let candidate = dir.join(default_name);
+        if is_executable(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(AgentError::Spawn(format!(
+        "`{default_name}` not found on PATH (set its path in Settings → Providers)"
+    )))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
 /// A chosen option value, persisted per session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionSelection {
@@ -552,5 +600,32 @@ mod mcp_registration_tests {
             Some("Bearer abc123")
         );
         assert!(table.get("bearer_token").is_none());
+    }
+}
+
+#[cfg(test)]
+mod resolve_binary_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_path_is_used_as_given() {
+        let explicit = std::path::Path::new("/opt/custom/claude");
+        let resolved = resolve_binary(Some(explicit), "claude").unwrap();
+        assert_eq!(resolved, explicit);
+    }
+
+    #[test]
+    fn bare_name_resolves_to_an_absolute_path_on_path() {
+        // `sh` is on PATH everywhere we run; the point is that the result is
+        // absolute, so a child that sets its own cwd can still exec it.
+        let resolved = resolve_binary(None, "sh").expect("sh must resolve");
+        assert!(resolved.is_absolute(), "resolved {resolved:?} is not absolute");
+        assert!(is_executable(&resolved));
+    }
+
+    #[test]
+    fn missing_binary_reports_a_helpful_error() {
+        let err = resolve_binary(None, "tcode-definitely-not-a-real-binary").unwrap_err();
+        assert!(matches!(err, AgentError::Spawn(msg) if msg.contains("not found on PATH")));
     }
 }

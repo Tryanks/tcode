@@ -496,8 +496,9 @@ fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
 ) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>), AgentError> {
-    let binary = binary_path.unwrap_or_else(|| Path::new("codex"));
-    let mut child = Command::new(binary)
+    // Absolute path: bare names break once a child sets its own cwd.
+    let binary = crate::resolve_binary(binary_path, "codex")?;
+    let mut child = Command::new(&binary)
         .arg("app-server")
         .args(extra_args)
         .stdin(Stdio::piped())
