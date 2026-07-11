@@ -583,6 +583,7 @@ impl AppState {
             draft: true,
             runtime: Runtime::Idle,
             live_model: None,
+            live_approval_mode: None,
             pending_sends: Vec::new(),
             turn_in_flight: false,
             diff_open: false,
