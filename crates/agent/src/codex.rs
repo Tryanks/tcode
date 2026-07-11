@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use async_channel::{Receiver, Sender};
@@ -11,9 +12,18 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind, ResumeCursor,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus, ModelSpec,
+    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderKind, ResumeCursor,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    TurnOptions, TurnStatus,
 };
+
+mod developer_instructions;
+use developer_instructions::{default_mode_instructions, plan_mode_instructions};
+
+/// Fallback model slug for `collaborationMode.settings.model` when the session
+/// has no resolved model yet (mirrors T3's `DEFAULT_MODEL`).
+const DEFAULT_MODEL: &str = "gpt-5-codex";
 
 /// Map a canonical [`ApprovalMode`] onto Codex's `approvalPolicy` × `sandbox`
 /// pair for `thread/start` (and `thread/resume`).
@@ -54,6 +64,275 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Model catalog (`model/list`)
+// ---------------------------------------------------------------------------
+
+/// Spawn `codex app-server`, page through `model/list`, and tear the process
+/// down. Mirrors T3's `requestAllCodexModels` (initial `{}`, then `{cursor}`
+/// until `nextCursor` is empty).
+pub async fn list_models(binary_path: Option<PathBuf>) -> Result<Vec<ModelSpec>, AgentError> {
+    let (mut child, mut stdin, lines) = spawn_server(binary_path.as_deref())?;
+    let result = collect_models(&mut stdin, &lines).await;
+    stop_child(&mut child, stdin);
+    result
+}
+
+async fn collect_models(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+) -> Result<Vec<ModelSpec>, AgentError> {
+    send_json(
+        stdin,
+        &json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": { "name": "tcode", "title": "tcode", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "experimentalApi": true }
+            }
+        }),
+    )?;
+    wait_for_response(lines, 1).await?;
+    send_json(stdin, &json!({ "method": "initialized" }))?;
+
+    let mut models = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut id = 2;
+    loop {
+        let params = match &cursor {
+            Some(cursor) => json!({ "cursor": cursor }),
+            None => json!({}),
+        };
+        send_json(
+            stdin,
+            &json!({ "id": id, "method": "model/list", "params": params }),
+        )?;
+        let response = wait_for_response(lines, id).await?;
+        id += 1;
+        if let Some(data) = response.get("data").and_then(Value::as_array) {
+            for model in data {
+                if let Some(spec) = map_model(model) {
+                    models.push(spec);
+                }
+            }
+        }
+        cursor = response
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(models)
+}
+
+/// Map one `model/list` entry to a [`ModelSpec`]; `None` for hidden models.
+fn map_model(model: &Value) -> Option<ModelSpec> {
+    if model.get("hidden").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+    let id = model.get("model").and_then(Value::as_str)?.to_owned();
+    let display_name = codex_display_name(
+        model
+            .get("displayName")
+            .and_then(Value::as_str)
+            .unwrap_or(&id),
+    );
+    let is_default = model
+        .get("isDefault")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut options = Vec::new();
+
+    if let Some(efforts) = model
+        .get("supportedReasoningEfforts")
+        .and_then(Value::as_array)
+    {
+        let select_options: Vec<SelectOption> = efforts
+            .iter()
+            .filter_map(|entry| {
+                let value = entry
+                    .get("reasoningEffort")
+                    .and_then(Value::as_str)?
+                    .to_owned();
+                let label = reasoning_effort_label(&value);
+                let description = entry
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                Some(SelectOption {
+                    value,
+                    label,
+                    description,
+                })
+            })
+            .collect();
+        if !select_options.is_empty() {
+            let default_value = model
+                .get("defaultReasoningEffort")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            options.push(OptionDescriptor::Select {
+                id: "reasoningEffort".into(),
+                label: "Reasoning".into(),
+                options: select_options,
+                default_value,
+            });
+        }
+    }
+
+    let tiers = service_tiers(model);
+    if !tiers.is_empty() {
+        let catalog_default = model
+            .get("defaultServiceTier")
+            .and_then(Value::as_str)
+            .filter(|d| tiers.iter().any(|t| t.value == *d))
+            .map(str::to_owned);
+        let default_value = catalog_default.unwrap_or_else(|| "default".into());
+        let mut select_options = Vec::with_capacity(tiers.len() + 1);
+        select_options.push(SelectOption {
+            value: "default".into(),
+            label: "Standard".into(),
+            description: None,
+        });
+        select_options.extend(tiers);
+        options.push(OptionDescriptor::Select {
+            id: "serviceTier".into(),
+            label: "Service Tier".into(),
+            options: select_options,
+            default_value: Some(default_value),
+        });
+    }
+
+    Some(ModelSpec {
+        id,
+        display_name,
+        is_default,
+        options,
+    })
+}
+
+/// Derive service-tier options from `serviceTiers` (preferred) or, absent that,
+/// `additionalSpeedTiers` (`fast` → `Fast`), matching T3's mapping.
+fn service_tiers(model: &Value) -> Vec<SelectOption> {
+    if let Some(tiers) = model.get("serviceTiers").and_then(Value::as_array) {
+        if !tiers.is_empty() {
+            return tiers
+                .iter()
+                .filter_map(|tier| {
+                    let value = tier.get("id").and_then(Value::as_str)?.to_owned();
+                    let label = tier
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&value)
+                        .to_owned();
+                    let description = tier
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    Some(SelectOption {
+                        value,
+                        label,
+                        description,
+                    })
+                })
+                .collect();
+        }
+    }
+    if let Some(speed) = model.get("additionalSpeedTiers").and_then(Value::as_array) {
+        return speed
+            .iter()
+            .filter_map(|tier| {
+                let value = tier.as_str()?.to_owned();
+                let label = if value == "fast" {
+                    "Fast".to_owned()
+                } else {
+                    value.clone()
+                };
+                Some(SelectOption {
+                    value,
+                    label,
+                    description: None,
+                })
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// `gpt…` → `GPT…`, and capitalize the letter after each hyphen (T3 transform).
+fn codex_display_name(raw: &str) -> String {
+    let base = if raw
+        .get(..3)
+        .map(|p| p.eq_ignore_ascii_case("gpt"))
+        .unwrap_or(false)
+    {
+        format!("GPT{}", &raw[3..])
+    } else {
+        raw.to_owned()
+    };
+    let mut out = String::with_capacity(base.len());
+    let mut after_hyphen = false;
+    for c in base.chars() {
+        if after_hyphen && c.is_ascii_lowercase() {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push(c);
+        }
+        after_hyphen = c == '-';
+    }
+    out
+}
+
+fn reasoning_effort_label(effort: &str) -> String {
+    match effort {
+        "none" => "None",
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra High",
+        "max" => "Max",
+        "ultra" => "Ultra",
+        other => return other.to_owned(),
+    }
+    .to_owned()
+}
+
+/// Read a string option value from the session's selections.
+fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
+    selections
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.value.as_str().map(str::to_owned))
+}
+
+fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
+    selections
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.value.as_bool())
+}
+
+/// Selected reasoning effort (option id `reasoningEffort`).
+fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
+    selection_str(selections, "reasoningEffort")
+}
+
+/// Selected service tier (option id `serviceTier`), with the legacy
+/// `fastMode: true` → `fast` fallback (T3 `getCodexServiceTierOptionValue`).
+fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
+    selection_str(selections, "serviceTier").or_else(|| {
+        (selection_bool(selections, "fastMode") == Some(true)).then(|| "fast".to_owned())
+    })
+}
+
 enum ChildOutput {
     Line(String),
     Eof,
@@ -72,6 +351,14 @@ struct Actor {
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,
     thread_id: String,
+    /// Resolved model slug; used for `collaborationMode.settings.model`.
+    model: Option<String>,
+    /// Session's Build/Plan mode; applied on the next `turn/start`.
+    interaction_mode: InteractionMode,
+    /// Session reasoning effort (`reasoningEffort` selection), if any.
+    effort: Option<String>,
+    /// Session service tier (`serviceTier` selection / legacy fastMode), if any.
+    service_tier: Option<String>,
     next_id: i64,
     pending_requests: HashMap<i64, PendingRequest>,
     approvals: HashMap<String, Value>,
@@ -86,7 +373,7 @@ async fn run_actor(
     events: Sender<AgentEvent>,
     ready: Sender<Result<(), AgentError>>,
 ) {
-    let (mut child, mut stdin, lines) = match spawn_server(&opts) {
+    let (mut child, mut stdin, lines) = match spawn_server(opts.binary_path.as_deref()) {
         Ok(parts) => parts,
         Err(err) => {
             let _ = ready.send(Err(err)).await;
@@ -110,6 +397,10 @@ async fn run_actor(
         lines,
         events,
         thread_id: thread_id.clone(),
+        model: model.clone(),
+        interaction_mode: opts.interaction_mode,
+        effort: codex_effort(&opts.option_selections),
+        service_tier: codex_service_tier(&opts.option_selections),
         next_id,
         pending_requests: HashMap::new(),
         approvals: HashMap::new(),
@@ -189,12 +480,9 @@ async fn run_actor(
 }
 
 fn spawn_server(
-    opts: &SessionOptions,
+    binary_path: Option<&Path>,
 ) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>), AgentError> {
-    let binary = opts
-        .binary_path
-        .as_deref()
-        .unwrap_or_else(|| std::path::Path::new("codex"));
+    let binary = binary_path.unwrap_or_else(|| Path::new("codex"));
     let mut child = Command::new(binary)
         .arg("app-server")
         .stdin(Stdio::piped())
@@ -262,7 +550,7 @@ async fn initialize_and_open_thread(
             "method": "initialize",
             "params": {
                 "clientInfo": { "name": "tcode", "title": "tcode", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": null
+                "capabilities": { "experimentalApi": true }
             }
         }),
     )?;
@@ -302,6 +590,9 @@ async fn initialize_and_open_thread(
     };
     if let Some(model) = &opts.model {
         params["model"] = json!(model);
+    }
+    if let Some(tier) = codex_service_tier(&opts.option_selections) {
+        params["serviceTier"] = json!(tier);
     }
     send_json(
         stdin,
@@ -392,18 +683,69 @@ impl Actor {
         Ok(())
     }
 
+    /// Build `turn/start` params, applying per-turn overrides on top of the
+    /// session's persisted effort / service tier / interaction mode. Mirrors
+    /// T3's `buildTurnStartParams` + `buildCodexCollaborationMode`.
+    fn build_turn_params(&self, text: &str, options: Option<&TurnOptions>) -> Value {
+        let effort = options
+            .and_then(|o| o.effort.clone())
+            .or_else(|| self.effort.clone());
+        let mode = options
+            .and_then(|o| o.interaction_mode)
+            .unwrap_or(self.interaction_mode);
+
+        let mut params = json!({
+            "threadId": self.thread_id,
+            "input": [{ "type": "text", "text": text, "text_elements": [] }],
+        });
+        if let Some(effort) = &effort {
+            params["effort"] = json!(effort);
+        }
+        if let Some(tier) = &self.service_tier {
+            params["serviceTier"] = json!(tier);
+        }
+
+        // Interaction mode is always present in our session model, so Codex
+        // always carries `collaborationMode` (T3 sends it whenever the toggle
+        // is exposed, which it is for Codex).
+        let mode_str = match mode {
+            InteractionMode::Build => "default",
+            InteractionMode::Plan => "plan",
+        };
+        let developer_instructions = match mode {
+            InteractionMode::Plan => plan_mode_instructions(),
+            InteractionMode::Build => default_mode_instructions(),
+        };
+        let model = self.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        params["collaborationMode"] = json!({
+            "mode": mode_str,
+            "settings": {
+                "model": model,
+                "reasoning_effort": effort.clone().unwrap_or_else(|| "medium".to_owned()),
+                "developer_instructions": developer_instructions,
+            }
+        });
+
+        log::debug!(
+            "codex turn/start: effort={:?} mode={} serviceTier={:?}",
+            effort,
+            mode_str,
+            self.service_tier
+        );
+        params
+    }
+
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
         match command {
-            SessionCommand::SendTurn { text } => {
-                let thread_id = self.thread_id.clone();
-                self.request(
-                    "turn/start",
-                    json!({
-                        "threadId": thread_id,
-                        "input": [{ "type": "text", "text": text, "text_elements": [] }]
-                    }),
-                    PendingRequest::TurnStart,
-                )
+            SessionCommand::SendTurn { text, options } => {
+                let params = self.build_turn_params(&text, options.as_ref());
+                self.request("turn/start", params, PendingRequest::TurnStart)
+            }
+            SessionCommand::SetInteractionMode(mode) => {
+                // Turn-scoped in the protocol: store it; it applies on the next
+                // `turn/start.collaborationMode`.
+                self.interaction_mode = mode;
+                Ok(())
             }
             SessionCommand::Interrupt => {
                 let Some(turn_id) = self.active_turn.clone() else {
@@ -604,7 +946,21 @@ impl Actor {
                 .await;
             }
             "item/started" | "item/updated" | "item/completed" => {
-                if let Some(item) = params.get("item").and_then(map_item) {
+                let item_value = params.get("item");
+                // Proposed-plan item (`ThreadItem::Plan { id, text }`): a
+                // completed plan item is the finalized `<proposed_plan>` block.
+                if item_value.and_then(|i| i.get("type")).and_then(Value::as_str) == Some("plan") {
+                    if method == "item/completed" {
+                        if let Some(item) = item_value {
+                            let markdown = string_field(item, "text");
+                            let item_id = string_field(item, "id");
+                            self.emit(AgentEvent::ProposedPlan { item_id, markdown })
+                                .await;
+                        }
+                    }
+                    return;
+                }
+                if let Some(item) = item_value.and_then(map_item) {
                     self.items.insert(item.id.clone(), item.clone());
                     let event = match method {
                         "item/started" => AgentEvent::ItemStarted(item),
@@ -612,6 +968,45 @@ impl Actor {
                         _ => AgentEvent::ItemCompleted(item),
                     };
                     self.emit(event).await;
+                }
+            }
+            "turn/plan/updated" => {
+                let turn_id = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| self.active_turn.clone());
+                let explanation = params
+                    .get("explanation")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let steps = params
+                    .get("plan")
+                    .and_then(Value::as_array)
+                    .map(|steps| steps.iter().map(map_plan_step).collect())
+                    .unwrap_or_default();
+                self.emit(AgentEvent::PlanUpdated {
+                    turn_id,
+                    explanation,
+                    steps,
+                })
+                .await;
+            }
+            "item/plan/delta" => {
+                if let (Some(item_id), Some(text)) = (
+                    params.get("itemId").and_then(Value::as_str),
+                    params
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .filter(|d| !d.is_empty()),
+                ) {
+                    self.emit(AgentEvent::ProposedPlanDelta {
+                        item_id: item_id.to_owned(),
+                        text: text.to_owned(),
+                    })
+                    .await;
                 }
             }
             "item/agentMessage/delta" => self.emit_delta(params, DeltaKind::AssistantText).await,
@@ -781,6 +1176,24 @@ fn tool_output(item: &Value) -> Option<String> {
         .map(Value::to_string)
 }
 
+/// Map one `turn/plan/updated` step (status fallback `pending`, step text
+/// fallback `"step"`), mirroring T3's CodexAdapter plan mapping.
+fn map_plan_step(step: &Value) -> PlanStep {
+    let text = step
+        .get("step")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("step")
+        .to_owned();
+    let status = match step.get("status").and_then(Value::as_str) {
+        Some("completed") => PlanStepStatus::Completed,
+        Some("inProgress") => PlanStepStatus::InProgress,
+        _ => PlanStepStatus::Pending,
+    };
+    PlanStep { step: text, status }
+}
+
 fn map_status(status: Option<&str>) -> ItemStatus {
     match status {
         Some("completed") => ItemStatus::Completed,
@@ -860,6 +1273,10 @@ mod tests {
                 lines: line_rx,
                 events: event_tx,
                 thread_id: "thread-1".into(),
+                model: Some("gpt-5-codex".into()),
+                interaction_mode: InteractionMode::Build,
+                effort: None,
+                service_tier: None,
                 next_id: 1,
                 pending_requests: HashMap::new(),
                 approvals: HashMap::new(),
@@ -869,6 +1286,209 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[test]
+    fn maps_model_list_entry_to_spec() {
+        let spec = map_model(&json!({
+            "model": "gpt-5-codex",
+            "displayName": "gpt-5-codex",
+            "isDefault": true,
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "low", "description": "fast"},
+                {"reasoningEffort": "medium"},
+                {"reasoningEffort": "xhigh"}
+            ],
+            "defaultReasoningEffort": "medium",
+            "serviceTiers": [{"id": "flex", "name": "Flex", "description": "cheap"}],
+            "defaultServiceTier": "flex"
+        }))
+        .expect("visible model maps");
+
+        assert_eq!(spec.id, "gpt-5-codex");
+        assert_eq!(spec.display_name, "GPT-5-Codex");
+        assert!(spec.is_default);
+        assert_eq!(spec.options.len(), 2);
+
+        match &spec.options[0] {
+            OptionDescriptor::Select {
+                id,
+                label,
+                options,
+                default_value,
+            } => {
+                assert_eq!(id, "reasoningEffort");
+                assert_eq!(label, "Reasoning");
+                assert_eq!(default_value.as_deref(), Some("medium"));
+                assert_eq!(options[0].label, "Low");
+                assert_eq!(options[0].description.as_deref(), Some("fast"));
+                assert_eq!(options[2].label, "Extra High");
+            }
+            other => panic!("expected reasoning Select, got {other:?}"),
+        }
+        match &spec.options[1] {
+            OptionDescriptor::Select {
+                id,
+                options,
+                default_value,
+                ..
+            } => {
+                assert_eq!(id, "serviceTier");
+                assert_eq!(default_value.as_deref(), Some("flex"));
+                assert_eq!(options[0].value, "default");
+                assert_eq!(options[0].label, "Standard");
+                assert_eq!(options[1].value, "flex");
+                assert_eq!(options[1].label, "Flex");
+            }
+            other => panic!("expected serviceTier Select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hidden_model_is_skipped_and_speed_tiers_adapt() {
+        assert!(map_model(&json!({"model": "secret", "displayName": "secret", "hidden": true})).is_none());
+
+        // No serviceTiers → adapt additionalSpeedTiers (`fast` → `Fast`).
+        let spec = map_model(&json!({
+            "model": "gpt-x",
+            "displayName": "gpt-x",
+            "supportedReasoningEfforts": [],
+            "additionalSpeedTiers": ["fast", "priority"]
+        }))
+        .unwrap();
+        // Empty reasoning efforts → no reasoning descriptor, only serviceTier.
+        assert_eq!(spec.options.len(), 1);
+        match &spec.options[0] {
+            OptionDescriptor::Select { id, options, .. } => {
+                assert_eq!(id, "serviceTier");
+                assert_eq!(options[1].value, "fast");
+                assert_eq!(options[1].label, "Fast");
+                assert_eq!(options[2].value, "priority");
+                assert_eq!(options[2].label, "priority");
+            }
+            other => panic!("expected serviceTier Select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collaboration_mode_payload_shape() {
+        let (mut actor, _events) = test_actor();
+        actor.interaction_mode = InteractionMode::Plan;
+        actor.effort = Some("high".into());
+        actor.service_tier = Some("flex".into());
+        actor.model = Some("gpt-5-codex".into());
+
+        let params = actor.build_turn_params("hi", None);
+        assert_eq!(params["effort"], "high");
+        assert_eq!(params["serviceTier"], "flex");
+        let collab = &params["collaborationMode"];
+        assert_eq!(collab["mode"], "plan");
+        assert_eq!(collab["settings"]["model"], "gpt-5-codex");
+        assert_eq!(collab["settings"]["reasoning_effort"], "high");
+        let instructions = collab["settings"]["developer_instructions"]
+            .as_str()
+            .unwrap();
+        assert!(instructions.contains("# Plan Mode (Conversational)"));
+        assert!(instructions.contains("<proposed_plan>"));
+        assert!(instructions.trim_end().ends_with("</collaboration_mode>"));
+
+        // Per-turn override to Build with no effort → default instructions and
+        // the `medium` reasoning fallback.
+        actor.effort = None;
+        let opts = TurnOptions {
+            effort: None,
+            interaction_mode: Some(InteractionMode::Build),
+        };
+        let params = actor.build_turn_params("hi", Some(&opts));
+        assert!(params.get("effort").is_none());
+        assert_eq!(params["collaborationMode"]["mode"], "default");
+        assert_eq!(params["collaborationMode"]["settings"]["reasoning_effort"], "medium");
+        assert!(
+            params["collaborationMode"]["settings"]["developer_instructions"]
+                .as_str()
+                .unwrap()
+                .contains("# Collaboration Mode: Default")
+        );
+
+        let _ = actor.child.kill();
+        let _ = actor.child.wait();
+    }
+
+    #[test]
+    fn plan_notifications_map_to_events() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("turn-9".into());
+
+            actor
+                .handle_notification(
+                    "turn/plan/updated",
+                    &json!({
+                        "explanation": "  building  ",
+                        "plan": [
+                            {"step": "explore", "status": "completed"},
+                            {"step": "  ", "status": "inProgress"},
+                            {"status": "weird"}
+                        ]
+                    }),
+                )
+                .await;
+            match events.recv().await.unwrap() {
+                AgentEvent::PlanUpdated {
+                    turn_id,
+                    explanation,
+                    steps,
+                } => {
+                    assert_eq!(turn_id.as_deref(), Some("turn-9"));
+                    assert_eq!(explanation.as_deref(), Some("building"));
+                    assert_eq!(steps[0].status, PlanStepStatus::Completed);
+                    assert_eq!(steps[1].step, "step");
+                    assert_eq!(steps[1].status, PlanStepStatus::InProgress);
+                    assert_eq!(steps[2].step, "step");
+                    assert_eq!(steps[2].status, PlanStepStatus::Pending);
+                }
+                other => panic!("expected PlanUpdated, got {other:?}"),
+            }
+
+            actor
+                .handle_notification(
+                    "item/plan/delta",
+                    &json!({"itemId": "plan-1", "delta": "## Title"}),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ProposedPlanDelta { ref item_id, ref text } if item_id == "plan-1" && text == "## Title"
+            ));
+
+            actor
+                .handle_notification(
+                    "item/completed",
+                    &json!({"item": {"type": "plan", "id": "plan-1", "text": "# Final plan"}}),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ProposedPlan { ref item_id, ref markdown } if item_id == "plan-1" && markdown == "# Final plan"
+            ));
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn service_tier_falls_back_to_fast_for_legacy_fast_mode() {
+        let selections = vec![OptionSelection {
+            id: "fastMode".into(),
+            value: json!(true),
+        }];
+        assert_eq!(codex_service_tier(&selections).as_deref(), Some("fast"));
+        let explicit = vec![OptionSelection {
+            id: "serviceTier".into(),
+            value: json!("flex"),
+        }];
+        assert_eq!(codex_service_tier(&explicit).as_deref(), Some("flex"));
     }
 
     #[test]
