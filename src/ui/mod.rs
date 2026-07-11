@@ -4,6 +4,7 @@ mod diff_panel;
 mod palette;
 mod settings_page;
 mod sidebar;
+mod terminal_drawer;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
