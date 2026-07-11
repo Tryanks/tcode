@@ -6,6 +6,7 @@
 //! types; nothing provider-shaped leaks past this crate except [`ResumeCursor`],
 //! which is intentionally opaque.
 
+pub mod acp;
 pub mod claude;
 pub mod codex;
 mod process;
@@ -19,6 +20,11 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderKind {
     Codex,
     ClaudeCode,
+    /// Any agent speaking the Agent Client Protocol. Which one is carried
+    /// separately ([`SessionOptions::acp`]) so this stays `Copy`: Codex and
+    /// Claude Code keep their richer native clients, and ACP covers the rest
+    /// of the ecosystem.
+    Acp,
 }
 
 impl ProviderKind {
@@ -26,8 +32,53 @@ impl ProviderKind {
         match self {
             ProviderKind::Codex => "Codex",
             ProviderKind::ClaudeCode => "Claude Code",
+            ProviderKind::Acp => "ACP agent",
         }
     }
+}
+
+/// The two registry agents we never surface: they are ACP adapters over the very
+/// CLIs we already integrate natively (with steering, structured questions and
+/// richer tool mapping that ACP cannot express).
+pub const HIDDEN_ACP_AGENT_IDS: [&str; 2] = ["claude-acp", "codex-acp"];
+
+/// One ACP agent a session can run: its registry identity plus how to launch it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcpAgent {
+    /// Registry id (`"gemini"`, `"cursor"`, …), or a user-chosen id for a custom agent.
+    pub id: String,
+    pub name: String,
+    pub launch: AcpLaunch,
+}
+
+/// How to start an ACP agent process (ACP is JSON-RPC over the child's stdio).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AcpLaunch {
+    /// Registry `npx` distribution: `npm exec --yes -- <package> <args…>`.
+    Npx {
+        package: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
+    /// Registry `binary` distribution, already downloaded and extracted.
+    Binary {
+        command: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
+    /// A user-defined command (the escape hatch for agents not in the registry).
+    Custom {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
 }
 
 /// Provider-shaped opaque state needed to resume a session later
@@ -64,6 +115,9 @@ pub struct SessionOptions {
     pub launch_env: LaunchEnv,
     /// Extra CLI arguments appended at spawn (Claude's "Launch arguments").
     pub extra_args: Vec<String>,
+    /// Which ACP agent to launch. Required when `provider == ProviderKind::Acp`,
+    /// ignored (and `None`) for the native Codex / Claude Code clients.
+    pub acp: Option<AcpAgent>,
 }
 
 /// The per-provider environment configured in Settings → Providers, applied to
@@ -87,10 +141,15 @@ impl LaunchEnv {
         let mut pairs = self.env.clone();
         if let Some(home) = &self.home {
             let key = match provider {
-                ProviderKind::ClaudeCode => "HOME",
-                ProviderKind::Codex => "CODEX_HOME",
+                ProviderKind::ClaudeCode => Some("HOME"),
+                ProviderKind::Codex => Some("CODEX_HOME"),
+                // ACP agents carry their own env in the launch recipe; there is
+                // no protocol-level home concept to override.
+                ProviderKind::Acp => None,
             };
-            pairs.push((key.to_string(), home.to_string_lossy().into_owned()));
+            if let Some(key) = key {
+                pairs.push((key.to_string(), home.to_string_lossy().into_owned()));
+            }
         }
         pairs
     }
@@ -384,6 +443,9 @@ pub async fn list_models(
     match provider {
         ProviderKind::Codex => codex::list_models(binary_path, launch_env).await,
         ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env).await,
+        // ACP agents advertise their models over the wire at session start
+        // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
+        ProviderKind::Acp => Ok(Vec::new()),
     }
 }
 
@@ -453,6 +515,14 @@ pub enum SessionCommand {
     /// Switch Build/Plan interaction mode. Codex applies it on the next
     /// `turn/start`; Claude sends a `set_permission_mode` control request.
     SetInteractionMode(InteractionMode),
+    /// Set one of the agent's self-described options (see
+    /// [`AgentEvent::ProviderOptions`]). ACP routes it to `session/set_mode`,
+    /// `session/set_model` or `session/set_config_option` by the descriptor's
+    /// origin; the native providers ignore ids they do not know.
+    SetOption {
+        id: String,
+        value: serde_json::Value,
+    },
     Shutdown,
 }
 
@@ -472,6 +542,7 @@ pub async fn start_session(
     match provider {
         ProviderKind::Codex => codex::start(opts).await,
         ProviderKind::ClaudeCode => claude::start(opts).await,
+        ProviderKind::Acp => acp::start(opts).await,
     }
 }
 
@@ -482,6 +553,14 @@ pub async fn start_session(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// The agent's self-described options (ACP `modes` / `models` /
+    /// `configOptions`), pushed at session start and on every change. Reuses
+    /// [`OptionDescriptor`] so the composer's existing picker renders them
+    /// verbatim; answer with [`SessionCommand::SetOption`].
+    ProviderOptions {
+        descriptors: Vec<OptionDescriptor>,
+        selections: Vec<OptionSelection>,
+    },
     /// Emitted once the provider session is ready. `resume` must round-trip
     /// through `SessionOptions::resume` to continue this thread later.
     SessionStarted {
@@ -669,6 +748,31 @@ pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
     pub kind: ApprovalKind,
+    /// Agent-supplied choices. ACP agents send their own option list
+    /// (`session/request_permission`), so the UI renders exactly those buttons.
+    /// Empty for the native providers, whose four fixed decisions
+    /// ([`ApprovalDecision`]) apply instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ApprovalOption>,
+}
+
+/// One choice offered by an ACP agent's permission request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalOption {
+    /// Opaque id echoed back in [`ApprovalDecision::Option`].
+    pub id: String,
+    pub label: String,
+    pub kind: ApprovalOptionKind,
+}
+
+/// ACP's `PermissionOptionKind`: lets the UI style/order the buttons sanely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -697,7 +801,7 @@ pub enum ApprovalKind {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     Approve,
@@ -708,6 +812,8 @@ pub enum ApprovalDecision {
     /// `"User cancelled tool execution."` (no interrupt); Codex maps it to the
     /// protocol `{decision:"cancel"}` (deny + immediate turn interruption).
     Cancel,
+    /// Pick one of the agent's own [`ApprovalOption`]s (ACP only).
+    Option(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

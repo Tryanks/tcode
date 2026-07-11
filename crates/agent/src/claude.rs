@@ -450,7 +450,7 @@ async fn handle_command(
             request_id,
             decision,
         } => {
-            if let Some(response) = mapper.build_approval_response(&request_id, decision) {
+            if let Some(response) = mapper.build_approval_response(&request_id, decision.clone()) {
                 let _ = write_line(stdin, &response).await;
                 let _ = event_tx
                     .send(AgentEvent::ApprovalResolved {
@@ -498,6 +498,10 @@ async fn handle_command(
             } else {
                 mapper.applied_permission_mode = flag.to_string();
             }
+            Flow::Continue
+        }
+        SessionCommand::SetOption { id, .. } => {
+            log::debug!("claude: ignoring ACP-only SetOption {id}");
             Flow::Continue
         }
         SessionCommand::Shutdown => {
@@ -704,6 +708,12 @@ impl Mapper {
     ) -> Option<Value> {
         let pending = self.pending_approvals.remove(request_id)?;
         let response = match decision {
+            // Agent-supplied option ids are an ACP concept; Claude's approvals
+            // are the fixed four. Deny rather than leave the turn hanging.
+            ApprovalDecision::Option(ref id) => {
+                log::warn!("claude: unexpected ACP option decision {id}; denying");
+                json!({ "behavior": "deny", "message": "User declined tool execution." })
+            }
             ApprovalDecision::Approve => json!({
                 "behavior": "allow",
                 "updatedInput": pending.input,
@@ -1240,6 +1250,8 @@ impl Mapper {
             id: request_id,
             turn_id: self.current_turn_id.clone(),
             kind,
+            // Native approvals use the fixed four decisions.
+            options: Vec::new(),
         })]
     }
 

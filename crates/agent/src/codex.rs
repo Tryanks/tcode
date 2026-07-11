@@ -921,6 +921,13 @@ impl Actor {
                     ApprovalDecision::ApproveForSession => "acceptForSession",
                     ApprovalDecision::Deny => "decline",
                     ApprovalDecision::Cancel => "cancel",
+                    // Agent-supplied option ids are an ACP concept; codex's
+                    // approvals are the fixed four. Treat as a decline so the
+                    // turn cannot hang on an unanswered request.
+                    ApprovalDecision::Option(ref id) => {
+                        log::warn!("codex: unexpected ACP option decision {id}; declining");
+                        "decline"
+                    }
                 };
                 send_json(
                     &mut self.stdin,
@@ -973,6 +980,10 @@ impl Actor {
                     "codex: applying approval mode {mode:?} requires a session restart"
                 )))
                 .await;
+                Ok(())
+            }
+            SessionCommand::SetOption { id, .. } => {
+                log::debug!("codex: ignoring ACP-only SetOption {id}");
                 Ok(())
             }
             SessionCommand::Shutdown => Ok(()),
@@ -1098,6 +1109,8 @@ impl Actor {
             id: key,
             turn_id,
             kind,
+            // Native approvals use the fixed four decisions.
+            options: Vec::new(),
         }))
         .await;
     }
