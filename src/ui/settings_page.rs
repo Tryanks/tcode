@@ -107,9 +107,15 @@ impl SettingsPage {
         let codex = optional_path(&self.codex_input, cx);
         self.app_state.update(cx, |state, cx| {
             let mut settings = state.settings.clone();
+            let changed =
+                settings.claude_binary != claude || settings.codex_binary != codex;
             settings.claude_binary = claude;
             settings.codex_binary = codex;
             state.update_settings(settings, cx);
+            // A new binary path can change which models are available: refresh.
+            if changed {
+                state.refresh_model_catalogs(cx);
+            }
         });
     }
 
@@ -348,6 +354,14 @@ impl SettingsPage {
                 !settings.skip_delete_confirmation,
                 cx,
                 |s, checked| s.skip_delete_confirmation = !checked,
+            ))
+            .child(self.toggle_row(
+                "auto-open-task-panel",
+                rust_i18n::t!("settings.auto_open_task_panel.title"),
+                rust_i18n::t!("settings.auto_open_task_panel.description"),
+                settings.auto_open_task_panel,
+                cx,
+                |s, checked| s.auto_open_task_panel = checked,
             ))
     }
 

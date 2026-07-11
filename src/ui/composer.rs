@@ -6,13 +6,14 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use agent::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, FileChangeKind, ProviderKind,
-    TokenUsage,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest, FileChangeKind, InteractionMode,
+    ModelSpec, OptionDescriptor, ProviderKind, TokenUsage, UserInputQuestion,
 };
 use gpui::{
-    Anchor, AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -37,54 +38,14 @@ const STOP_TINT: u32 = 0xF4562E;
 /// the card edge (diff panel open, or a small window).
 const CONTROL_ROW_COMPACT_BELOW: f32 = 520.;
 
-/// One selectable model in the picker.
+/// One selectable model in the picker (a catalog [`ModelSpec`] row).
 #[derive(Clone)]
 struct ModelRow {
-    /// The id passed to the provider (`None` = provider default).
-    id: Option<&'static str>,
-    /// Display name (also the favorites key; unique across the catalog).
-    name: &'static str,
+    /// Provider-native model id (the favorites key + selection value).
+    id: String,
+    /// Display name.
+    name: String,
     provider: ProviderKind,
-}
-
-fn model_catalog() -> Vec<ModelRow> {
-    vec![
-        ModelRow {
-            id: None,
-            name: "Default",
-            provider: ProviderKind::ClaudeCode,
-        },
-        ModelRow {
-            id: Some("opus"),
-            name: "Claude Opus",
-            provider: ProviderKind::ClaudeCode,
-        },
-        ModelRow {
-            id: Some("sonnet"),
-            name: "Claude Sonnet",
-            provider: ProviderKind::ClaudeCode,
-        },
-        ModelRow {
-            id: Some("haiku"),
-            name: "Claude Haiku",
-            provider: ProviderKind::ClaudeCode,
-        },
-        ModelRow {
-            id: Some("gpt-5.6-sol"),
-            name: "gpt-5.6-sol",
-            provider: ProviderKind::Codex,
-        },
-        ModelRow {
-            id: Some("gpt-5.6-sol-mini"),
-            name: "gpt-5.6-sol-mini",
-            provider: ProviderKind::Codex,
-        },
-        ModelRow {
-            id: Some("gpt-5.5-codex"),
-            name: "gpt-5.5-codex",
-            provider: ProviderKind::Codex,
-        },
-    ]
 }
 
 fn provider_short(provider: ProviderKind) -> &'static str {
@@ -151,6 +112,24 @@ pub enum ComposerEvent {
     Submitted,
 }
 
+/// The minimal `/`-command set this slice handles (S1 §7).
+enum SlashCommand {
+    Plan,
+    Default,
+    Model,
+}
+
+/// Recognize a standalone `/plan`, `/default`, or `/model` message (T3 strips
+/// the command and switches mode / opens the picker instead of sending it).
+fn slash_command(text: &str) -> Option<SlashCommand> {
+    match text.trim() {
+        "/plan" => Some(SlashCommand::Plan),
+        "/default" => Some(SlashCommand::Default),
+        "/model" => Some(SlashCommand::Model),
+        _ => None,
+    }
+}
+
 pub struct Composer {
     app_state: Entity<AppState>,
     input: Entity<InputState>,
@@ -159,6 +138,18 @@ pub struct Composer {
     picker_rail: Option<PickerRail>,
     /// Whether the approval panel's detail is expanded.
     approval_expanded: bool,
+    /// The user-input request currently being answered (its id), plus the
+    /// question index and per-question selected option labels. Reset when a new
+    /// request arrives or it resolves.
+    ui_request_id: Option<String>,
+    ui_question_index: usize,
+    ui_selections: std::collections::HashMap<String, Vec<String>>,
+    /// The placeholder text last applied to the input (so it is only re-set —
+    /// which notifies — when it actually changes).
+    applied_placeholder: String,
+    /// Bumped by `/model` so the model-picker popover re-opens (a fresh popover
+    /// instance, keyed by this token, starts open).
+    model_picker_token: u64,
     /// Measured width of the control row (written from the prepaint callback,
     /// read at render time); drives the collapse to the "⋯" overflow layout at
     /// narrow widths. Shared via `Rc<Cell>` because the paint-phase callback
@@ -214,6 +205,11 @@ impl Composer {
             model_search,
             picker_rail: None,
             approval_expanded: false,
+            ui_request_id: None,
+            ui_question_index: 0,
+            ui_selections: std::collections::HashMap::new(),
+            applied_placeholder: rust_i18n::t!("composer.placeholder").into_owned(),
+            model_picker_token: 0,
             control_width: Rc::new(Cell::new(None)),
             prev_seen_width: None,
             raf_pending: false,
@@ -222,12 +218,35 @@ impl Composer {
     }
 
     fn submit(&mut self, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+        // While a user-input question is pending, Enter is captured by the
+        // question panel; normal send is suppressed (S1 §7).
+        if self.pending_user_input(cx).is_some() {
+            return;
+        }
         let text = input.read(cx).value().trim().to_string();
         if text.is_empty() {
             return;
         }
         if self.app_state.read(cx).active.is_none() {
             window.push_notification(Notification::info(rust_i18n::t!("composer.no_session")), cx);
+            return;
+        }
+        // Intercept the minimal `/`-command set (S1 §4/§7): `/plan` and
+        // `/default` switch mode and are stripped; `/model` opens the picker.
+        if let Some(command) = slash_command(&text) {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            match command {
+                SlashCommand::Plan => self
+                    .app_state
+                    .update(cx, |state, cx| state.set_interaction_mode(InteractionMode::Plan, cx)),
+                SlashCommand::Default => self.app_state.update(cx, |state, cx| {
+                    state.set_interaction_mode(InteractionMode::Build, cx)
+                }),
+                SlashCommand::Model => {
+                    self.model_picker_token = self.model_picker_token.wrapping_add(1);
+                }
+            }
+            cx.notify();
             return;
         }
         input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -237,8 +256,25 @@ impl Composer {
         cx.notify();
     }
 
-    fn rail(&self, provider: ProviderKind) -> PickerRail {
-        self.picker_rail.unwrap_or(PickerRail::Provider(provider))
+    /// The active session's pending user-input request, if any.
+    fn pending_user_input(&self, cx: &App) -> Option<(String, Vec<UserInputQuestion>)> {
+        self.app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|a| a.timeline.pending_user_input.clone())
+    }
+
+    /// The rail the picker shows: an explicit user choice, else Favorites when
+    /// any favorites exist (S1 §2), else the active provider.
+    fn rail_for(&self, provider: ProviderKind, has_favorites: bool) -> PickerRail {
+        self.picker_rail.unwrap_or({
+            if has_favorites {
+                PickerRail::Favorites
+            } else {
+                PickerRail::Provider(provider)
+            }
+        })
     }
 
     // -- control-row popovers ----------------------------------------------
@@ -250,20 +286,50 @@ impl Composer {
             Some(active) => (active.meta.provider, active.meta.model.clone()),
             None => return div().into_any_element(),
         };
-        let display = current_model_name(provider, current_model.as_deref());
+        let catalog = app_state.models_for(provider);
+        let display = current_model_name(catalog, current_model.as_deref());
 
         // Build the filtered + favorites-first row list for the current frame.
+        // Favorites open first when any exist (S1 §2).
         let query = self.model_search.read(cx).value().to_lowercase();
-        let rail = self.rail(provider);
-        let mut rows: Vec<ModelRow> = model_catalog()
+        let has_favorites = app_state
+            .model_catalogs
+            .values()
+            .flatten()
+            .any(|m| app_state.is_favorite_model(&m.id));
+        let rail = self.rail_for(provider, has_favorites);
+        let all_rows: Vec<ModelRow> = match rail {
+            PickerRail::Favorites => app_state
+                .model_catalogs
+                .iter()
+                .flat_map(|(p, models)| {
+                    models.iter().map(move |m| ModelRow {
+                        id: m.id.clone(),
+                        name: m.display_name.clone(),
+                        provider: *p,
+                    })
+                })
+                .filter(|r| app_state.is_favorite_model(&r.id))
+                .collect(),
+            PickerRail::Provider(p) => app_state
+                .models_for(p)
+                .iter()
+                .map(|m| ModelRow {
+                    id: m.id.clone(),
+                    name: m.display_name.clone(),
+                    provider: p,
+                })
+                .collect(),
+        };
+        let mut rows: Vec<ModelRow> = all_rows
             .into_iter()
-            .filter(|r| match rail {
-                PickerRail::Favorites => app_state.is_favorite_model(r.name),
-                PickerRail::Provider(p) => r.provider == p,
-            })
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
             .collect();
-        rows.sort_by_key(|r| !app_state.is_favorite_model(r.name));
+        rows.sort_by_key(|r| !app_state.is_favorite_model(&r.id));
+        let loading = app_state.models_loading(provider)
+            && matches!(rail, PickerRail::Provider(_))
+            && rows.is_empty()
+            && query.is_empty();
 
         let composer = cx.entity();
         let app_entity = self.app_state.clone();
@@ -285,8 +351,9 @@ impl Composer {
                 ),
         );
 
-        Popover::new("model-picker-popover")
+        Popover::new(("model-picker-popover", self.model_picker_token))
             .anchor(Anchor::BottomLeft)
+            .default_open(self.model_picker_token > 0)
             .trigger(trigger)
             .content(move |_state, _window, cx| {
                 let rows = rows.clone();
@@ -300,6 +367,7 @@ impl Composer {
                     &selected,
                     rail,
                     pending_restart,
+                    loading,
                     &app_entity,
                     &model_search,
                     &composer,
@@ -307,6 +375,94 @@ impl Composer {
                     cx,
                 )
             })
+            .into_any_element()
+    }
+
+    /// The traits chip ("High · 200k") + descriptor popover. Empty element when
+    /// the current model has no descriptors.
+    fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let app_state = self.app_state.read(cx);
+        let Some(spec) = app_state.active_model_spec() else {
+            return div().into_any_element();
+        };
+        let selections = app_state.active_option_selections();
+        let ultrathink_armed = app_state.ultrathink_armed();
+        let Some(label) = traits_chip_label(&spec, &selections, ultrathink_armed) else {
+            return div().into_any_element();
+        };
+        let muted = cx.theme().muted_foreground;
+        // The reasoning section is locked while the prompt text itself contains
+        // "ultrathink" (T3).
+        let locked = self
+            .input
+            .read(cx)
+            .value()
+            .to_lowercase()
+            .contains("ultrathink");
+        let pending_restart = app_state.options_pending_restart();
+
+        let trigger = Button::new("traits-chip").ghost().compact().child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .text_size(px(13.))
+                .text_color(muted)
+                .child(label)
+                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+        );
+
+        let app_entity = self.app_state.clone();
+        Popover::new("traits-popover")
+            .anchor(Anchor::BottomLeft)
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                render_traits_pane(
+                    &spec,
+                    &selections,
+                    ultrathink_armed,
+                    locked,
+                    pending_restart,
+                    &app_entity,
+                    &cx.entity(),
+                    cx,
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The Build/Plan interaction-mode chip (S1 §4).
+    fn render_mode_chip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mode = self.app_state.read(cx).active_interaction_mode();
+        let muted = cx.theme().muted_foreground;
+        let (icon, label, tooltip) = match mode {
+            InteractionMode::Build => (
+                "icons/box.svg",
+                rust_i18n::t!("composer.build"),
+                rust_i18n::t!("composer.build_tooltip"),
+            ),
+            InteractionMode::Plan => (
+                "icons/ruler.svg",
+                rust_i18n::t!("composer.plan"),
+                rust_i18n::t!("composer.plan_tooltip"),
+            ),
+        };
+        Button::new("mode-chip")
+            .ghost()
+            .compact()
+            .tooltip(tooltip)
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(Icon::empty().path(icon).small().text_color(muted))
+                    .child(label),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.app_state
+                    .update(cx, |state, cx| state.toggle_interaction_mode(cx));
+            }))
             .into_any_element()
     }
 
@@ -368,32 +524,6 @@ impl Composer {
             .into_any_element()
     }
 
-    /// A static (non-selectable) chip: icon + label + "coming soon" tooltip.
-    fn render_static_chip(
-        &self,
-        id: &'static str,
-        icon: Icon,
-        label: String,
-        tooltip: String,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        Button::new(id)
-            .ghost()
-            .compact()
-            .tooltip(tooltip)
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(icon.small().text_color(muted))
-                    .child(label),
-            )
-            .into_any_element()
-    }
-
     /// The "⋯" overflow button + popover holding the context / permission /
     /// mode controls when the control row is too narrow to show them inline.
     fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -405,6 +535,7 @@ impl Composer {
             .and_then(|a| a.timeline.usage);
         let muted = cx.theme().muted_foreground;
         let mode = self.app_state.read(cx).active_approval_mode();
+        let interaction = self.app_state.read(cx).active_interaction_mode();
 
         let trigger = Button::new("overflow-controls")
             .ghost()
@@ -415,7 +546,7 @@ impl Composer {
         Popover::new("overflow-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
-            .content(move |_, _, cx| render_overflow_pane(usage, mode, cx))
+            .content(move |_, _, cx| render_overflow_pane(usage, mode, interaction, cx))
             .into_any_element()
     }
 
@@ -470,6 +601,431 @@ impl Composer {
                 this.submit(&input, window, cx);
             }))
             .into_any_element()
+    }
+
+    /// The composer's primary control: the stop button while a turn runs, the
+    /// Refine / Implement (split) controls in the plan-ready state, else send.
+    fn render_primary_action(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
+        if turn_running {
+            return self.render_send_or_stop(true, cx);
+        }
+        if self.app_state.read(cx).plan_ready_markdown().is_some() {
+            let has_text = !self.input.read(cx).value().trim().is_empty();
+            if has_text {
+                // Refine: send the feedback and stay in Plan mode (a normal send
+                // while the session is in Plan mode continues planning).
+                return Button::new("plan-refine")
+                    .primary()
+                    .label(rust_i18n::t!("plan.refine"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let input = this.input.clone();
+                        this.submit(&input, window, cx);
+                    }))
+                    .into_any_element();
+            }
+            return self.render_implement_split(cx);
+        }
+        self.render_send_or_stop(turn_running, cx)
+    }
+
+    /// The Implement split-button: primary "Implement" + a chevron menu with
+    /// "Implement in a new thread" (S1 §5).
+    fn render_implement_split(&self, cx: &mut Context<Self>) -> AnyElement {
+        let primary = cx.theme().primary;
+        let fg = cx.theme().primary_foreground;
+        let app_main = self.app_state.clone();
+
+        let chevron = Popover::new("implement-menu")
+            .anchor(Anchor::TopRight)
+            .trigger(
+                Button::new("implement-menu-trigger")
+                    .primary()
+                    .compact()
+                    .icon(IconName::ChevronDown),
+            )
+            .content(move |_state, _window, cx| {
+                let app = cx.entity();
+                let app_state = app_main.clone();
+                let popover = cx.entity();
+                v_flex()
+                    .w(px(220.))
+                    .p_1()
+                    .child(
+                        h_flex()
+                            .id("implement-new-thread")
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .hover(|s| s.bg(cx.theme().muted))
+                            .child(Icon::new(IconName::Plus).xsmall())
+                            .child(rust_i18n::t!("plan.implement_new_thread"))
+                            .on_click(move |_, window, cx| {
+                                app_state.update(cx, |state, cx| {
+                                    state.implement_plan_in_new_thread(cx)
+                                });
+                                let _ = &app;
+                                popover.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
+                    )
+                    .into_any_element()
+            });
+
+        let app_impl = self.app_state.clone();
+        h_flex()
+            .flex_none()
+            .h(px(32.))
+            .items_center()
+            .rounded(px(8.))
+            .bg(primary)
+            .text_color(fg)
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .id("implement-main")
+                    .h_full()
+                    .px_3()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .font_medium()
+                    .hover(|s| s.opacity(0.9))
+                    .child(rust_i18n::t!("plan.implement"))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        app_impl.update(cx, |state, cx| state.implement_plan(cx));
+                    })),
+            )
+            .child(div().w_px().h(px(16.)).bg(fg).opacity(0.3))
+            .child(chevron)
+            .into_any_element()
+    }
+
+    /// The "Plan Ready" header strip shown atop the composer while a proposed
+    /// plan awaits a decision (S1 §5).
+    fn render_plan_ready_header(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .px_4()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .px_2()
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
+                    .text_size(px(11.))
+                    .font_medium()
+                    .child(rust_i18n::t!("plan.ready")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(title),
+            )
+            .into_any_element()
+    }
+
+    // -- user-input question panel (S1 §7) ---------------------------------
+
+    /// Keep the per-request question state in sync: reset the index/selections
+    /// when a new request arrives (or the pending one resolves).
+    fn sync_user_input_state(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|a| a.timeline.pending_user_input.as_ref().map(|(id, _)| id.clone()));
+        if current != self.ui_request_id {
+            self.ui_request_id = current;
+            self.ui_question_index = 0;
+            self.ui_selections.clear();
+        }
+    }
+
+    fn render_user_input_panel(
+        &self,
+        request_id: String,
+        questions: Vec<UserInputQuestion>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let primary = cx.theme().primary;
+        let total = questions.len();
+        let index = self.ui_question_index.min(total.saturating_sub(1));
+        let Some(question) = questions.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let multi = question.multi_select;
+        let selected = self.ui_selections.get(&question.id).cloned().unwrap_or_default();
+
+        // Header: question header + "N/total" when multiple.
+        let header = h_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .font_medium()
+                    .child(question.header.clone()),
+            )
+            .when(total > 1, |this| {
+                this.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(rust_i18n::t!(
+                            "userinput.question_count",
+                            index = index + 1,
+                            total = total
+                        )),
+                )
+            });
+
+        // Option rows.
+        let mut options = v_flex().w_full().gap_1();
+        for (opt_index, option) in question.options.iter().enumerate() {
+            let is_selected = selected.iter().any(|l| l == &option.label);
+            let label = option.label.clone();
+            let question_for_click = question.clone();
+            let questions_for_click = questions.clone();
+            let mark: AnyElement = if multi {
+                if is_selected {
+                    Icon::new(IconName::CircleCheck)
+                        .xsmall()
+                        .text_color(primary)
+                        .into_any_element()
+                } else {
+                    div()
+                        .size(px(14.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(muted)
+                        .into_any_element()
+                }
+            } else if is_selected {
+                Icon::new(IconName::Check)
+                    .xsmall()
+                    .text_color(primary)
+                    .into_any_element()
+            } else {
+                div().size(px(14.)).into_any_element()
+            };
+            options = options.child(
+                h_flex()
+                    .id(("ui-opt", opt_index))
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_2()
+                    .items_start()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(is_selected, |s| s.bg(cx.theme().muted))
+                    .hover(|s| s.bg(cx.theme().muted))
+                    .child(div().flex_none().pt(px(2.)).child(mark))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .text_size(px(13.))
+                                    .child(div().flex_none().text_color(muted).child(format!(
+                                        "{}",
+                                        opt_index + 1
+                                    )))
+                                    .child(div().font_medium().child(option.label.clone())),
+                            )
+                            .when(!option.description.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(muted)
+                                        .child(option.description.clone()),
+                                )
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ui_toggle_option(&question_for_click, label.clone(), cx);
+                        // Single-select auto-advances to the next question.
+                        if !multi {
+                            this.ui_auto_advance(&questions_for_click, String::new(), cx);
+                        }
+                    })),
+            );
+        }
+
+        // Actions row.
+        let is_last = index + 1 >= total;
+        let submit_label = if !multi && total == 1 {
+            rust_i18n::t!("userinput.submit_answer")
+        } else {
+            rust_i18n::t!("userinput.submit_answers")
+        };
+        let questions_submit = questions.clone();
+        let request_submit = request_id.clone();
+        let mut actions = h_flex().w_full().gap_2().items_center();
+        if index > 0 {
+            actions = actions.child(
+                Button::new("ui-prev")
+                    .ghost()
+                    .small()
+                    .label(rust_i18n::t!("userinput.previous"))
+                    .on_click(cx.listener(|this, _, _, cx| this.ui_go(-1, cx))),
+            );
+        }
+        actions = actions.child(div().flex_1());
+        if !is_last {
+            actions = actions.child(
+                Button::new("ui-next")
+                    .outline()
+                    .small()
+                    .label(rust_i18n::t!("userinput.next_question"))
+                    .on_click(cx.listener(|this, _, _, cx| this.ui_go(1, cx))),
+            );
+        }
+        actions = actions.child(
+            Button::new("ui-submit")
+                .primary()
+                .small()
+                .label(submit_label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
+                })),
+        );
+
+        // Number keys 1-9 select the matching option.
+        let question_keys = question.clone();
+        let questions_keys = questions.clone();
+
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p(px(14.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_sm()
+            .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+                if let Ok(n) = ev.keystroke.key.parse::<usize>() {
+                    if n >= 1 && n <= question_keys.options.len() {
+                        let label = question_keys.options[n - 1].label.clone();
+                        this.ui_toggle_option(&question_keys, label, cx);
+                        if !question_keys.multi_select {
+                            this.ui_auto_advance(&questions_keys, String::new(), cx);
+                        }
+                    }
+                }
+            }))
+            .child(header)
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .child(question.question.clone()),
+            )
+            .child(options)
+            .when(multi, |this| {
+                this.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(rust_i18n::t!("userinput.multi_hint")),
+                )
+            })
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// Toggle an option label for a question: single-select replaces, multi
+    /// toggles membership.
+    fn ui_toggle_option(
+        &mut self,
+        question: &UserInputQuestion,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entry = self.ui_selections.entry(question.id.clone()).or_default();
+        if question.multi_select {
+            if let Some(pos) = entry.iter().position(|l| l == &label) {
+                entry.remove(pos);
+            } else {
+                entry.push(label);
+            }
+        } else {
+            *entry = vec![label];
+        }
+        cx.notify();
+    }
+
+    fn ui_go(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let next = self.ui_question_index as i32 + delta;
+        if next >= 0 {
+            self.ui_question_index = next as usize;
+            cx.notify();
+        }
+    }
+
+    /// Single-select auto-advance (~200ms) to the next question (S1 §7).
+    fn ui_auto_advance(&mut self, questions: &[UserInputQuestion], _req: String, cx: &mut Context<Self>) {
+        let total = questions.len();
+        let at = self.ui_question_index;
+        if at + 1 >= total {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ui_question_index == at && at + 1 < total {
+                    this.ui_question_index = at + 1;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn ui_submit(
+        &mut self,
+        questions: &[UserInputQuestion],
+        request_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let custom = self.input.read(cx).value().trim().to_string();
+        let custom = if custom.is_empty() {
+            None
+        } else {
+            Some(custom.as_str())
+        };
+        let answers =
+            assemble_user_input_answers(questions, &self.ui_selections, self.ui_question_index, custom);
+        self.input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.ui_selections.clear();
+        self.ui_question_index = 0;
+        self.app_state
+            .update(cx, |state, cx| state.respond_user_input(request_id, answers, cx));
+        cx.notify();
     }
 
     // -- below-card + approval ---------------------------------------------
@@ -676,6 +1232,7 @@ impl Composer {
         let approve_id = request.id.clone();
         let always_id = request.id.clone();
         let deny_id = request.id.clone();
+        let cancel_id = request.id.clone();
 
         v_flex()
             .w_full()
@@ -740,15 +1297,28 @@ impl Composer {
                 )
             })
             .child(
+                // T3 order (S2 §4): Cancel turn, Decline, Always allow this
+                // session, Approve once.
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .justify_end()
+                    .items_center()
+                    .child(
+                        Button::new("approval-cancel")
+                            .ghost()
+                            .small()
+                            .label(rust_i18n::t!("approval.cancel_turn"))
+                            .text_color(cx.theme().muted_foreground)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
+                            })),
+                    )
+                    .child(div().flex_1())
                     .child(
                         Button::new("approval-deny")
                             .ghost()
                             .small()
-                            .label(rust_i18n::t!("approval.deny"))
+                            .label(rust_i18n::t!("approval.decline"))
                             .text_color(cx.theme().danger)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
@@ -758,7 +1328,7 @@ impl Composer {
                         Button::new("approval-always")
                             .ghost()
                             .small()
-                            .label(rust_i18n::t!("approval.always_allow"))
+                            .label(rust_i18n::t!("approval.always_allow_session"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(
                                     always_id.clone(),
@@ -771,7 +1341,7 @@ impl Composer {
                         Button::new("approval-approve")
                             .primary()
                             .small()
-                            .label(rust_i18n::t!("approval.approve"))
+                            .label(rust_i18n::t!("approval.approve_once"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
                             })),
@@ -790,6 +1360,7 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_user_input_state(cx);
         let (turn_running, approval, approval_count) = {
             let state = self.app_state.read(cx);
             match &state.active {
@@ -842,22 +1413,17 @@ impl Render for Composer {
                 .child(self.render_model_picker(cx))
                 .child(self.render_overflow_menu(cx))
                 .child(div().flex_1())
-                .child(self.render_send_or_stop(turn_running, cx))
+                .child(self.render_primary_action(turn_running, cx))
         } else {
             control_row_base
                 .child(self.render_model_picker(cx))
+                .child(self.render_traits_picker(cx))
                 .child(divider())
                 .child(self.render_context_chip(cx))
                 .child(self.render_permission_picker(cx))
-                .child(self.render_static_chip(
-                    "mode-chip",
-                    Icon::empty().path("icons/box.svg"),
-                    rust_i18n::t!("composer.build").into_owned(),
-                    rust_i18n::t!("composer.modes_soon").into_owned(),
-                    cx,
-                ))
+                .child(self.render_mode_chip(cx))
                 .child(div().flex_1())
-                .child(self.render_send_or_stop(turn_running, cx))
+                .child(self.render_primary_action(turn_running, cx))
         };
 
         // Measure the control row's laid-out width so the next frame can decide
@@ -876,6 +1442,28 @@ impl Render for Composer {
             }
         });
 
+        // Plan-ready state: a "Plan Ready" header strip + refine placeholder.
+        let plan_ready_title = {
+            let state = self.app_state.read(cx);
+            state.plan_ready_markdown().map(|md| {
+                crate::session::plan_title(&md)
+                    .unwrap_or_else(|| rust_i18n::t!("plan.proposed_plan").into_owned())
+            })
+        };
+        let desired_placeholder = if plan_ready_title.is_some() {
+            rust_i18n::t!("plan.refine_placeholder").into_owned()
+        } else {
+            rust_i18n::t!("composer.placeholder").into_owned()
+        };
+        if self.applied_placeholder != desired_placeholder {
+            self.applied_placeholder = desired_placeholder.clone();
+            self.input.update(cx, |state, cx| {
+                state.set_placeholder(desired_placeholder, window, cx)
+            });
+        }
+
+        let user_input = self.pending_user_input(cx);
+
         let card = v_flex()
             .w_full()
             .rounded(px(16.))
@@ -883,6 +1471,9 @@ impl Render for Composer {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .shadow_sm()
+            .when_some(plan_ready_title, |this, title| {
+                this.child(self.render_plan_ready_header(title, cx))
+            })
             .child(
                 div()
                     .px_4()
@@ -898,8 +1489,19 @@ impl Render for Composer {
             .pt_2()
             .pb_3()
             .gap_2()
+            // Shift+Tab toggles Build ↔ Plan (S1 §4).
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
+                    this.app_state
+                        .update(cx, |state, cx| state.toggle_interaction_mode(cx));
+                    cx.notify();
+                }
+            }))
             .when_some(approval, |this, request| {
                 this.child(self.render_approval_panel(&request, approval_count, cx))
+            })
+            .when_some(user_input, |this, (request_id, questions)| {
+                this.child(self.render_user_input_panel(request_id, questions, cx))
             })
             .child(card)
             .children(self.render_checkout_row(cx))
@@ -916,6 +1518,7 @@ fn render_model_pane(
     selected: &Option<String>,
     rail: PickerRail,
     pending_restart: bool,
+    loading: bool,
     app_entity: &Entity<AppState>,
     model_search: &Entity<InputState>,
     composer: &Entity<Composer>,
@@ -998,7 +1601,11 @@ fn render_model_pane(
                 .py_4()
                 .text_size(px(13.))
                 .text_color(muted)
-                .child(rust_i18n::t!("composer.no_models")),
+                .child(if loading {
+                    rust_i18n::t!("composer.loading_models")
+                } else {
+                    rust_i18n::t!("composer.no_models")
+                }),
         );
     }
 
@@ -1044,9 +1651,8 @@ fn render_model_pane(
             }
             if let Ok(n) = ev.keystroke.key.parse::<usize>() {
                 if n >= 1 && n <= key_rows.len() {
-                    let row = &key_rows[n - 1];
-                    let id = row.id.map(str::to_string);
-                    app_key.update(cx, |s, cx| s.set_active_model(id, cx));
+                    let id = key_rows[n - 1].id.clone();
+                    app_key.update(cx, |s, cx| s.set_active_model(Some(id), cx));
                     popover_key.update(cx, |st, cx| st.dismiss(window, cx));
                 }
             }
@@ -1065,10 +1671,11 @@ fn render_model_row(
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let is_current = selected.as_deref() == row.id;
-    let is_fav = app_entity.read(cx).is_favorite_model(row.name);
-    let name = row.name;
-    let id = row.id.map(str::to_string);
+    let is_current = selected.as_deref() == Some(row.id.as_str());
+    let is_fav = app_entity.read(cx).is_favorite_model(&row.id);
+    let name = row.name.clone();
+    let id = row.id.clone();
+    let fav_id = row.id.clone();
 
     let app_select = app_entity.clone();
     let popover_select = popover.clone();
@@ -1086,7 +1693,7 @@ fn render_model_row(
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().muted))
         .on_click(move |_, window, cx| {
-            app_select.update(cx, |s, cx| s.set_active_model(id.clone(), cx));
+            app_select.update(cx, |s, cx| s.set_active_model(Some(id.clone()), cx));
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })
         .child(
@@ -1154,7 +1761,7 @@ fn render_model_row(
                 )
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
-                    app_fav.update(cx, |s, cx| s.toggle_favorite_model(name, cx));
+                    app_fav.update(cx, |s, cx| s.toggle_favorite_model(&fav_id, cx));
                     // Refresh the open popover so the star + ordering update.
                     popover_fav.update(cx, |_, cx| cx.notify());
                 }),
@@ -1245,12 +1852,189 @@ fn render_permission_pane(
     pane.into_any_element()
 }
 
+/// The traits popover: one section per option descriptor (S1 §3). Select
+/// descriptors list their options (✓ + " (default)"); booleans list On/Off. The
+/// reasoning section locks while the prompt text contains "ultrathink".
+#[allow(clippy::too_many_arguments)]
+fn render_traits_pane(
+    spec: &ModelSpec,
+    selections: &[agent::OptionSelection],
+    ultrathink_armed: bool,
+    locked: bool,
+    pending_restart: bool,
+    app_entity: &Entity<AppState>,
+    popover: &Entity<PopoverState>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let primary = cx.theme().primary;
+    let default_suffix = rust_i18n::t!("composer.option_default").into_owned();
+
+    let section_header = |label: &str, cx: &mut Context<PopoverState>| -> AnyElement {
+        div()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .text_size(px(11.))
+            .font_medium()
+            .text_color(cx.theme().muted_foreground)
+            .child(label.to_string())
+            .into_any_element()
+    };
+
+    let mut pane = v_flex().w(px(280.)).p_1().gap_0p5();
+
+    for descriptor in &spec.options {
+        match descriptor {
+            OptionDescriptor::Select {
+                id,
+                label,
+                options,
+                default_value,
+            } => {
+                let is_reasoning = id == "reasoningEffort";
+                pane = pane.child(section_header(label, cx));
+                if is_reasoning && locked {
+                    pane = pane.child(
+                        div()
+                            .px_2()
+                            .py_1p5()
+                            .text_size(px(12.))
+                            .text_color(muted)
+                            .child(rust_i18n::t!("composer.ultrathink_locked")),
+                    );
+                    continue;
+                }
+                let resolved = resolved_select_value(id, options, default_value, selections);
+                for (index, opt) in options.iter().enumerate() {
+                    let is_default = default_value.as_deref() == Some(opt.value.as_str());
+                    let is_ultra = is_reasoning && opt.value == "ultrathink";
+                    let is_selected = if is_reasoning && ultrathink_armed {
+                        is_ultra
+                    } else if is_ultra {
+                        false
+                    } else {
+                        resolved.as_deref() == Some(opt.value.as_str())
+                    };
+                    let mut text = opt.label.clone();
+                    if is_default {
+                        text.push_str(&default_suffix);
+                    }
+                    let app = app_entity.clone();
+                    let pop = popover.clone();
+                    let opt_id = id.clone();
+                    let opt_value = opt.value.clone();
+                    pane = pane.child(
+                        h_flex()
+                            .id(("trait-opt", index * 31 + descriptor_hash(id)))
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .hover(|s| s.bg(cx.theme().muted))
+                            .child(div().flex_1().min_w_0().child(text))
+                            .when(is_selected, |this| {
+                                this.child(Icon::new(IconName::Check).xsmall().text_color(primary))
+                            })
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |s, cx| {
+                                    if is_ultra {
+                                        s.select_ultrathink(cx);
+                                    } else {
+                                        s.set_active_option(
+                                            &opt_id,
+                                            Some(serde_json::Value::String(opt_value.clone())),
+                                            cx,
+                                        );
+                                    }
+                                });
+                                pop.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
+                    );
+                }
+            }
+            OptionDescriptor::Boolean {
+                id,
+                label,
+                default_value,
+            } => {
+                pane = pane.child(section_header(label, cx));
+                let on = option_selection_bool(selections, id).unwrap_or(*default_value);
+                for (index, (value, text)) in [
+                    (true, rust_i18n::t!("composer.on").into_owned()),
+                    (false, rust_i18n::t!("composer.off").into_owned()),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let is_selected = on == value;
+                    let app = app_entity.clone();
+                    let pop = popover.clone();
+                    let opt_id = id.clone();
+                    pane = pane.child(
+                        h_flex()
+                            .id(("trait-bool", index * 61 + descriptor_hash(id)))
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .hover(|s| s.bg(cx.theme().muted))
+                            .child(div().flex_1().min_w_0().child(text))
+                            .when(is_selected, |this| {
+                                this.child(Icon::new(IconName::Check).xsmall().text_color(primary))
+                            })
+                            .on_click(move |_, window, cx| {
+                                app.update(cx, |s, cx| {
+                                    s.set_active_option(
+                                        &opt_id,
+                                        Some(serde_json::Value::Bool(value)),
+                                        cx,
+                                    );
+                                });
+                                pop.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
+                    );
+                }
+            }
+        }
+    }
+
+    if pending_restart {
+        pane = pane.child(
+            div()
+                .px_2()
+                .py_1p5()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(rust_i18n::t!("composer.restart_note")),
+        );
+    }
+    pane.into_any_element()
+}
+
+/// A tiny stable hash of a descriptor id, to keep row element ids unique across
+/// sections without colliding.
+fn descriptor_hash(id: &str) -> usize {
+    id.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize))
+}
+
 /// The "⋯" overflow popover: the context chip's usage summary plus the
 /// permission / mode chips, shown when the control row collapses at narrow
 /// widths.
 fn render_overflow_pane(
     usage: Option<TokenUsage>,
     mode: ApprovalMode,
+    interaction: InteractionMode,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -1270,6 +2054,10 @@ fn render_overflow_pane(
     };
 
     let (mode_label, _, mode_icon) = approval_mode_meta(mode);
+    let (interaction_icon, interaction_label) = match interaction {
+        InteractionMode::Build => ("icons/box.svg", rust_i18n::t!("composer.build")),
+        InteractionMode::Plan => ("icons/ruler.svg", rust_i18n::t!("composer.plan")),
+    };
     v_flex()
         .w(px(220.))
         .p_1()
@@ -1277,8 +2065,8 @@ fn render_overflow_pane(
         .child(item(Icon::new(IconName::Info), context_label(usage)))
         .child(item(Icon::empty().path(mode_icon), mode_label.into()))
         .child(item(
-            Icon::empty().path("icons/box.svg"),
-            rust_i18n::t!("composer.build").into_owned().into(),
+            Icon::empty().path(interaction_icon),
+            interaction_label.into_owned().into(),
         ))
         .into_any_element()
 }
@@ -1345,15 +2133,141 @@ fn render_context_pane(usage: Option<TokenUsage>, cx: &mut Context<PopoverState>
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn current_model_name(provider: ProviderKind, model: Option<&str>) -> String {
-    if let Some(found) = model_catalog()
+// ---------------------------------------------------------------------------
+// Traits (option descriptors)
+// ---------------------------------------------------------------------------
+
+fn option_selection_str<'a>(selections: &'a [agent::OptionSelection], id: &str) -> Option<&'a str> {
+    selections
         .iter()
-        .find(|r| r.provider == provider && r.id == model)
-    {
-        return found.name.to_string();
+        .find(|s| s.id == id)
+        .and_then(|s| s.value.as_str())
+}
+
+fn option_selection_bool(selections: &[agent::OptionSelection], id: &str) -> Option<bool> {
+    selections
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.value.as_bool())
+}
+
+/// The resolved value of a select descriptor: an accepted persisted selection,
+/// else the descriptor default.
+fn resolved_select_value(
+    id: &str,
+    options: &[agent::SelectOption],
+    default_value: &Option<String>,
+    selections: &[agent::OptionSelection],
+) -> Option<String> {
+    option_selection_str(selections, id)
+        .filter(|v| options.iter().any(|o| &o.value == v))
+        .map(str::to_string)
+        .or_else(|| default_value.clone())
+}
+
+/// The traits chip label: every resolved descriptor label joined with " · "
+/// (e.g. "High · 200k", "High · 200k · Fast", "Thinking Off"). `None` when the
+/// model has no descriptors (S1 §3).
+fn traits_chip_label(
+    spec: &ModelSpec,
+    selections: &[agent::OptionSelection],
+    ultrathink_armed: bool,
+) -> Option<String> {
+    if spec.options.is_empty() {
+        return None;
     }
+    let mut parts: Vec<String> = Vec::new();
+    for descriptor in &spec.options {
+        match descriptor {
+            OptionDescriptor::Select {
+                id,
+                options,
+                default_value,
+                ..
+            } => {
+                // An armed Ultrathink shows in the reasoning segment (it is not
+                // persisted, so it does not resolve as an ordinary selection).
+                if id == "reasoningEffort" && ultrathink_armed {
+                    if let Some(o) = options.iter().find(|o| o.value == "ultrathink") {
+                        parts.push(o.label.clone());
+                        continue;
+                    }
+                }
+                if let Some(value) = resolved_select_value(id, options, default_value, selections) {
+                    if let Some(o) = options.iter().find(|o| o.value == value) {
+                        parts.push(o.label.clone());
+                    }
+                }
+            }
+            OptionDescriptor::Boolean {
+                id,
+                label,
+                default_value,
+            } => {
+                let on = option_selection_bool(selections, id).unwrap_or(*default_value);
+                if id == "fastMode" {
+                    parts.push(
+                        rust_i18n::t!(if on {
+                            "composer.trait_fast"
+                        } else {
+                            "composer.trait_normal"
+                        })
+                        .into_owned(),
+                    );
+                } else {
+                    let state = rust_i18n::t!(if on { "composer.on" } else { "composer.off" });
+                    parts.push(format!("{label} {state}"));
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// Build the answers map for a user-input request: keyed by question id, with a
+/// string (single-select / free-text) or string-array (multi-select) value. A
+/// non-empty custom answer overrides the current question's selections (S1 §7).
+fn assemble_user_input_answers(
+    questions: &[UserInputQuestion],
+    selections: &std::collections::HashMap<String, Vec<String>>,
+    current_index: usize,
+    custom_current: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (i, question) in questions.iter().enumerate() {
+        if i == current_index {
+            if let Some(text) = custom_current.map(str::trim).filter(|t| !t.is_empty()) {
+                map.insert(
+                    question.id.clone(),
+                    serde_json::Value::String(text.to_string()),
+                );
+                continue;
+            }
+        }
+        let selected = selections.get(&question.id).cloned().unwrap_or_default();
+        let value = if question.multi_select {
+            serde_json::Value::Array(
+                selected.into_iter().map(serde_json::Value::String).collect(),
+            )
+        } else {
+            serde_json::Value::String(selected.into_iter().next().unwrap_or_default())
+        };
+        map.insert(question.id.clone(), value);
+    }
+    map
+}
+
+fn current_model_name(catalog: &[ModelSpec], model: Option<&str>) -> String {
     match model {
-        Some(id) => id.to_string(),
+        Some(id) => catalog
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.display_name.clone())
+            .unwrap_or_else(|| id.to_string()),
         None => rust_i18n::t!("composer.default_model").into_owned(),
     }
 }
@@ -1457,18 +2371,166 @@ mod tests {
 
     #[test]
     fn current_model_name_maps_catalog() {
+        let catalog = vec![agent::ModelSpec {
+            id: "claude-fable-5".into(),
+            display_name: "Claude Fable 5".into(),
+            is_default: false,
+            options: Vec::new(),
+        }];
+        assert_eq!(current_model_name(&catalog, None), "Default");
         assert_eq!(
-            current_model_name(ProviderKind::ClaudeCode, None),
-            "Default"
-        );
-        assert_eq!(
-            current_model_name(ProviderKind::ClaudeCode, Some("opus")),
-            "Claude Opus"
+            current_model_name(&catalog, Some("claude-fable-5")),
+            "Claude Fable 5"
         );
         // Unknown id falls back to the raw id.
+        assert_eq!(current_model_name(&catalog, Some("gpt-9")), "gpt-9");
+    }
+
+    #[test]
+    fn traits_chip_joins_descriptor_labels() {
+        let spec = agent::ModelSpec {
+            id: "claude-fable-5".into(),
+            display_name: "Claude Fable 5".into(),
+            is_default: false,
+            options: vec![
+                agent::OptionDescriptor::Select {
+                    id: "reasoningEffort".into(),
+                    label: "Reasoning".into(),
+                    options: vec![
+                        agent::SelectOption {
+                            value: "high".into(),
+                            label: "High".into(),
+                            description: None,
+                        },
+                        agent::SelectOption {
+                            value: "max".into(),
+                            label: "Max".into(),
+                            description: None,
+                        },
+                    ],
+                    default_value: Some("high".into()),
+                },
+                agent::OptionDescriptor::Select {
+                    id: "contextWindow".into(),
+                    label: "Context Window".into(),
+                    options: vec![
+                        agent::SelectOption {
+                            value: "200k".into(),
+                            label: "200k".into(),
+                            description: None,
+                        },
+                        agent::SelectOption {
+                            value: "1m".into(),
+                            label: "1M".into(),
+                            description: None,
+                        },
+                    ],
+                    default_value: Some("200k".into()),
+                },
+            ],
+        };
+        // Defaults resolve to "High · 200k".
+        assert_eq!(traits_chip_label(&spec, &[], false), Some("High · 200k".into()));
+        // A selection overrides the default.
+        let sel = vec![agent::OptionSelection {
+            id: "contextWindow".into(),
+            value: serde_json::Value::String("1m".into()),
+        }];
+        assert_eq!(traits_chip_label(&spec, &sel, false), Some("High · 1M".into()));
+
+        // Fast Mode boolean → Fast/Normal; a plain boolean → "<Label> On/Off".
+        let fast = agent::ModelSpec {
+            id: "m".into(),
+            display_name: "m".into(),
+            is_default: false,
+            options: vec![agent::OptionDescriptor::Boolean {
+                id: "fastMode".into(),
+                label: "Fast Mode".into(),
+                default_value: false,
+            }],
+        };
+        assert_eq!(traits_chip_label(&fast, &[], false), Some("Normal".into()));
+        let thinking = agent::ModelSpec {
+            id: "h".into(),
+            display_name: "h".into(),
+            is_default: false,
+            options: vec![agent::OptionDescriptor::Boolean {
+                id: "thinking".into(),
+                label: "Thinking".into(),
+                default_value: false,
+            }],
+        };
         assert_eq!(
-            current_model_name(ProviderKind::Codex, Some("gpt-9")),
-            "gpt-9"
+            traits_chip_label(&thinking, &[], false),
+            Some("Thinking Off".into())
         );
+        // A model with no descriptors has no chip.
+        let bare = agent::ModelSpec {
+            id: "b".into(),
+            display_name: "b".into(),
+            is_default: false,
+            options: Vec::new(),
+        };
+        assert_eq!(traits_chip_label(&bare, &[], false), None);
+    }
+
+    #[test]
+    fn user_input_answers_assemble_with_multi_and_custom_override() {
+        let questions = vec![
+            UserInputQuestion {
+                id: "q1".into(),
+                header: "H1".into(),
+                question: "Pick one".into(),
+                options: vec![
+                    agent::UserInputOption {
+                        label: "A".into(),
+                        description: String::new(),
+                    },
+                    agent::UserInputOption {
+                        label: "B".into(),
+                        description: String::new(),
+                    },
+                ],
+                multi_select: false,
+            },
+            UserInputQuestion {
+                id: "q2".into(),
+                header: "H2".into(),
+                question: "Pick many".into(),
+                options: vec![
+                    agent::UserInputOption {
+                        label: "X".into(),
+                        description: String::new(),
+                    },
+                    agent::UserInputOption {
+                        label: "Y".into(),
+                        description: String::new(),
+                    },
+                ],
+                multi_select: true,
+            },
+        ];
+        let mut selections = std::collections::HashMap::new();
+        selections.insert("q1".to_string(), vec!["A".to_string()]);
+        selections.insert("q2".to_string(), vec!["X".to_string(), "Y".to_string()]);
+
+        // No custom override: single-select → string, multi-select → array.
+        let answers = assemble_user_input_answers(&questions, &selections, 0, None);
+        assert_eq!(answers["q1"], serde_json::json!("A"));
+        assert_eq!(answers["q2"], serde_json::json!(["X", "Y"]));
+
+        // A custom answer overrides the current question's selection only.
+        let answers = assemble_user_input_answers(&questions, &selections, 0, Some("  freehand  "));
+        assert_eq!(answers["q1"], serde_json::json!("freehand"));
+        assert_eq!(answers["q2"], serde_json::json!(["X", "Y"]));
+
+        // A blank/whitespace custom answer does not override.
+        let answers = assemble_user_input_answers(&questions, &selections, 0, Some("   "));
+        assert_eq!(answers["q1"], serde_json::json!("A"));
+
+        // An unanswered single-select yields an empty string.
+        let answers = assemble_user_input_answers(&questions, &std::collections::HashMap::new(), 0, None);
+        assert_eq!(answers["q1"], serde_json::json!(""));
+        assert_eq!(answers["q2"], serde_json::json!([]));
     }
 }

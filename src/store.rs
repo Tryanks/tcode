@@ -11,7 +11,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use agent::{AgentEvent, ApprovalMode, ProviderKind, ResumeCursor};
+use agent::{
+    AgentEvent, ApprovalMode, InteractionMode, ModelSpec, OptionSelection, ProviderKind,
+    ResumeCursor,
+};
 use serde::{Deserialize, Serialize};
 
 /// One persisted event, optionally tagged with the wall-clock time (unix ms)
@@ -80,6 +83,16 @@ pub struct SessionMeta {
     pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
+    /// Chosen values for the selected model's option descriptors (reasoning
+    /// effort, context window, service tier, fast mode, thinking, …). Absent in
+    /// index files written before this slice; defaults to no selections (each
+    /// descriptor then resolves to its own default).
+    #[serde(default)]
+    pub option_selections: Vec<OptionSelection>,
+    /// Build (default) vs Plan interaction mode. Absent in legacy files;
+    /// defaults to `Build`.
+    #[serde(default)]
+    pub interaction_mode: InteractionMode,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -96,6 +109,8 @@ impl SessionMeta {
             model,
             approval_mode: ApprovalMode::default(),
             resume_cursor: None,
+            option_selections: Vec::new(),
+            interaction_mode: InteractionMode::default(),
             created_at: now,
             updated_at: now,
         }
@@ -175,6 +190,33 @@ impl SessionStore {
 
     fn events_path(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}.jsonl"))
+    }
+
+    fn models_path(&self, provider: ProviderKind) -> PathBuf {
+        let name = match provider {
+            ProviderKind::Codex => "codex",
+            ProviderKind::ClaudeCode => "claude",
+        };
+        self.root.join(format!("models-{name}.json"))
+    }
+
+    /// Load the last-fetched model catalog for `provider` so the picker is
+    /// instant offline. Empty when never fetched / unreadable.
+    pub fn load_models(&self, provider: ProviderKind) -> Vec<ModelSpec> {
+        let Ok(bytes) = fs::read(self.models_path(provider)) else {
+            return Vec::new();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    /// Persist the freshly fetched model catalog for `provider`.
+    pub fn save_models(&self, provider: ProviderKind, models: &[ModelSpec]) -> std::io::Result<()> {
+        let path = self.models_path(provider);
+        let tmp = path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(models)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, path)
     }
 
     /// Load the whole index file (projects + sessions), tolerating the old
