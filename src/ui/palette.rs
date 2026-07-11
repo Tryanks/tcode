@@ -10,10 +10,11 @@
 //!
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
 
+use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
@@ -52,6 +53,9 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     (qi == q.len()).then_some(score)
 }
 
+/// Claude's warm brand tint for its glyph.
+const CLAUDE_TINT: u32 = 0xD97757;
+
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
@@ -62,9 +66,42 @@ enum Action {
     OpenSettings,
     ToggleTheme,
     ToggleDiff,
+    ToggleTerminal,
+    OpenPreview,
+    CheckUpdates,
     OpenThread {
         session_id: String,
     },
+}
+
+/// The provider glyph (Claude starburst / Codex OpenAI mark) for a result row.
+fn provider_glyph(provider: ProviderKind) -> Icon {
+    match provider {
+        ProviderKind::ClaudeCode => Icon::empty()
+            .path("icons/claude.svg")
+            .text_color(rgb(CLAUDE_TINT)),
+        ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
+    }
+}
+
+/// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
+fn humanize_ago(secs: u64) -> String {
+    if secs < 60 {
+        rust_i18n::t!("time.just_now").into_owned()
+    } else if secs < 3600 {
+        rust_i18n::t!("time.minutes_ago", count = secs / 60).into_owned()
+    } else if secs < 86_400 {
+        rust_i18n::t!("time.hours_ago", count = secs / 3600).into_owned()
+    } else {
+        rust_i18n::t!("time.days_ago", count = secs / 86_400).into_owned()
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// One rendered palette row.
@@ -74,6 +111,9 @@ struct Item {
     label: String,
     /// Optional muted subtitle (e.g. a thread's project).
     subtitle: Option<String>,
+    /// Thread rows carry their provider glyph + last-activity time (right side).
+    provider: Option<ProviderKind>,
+    updated_at: Option<u64>,
     action: Action,
 }
 
@@ -123,10 +163,17 @@ impl CommandPalette {
         }
     }
 
-    /// Focus the search input (called when the palette opens).
+    /// Focus the search input (called when the palette opens). `--debug-palette`
+    /// seeds the query so palette states can be screenshotted headlessly.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seed = self
+            .app_state
+            .read(cx)
+            .debug_palette
+            .clone()
+            .unwrap_or_default();
         self.query.update(cx, |state, cx| {
-            state.set_value("", window, cx);
+            state.set_value(seed, window, cx);
             state.focus(window, cx);
         });
         self.selected = 0;
@@ -137,27 +184,36 @@ impl CommandPalette {
             .update(cx, |state, cx| state.close_palette(cx));
     }
 
-    /// Build the grouped result list for the current query.
+    /// Build the grouped result list for the current query. A leading `>`
+    /// restricts results to Actions (T3 §4).
     fn groups(&self, cx: &Context<Self>) -> Vec<Group> {
-        let query = self.query.read(cx).value().to_string();
+        let raw = self.query.read(cx).value().to_string();
+        let actions_only = raw.trim_start().starts_with('>');
+        // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
+        let query = if actions_only {
+            raw.trim_start().trim_start_matches('>').trim_start().to_string()
+        } else {
+            raw
+        };
         let state = self.app_state.read(cx);
 
         // Actions.
         let mut actions: Vec<(i32, Item)> = Vec::new();
-        let mut push_action =
-            |label: String, icon: IconName, action: Action, subtitle: Option<String>| {
-                if let Some(score) = fuzzy_score(&query, &label) {
-                    actions.push((
-                        score,
-                        Item {
-                            icon,
-                            label,
-                            subtitle,
-                            action,
-                        },
-                    ));
-                }
-            };
+        let mut push_action = |label: String, icon: IconName, action: Action| {
+            if let Some(score) = fuzzy_score(&query, &label) {
+                actions.push((
+                    score,
+                    Item {
+                        icon,
+                        label,
+                        subtitle: None,
+                        provider: None,
+                        updated_at: None,
+                        action,
+                    },
+                ));
+            }
+        };
         for group in state.grouped_sessions() {
             push_action(
                 rust_i18n::t!("palette.new_thread", project = group.project.name).into_owned(),
@@ -166,49 +222,39 @@ impl CommandPalette {
                     cwd: group.project.root.clone(),
                     project_id: group.project.id.clone(),
                 },
-                None,
             );
         }
         push_action(
             rust_i18n::t!("palette.open_settings").into_owned(),
             IconName::Settings,
             Action::OpenSettings,
-            None,
         );
         push_action(
             rust_i18n::t!("palette.toggle_theme").into_owned(),
             IconName::Moon,
             Action::ToggleTheme,
-            None,
         );
         push_action(
             rust_i18n::t!("palette.toggle_diff").into_owned(),
             IconName::PanelRight,
             Action::ToggleDiff,
-            None,
+        );
+        push_action(
+            rust_i18n::t!("palette.toggle_terminal").into_owned(),
+            IconName::SquareTerminal,
+            Action::ToggleTerminal,
+        );
+        push_action(
+            rust_i18n::t!("palette.open_preview").into_owned(),
+            IconName::Globe,
+            Action::OpenPreview,
+        );
+        push_action(
+            rust_i18n::t!("palette.check_updates").into_owned(),
+            IconName::Inbox,
+            Action::CheckUpdates,
         );
         actions.sort_by(|a, b| b.0.cmp(&a.0));
-
-        // Threads (fuzzy over titles).
-        let mut threads: Vec<(i32, Item)> = Vec::new();
-        for group in state.grouped_sessions() {
-            for meta in &group.sessions {
-                if let Some(score) = fuzzy_score(&query, &meta.title) {
-                    threads.push((
-                        score,
-                        Item {
-                            icon: IconName::SquareTerminal,
-                            label: meta.title.clone(),
-                            subtitle: Some(group.project.name.clone()),
-                            action: Action::OpenThread {
-                                session_id: meta.id.clone(),
-                            },
-                        },
-                    ));
-                }
-            }
-        }
-        threads.sort_by(|a, b| b.0.cmp(&a.0));
 
         let mut groups = Vec::new();
         if !actions.is_empty() {
@@ -217,11 +263,36 @@ impl CommandPalette {
                 items: actions.into_iter().map(|(_, i)| i).collect(),
             });
         }
-        if !threads.is_empty() {
-            groups.push(Group {
-                label: rust_i18n::t!("palette.threads").into_owned(),
-                items: threads.into_iter().map(|(_, i)| i).collect(),
-            });
+
+        // Threads (fuzzy over titles) — suppressed in `>`-actions-only mode.
+        if !actions_only {
+            let mut threads: Vec<(i32, Item)> = Vec::new();
+            for group in state.grouped_sessions() {
+                for meta in &group.sessions {
+                    if let Some(score) = fuzzy_score(&query, &meta.title) {
+                        threads.push((
+                            score,
+                            Item {
+                                icon: IconName::SquareTerminal,
+                                label: meta.title.clone(),
+                                subtitle: Some(group.project.name.clone()),
+                                provider: Some(meta.provider),
+                                updated_at: Some(meta.updated_at),
+                                action: Action::OpenThread {
+                                    session_id: meta.id.clone(),
+                                },
+                            },
+                        ));
+                    }
+                }
+            }
+            threads.sort_by(|a, b| b.0.cmp(&a.0));
+            if !threads.is_empty() {
+                groups.push(Group {
+                    label: rust_i18n::t!("palette.threads").into_owned(),
+                    items: threads.into_iter().map(|(_, i)| i).collect(),
+                });
+            }
         }
         groups
     }
@@ -268,6 +339,21 @@ impl CommandPalette {
             Action::ToggleDiff => {
                 self.app_state
                     .update(cx, |state, cx| state.toggle_diff_panel(cx));
+                self.close(cx);
+            }
+            Action::ToggleTerminal => {
+                self.app_state
+                    .update(cx, |state, cx| state.toggle_terminal_panel(cx));
+                self.close(cx);
+            }
+            Action::OpenPreview => {
+                self.app_state
+                    .update(cx, |state, cx| state.open_preview_panel(cx));
+                self.close(cx);
+            }
+            Action::CheckUpdates => {
+                self.app_state
+                    .update(cx, |state, cx| state.check_provider_versions(cx));
                 self.close(cx);
             }
             Action::OpenThread { session_id } => {
@@ -371,6 +457,22 @@ impl Render for CommandPalette {
                                     )
                                 }),
                         )
+                        // Thread rows: provider glyph + relative last-activity time.
+                        .when_some(item.provider, |this, provider| {
+                            this.child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .text_size(px(11.))
+                                    .text_color(muted)
+                                    .when_some(item.updated_at, |this, at| {
+                                        let ago = now_secs().saturating_sub(at);
+                                        this.child(div().child(humanize_ago(ago)))
+                                    })
+                                    .child(provider_glyph(provider).xsmall()),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.activate(action.clone(), window, cx);
                         })),

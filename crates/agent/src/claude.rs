@@ -32,10 +32,10 @@ use smol::process::{Command, Stdio};
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus, ModelSpec,
-    OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderKind, ResumeCursor,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus, UserInputOption, UserInputQuestion,
+    Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
+    ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
@@ -383,7 +383,11 @@ async fn handle_command(
     child: &mut smol::process::Child,
 ) -> Flow {
     match command {
-        SessionCommand::SendTurn { text, options } => {
+        SessionCommand::SendTurn {
+            text,
+            options,
+            attachments,
+        } => {
             // Apply the interaction mode (per-turn override, else session mode)
             // via a `set_permission_mode` control request when it has changed.
             let mode = options
@@ -412,7 +416,7 @@ async fn handle_command(
             } else {
                 text
             };
-            let msg = user_message(&text);
+            let msg = user_message(&text, &attachments);
             if write_line(stdin, &msg).await.is_err() {
                 let _ = event_tx
                     .send(AgentEvent::Error {
@@ -517,15 +521,28 @@ async fn write_line(
     stdin.flush().await
 }
 
-/// Build a stream-json user message line.
-fn user_message(text: &str) -> Value {
+/// Build a stream-json user message line. Text comes first, followed by one
+/// `image` content block per attachment (`source: {type: "base64", media_type,
+/// data}` — the Anthropic content-block shape the CLI accepts).
+fn user_message(text: &str, attachments: &[Attachment]) -> Value {
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    for attachment in attachments {
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": attachment.media_type,
+                "data": attachment.data_base64,
+            }
+        }));
+    }
     json!({
         "type": "user",
         "session_id": "",
         "parent_tool_use_id": null,
         "message": {
             "role": "user",
-            "content": [{ "type": "text", "text": text }]
+            "content": content,
         }
     })
 }
@@ -586,6 +603,10 @@ pub(crate) struct Mapper {
     exit_plan_captures: HashSet<String>,
     /// Control responses to write back (e.g. the auto-deny for `ExitPlanMode`).
     outgoing: Vec<Value>,
+    /// Cumulative tokens processed across every completed turn this session
+    /// (Claude reports only per-turn usage, so we accumulate it ourselves for
+    /// the "Total processed" display).
+    cumulative_processed: u64,
 }
 
 impl Mapper {
@@ -607,6 +628,7 @@ impl Mapper {
             applied_permission_mode: "default".to_string(),
             exit_plan_captures: HashSet::new(),
             outgoing: Vec::new(),
+            cumulative_processed: 0,
         }
     }
 
@@ -808,12 +830,15 @@ impl Mapper {
     }
 
     fn on_system(&mut self, msg: &Value) -> Vec<AgentEvent> {
-        if msg.get("subtype").and_then(Value::as_str) != Some("init") {
-            log::debug!(
-                "claude: ignoring system/{:?}",
-                msg.get("subtype").and_then(Value::as_str)
-            );
-            return Vec::new();
+        match msg.get("subtype").and_then(Value::as_str) {
+            Some("init") => {}
+            // Claude compacted its context window (verified shape:
+            // `{type:"system", subtype:"compact_boundary", compact_metadata:{…}}`).
+            Some("compact_boundary") => return vec![AgentEvent::ContextCompacted],
+            other => {
+                log::debug!("claude: ignoring system/{other:?}");
+                return Vec::new();
+            }
         }
         if self.session_started {
             return Vec::new();
@@ -827,11 +852,18 @@ impl Mapper {
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_string);
-        vec![AgentEvent::SessionStarted {
+        let mut events = vec![AgentEvent::SessionStarted {
             provider_session_id: session_id.clone(),
             resume: ResumeCursor(json!({ "session_id": session_id })),
             model,
-        }]
+        }];
+        // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
+        // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
+        let commands = parse_provider_commands(msg);
+        if !commands.is_empty() {
+            events.push(AgentEvent::ProviderCommands { commands });
+        }
+        events
     }
 
     fn on_stream_event(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1228,9 +1260,13 @@ impl Mapper {
         if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
             status = TurnStatus::Interrupted;
         }
-        let usage = msg
-            .get("usage")
-            .map(|u| map_usage(u, msg.get("modelUsage")));
+        let usage = msg.get("usage").map(|u| {
+            let mut usage = map_usage(u, msg.get("modelUsage"));
+            // Accumulate this turn's processed tokens into the session total.
+            self.cumulative_processed += usage.used_tokens.unwrap_or(0);
+            usage.total_processed_tokens = Some(self.cumulative_processed);
+            usage
+        });
         vec![AgentEvent::TurnCompleted {
             turn_id,
             status,
@@ -1531,7 +1567,34 @@ fn map_usage(usage: &Value, model_usage: Option<&Value>) -> TokenUsage {
         output_tokens: output,
         used_tokens,
         context_window,
+        // Session-cumulative total is stamped by the caller (`on_result`); the
+        // streaming/partial usage path leaves it unset.
+        total_processed_tokens: None,
     }
+}
+
+/// Parse Claude system-init `slash_commands` (→ [`ProviderCommandKind::Command`])
+/// and `skills` (→ [`ProviderCommandKind::Skill`]) into [`ProviderCommand`]s.
+/// Both are arrays of bare name strings; the CLI supplies no descriptions.
+fn parse_provider_commands(init: &Value) -> Vec<ProviderCommand> {
+    let mut out = Vec::new();
+    let mut push = |field: &str, kind: ProviderCommandKind| {
+        if let Some(names) = init.get(field).and_then(Value::as_array) {
+            for name in names.iter().filter_map(Value::as_str) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    out.push(ProviderCommand {
+                        name: name.to_owned(),
+                        description: None,
+                        kind,
+                    });
+                }
+            }
+        }
+    };
+    push("slash_commands", ProviderCommandKind::Command);
+    push("skills", ProviderCommandKind::Skill);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2074,6 +2137,91 @@ mod tests {
             r##"{"type":"assistant","message":{"id":"msg_p","content":[{"type":"tool_use","id":"req-plan","name":"ExitPlanMode","input":{"plan":"# Plan\n- step one"}}]}}"##,
         );
         assert!(evs.is_empty(), "duplicate capture should be suppressed");
+    }
+
+    #[test]
+    fn user_message_carries_image_content_blocks() {
+        let attachments = vec![
+            Attachment {
+                media_type: "image/png".into(),
+                data_base64: "AAAA".into(),
+            },
+            Attachment {
+                media_type: "image/jpeg".into(),
+                data_base64: "BBBB".into(),
+            },
+        ];
+        let msg = user_message("what color is this?", &attachments);
+        let content = msg["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what color is this?");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+        assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+        // Text-only stays a single text block.
+        let plain = user_message("hi", &[]);
+        assert_eq!(plain["message"]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn init_parses_slash_commands_and_skills() {
+        let mut m = Mapper::new();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8","slash_commands":["plan","review",""],"skills":["dataviz"]}"#,
+        );
+        // SessionStarted then ProviderCommands.
+        assert!(matches!(evs[0], AgentEvent::SessionStarted { .. }));
+        match &evs[1] {
+            AgentEvent::ProviderCommands { commands } => {
+                // Empty names dropped; two commands + one skill.
+                assert_eq!(commands.len(), 3);
+                assert_eq!(commands[0].name, "plan");
+                assert_eq!(commands[0].kind, ProviderCommandKind::Command);
+                assert_eq!(commands[2].name, "dataviz");
+                assert_eq!(commands[2].kind, ProviderCommandKind::Skill);
+            }
+            other => panic!("expected ProviderCommands, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compact_boundary_maps_to_context_compacted() {
+        let mut m = Mapper::new();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"compact_boundary","session_id":"s1","compact_metadata":{"trigger":"manual","pre_tokens":500,"post_tokens":10}}"#,
+        );
+        assert!(matches!(evs.as_slice(), [AgentEvent::ContextCompacted]));
+    }
+
+    #[test]
+    fn result_accumulates_total_processed_tokens() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":20}}"#,
+        );
+        let first = match &evs[0] {
+            AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        };
+        assert_eq!(first.total_processed_tokens, Some(120));
+        // A second turn accumulates on top of the first.
+        m.start_turn();
+        let evs = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":30,"output_tokens":5}}"#,
+        );
+        let second = match &evs[0] {
+            AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        };
+        assert_eq!(second.total_processed_tokens, Some(155));
     }
 
     #[test]
