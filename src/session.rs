@@ -69,7 +69,6 @@ pub enum EntryContent {
     },
     FileChange {
         changes: Vec<FileChange>,
-        status: ItemStatus,
     },
     Tool {
         name: String,
@@ -293,9 +292,8 @@ impl Timeline {
                 exit_code: *exit_code,
                 status: *status,
             },
-            ItemContent::FileChange { changes, status } => EntryContent::FileChange {
+            ItemContent::FileChange { changes, .. } => EntryContent::FileChange {
                 changes: changes.clone(),
-                status: *status,
             },
             ItemContent::ToolCall {
                 name,
@@ -539,7 +537,7 @@ mod tests {
         assert_eq!(timeline.entries.len(), 4);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::FileChange { status: ItemStatus::Completed, changes }
+            EntryContent::FileChange { changes }
                 if changes.len() == 1 && changes[0].path.ends_with("hello.txt")
         ));
         assert!(matches!(

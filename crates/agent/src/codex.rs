@@ -660,20 +660,15 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    // The app synthesizes a canonical `UserMessage` event at send time (needed
+    // for universal replay across providers). Codex echoes the same user input
+    // back as a `userMessage` item; emitting it too would render a duplicate
+    // user bubble, so swallow the provider echo here.
+    if provider_kind == "userMessage" {
+        log::debug!("suppressing provider-echoed userMessage item {id}");
+        return None;
+    }
     let content = match provider_kind {
-        "userMessage" => ItemContent::UserMessage {
-            text: item
-                .get("content")
-                .and_then(Value::as_array)
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter_map(|p| p.get("text").and_then(Value::as_str))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default(),
-        },
         "agentMessage" => ItemContent::AssistantMessage {
             text: string_field(item, "text"),
         },
@@ -891,8 +886,13 @@ mod tests {
         assert!(
             matches!(reasoning.content, ItemContent::Reasoning { ref text } if text == "summary\ndetail")
         );
-        let user = map_item(&json!({"type":"userMessage","id":"u1","content":[{"type":"text","text":"hello"},{"type":"image","url":"x"}]})).unwrap();
-        assert!(matches!(user.content, ItemContent::UserMessage { ref text } if text == "hello"));
+        // Provider-echoed user messages are suppressed: the app synthesizes the
+        // canonical UserMessage at send time, so mapping one here yields None
+        // (no duplicate user bubble on replay/live).
+        assert!(
+            map_item(&json!({"type":"userMessage","id":"u1","content":[{"type":"text","text":"hello"},{"type":"image","url":"x"}]}))
+                .is_none()
+        );
     }
 
     #[test]
