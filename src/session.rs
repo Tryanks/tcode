@@ -406,6 +406,9 @@ impl Timeline {
             }
             // Session metadata (composer menus) — not folded into the timeline.
             AgentEvent::ProviderCommands { .. } => {}
+            // Live UI state (the agent's self-described options), not transcript
+            // content — the timeline fold ignores it.
+            AgentEvent::ProviderOptions { .. } => {}
         }
     }
 
@@ -725,6 +728,7 @@ mod tests {
                     changes: changes.clone(),
                     reason: None,
                 },
+                options: Vec::new(),
             }),
         );
 
@@ -1046,6 +1050,7 @@ mod tests {
                     cwd: None,
                     reason: None,
                 },
+                options: Vec::new(),
             }),
         );
         timeline.apply_at(

@@ -19,8 +19,8 @@ use gpui::{
     Window, canvas, div, img, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    ActiveTheme as _, ElementExt as _, Icon, IconName, Sizable as _, StyledExt as _,
-    WindowExt as _,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -108,10 +108,33 @@ struct ModelRow {
     provider: ProviderKind,
 }
 
+/// The platform's "secondary" modifier as the composer spells it: gpui binds
+/// `secondary-enter` to ⌘+Enter on macOS and Ctrl+Enter everywhere else.
+fn steer_modifier() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "⌘"
+    } else {
+        "Ctrl+"
+    }
+}
+
+/// Queue-strip rows are single-line: collapse whitespace and clip long messages
+/// (the full text is still what gets sent).
+fn truncate_queued(text: &str) -> String {
+    const MAX: usize = 80;
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX {
+        return normalized;
+    }
+    let clipped: String = normalized.chars().take(MAX).collect();
+    format!("{clipped}…")
+}
+
 fn provider_short(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "Claude",
         ProviderKind::Codex => "Codex",
+        ProviderKind::Acp => "ACP",
     }
 }
 
@@ -122,6 +145,7 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
             .path("icons/claude.svg")
             .text_color(rgb(CLAUDE_TINT)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
+        ProviderKind::Acp => Icon::empty(),
     }
 }
 
@@ -256,6 +280,7 @@ fn provider_display_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "Claude",
         ProviderKind::Codex => "Codex",
+        ProviderKind::Acp => "ACP",
     }
 }
 
@@ -380,14 +405,23 @@ impl Composer {
             cx.observe(&app_state, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
                 match event {
-                    InputEvent::PressEnter { shift: false, .. } => {
+                    InputEvent::PressEnter {
+                        shift: false,
+                        secondary,
+                    } => {
                         // Enter accepts the highlighted trigger-menu row when the
                         // menu is open, otherwise submits the turn.
+                        //
+                        // The platform modifier (⌘ on macOS, Ctrl elsewhere)
+                        // makes it a STEER instead of a QUEUE: the message is
+                        // injected into the turn that is already running rather
+                        // than held until it finishes. With no turn running the
+                        // two are equivalent (there is nothing to steer into).
                         if this.menu_visible(cx) {
                             this.accept_menu(this.menu_highlight, window, cx);
                         } else {
                             let input = input.clone();
-                            this.submit(&input, window, cx);
+                            this.submit(&input, *secondary, window, cx);
                         }
                     }
                     // Recompute the active `@`/`/`/`$` trigger and re-render (also
@@ -470,7 +504,17 @@ impl Composer {
         cx.notify();
     }
 
-    fn submit(&mut self, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Send the composer's contents. `steer` is set by the ⌘/Ctrl+Enter gesture:
+    /// inject into the running turn rather than queue behind it. It is a no-op
+    /// when no turn is running (`AppState::steer` just sends), and degrades to
+    /// queueing (with a notice) on providers that cannot steer.
+    fn submit(
+        &mut self,
+        input: &Entity<InputState>,
+        steer: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // While a user-input question is pending, Enter is captured by the
         // question panel; normal send is suppressed (S1 §7).
         if self.pending_user_input(cx).is_some() {
@@ -536,7 +580,11 @@ impl Composer {
                 active.terminal_workspace.contexts.clear();
             }
             state.clear_review_comments();
-            state.send_turn(sent_text, attachments, cx)
+            if steer {
+                state.steer(sent_text, attachments, cx)
+            } else {
+                state.send_turn(sent_text, attachments, cx)
+            }
         });
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
@@ -1297,6 +1345,93 @@ impl Composer {
 
     /// The 64px thumbnail strip above the control row (T3), when images are
     /// attached; each thumbnail opens an expanded preview and has a remove `x`.
+    /// The queue strip shown ABOVE the card whenever messages are waiting for
+    /// the running turn to finish: one row per queued message (truncated text),
+    /// each with a steer button (inject it into the running turn NOW) and an ✕
+    /// (drop it). Rows are reorderable-by-removal only.
+    fn render_queue_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (queued, can_steer, agent) = {
+            let state = self.app_state.read(cx);
+            let active = state.active.as_ref()?;
+            (
+                active.queued().to_vec(),
+                active.supports_steering(),
+                active.meta.provider.display_name(),
+            )
+        };
+        if queued.is_empty() {
+            return None;
+        }
+
+        let muted = cx.theme().muted_foreground;
+        let mut strip = v_flex()
+            .w_full()
+            .gap_1()
+            .p_2()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .px_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(rust_i18n::t!("composer.queued_count", count = queued.len())),
+            );
+
+        for message in queued {
+            let id = message.id;
+            let steer_tooltip = if can_steer {
+                rust_i18n::t!("composer.steer_queued").into_owned()
+            } else {
+                rust_i18n::t!("composer.steer_unsupported_tooltip", agent = agent).into_owned()
+            };
+            strip = strip.child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .items_center()
+                    .px_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .child(truncate_queued(&message.text)),
+                    )
+                    .child(
+                        Button::new(("queue-steer", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ArrowUp)
+                            // A provider that can't steer must not offer the
+                            // gesture — the tooltip explains why.
+                            .disabled(!can_steer)
+                            .tooltip(steer_tooltip)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.app_state
+                                    .update(cx, |state, cx| state.steer_queued(id, cx));
+                            })),
+                    )
+                    .child(
+                        Button::new(("queue-drop", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(rust_i18n::t!("composer.drop_queued"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.app_state
+                                    .update(cx, |state, cx| state.drop_queued(id, cx));
+                            })),
+                    ),
+            );
+        }
+        Some(strip.into_any_element())
+    }
+
     fn render_image_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.pending_images.is_empty() {
             return None;
@@ -1436,7 +1571,7 @@ impl Composer {
                         .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
                         .on_click(cx.listener(|this, _, window, cx| {
                             let input = this.input.clone();
-                            this.submit(&input, window, cx);
+                            this.submit(&input, false, window, cx);
                         })),
                 );
             }
@@ -1496,7 +1631,7 @@ impl Composer {
             .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
             .on_click(cx.listener(|this, _, window, cx| {
                 let input = this.input.clone();
-                this.submit(&input, window, cx);
+                this.submit(&input, false, window, cx);
             }))
             .into_any_element()
     }
@@ -1517,7 +1652,7 @@ impl Composer {
                     .label(rust_i18n::t!("plan.refine"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let input = this.input.clone();
-                        this.submit(&input, window, cx);
+                        this.submit(&input, false, window, cx);
                     }))
                     .into_any_element();
             }
@@ -2656,6 +2791,19 @@ impl Render for Composer {
                     .child(Input::new(&self.input).appearance(false)),
             )
             .children(self.render_image_strip(cx))
+            // While a turn is running the two send gestures diverge, so say so.
+            .when(turn_running, |this| {
+                this.child(
+                    div()
+                        .px_4()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(rust_i18n::t!(
+                            "composer.queue_hint",
+                            modifier = steer_modifier()
+                        )),
+                )
+            })
             .child(control_row);
 
         v_flex()
@@ -2680,6 +2828,7 @@ impl Render for Composer {
                 this.child(self.render_user_input_panel(request_id, questions, cx))
             })
             .children(self.render_trigger_menu(cx))
+            .children(self.render_queue_strip(cx))
             .child(card)
             .children(self.render_checkout_row(cx))
             .children(self.render_image_preview(cx))

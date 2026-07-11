@@ -351,6 +351,7 @@ enum ChildOutput {
 enum PendingRequest {
     TurnStart,
     Interrupt,
+    Steer,
 }
 
 struct Actor {
@@ -819,18 +820,9 @@ impl Actor {
             .and_then(|o| o.interaction_mode)
             .unwrap_or(self.interaction_mode);
 
-        // Text first, then one `image` input entry per attachment carrying a
-        // `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape).
-        let mut input = vec![json!({ "type": "text", "text": text, "text_elements": [] })];
-        for attachment in attachments {
-            input.push(json!({
-                "type": "image",
-                "url": format!("data:{};base64,{}", attachment.media_type, attachment.data_base64),
-            }));
-        }
         let mut params = json!({
             "threadId": self.thread_id,
-            "input": input,
+            "input": user_input(text, attachments),
         });
         if let Some(effort) = &effort {
             params["effort"] = json!(effort);
@@ -986,10 +978,34 @@ impl Actor {
                 log::debug!("codex: ignoring ACP-only SetOption {id}");
                 Ok(())
             }
-            SessionCommand::Steer { .. } => {
-                // TODO(steering): real implementation lands with the queue/steer task.
-                log::debug!("codex: Steer not wired yet");
-                Ok(())
+            SessionCommand::Steer { text, attachments } => {
+                // Native same-turn steering: `turn/steer` injects the message
+                // into the ALREADY-RUNNING turn (the model picks it up at its
+                // next input checkpoint) and resolves with the *same* turnId —
+                // no new turn is started, so there is no extra `turn/started`
+                // and our turn accounting stays intact.
+                //
+                // `expectedTurnId` is a required precondition: the app-server
+                // rejects the request when it does not match the active turn,
+                // which is exactly the race we want to lose loudly rather than
+                // silently start a second turn.
+                let Some(turn_id) = self.active_turn.clone() else {
+                    self.emit(AgentEvent::Warning(
+                        "cannot steer: no active Codex turn".into(),
+                    ))
+                    .await;
+                    return Ok(());
+                };
+                let thread_id = self.thread_id.clone();
+                self.request(
+                    "turn/steer",
+                    json!({
+                        "threadId": thread_id,
+                        "expectedTurnId": turn_id,
+                        "input": user_input(&text, &attachments),
+                    }),
+                    PendingRequest::Steer,
+                )
             }
             SessionCommand::Shutdown => Ok(()),
         }
@@ -1304,10 +1320,25 @@ impl Actor {
     }
 }
 
+/// The `input: UserInput[]` array shared by `turn/start` and `turn/steer`: text
+/// first, then one `image` entry per attachment carrying a
+/// `data:<mime>;base64,<data>` URL (the Codex app-server image-input shape).
+fn user_input(text: &str, attachments: &[Attachment]) -> Value {
+    let mut input = vec![json!({ "type": "text", "text": text, "text_elements": [] })];
+    for attachment in attachments {
+        input.push(json!({
+            "type": "image",
+            "url": format!("data:{};base64,{}", attachment.media_type, attachment.data_base64),
+        }));
+    }
+    Value::Array(input)
+}
+
 fn pending_name(request: Option<PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart) => "turn/start",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
+        Some(PendingRequest::Steer) => "turn/steer",
         None => "unknown",
     }
 }

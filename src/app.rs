@@ -204,21 +204,66 @@ pub enum RightTab {
     Preview,
 }
 
-/// A queued turn: its text and any image attachments, awaiting dispatch to the
-/// live provider.
+/// A message the user sent while a turn was already running. It is held (FIFO)
+/// and dispatched as an ordinary turn once the running turn completes — or
+/// converted into a steering message by the queue strip's steer button.
+///
+/// Queueing is an APP-LEVEL concept and works for every provider, including the
+/// ones that cannot steer. The queue is per-session and in-memory only: it is
+/// deliberately NOT persisted to the session JSONL, because a queued message is
+/// not yet part of the conversation (it is recorded only once it is actually
+/// dispatched, or steered, as a user message).
 #[derive(Debug, Clone, PartialEq)]
-struct PendingSend {
-    text: String,
-    attachments: Vec<Attachment>,
+pub struct QueuedMessage {
+    /// Stable per-session id, so the UI can address a row for steer/drop even
+    /// as earlier entries are dispatched out from under it.
+    pub id: u64,
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    /// Ultrathink was armed when this message was written. It is a per-send
+    /// prompt-prefix mode, so it rides with the message rather than with the
+    /// session, and is applied only to the text sent on the wire (the user
+    /// message recorded in the transcript stays clean).
+    ultrathink: bool,
 }
 
-impl From<&str> for PendingSend {
-    fn from(text: &str) -> Self {
-        PendingSend {
-            text: text.to_string(),
-            attachments: Vec::new(),
+impl QueuedMessage {
+    /// The text actually sent to the provider (Ultrathink prefix applied).
+    fn wire_text(&self) -> String {
+        if self.ultrathink {
+            format!("Ultrathink:\n{}", self.text)
+        } else {
+            self.text.clone()
         }
     }
+}
+
+impl From<&str> for QueuedMessage {
+    fn from(text: &str) -> Self {
+        QueuedMessage {
+            id: 0,
+            text: text.to_string(),
+            attachments: Vec::new(),
+            ultrathink: false,
+        }
+    }
+}
+
+/// What a send gesture resolves to. Enter always means [`Self::Send`] or
+/// [`Self::Queue`]; ⌘/Ctrl+Enter additionally reaches [`Self::Steer`] — or
+/// [`Self::QueueUnsupported`] when the provider has no steering mechanism, in
+/// which case the message is still delivered (queued), just not mid-turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendRouting {
+    /// No turn is running: dispatch immediately as an ordinary turn.
+    Send,
+    /// A turn is running: hold this message until it completes.
+    Queue,
+    /// A turn is running and the provider can take a mid-turn injection.
+    Steer,
+    /// A steer was asked for, but this provider cannot steer. Queue it and tell
+    /// the user honestly rather than silently dropping the gesture.
+    QueueUnsupported,
 }
 
 /// Provider process state for the active session.
@@ -271,7 +316,11 @@ pub struct ActiveSession {
     /// Group C: set while the first send is creating a worktree in the
     /// background (drives the composer's "Preparing worktree…" action).
     preparing_worktree: bool,
-    pending_sends: Vec<PendingSend>,
+    /// Messages typed while a turn was running (Enter → queue). In-memory only,
+    /// per session — see [`QueuedMessage`].
+    queue: Vec<QueuedMessage>,
+    /// Source of [`QueuedMessage::id`]s.
+    next_queue_id: u64,
     turn_in_flight: bool,
     /// Provider-native commands / skills discovered at session start (Claude
     /// `slash_commands` + `skills`; Codex `skills/list`). Feeds the composer's
@@ -347,36 +396,99 @@ impl ActiveSession {
         self._pump = None;
     }
 
-    /// Whether this session steers (sends mid-turn) instead of queueing. Group B:
-    /// the Claude CLI accepts mid-turn user messages as steering, so we
-    /// deliberately exceed T3 here and dispatch immediately even while a turn is
-    /// in flight. Codex keeps the strict one-turn-at-a-time queue.
-    fn supports_steering(&self) -> bool {
-        matches!(self.runtime, Runtime::Live(_)) && self.meta.provider == ProviderKind::ClaudeCode
+    /// Whether a message typed right now could be STEERED into the turn that is
+    /// already running — i.e. the provider has a native mid-turn injection
+    /// mechanism (Claude: a stream-json user message; Codex: `turn/steer`) and
+    /// is actually live. When false, the composer's steer gesture degrades to
+    /// queueing (and says so).
+    pub fn supports_steering(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_)) && self.meta.provider.supports_steering()
     }
 
-    /// Dispatch at most one queued send, preserving FIFO order. A turn already in
-    /// flight blocks dispatch for queueing providers (Codex); steering providers
-    /// (Claude) dispatch immediately (see [`Self::supports_steering`]).
+    /// Whether a turn is currently running, i.e. Enter queues rather than sends.
+    pub fn is_turn_running(&self) -> bool {
+        self.turn_in_flight
+    }
+
+    pub fn queued(&self) -> &[QueuedMessage] {
+        &self.queue
+    }
+
+    /// Where a send gesture should go, given what the session is doing right
+    /// now. This is the whole steering-vs-queueing policy in one place.
+    fn route(&self, steer: bool) -> SendRouting {
+        if !self.is_turn_running() {
+            // Nothing to steer into: ⌘Enter and Enter are the same thing.
+            SendRouting::Send
+        } else if !steer {
+            SendRouting::Queue
+        } else if self.supports_steering() {
+            SendRouting::Steer
+        } else {
+            SendRouting::QueueUnsupported
+        }
+    }
+
+    /// Pull a message out of the queue by id (the strip's steer/✕ buttons).
+    fn take_queued(&mut self, id: u64) -> Option<QueuedMessage> {
+        let index = self.queue.iter().position(|m| m.id == id)?;
+        Some(self.queue.remove(index))
+    }
+
+    /// Inject a message into the turn already in flight. Deliberately does NOT
+    /// touch the turn bookkeeping: the provider folds the message into the
+    /// running turn (Claude emits no second `result`; Codex's `turn/steer`
+    /// resolves with the same `turnId`), so `turn_in_flight` stays true and the
+    /// queue is untouched. Opening a turn here would leave a phantom that never
+    /// completes.
+    fn steer_now(&mut self, text: String, attachments: Vec<Attachment>) -> Result<(), ()> {
+        let Runtime::Live(commands) = &self.runtime else {
+            return Err(());
+        };
+        commands
+            .try_send(SessionCommand::Steer { text, attachments })
+            .map_err(|_| ())
+    }
+
+    /// Append a message to the queue, consuming the armed Ultrathink flag (it is
+    /// per-send, so it belongs to this message, not to whatever is sent later).
+    fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        let ultrathink = std::mem::take(&mut self.pending_ultrathink);
+        self.queue.push(QueuedMessage {
+            id,
+            text,
+            attachments,
+            ultrathink,
+        });
+        id
+    }
+
+    /// Dispatch at most one queued message as an ordinary turn, preserving FIFO
+    /// order. A turn already in flight blocks dispatch for EVERY provider: a
+    /// queued message is by definition one that waits for the running turn to
+    /// finish. (Steering — the other way to send mid-turn — never goes through
+    /// here; see [`AppState::steer`].)
     fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
-        if self.turn_in_flight && !self.supports_steering() {
+        if self.turn_in_flight {
             return Ok(false);
         }
         let Runtime::Live(commands) = &self.runtime else {
             return Ok(false);
         };
-        let Some(send) = self.pending_sends.first().cloned() else {
+        let Some(send) = self.queue.first().cloned() else {
             return Ok(false);
         };
         let options = Some(self.turn_options());
         commands
             .try_send(SessionCommand::SendTurn {
-                text: send.text,
+                text: send.wire_text(),
                 options,
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
-        self.pending_sends.remove(0);
+        self.queue.remove(0);
         self.turn_in_flight = true;
         Ok(true)
     }
@@ -2140,7 +2252,7 @@ impl AppState {
             active.meta.updated_at = now_secs();
             active.timeline = timeline;
             active.git_branch = read_git_branch(&active.meta.cwd);
-            active.pending_sends.clear();
+            active.queue.clear();
             active.plan_implemented = false;
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
@@ -2285,7 +2397,8 @@ impl AppState {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: Vec::new(),
+            queue: Vec::new(),
+            next_queue_id: 0,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -2329,7 +2442,8 @@ impl AppState {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: Vec::new(),
+            queue: Vec::new(),
+            next_queue_id: 0,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -2423,7 +2537,8 @@ impl AppState {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: Vec::new(),
+            queue: Vec::new(),
+            next_queue_id: 0,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -2489,41 +2604,15 @@ impl AppState {
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        let session_id = active.meta.id.clone();
 
-        // Group B: the JSONL length before this turn's user message — the revert
-        // truncation boundary — captured before the message is appended.
-        let checkpoint_offset = self.store.event_count(&session_id);
+        // Every send goes through the queue; what differs is whether it can
+        // leave it right now. With a turn in flight the message simply waits
+        // (Enter → QUEUE) and shows up in the composer's queue strip; nothing is
+        // written to the transcript yet, so dropping it there leaves no trace.
+        // See `dispatch_next_queued`, which records the user message at the
+        // moment the message is actually sent.
+        active.push_queued(text, attachments);
 
-        // Record the user message as a synthetic canonical event so replay
-        // renders it identically (providers don't echo user input).
-        let user_event = AgentEvent::ItemCompleted(ThreadItem {
-            id: format!("local-user-{}", uuid::Uuid::new_v4()),
-            content: ItemContent::UserMessage { text: text.clone() },
-        });
-        self.record_event(&session_id, &user_event, cx);
-
-        // Group B: snapshot the pre-turn working tree for this turn's revert.
-        self.capture_checkpoint(&session_id, checkpoint_offset, cx);
-
-        self.maybe_adopt_title(cx);
-
-        let Some(active) = self.active.as_mut() else {
-            return;
-        };
-        // Ultrathink is a per-send prompt-prefix mode (never persisted): prepend
-        // it to the text sent to the provider (the recorded user message above
-        // stays clean) and disarm it.
-        let sent_text = if active.pending_ultrathink {
-            active.pending_ultrathink = false;
-            format!("Ultrathink:\n{text}")
-        } else {
-            text
-        };
-        active.pending_sends.push(PendingSend {
-            text: sent_text,
-            attachments,
-        });
         // If the user switched models — or a provider that can't switch its
         // approval mode live (Codex) had its mode changed, or a launch-time
         // option changed — while the provider is live, restart it first: the
@@ -2548,12 +2637,130 @@ impl AppState {
             active.shutdown_to_idle();
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
-        let dispatch_failed = active.dispatch_next_pending().is_err();
+        let dispatch_failed = self.dispatch_next_queued(cx).is_err();
         if should_start {
             self.ensure_started(cx);
         }
         if dispatch_failed {
             self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Record + dispatch the head of the queue, if the session can take a turn
+    /// right now (live provider, nothing in flight). This is the ONLY place a
+    /// queued message becomes part of the conversation: the user message is
+    /// appended to the JSONL and the pre-turn checkpoint captured here, not when
+    /// the message was queued — so a message dropped from the queue strip never
+    /// touches the transcript.
+    fn dispatch_next_queued(&mut self, cx: &mut Context<Self>) -> Result<bool, ()> {
+        let Some(active) = self.active.as_ref() else {
+            return Ok(false);
+        };
+        if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
+            return Ok(false);
+        }
+        let Some(next) = active.queue.first().cloned() else {
+            return Ok(false);
+        };
+        let session_id = active.meta.id.clone();
+
+        // Group B: the JSONL length before this turn's user message — the revert
+        // truncation boundary — captured before the message is appended.
+        let checkpoint_offset = self.store.event_count(&session_id);
+        self.record_user_message(&session_id, &next.text, cx);
+        // Group B: snapshot the pre-turn working tree for this turn's revert.
+        self.capture_checkpoint(&session_id, checkpoint_offset, cx);
+        self.maybe_adopt_title(cx);
+
+        let Some(active) = self.active.as_mut() else {
+            return Ok(false);
+        };
+        active.dispatch_next_pending()
+    }
+
+    /// Append a user message to the session transcript. Providers don't echo
+    /// user input, so we record it as a synthetic canonical event and replay
+    /// renders it identically.
+    fn record_user_message(&mut self, session_id: &str, text: &str, cx: &mut Context<Self>) {
+        let user_event = AgentEvent::ItemCompleted(ThreadItem {
+            id: format!("local-user-{}", uuid::Uuid::new_v4()),
+            content: ItemContent::UserMessage {
+                text: text.to_owned(),
+            },
+        });
+        self.record_event(session_id, &user_event, cx);
+    }
+
+    /// Cmd+Enter: inject `text` into the turn that is ALREADY running, so the
+    /// model picks it up at its next opportunity (typically its next tool call).
+    ///
+    /// Degrades honestly:
+    ///   * no turn running → there is nothing to steer into, so just send;
+    ///   * turn running, provider can't steer (ACP) → queue it and say so.
+    ///
+    /// A steered message IS part of the conversation, so it is recorded to the
+    /// session JSONL as a user message (unlike a merely queued one).
+    pub fn steer(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        match active.route(true) {
+            // Nothing is running, so there is nothing to steer into: an ordinary
+            // send is exactly the right thing.
+            SendRouting::Send | SendRouting::Queue => self.send_turn(text, attachments, cx),
+            SendRouting::QueueUnsupported => {
+                let agent = active.meta.provider.display_name();
+                self.send_turn(text, attachments, cx);
+                self.report_error(
+                    rust_i18n::t!("composer.steer_unsupported", agent = agent).into_owned(),
+                    cx,
+                );
+            }
+            SendRouting::Steer => {
+                let session_id = active.meta.id.clone();
+                let wire_text = if active.pending_ultrathink {
+                    format!("Ultrathink:\n{text}")
+                } else {
+                    text.clone()
+                };
+                // The steered message joins the running turn, so it belongs in
+                // the transcript exactly like any other user message. (A merely
+                // *queued* message does not — see `dispatch_next_queued`.)
+                self.record_user_message(&session_id, &text, cx);
+
+                let Some(active) = self.active.as_mut() else {
+                    return;
+                };
+                active.pending_ultrathink = false;
+                if active.steer_now(wire_text, attachments).is_err() {
+                    self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Queue strip: convert an already-queued message into a steering message —
+    /// pull it out of the queue and inject it into the running turn.
+    pub fn steer_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(message) = active.take_queued(id) else {
+            return;
+        };
+        // `steer` consumes the session's armed Ultrathink flag, but this
+        // message captured its own at queue time — re-arm so it rides along.
+        active.pending_ultrathink = message.ultrathink;
+        self.steer(message.text, message.attachments, cx);
+    }
+
+    /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
+    /// so nothing needs undoing.
+    pub fn drop_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut() {
+            active.queue.retain(|m| m.id != id);
         }
         cx.notify();
     }
@@ -2825,7 +3032,8 @@ impl AppState {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: Vec::new(),
+            queue: Vec::new(),
+            next_queue_id: 0,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -3209,7 +3417,7 @@ impl AppState {
                         let active = state.active.as_mut().unwrap();
                         active.runtime = Runtime::Live(commands.clone());
                         active._pump = Some(pump);
-                        if active.dispatch_next_pending().is_err() {
+                        if state.dispatch_next_queued(cx).is_err() {
                             state.report_error(
                                 "session process exited before the queued turn was sent".into(),
                                 cx,
@@ -3221,7 +3429,7 @@ impl AppState {
                         if matches_attempt {
                             if let Some(active) = state.active.as_mut() {
                                 active.runtime = Runtime::Idle;
-                                active.pending_sends.clear();
+                                active.queue.clear();
                                 active.turn_in_flight = false;
                             }
                             let message =
@@ -3361,15 +3569,15 @@ impl AppState {
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
-            let dispatch_failed = self
+            // The turn is over: the next queued message (if any) now goes out as
+            // an ordinary turn, FIFO, one at a time.
+            let is_active = self
                 .active
                 .as_mut()
                 .filter(|active| active.meta.id == session_id)
-                .is_some_and(|active| {
-                    active.turn_in_flight = false;
-                    active.dispatch_next_pending().is_err()
-                });
-            if dispatch_failed {
+                .map(|active| active.turn_in_flight = false)
+                .is_some();
+            if is_active && self.dispatch_next_queued(cx).is_err() {
                 self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
             }
         }
@@ -3504,6 +3712,8 @@ fn default_program(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => "codex".into(),
         ProviderKind::ClaudeCode => "claude".into(),
+        // ACP agents are launched from a registry recipe, not a bare command.
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -3610,6 +3820,8 @@ async fn probe_provider(
             json.as_deref()
                 .and_then(crate::provider_status::parse_codex_auth)
         }
+        // ACP agents carry their own auth; nothing to probe from here.
+        ProviderKind::Acp => None,
     };
 
     // Three outcomes, mirroring T3's status vocabulary:
@@ -3883,8 +4095,10 @@ fn session_options(
         // for it unless a future card adds one).
         extra_args: match meta.provider {
             ProviderKind::ClaudeCode => provider_settings.extra_args(),
-            ProviderKind::Codex => Vec::new(),
+            ProviderKind::Codex | ProviderKind::Acp => Vec::new(),
         },
+        // The ACP launch recipe is owned by the parallel ACP task.
+        acp: None,
     }
 }
 
@@ -4151,7 +4365,8 @@ mod tests {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: Vec::new(),
+            queue: Vec::new(),
+            next_queue_id: 0,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -4187,7 +4402,8 @@ mod tests {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: vec!["first".into(), "second".into()],
+            queue: vec!["first".into(), "second".into()],
+            next_queue_id: 2,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -4206,7 +4422,7 @@ mod tests {
         ));
         assert_eq!(active.dispatch_next_pending(), Ok(false));
         assert!(receiver.try_recv().is_err());
-        assert_eq!(active.pending_sends, [PendingSend::from("second")]);
+        assert_eq!(active.queue, [QueuedMessage::from("second")]);
 
         active.turn_in_flight = false;
         assert_eq!(active.dispatch_next_pending(), Ok(true));
@@ -4214,7 +4430,151 @@ mod tests {
             receiver.try_recv(),
             Ok(SessionCommand::SendTurn { text, .. }) if text == "second"
         ));
-        assert!(active.pending_sends.is_empty());
+        assert!(active.queue.is_empty());
+    }
+
+    /// A live session with `provider`, nothing queued, no turn in flight.
+    fn live_session(
+        provider: ProviderKind,
+        commands: async_channel::Sender<SessionCommand>,
+    ) -> ActiveSession {
+        ActiveSession {
+            meta: SessionMeta::new(provider, PathBuf::from("/tmp/project"), None),
+            timeline: Timeline::default(),
+            git_branch: None,
+            branches: Vec::new(),
+            draft: false,
+            runtime: Runtime::Live(commands),
+            live_model: None,
+            live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
+            queue: Vec::new(),
+            next_queue_id: 0,
+            turn_in_flight: false,
+            provider_commands: Vec::new(),
+            diff_open: false,
+            diff_expanded: false,
+            diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
+            terminal_workspace: TerminalWorkspace::default(),
+            _pump: None,
+        }
+    }
+
+    /// Enter always queues while a turn runs; ⌘Enter steers only where the
+    /// provider actually supports it, and otherwise degrades to queueing.
+    #[test]
+    fn send_routing_matrix() {
+        let (commands, _rx) = async_channel::unbounded();
+        let mut codex = live_session(ProviderKind::Codex, commands.clone());
+
+        // Idle: both gestures are a plain send — there is nothing to steer into.
+        assert_eq!(codex.route(false), SendRouting::Send);
+        assert_eq!(codex.route(true), SendRouting::Send);
+
+        // Turn running: Enter queues, ⌘Enter steers (Codex has `turn/steer`).
+        codex.turn_in_flight = true;
+        assert_eq!(codex.route(false), SendRouting::Queue);
+        assert_eq!(codex.route(true), SendRouting::Steer);
+
+        let mut claude = live_session(ProviderKind::ClaudeCode, commands.clone());
+        claude.turn_in_flight = true;
+        assert_eq!(claude.route(true), SendRouting::Steer);
+
+        // ACP has no steering method, so a steer must fall back to the queue
+        // rather than silently vanish.
+        let mut acp = live_session(ProviderKind::Acp, commands);
+        acp.turn_in_flight = true;
+        assert_eq!(acp.route(false), SendRouting::Queue);
+        assert_eq!(acp.route(true), SendRouting::QueueUnsupported);
+
+        // A provider that can steer still can't while it isn't live.
+        let mut dead = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+        dead.runtime = Runtime::Idle;
+        dead.turn_in_flight = true;
+        assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
+    }
+
+    /// Steering must not disturb the turn bookkeeping: it joins the turn already
+    /// in flight, so no queue entry is consumed and no new turn is opened.
+    /// (Both providers were verified live to emit exactly one TurnStarted /
+    /// TurnCompleted across a steered turn — see examples/steer_probe.rs.)
+    #[test]
+    fn steering_does_not_disturb_turn_accounting() {
+        let (commands, receiver) = async_channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.turn_in_flight = true;
+        active.push_queued("queued".into(), Vec::new());
+
+        assert_eq!(active.steer_now("steer me".into(), Vec::new()), Ok(()));
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::Steer { text, .. }) if text == "steer me"
+        ));
+        // Still exactly one turn in flight, and the queue is untouched.
+        assert!(active.turn_in_flight);
+        assert_eq!(active.queued().len(), 1);
+        assert_eq!(active.queued()[0].text, "queued");
+    }
+
+    /// The queue strip's steer button pulls that specific entry out (by id),
+    /// leaving the rest of the FIFO in order.
+    #[test]
+    fn queued_message_converts_to_steer() {
+        let (commands, _rx) = async_channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.turn_in_flight = true;
+        let first = active.push_queued("first".into(), Vec::new());
+        let second = active.push_queued("second".into(), Vec::new());
+        let third = active.push_queued("third".into(), Vec::new());
+        assert_ne!(first, second);
+
+        // Steer the middle one: it leaves the queue, order is preserved.
+        let taken = active.take_queued(second).expect("queued message");
+        assert_eq!(taken.text, "second");
+        let remaining: Vec<_> = active.queued().iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(remaining, ["first", "third"]);
+
+        // Dropping the head (the ✕) leaves the tail alone.
+        active.take_queued(first).expect("queued message");
+        assert_eq!(active.queued().len(), 1);
+        assert_eq!(active.queued()[0].id, third);
+
+        // An unknown id is a no-op, not a panic.
+        assert!(active.take_queued(9999).is_none());
+    }
+
+    /// Ultrathink is per-send: it rides with the message it was armed for, not
+    /// with whatever happens to be dispatched later.
+    #[test]
+    fn ultrathink_rides_with_the_queued_message() {
+        let (commands, receiver) = async_channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.turn_in_flight = true;
+        active.pending_ultrathink = true;
+        active.push_queued("deep".into(), Vec::new());
+        // The flag is consumed by the message that was armed for it.
+        assert!(!active.pending_ultrathink);
+        active.push_queued("shallow".into(), Vec::new());
+
+        active.turn_in_flight = false;
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn { text, .. }) if text == "Ultrathink:\ndeep"
+        ));
+        active.turn_in_flight = false;
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn { text, .. }) if text == "shallow"
+        ));
     }
 
     #[test]
@@ -4234,7 +4594,8 @@ mod tests {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: Vec::new(),
+            queue: Vec::new(),
+            next_queue_id: 0,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -4276,7 +4637,8 @@ mod tests {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            pending_sends: vec!["do it".into()],
+            queue: vec!["do it".into()],
+            next_queue_id: 1,
             turn_in_flight: false,
             provider_commands: Vec::new(),
             diff_open: false,
@@ -4295,7 +4657,7 @@ mod tests {
         // while the queued turn is preserved for the restarted process.
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         assert!(matches!(active.runtime, Runtime::Idle));
-        assert_eq!(active.pending_sends, [PendingSend::from("do it")]);
+        assert_eq!(active.queue, [QueuedMessage::from("do it")]);
         assert!(!active.model_changed_while_live());
 
         // No restart when the selected model matches the live one.

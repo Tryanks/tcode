@@ -17,6 +17,8 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "@anthropic-ai/claude-code",
         ProviderKind::Codex => "@openai/codex",
+        // ACP agents ship on their own cadence; no single npm package.
+        ProviderKind::Acp => "",
     }
 }
 
@@ -91,6 +93,7 @@ fn brew_formula(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "claude-code",
         ProviderKind::Codex => "codex",
+        ProviderKind::Acp => "",
     }
 }
 

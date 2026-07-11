@@ -238,6 +238,7 @@ impl SessionStore {
         let name = match provider {
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCode => "claude",
+            ProviderKind::Acp => "acp",
         };
         self.root.join(format!("models-{name}.json"))
     }

@@ -77,6 +77,7 @@ pub fn provider_key(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Acp => "acp",
     }
 }
 
@@ -85,6 +86,7 @@ pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "Codex",
         ProviderKind::ClaudeCode => "Claude",
+        ProviderKind::Acp => "ACP",
     }
 }
 

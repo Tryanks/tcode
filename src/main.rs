@@ -87,6 +87,15 @@ fn main() {
     let debug_send = std::env::args()
         .skip_while(|arg| arg != "--debug-send")
         .nth(1);
+    // Screenshot / E2E only: `--debug-queue "msg1|msg2"` sends each `|`-separated
+    // message through the ordinary `send_turn` path on launch. Because the
+    // provider is still starting, they all land in the queue; the first flushes
+    // when it goes live and the rest stay queued — which both renders the queue
+    // strip for screenshots and exercises the real dispatch-on-completion FIFO
+    // (pair it with `--debug-send` to occupy the provider with a long turn).
+    let debug_queue = std::env::args()
+        .skip_while(|arg| arg != "--debug-queue")
+        .nth(1);
     // Screenshot-only: seed the command palette query (pairs with --open-palette).
     let debug_palette = std::env::args()
         .skip_while(|arg| arg != "--debug-palette")
@@ -192,7 +201,8 @@ fn main() {
                 || debug_diff_scope_menu
                 || debug_review_comment
                 || debug_live
-                || debug_send.is_some();
+                || debug_send.is_some()
+                || debug_queue.is_some();
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
@@ -341,6 +351,11 @@ fn main() {
                         }
                         if let Some(text) = debug_send.clone() {
                             state.send_turn(text, Vec::new(), cx);
+                        }
+                        if let Some(queued) = debug_queue.clone() {
+                            for message in queued.split('|').filter(|m| !m.trim().is_empty()) {
+                                state.send_turn(message.trim().to_string(), Vec::new(), cx);
+                            }
                         }
                     });
                 }

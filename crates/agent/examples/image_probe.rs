@@ -123,6 +123,7 @@ fn main() {
             mcp_server: None,
             launch_env: Default::default(),
             extra_args: Vec::new(),
+            acp: None,
         };
         let handle = match start_session(provider, opts).await {
             Ok(handle) => handle,

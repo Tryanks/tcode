@@ -81,6 +81,7 @@ fn provider_glyph(provider: ProviderKind) -> Icon {
             .path("icons/claude.svg")
             .text_color(rgb(CLAUDE_TINT)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
+        ProviderKind::Acp => Icon::empty(),
     }
 }
 

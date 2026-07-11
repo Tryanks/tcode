@@ -504,9 +504,31 @@ async fn handle_command(
             log::debug!("claude: ignoring ACP-only SetOption {id}");
             Flow::Continue
         }
-        SessionCommand::Steer { .. } => {
-            // TODO(steering): real implementation lands with the queue/steer task.
-            log::debug!("claude: Steer not wired yet");
+        SessionCommand::Steer { text, attachments } => {
+            // Steering writes the *same* stream-json user-message line as
+            // `SendTurn`, but deliberately skips the turn bookkeeping: no
+            // `start_turn()`, no `TurnStarted`. The CLI folds the message into
+            // the turn that is already running (it is picked up at the next
+            // input checkpoint — in practice the next tool call) and still
+            // emits exactly one `result` for that turn, so allocating a turn id
+            // here would leave a phantom turn that never completes.
+            //
+            // Verified live (examples/steer_probe.rs): 1 `TurnStarted`,
+            // 1 `TurnCompleted` across a steered turn.
+            let text = if mapper.ultrathink {
+                format!("Ultrathink:\n{text}")
+            } else {
+                text
+            };
+            let msg = user_message(&text, &attachments);
+            if write_line(stdin, &msg).await.is_err() {
+                let _ = event_tx
+                    .send(AgentEvent::Error {
+                        message: "failed to write steering message to provider stdin".into(),
+                        fatal: true,
+                    })
+                    .await;
+            }
             Flow::Continue
         }
         SessionCommand::Shutdown => {

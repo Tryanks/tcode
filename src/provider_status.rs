@@ -398,6 +398,7 @@ pub fn missing_cli_message(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.probe.codex_missing").into_owned(),
         ProviderKind::ClaudeCode => rust_i18n::t!("providers.probe.claude_missing").into_owned(),
+        ProviderKind::Acp => String::new(),
     }
 }
 
@@ -424,6 +425,7 @@ pub fn unauthenticated_message(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => rust_i18n::t!("providers.probe.codex_signed_out").into_owned(),
         ProviderKind::ClaudeCode => rust_i18n::t!("providers.probe.claude_signed_out").into_owned(),
+        ProviderKind::Acp => String::new(),
     }
 }
 
