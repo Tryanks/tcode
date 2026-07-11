@@ -79,6 +79,10 @@ pub struct Settings {
     pub claude_binary: Option<PathBuf>,
     #[serde(default)]
     pub theme_mode: ThemeMode,
+    /// Whether the sidebar is collapsed to its icon strip. Persisted so the
+    /// choice survives a restart (absent in legacy files → expanded).
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
     /// Default soft-wrap for long lines in the diff panel. Tolerantly added:
     /// absent in legacy settings.json files (defaults to off).
     #[serde(default)]
@@ -165,6 +169,7 @@ mod tests {
             codex_binary: Some(PathBuf::from("/opt/tools/codex")),
             claude_binary: Some(PathBuf::from("/opt/tools/claude")),
             theme_mode: ThemeMode::Dark,
+            sidebar_collapsed: true,
             word_wrap_diffs: true,
             skip_delete_confirmation: true,
             auto_open_task_panel: true,
@@ -227,5 +232,22 @@ mod tests {
         assert!(!loaded.word_wrap_diffs);
         assert!(!loaded.skip_delete_confirmation);
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod sidebar_collapse_tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_collapsed_round_trips_and_defaults_to_expanded() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(!legacy.sidebar_collapsed, "legacy files must open expanded");
+
+        let mut settings = Settings::default();
+        settings.sidebar_collapsed = true;
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(back.sidebar_collapsed);
     }
 }

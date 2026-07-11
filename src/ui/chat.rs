@@ -923,10 +923,15 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // With the sidebar collapsed to its 48px strip, the native traffic
+        // lights (which sit at the window's top-left) overhang into the chat
+        // header — inset the header content so the title clears them.
+        let collapsed = self.app_state.read(cx).sidebar_collapsed;
         let base = h_flex()
             .flex_shrink_0()
             .h(px(52.))
             .px_4()
+            .when(collapsed, |this| this.pl(px(36.)))
             .gap_2()
             .items_center()
             .border_b_1()
