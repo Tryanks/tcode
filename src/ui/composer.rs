@@ -27,7 +27,50 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::AppState;
+use crate::app::{AppState, TerminalContext};
+
+fn normalize_terminal_context_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .trim_matches('\n')
+        .to_string()
+}
+
+pub(crate) fn append_terminal_contexts_to_prompt(
+    prompt: &str,
+    contexts: &[TerminalContext],
+) -> String {
+    let prompt = prompt.trim();
+    let mut lines = Vec::new();
+    for context in contexts {
+        let text = normalize_terminal_context_text(&context.text);
+        if text.is_empty() || context.terminal_label.trim().is_empty() {
+            continue;
+        }
+        let range = if context.line_start == context.line_end {
+            format!("line {}", context.line_start)
+        } else {
+            format!("lines {}-{}", context.line_start, context.line_end)
+        };
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("- {} {}:", context.terminal_label.trim(), range));
+        lines.extend(
+            text.lines()
+                .enumerate()
+                .map(|(index, line)| format!("  {} | {}", context.line_start + index, line)),
+        );
+    }
+    if lines.is_empty() {
+        return prompt.to_string();
+    }
+    let block = format!("<terminal_context>\n{}\n</terminal_context>", lines.join("\n"));
+    if prompt.is_empty() {
+        block
+    } else {
+        format!("{prompt}\n\n{block}")
+    }
+}
 
 /// Claude's warm brand tint for the starburst glyph.
 const CLAUDE_TINT: u32 = 0xD97757;
@@ -224,7 +267,14 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        let terminal_contexts = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| active.terminal_workspace.contexts.clone())
+            .unwrap_or_default();
+        if text.is_empty() && terminal_contexts.is_empty() {
             return;
         }
         if self.app_state.read(cx).active.is_none() {
@@ -233,7 +283,7 @@ impl Composer {
         }
         // Intercept the minimal `/`-command set (S1 §4/§7): `/plan` and
         // `/default` switch mode and are stripped; `/model` opens the picker.
-        if let Some(command) = slash_command(&text) {
+        if terminal_contexts.is_empty() && let Some(command) = slash_command(&text) {
             input.update(cx, |state, cx| state.set_value("", window, cx));
             match command {
                 SlashCommand::Plan => self
@@ -249,9 +299,14 @@ impl Composer {
             cx.notify();
             return;
         }
+        let text = append_terminal_contexts_to_prompt(&text, &terminal_contexts);
         input.update(cx, |state, cx| state.set_value("", window, cx));
-        self.app_state
-            .update(cx, |state, cx| state.send_turn(text, cx));
+        self.app_state.update(cx, |state, cx| {
+            if let Some(active) = state.active.as_mut() {
+                active.terminal_workspace.contexts.clear();
+            }
+            state.send_turn(text, cx)
+        });
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
     }
@@ -1464,6 +1519,36 @@ impl Render for Composer {
 
         let user_input = self.pending_user_input(cx);
 
+        let terminal_contexts = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| active.terminal_workspace.contexts.clone())
+            .unwrap_or_default();
+        let has_terminal_contexts = !terminal_contexts.is_empty();
+        let context_chips = h_flex()
+            .w_full()
+            .flex_wrap()
+            .gap_1()
+            .children(terminal_contexts.into_iter().map(|context| {
+                let id = context.id;
+                let range = if context.line_start == context.line_end {
+                    format!("L{}", context.line_start)
+                } else {
+                    format!("L{}-L{}", context.line_start, context.line_end)
+                };
+                Button::new(("terminal-context-chip", id))
+                    .ghost()
+                    .small()
+                    .label(format!("{} · {}  ×", context.terminal_label, range))
+                    .tooltip(context.text)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.app_state
+                            .update(cx, |state, cx| state.remove_terminal_context(id, cx));
+                    }))
+            }));
+
         let card = v_flex()
             .w_full()
             .rounded(px(16.))
@@ -1473,6 +1558,9 @@ impl Render for Composer {
             .shadow_sm()
             .when_some(plan_ready_title, |this, title| {
                 this.child(self.render_plan_ready_header(title, cx))
+            })
+            .when(has_terminal_contexts, |this| {
+                this.child(div().px_3().pt_2().child(context_chips))
             })
             .child(
                 div()
@@ -2320,6 +2408,21 @@ fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serializes_terminal_context_like_t3() {
+        let contexts = vec![TerminalContext {
+            id: 1,
+            terminal_label: "zsh".into(),
+            line_start: 12,
+            line_end: 13,
+            text: "cargo test\nok".into(),
+        }];
+        assert_eq!(
+            append_terminal_contexts_to_prompt("Explain this", &contexts),
+            "Explain this\n\n<terminal_context>\n- zsh lines 12-13:\n  12 | cargo test\n  13 | ok\n</terminal_context>"
+        );
+    }
 
     #[test]
     fn context_label_variants() {
