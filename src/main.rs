@@ -13,6 +13,7 @@ mod provider_models;
 mod provider_status;
 mod session;
 mod settings;
+mod shell_env;
 mod smoke;
 mod store;
 mod ui;
@@ -33,6 +34,12 @@ const TCODE_THEME: &str = include_str!("../themes/tcode.json");
 
 fn main() {
     env_logger::init();
+
+    // A Finder/Dock launch inherits launchd's minimal PATH, under which none of
+    // the provider CLIs resolve — import the login shell's environment first,
+    // before anything (probes, sessions, the terminal) reads PATH. Must stay
+    // ahead of any thread spawn: it writes the process environment.
+    shell_env::import_login_shell_environment();
 
     settings::apply_locale(None);
 
