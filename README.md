@@ -96,20 +96,13 @@ speaks ACP.
 
 **1. Install tcode.** Download a build for your platform from
 [Releases](https://github.com/Tryanks/tcode/releases) — macOS (Apple Silicon /
-Intel), Windows (x64 / ARM64), Linux (x64 / ARM64).
+Intel), Windows (x64 / ARM64), Linux (x64 / ARM64) — and run it. It is a single
+self-contained binary: no runtime to install, no libraries to hunt down, nothing
+to uninstall but the file itself.
 
-<details>
-<summary>Platform notes</summary>
-
-- **macOS** — builds aren't code-signed yet, so first launch needs
-  `xattr -dr com.apple.quarantine /Applications/tcode.app`.
-- **Windows** — the preview browser needs the
-  [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
-  (preinstalled on Windows 11).
-- **Linux** — needs a working Vulkan driver (e.g. `mesa-vulkan-drivers`). The
-  embedded preview browser is not available on Linux yet; everything else is.
-
-</details>
+macOS builds aren't code-signed yet, so the first launch needs
+`xattr -dr com.apple.quarantine /Applications/tcode.app`. The embedded preview
+browser is not available on Linux yet; everything else is.
 
 **2. Have an agent installed.** tcode drives the CLIs, it doesn't bundle them.
 Make sure `claude` or `codex` is on your `PATH` — or install an ACP agent from

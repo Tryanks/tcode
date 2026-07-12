@@ -59,7 +59,7 @@ mod native {
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
     use raw_window_handle::HasWindowHandle as _;
 
-    use super::{ReplyTx, normalize_url};
+    use super::{ReplyTx, normalize_url, unavailable_message};
     use crate::app::AppState;
 
     pub struct PreviewPanel {
@@ -79,6 +79,10 @@ mod native {
         mirrored: Option<String>,
         /// Discovered localhost dev-server ports (populated by the "Ports" button).
         dev_ports: Vec<u16>,
+        /// Why the platform webview could not be created (Windows without the
+        /// WebView2 runtime). Set once; the tab then explains itself instead of
+        /// retrying on every frame.
+        webview_error: Option<String>,
         _subscriptions: Vec<Subscription>,
     }
 
@@ -103,6 +107,7 @@ mod native {
                 url_input,
                 mirrored: None,
                 dev_ports: Vec::new(),
+                webview_error: None,
                 _subscriptions: subscriptions,
             }
         }
@@ -115,36 +120,54 @@ mod native {
                 .map(str::to_string)
         }
 
-        /// Get or lazily create the WebView for `session_id`, returning its entity.
+        /// Get or lazily create the WebView for `session_id`.
+        ///
+        /// `None` when the platform webview cannot be created — on Windows that
+        /// means the WebView2 runtime is absent. Only the preview browser needs
+        /// it, so this is a missing feature, not a dead app: the tab explains
+        /// itself and every other surface keeps working.
         fn ensure_webview(
             &mut self,
             session_id: &str,
             window: &mut Window,
             cx: &mut Context<Self>,
-        ) -> Entity<WebView> {
+        ) -> Option<Entity<WebView>> {
             if let Some(view) = self.webviews.get(session_id) {
-                return view.clone();
+                return Some(view.clone());
             }
+            if self.webview_error.is_some() {
+                return None;
+            }
+            // Start on about:blank so lb-wry begins a navigation and flushes its
+            // pending-scripts buffer, making later `evaluate_script` callbacks
+            // fire (see the `warm` field docs).
+            let builder = wry::WebViewBuilder::new()
+                .with_devtools(true)
+                .with_url("about:blank");
+            let built = window
+                .window_handle()
+                .map_err(|err| err.to_string())
+                .and_then(|handle| {
+                    builder
+                        .build_as_child(&handle)
+                        .map_err(|err| err.to_string())
+                });
+            let raw = match built {
+                Ok(raw) => raw,
+                Err(err) => {
+                    log::warn!("preview: no webview ({err})");
+                    self.webview_error = Some(err);
+                    return None;
+                }
+            };
             let webview = cx.new(|cx| {
-                // Start on about:blank so lb-wry begins a navigation and flushes its
-                // pending-scripts buffer, making later `evaluate_script` callbacks
-                // fire (see the `warm` field docs).
-                let builder = wry::WebViewBuilder::new()
-                    .with_devtools(true)
-                    .with_url("about:blank");
-                let handle = window
-                    .window_handle()
-                    .expect("preview: window handle unavailable");
-                let raw = builder
-                    .build_as_child(&handle)
-                    .expect("preview: failed to build webview");
                 let mut view = WebView::new(raw, window, cx);
                 view.hide();
                 view
             });
             self.webviews
                 .insert(session_id.to_string(), webview.clone());
-            webview
+            Some(webview)
         }
 
         /// Navigate the active session's WebView to `url`, remembering it.
@@ -153,7 +176,10 @@ mod native {
                 return;
             };
             let url = normalize_url(url);
-            let webview = self.ensure_webview(&session_id, window, cx);
+            let Some(webview) = self.ensure_webview(&session_id, window, cx) else {
+                cx.notify();
+                return;
+            };
             webview.update(cx, |view, _| {
                 view.show();
                 view.load_url(&url);
@@ -190,8 +216,9 @@ mod native {
         // ---- chrome actions -------------------------------------------------
 
         fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-            if let Some(id) = self.active_id(cx) {
-                let view = self.ensure_webview(&id, window, cx);
+            if let Some(id) = self.active_id(cx)
+                && let Some(view) = self.ensure_webview(&id, window, cx)
+            {
                 view.update(cx, |view, _| {
                     let _ = view.back();
                 });
@@ -249,9 +276,12 @@ mod native {
                         .update(cx, |state, cx| state.open_preview_panel(cx));
                     if let Some(url) = url.as_deref() {
                         self.navigate(url, window, cx);
-                    } else {
-                        let view = self.ensure_webview(&session_id, window, cx);
+                    } else if let Some(view) = self.ensure_webview(&session_id, window, cx) {
                         view.update(cx, |v, _| v.show());
+                    }
+                    if let Some(err) = &self.webview_error {
+                        let _ = reply.try_send(Err(unavailable_message(err)));
+                        return;
                     }
                     let payload = serde_json::json!({
                         "ok": true,
@@ -264,6 +294,10 @@ mod native {
                     self.app_state
                         .update(cx, |state, cx| state.open_preview_panel(cx));
                     self.navigate(&url, window, cx);
+                    if let Some(err) = &self.webview_error {
+                        let _ = reply.try_send(Err(unavailable_message(err)));
+                        return;
+                    }
                     let payload = serde_json::json!({
                         "ok": true,
                         "url": self.urls.get(&session_id),
@@ -304,7 +338,11 @@ mod native {
             cx: &mut Context<Self>,
         ) {
             // Ensure the WebView exists (and has begun loading about:blank).
-            let _ = self.ensure_webview(session_id, window, cx);
+            if self.ensure_webview(session_id, window, cx).is_none() {
+                let err = self.webview_error.clone().unwrap_or_default();
+                let _ = reply.try_send(Err(unavailable_message(&err)));
+                return;
+            }
             if self.warm.contains(session_id) {
                 self.eval_now(session_id, script, reply, cx);
                 return;
@@ -462,10 +500,24 @@ mod native {
             }
 
             let body: AnyElement = match &active {
-                Some(id) => {
-                    let view = self.ensure_webview(id, window, cx);
-                    div().flex_1().min_h_0().child(view).into_any_element()
-                }
+                Some(id) => match self.ensure_webview(id, window, cx) {
+                    Some(view) => div().flex_1().min_h_0().child(view).into_any_element(),
+                    None => v_flex()
+                        .flex_1()
+                        .gap_2()
+                        .items_center()
+                        .justify_center()
+                        .px_8()
+                        .text_center()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(rust_i18n::t!("preview.unavailable"))
+                        .child(
+                            div()
+                                .text_size(gpui::px(12.))
+                                .child(rust_i18n::t!("preview.unavailable_hint")),
+                        )
+                        .into_any_element(),
+                },
                 None => v_flex()
                     .flex_1()
                     .items_center()
@@ -640,6 +692,17 @@ fn screen_region(
     let w = f32::from(wv.size.width).round() as i32;
     let h = f32::from(wv.size.height).round() as i32;
     format!("{x},{y},{w},{h}")
+}
+
+/// What an automation tool answers when the platform webview cannot be created
+/// (Windows without the WebView2 runtime): say so plainly, with the underlying
+/// error, rather than leaving the agent to guess why nothing happened.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn unavailable_message(err: &str) -> String {
+    format!(
+        "the preview browser is unavailable on this machine \
+         (the system webview component could not be created: {err})"
+    )
 }
 
 /// Add a scheme to a bare host/port (so `localhost:5173` becomes a real URL).

@@ -434,6 +434,8 @@ preview:
   scan_ports: "Scan localhost dev ports"
   open_external: "Open in system browser"
   unsupported_linux: "Preview is not available on Linux yet."
+  unavailable: "The preview browser could not start."
+  unavailable_hint: "It needs the system webview component. Everything else in tcode works without it."
 git:
   action:
     commit: "Commit"

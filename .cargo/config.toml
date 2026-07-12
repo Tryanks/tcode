@@ -1,0 +1,12 @@
+# Statically link the MSVC C runtime.
+#
+# Without this the binary imports VCRUNTIME140.dll / VCRUNTIME140_1.dll and will
+# not start on a Windows box that never installed the "Visual C++ Redistributable"
+# — a dependency users should not have to know about for a downloaded app. The
+# UCRT (api-ms-win-crt-*) is part of Windows itself, so this leaves the exe with
+# nothing but system DLLs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

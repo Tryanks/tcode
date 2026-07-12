@@ -427,6 +427,8 @@ preview:
   scan_ports: "扫描本地开发端口"
   open_external: "在系统浏览器中打开"
   unsupported_linux: "预览功能暂不支持 Linux。"
+  unavailable: "预览浏览器无法启动。"
+  unavailable_hint: "它需要系统的 webview 组件。tcode 的其他功能不受影响。"
 git:
   action:
     commit: "提交"
