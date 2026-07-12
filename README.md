@@ -118,9 +118,9 @@ the marketplace once tcode is running.
 **3. Add a project and start a thread.** Point tcode at a directory, type, send.
 No API keys, no config file.
 
-The interface follows your system language (English and Simplified Chinese,
-switchable in Settings). Everything tcode stores — sessions, settings, installed
-ACP agents — lives under your platform's app-data directory.
+The interface is localized and follows your system language; you can override it
+in Settings. Everything tcode stores — sessions, settings, installed ACP agents —
+lives under your platform's app-data directory.
 
 <div align="center">
 <img src="docs/images/chat-dark.png" width="840" alt="tcode in dark mode">

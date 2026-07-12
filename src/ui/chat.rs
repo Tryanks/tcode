@@ -1324,7 +1324,10 @@ impl ChatView {
             match &title {
                 Some(title) => div()
                     .flex_1()
-                    .min_w_0()
+                    // Keep a few words of the title even when the diff panel and
+                    // the git/Open buttons squeeze the header; without a floor it
+                    // collapses to a lone "I…".
+                    .min_w(px(120.))
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(px(16.))

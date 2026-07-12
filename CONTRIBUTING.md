@@ -78,6 +78,10 @@ cargo run -p agent --example image_probe -- claude /tmp/blue.png \
     "What color is this image? Reply with just the color." /tmp/smoke
 ```
 
+`TCODE_DATA_DIR` points tcode at a throwaway profile (its own sessions, settings
+and installed ACP agents) — useful for demos, screenshots and trying a change
+without touching your real threads.
+
 **Launch flags** for driving surfaces that need a running app:
 `--open-latest`, `--open-diff`, `--open-settings`, `--open-palette`,
 `--open-draft <project>`; and for screenshots, `--debug-compose <text>`,
