@@ -174,6 +174,19 @@ Centered top-anchored modal over a dim backdrop: search input; grouped results
 panel) and Threads (fuzzy over titles); footer key hints (↑↓ Navigate · Enter
 Select · Esc Close).
 
+### Session lifetime
+A working session survives everything except an explicit stop. Switching
+threads (or opening a draft) parks a session that still has work — running turn
+or queued messages — instead of killing its provider: the process, event pump
+and queue stay alive in the background, its events keep landing in the JSONL,
+queued messages keep dispatching as turns complete, and its sidebar row keeps
+the green "● Working" dot. Selecting the thread re-adopts the live session
+seamlessly (timeline replayed from the JSONL, which stayed current). When a
+parked session runs out of work it shuts down for real. There is **no idle
+reaper and no timer** — T3 Code hard-kills provider processes after 30 minutes
+without a user message, which silently destroys autonomous overnight sessions;
+tcode's rule is "finish what you were given, then rest".
+
 ### Empty state
 Centered "Pick a thread to continue" (20px semibold) over "Select an existing
 thread or create a new one to get started." (14px muted). No composer rendered.

@@ -555,6 +555,18 @@ pub struct AppState {
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
     pub active: Option<ActiveSession>,
+    /// Sessions whose provider outlives their place on screen. Switching threads
+    /// used to kill the live process outright — mid-turn — which is the same
+    /// failure T3 Code's 30-minute idle reaper inflicts on autonomous overnight
+    /// sessions, except triggered by a glance at another thread. A session with
+    /// work left (turn in flight, or queued messages) is parked here instead:
+    /// its process, event pump and queue stay alive, events keep landing in its
+    /// JSONL (`record_event` routes by id), queued messages keep dispatching as
+    /// turns complete, and selecting the thread re-adopts it seamlessly. Once a
+    /// parked session runs out of work it is shut down for real — no reaper, no
+    /// timer, just "finish what you were given, then rest". (The parked
+    /// `timeline` goes stale by design; re-adoption replays the JSONL.)
+    background: HashMap<String, ActiveSession>,
     pub settings: Settings,
     pub smoke: Option<SmokeMode>,
     /// Whether the sidebar is collapsed to an icon strip (ephemeral UI state).
@@ -686,6 +698,7 @@ impl AppState {
             sessions,
             projects,
             active: None,
+            background: HashMap::new(),
             settings,
             smoke: None,
             sidebar_collapsed: settings_collapsed,
@@ -2333,6 +2346,8 @@ impl AppState {
             // shutdown_active drops the ActiveSession (and its terminal PTY).
             self.shutdown_active();
         }
+        // Deleting a thread that is working in the background kills it for real.
+        self.drop_background(session_id);
         if let Some(meta) = &meta {
             // Best-effort checkpoint ref cleanup in the session cwd.
             if crate::checkpoints::is_git_repo(&meta.cwd) {
@@ -2363,9 +2378,15 @@ impl AppState {
     /// Whether a turn is currently running for `session_id` (only the active
     /// session can be running).
     pub fn turn_running_for(&self, session_id: &str) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.meta.id == session_id && a.timeline.turn_running)
+        if let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) {
+            return active.timeline.turn_running;
+        }
+        // A parked session is working when a turn is in flight or its queue
+        // still has messages to run (the parked timeline is stale by design, so
+        // the flags are the source of truth).
+        self.background
+            .get(session_id)
+            .is_some_and(|s| s.turn_in_flight || !s.queue.is_empty())
     }
 
     /// Record that a thread has been visited now (clears its unread dot).
@@ -2731,7 +2752,7 @@ impl AppState {
             );
         }
         self.sessions = self.store.load_index();
-        self.shutdown_active();
+        self.park_active();
         let git_branch = read_git_branch(&meta.cwd);
         self.active = Some(ActiveSession {
             meta,
@@ -2821,7 +2842,7 @@ impl AppState {
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
-        self.shutdown_active();
+        self.park_active();
         let (provider, model) = self.draft_defaults();
         self.active = Some(Self::build_draft_session(project_id, cwd, provider, model));
         self.refresh_git_status(cx);
@@ -2856,8 +2877,38 @@ impl AppState {
         let Some(meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() else {
             return;
         };
-        self.shutdown_active();
+        self.park_active();
         self.mark_visited(session_id);
+
+        // A parked session is re-adopted, not replayed cold: its process, pump
+        // and queue come back as they were, and the timeline is rebuilt from the
+        // JSONL — which stayed current while parked, because `record_event`
+        // routes by session id.
+        if let Some(mut parked) = self.background.remove(session_id) {
+            log::info!(
+                "re-adopting parked session {} (turn in flight: {}, queued: {})",
+                session_id,
+                parked.turn_in_flight,
+                parked.queue.len()
+            );
+            parked.timeline = Timeline::fold_events(self.store.read_events(session_id));
+            parked.git_branch = read_git_branch(&parked.meta.cwd);
+            let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
+            self.active = Some(parked);
+            // Anything still queued that can go now, goes now.
+            if self.dispatch_next_queued(cx).is_err() {
+                self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
+            }
+            if needs_restart {
+                // Parked with a dead provider (its start failed while parked):
+                // the queue survived, so try again now that someone is looking.
+                self.ensure_started(cx);
+            }
+            self.refresh_git_status(cx);
+            cx.notify();
+            return;
+        }
+
         let events = self.store.read_events(&meta.id);
         let mut timeline = Timeline::fold_events(events);
         // The provider process is gone; stale approvals / running turns can't
@@ -3030,6 +3081,35 @@ impl AppState {
             return Ok(false);
         };
         active.dispatch_next_pending()
+    }
+
+    /// A parked session finished a turn: keep working through its queue, and
+    /// shut it down once nothing is left. Mirrors `dispatch_next_queued` with
+    /// two honest omissions — no git checkpoint (the checkpoint boundary needs
+    /// the live timeline, which a parked session doesn't maintain; those turns
+    /// simply have no Revert) and no title adoption (a parked session already
+    /// has its title).
+    fn on_background_turn_completed(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(parked) = self.background.get_mut(session_id) else {
+            return;
+        };
+        parked.turn_in_flight = false;
+        if parked.queue.is_empty() {
+            log::info!("parked session {session_id} finished its work; shutting down");
+            self.drop_background(session_id);
+            cx.notify();
+            return;
+        }
+        let next_text = parked.queue.first().map(|m| m.text.clone()).unwrap();
+        self.record_user_message(session_id, &next_text, cx);
+        if let Some(parked) = self.background.get_mut(session_id)
+            && parked.dispatch_next_pending().is_err()
+        {
+            // The process is gone; the queue (with its unsent text) survives
+            // for the user to find when they reopen the thread.
+            log::warn!("parked session {session_id}: dispatch failed (process gone)");
+        }
+        cx.notify();
     }
 
     /// Append a user message to the session transcript. Providers don't echo
@@ -3382,7 +3462,7 @@ impl AppState {
             );
         }
         self.sessions = self.store.load_index();
-        self.shutdown_active();
+        self.park_active();
         let git_branch = read_git_branch(&meta.cwd);
         self.active = Some(ActiveSession {
             meta,
@@ -3761,13 +3841,20 @@ impl AppState {
             let opts = session_options(&meta, &settings, launch_env, mcp_registration);
             let result = start_session(meta.provider, opts).await;
             let _ = this.update(cx, |state, cx| {
-                let matches_attempt = state.active.as_ref().is_some_and(|active| {
+                let matches_active = state.active.as_ref().is_some_and(|active| {
                     active.meta.id == session_id && active.is_starting_generation(generation)
                 });
+                // The session may have been parked (thread switch) while its
+                // start was in flight; the attempt then adopts the parked entry.
+                let matches_parked = !matches_active
+                    && state
+                        .background
+                        .get(&session_id)
+                        .is_some_and(|parked| parked.is_starting_generation(generation));
                 match result {
                     Ok(handle) => {
-                        if !matches_attempt {
-                            // User switched away or a newer start superseded this one.
+                        if !matches_active && !matches_parked {
+                            // Superseded by a newer start, or the session is gone.
                             let _ = handle.commands.try_send(SessionCommand::Shutdown);
                             return;
                         }
@@ -3786,29 +3873,40 @@ impl AppState {
                                 }
                             }
                         });
-                        let active = state.active.as_mut().unwrap();
-                        active.runtime = Runtime::Live(commands.clone());
-                        active._pump = Some(pump);
-                        if state.dispatch_next_queued(cx).is_err() {
-                            state.report_error(
-                                "session process exited before the queued turn was sent".into(),
-                                cx,
-                            );
+                        if matches_active {
+                            let active = state.active.as_mut().unwrap();
+                            active.runtime = Runtime::Live(commands.clone());
+                            active._pump = Some(pump);
+                            if state.dispatch_next_queued(cx).is_err() {
+                                state.report_error(
+                                    rust_i18n::t!("errors.process_gone").into_owned(),
+                                    cx,
+                                );
+                            }
+                        } else {
+                            let parked = state.background.get_mut(&session_id).unwrap();
+                            parked.runtime = Runtime::Live(commands.clone());
+                            parked._pump = Some(pump);
+                            // Work through the parked queue exactly as a
+                            // finished background turn would.
+                            state.on_background_turn_completed(&session_id, cx);
                         }
                         cx.notify();
                     }
                     Err(err) => {
-                        if matches_attempt {
-                            if let Some(active) = state.active.as_mut() {
+                        if matches_active || matches_parked {
+                            // The queue is deliberately KEPT in both cases: it
+                            // holds text the user typed but that was never
+                            // sent. It stays visible in the queue strip and
+                            // flushes on the next successful start; clearing it
+                            // would destroy their words along with the process
+                            // (the T3 bug family this app tests against).
+                            if let Some(active) = state.active.as_mut().filter(|_| matches_active) {
                                 active.runtime = Runtime::Idle;
-                                // The queue is deliberately KEPT: it holds text
-                                // the user typed but that was never sent. It
-                                // stays visible in the queue strip and flushes
-                                // on the next successful start; clearing it here
-                                // would destroy their words along with the
-                                // process (the T3 bug family this app tests
-                                // against).
                                 active.turn_in_flight = false;
+                            } else if let Some(parked) = state.background.get_mut(&session_id) {
+                                parked.runtime = Runtime::Idle;
+                                parked.turn_in_flight = false;
                             }
                             let message =
                                 rust_i18n::t!("errors.provider_start", error = err).into_owned();
@@ -3844,8 +3942,17 @@ impl AppState {
         if let AgentEvent::SessionClosed { reason } = &event {
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
-                // User-requested shutdowns remove the active runtime before the
-                // provider acknowledges them, so their close event stays silent.
+                // A parked session's process died on its own (crash, fatal
+                // error): put the close on the record — the transcript should
+                // say why the work stopped when the thread is reopened — and
+                // forget the dead runtime.
+                if self.background.contains_key(session_id) {
+                    self.record_event(session_id, &event, cx);
+                    self.background.remove(session_id);
+                    cx.notify();
+                }
+                // Otherwise: user-requested shutdowns remove the runtime before
+                // the provider acknowledges them, so their close stays silent.
                 return;
             }
 
@@ -3990,6 +4097,9 @@ impl AppState {
             if is_active && self.dispatch_next_queued(cx).is_err() {
                 self.report_error(rust_i18n::t!("errors.process_gone").into_owned(), cx);
             }
+            if !is_active {
+                self.on_background_turn_completed(session_id, cx);
+            }
         }
 
         // Smoke-mode automation.
@@ -4085,10 +4195,12 @@ impl AppState {
     }
 
     fn meta_mut(&mut self, session_id: &str) -> Option<&mut SessionMeta> {
-        self.active
-            .as_mut()
-            .map(|a| &mut a.meta)
-            .filter(|m| m.id == session_id)
+        if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
+            return Some(&mut active.meta);
+        }
+        // Parked sessions keep receiving meta updates (resume cursor, updated_at)
+        // — losing the cursor while parked would break the next cold resume.
+        self.background.get_mut(session_id).map(|s| &mut s.meta)
     }
 
     fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut Context<Self>) {
@@ -4106,6 +4218,43 @@ impl AppState {
         self.persist_terminal_preferences();
         if let Some(active) = self.active.take()
             && let Runtime::Live(commands) = active.runtime
+        {
+            let _ = commands.try_send(SessionCommand::Shutdown);
+        }
+    }
+
+    /// Leave the active session without killing its work: a live session with a
+    /// turn in flight or queued messages is parked in `background` (process,
+    /// pump and queue intact — see the field docs); an idle one is shut down as
+    /// before. Every "switch away" path goes through here; only destructive
+    /// paths (archive, delete) use `shutdown_active` directly.
+    fn park_active(&mut self) {
+        self.persist_terminal_preferences();
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        let has_work = active.turn_in_flight || !active.queue.is_empty();
+        // Live with work, or still Starting with messages waiting (the start
+        // attempt finds and adopts the parked entry when it completes) — both
+        // carry state that must not die with a thread switch.
+        let parkable = matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. });
+        if has_work && parkable {
+            log::info!(
+                "parking session {} (turn in flight: {}, queued: {})",
+                active.meta.id,
+                active.turn_in_flight,
+                active.queue.len()
+            );
+            self.background.insert(active.meta.id.clone(), active);
+        } else if let Runtime::Live(commands) = active.runtime {
+            let _ = commands.try_send(SessionCommand::Shutdown);
+        }
+    }
+
+    /// Shut down and forget a parked session (archive/delete paths).
+    fn drop_background(&mut self, session_id: &str) {
+        if let Some(parked) = self.background.remove(session_id)
+            && let Runtime::Live(commands) = parked.runtime
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
         }
@@ -5542,6 +5691,164 @@ mod tests {
             assert!(replayed.entries.iter().any(
                 |e| matches!(&e.content, EntryContent::User { text } if text == "second message")
             ));
+        });
+
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The T3 Code session-reaper failure class, our variant: switching to
+    /// another thread must NOT kill a session whose turn is still running. The
+    /// session parks in the background — process and queue alive, events still
+    /// recorded, sidebar still "Working" — and selecting it again re-adopts it
+    /// with the streamed-while-parked content visible.
+    #[gpui::test]
+    fn switching_threads_parks_a_working_session_instead_of_killing_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cwd = std::env::temp_dir().join(format!("tcode-park-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data = std::env::temp_dir().join(format!("tcode-park-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state
+                .settings
+                .provider_mut(ProviderKind::ClaudeCode)
+                .binary_path = Some("/nonexistent/tcode-test-claude".into());
+
+            // A live session with a running turn (the overnight workflow).
+            let (session, commands_a) = fake_live_session(cwd.clone());
+            let id_a = session.meta.id.clone();
+            state.store.upsert_meta(&session.meta).unwrap();
+            state.sessions = state.store.load_index();
+            state.active = Some(session);
+            state.send_turn("run the long migration".into(), Vec::new(), cx);
+            state.send_turn("queued follow-up".into(), Vec::new(), cx);
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+                cx,
+            );
+            assert!(matches!(
+                commands_a.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
+
+            // Glance at another thread: the session must survive, not die.
+            state.start_draft("proj-t3".into(), cwd.clone(), cx);
+            assert!(
+                commands_a.try_recv().is_err(),
+                "switching threads must not send Shutdown to a working session"
+            );
+            assert!(
+                state.turn_running_for(&id_a),
+                "a parked working session keeps its sidebar Working status"
+            );
+
+            // The parked session keeps streaming; its events keep landing in
+            // the JSONL even though another thread is on screen.
+            state.on_event(
+                &id_a,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id: "bg-1".into(),
+                    content: ItemContent::AssistantMessage {
+                        text: "Migration step 1 done.".into(),
+                    },
+                }),
+                cx,
+            );
+
+            // Its turn completes in the background → the queued follow-up goes
+            // out as the next turn, on the same process.
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+            assert!(matches!(
+                commands_a.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
+            assert!(state.turn_running_for(&id_a));
+
+            // Coming back re-adopts the live session: everything that happened
+            // while parked is in the timeline, and the turn is still running.
+            state.select_session(&id_a, cx);
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, id_a);
+            assert!(matches!(active.runtime, Runtime::Live(_)));
+            assert!(active.turn_in_flight);
+            assert!(active.timeline.entries.iter().any(|e| matches!(
+                &e.content,
+                EntryContent::Assistant { text } if text == "Migration step 1 done."
+            )));
+            assert!(active.timeline.entries.iter().any(|e| matches!(
+                &e.content,
+                EntryContent::User { text } if text == "queued follow-up"
+            )));
+
+            // The second turn completes with nothing queued: NOW the provider
+            // shuts down — work finished, not reaped.
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-2".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+            assert!(!state.turn_running_for(&id_a) || state.active.is_some());
+        });
+
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A parked session that runs out of work shuts down for real (no zombie
+    /// processes), and a parked session whose process dies is recorded and
+    /// forgotten.
+    #[gpui::test]
+    fn parked_session_shuts_down_when_its_work_is_done(cx: &mut gpui::TestAppContext) {
+        let cwd = std::env::temp_dir().join(format!("tcode-parkend-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data =
+            std::env::temp_dir().join(format!("tcode-parkend-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let (session, commands) = fake_live_session(cwd.clone());
+            let id = session.meta.id.clone();
+            state.store.upsert_meta(&session.meta).unwrap();
+            state.sessions = state.store.load_index();
+            state.active = Some(session);
+            state.send_turn("one last thing".into(), Vec::new(), cx);
+            let _ = commands.try_recv(); // the SendTurn
+
+            state.start_draft("proj".into(), cwd.clone(), cx);
+            assert!(state.turn_running_for(&id));
+
+            // The parked turn finishes with an empty queue → real shutdown.
+            state.on_event(
+                &id,
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+            assert!(matches!(commands.try_recv(), Ok(SessionCommand::Shutdown)));
+            assert!(!state.turn_running_for(&id));
         });
 
         let _ = std::fs::remove_dir_all(&cwd);

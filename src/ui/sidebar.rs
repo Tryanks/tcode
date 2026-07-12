@@ -540,7 +540,10 @@ impl SessionsSidebar {
         if !collapsed {
             for meta in group.sessions.iter().take(visible) {
                 let is_active = active_id == Some(meta.id.as_str());
-                let working = is_active && turn_running;
+                // "Working" covers parked sessions too — a thread that keeps
+                // running in the background keeps its green dot.
+                let working = (is_active && turn_running)
+                    || (!is_active && self.app_state.read(cx).turn_running_for(&meta.id));
                 container = container.child(self.render_thread(meta, is_active, working, cx));
             }
             if total > THREADS_COLLAPSED_LIMIT && !expanded {
