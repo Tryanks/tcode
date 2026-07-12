@@ -98,6 +98,15 @@ fn main() {
     let debug_queue = std::env::args()
         .skip_while(|arg| arg != "--debug-queue")
         .nth(1);
+    // Hidden E2E flag: `--debug-park-after <secs>` switches to a new draft that
+    // many seconds after launch — parking the running session exactly as
+    // clicking "New thread" does. Pair with `--debug-send` to occupy the
+    // session first; watch its JSONL keep growing to prove the parked provider
+    // kept working (the T3-reaper regression check).
+    let debug_park_after = std::env::args()
+        .skip_while(|arg| arg != "--debug-park-after")
+        .nth(1)
+        .and_then(|s| s.parse::<u64>().ok());
     // Hidden E2E flag: `--debug-edit-resend "<text>"` runs Edit & resend on the
     // opened session's LAST user message (the hover action row cannot be clicked
     // headlessly): the thread is rewound to just before that message — worktree
@@ -383,6 +392,25 @@ fn main() {
                         }
                         if let Some(text) = debug_edit_resend.clone() {
                             state.debug_edit_resend(text, cx);
+                        }
+                        if let Some(secs) = debug_park_after {
+                            let project = state
+                                .active
+                                .as_ref()
+                                .and_then(|a| a.meta.project_id.clone());
+                            let cwd = state.active.as_ref().map(|a| a.meta.cwd.clone());
+                            if let (Some(project), Some(cwd)) = (project, cwd) {
+                                cx.spawn(async move |state, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_secs(secs))
+                                        .await;
+                                    let _ = state.update(cx, |state, cx| {
+                                        log::info!("debug-park-after: opening a draft now");
+                                        state.start_draft(project, cwd, cx);
+                                    });
+                                })
+                                .detach();
+                            }
                         }
                     });
                 }
