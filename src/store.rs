@@ -215,11 +215,16 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// Open (creating if needed) the store under the platform data dir.
+    /// Open (creating if needed) the store under the platform data dir, or under
+    /// `TCODE_DATA_DIR` when it is set — which gives a throwaway profile (its own
+    /// sessions, settings and installed ACP agents) for demos and screenshots.
     pub fn open_default() -> std::io::Result<Self> {
-        let root = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("tcode");
+        let root = match std::env::var_os("TCODE_DATA_DIR") {
+            Some(dir) => PathBuf::from(dir),
+            None => dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("tcode"),
+        };
         Self::open_at(root)
     }
 

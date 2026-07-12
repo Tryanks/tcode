@@ -611,6 +611,14 @@ struct PendingApproval {
 pub(crate) struct Mapper {
     session_started: bool,
     current_message_id: Option<String>,
+    /// How many content blocks of each streamed message we have already seen in
+    /// an `assistant` line. The CLI splits one message across several `assistant`
+    /// lines — one per block, each carrying a *one-element* `content` array — so
+    /// enumerating that array gives 0 every time, while the `content_block_delta`
+    /// stream numbers the blocks 0, 1, 2… The completed item has to reuse the
+    /// stream's numbering or the timeline shows the same text twice: once from
+    /// the deltas (`msg:1`) and once from the completion (`msg:0`).
+    assistant_blocks_seen: HashMap<String, usize>,
     turn_counter: usize,
     current_turn_id: Option<String>,
     control_counter: usize,
@@ -650,6 +658,7 @@ impl Mapper {
         Mapper {
             session_started: false,
             current_message_id: None,
+            assistant_blocks_seen: HashMap::new(),
             turn_counter: 0,
             current_turn_id: None,
             control_counter: 0,
@@ -981,8 +990,18 @@ impl Mapper {
             Some(c) => c,
             None => return Vec::new(),
         };
+        // Continue the stream's block numbering across the CLI's split
+        // `assistant` lines (see `assistant_blocks_seen`).
+        let seen = self
+            .assistant_blocks_seen
+            .entry(msg_id.clone())
+            .or_default();
+        let first_index = *seen;
+        *seen += content.len();
+
         let mut out = Vec::new();
-        for (index, block) in content.iter().enumerate() {
+        for (offset, block) in content.iter().enumerate() {
+            let index = first_index + offset;
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     let text = block.get("text").and_then(Value::as_str).unwrap_or("");
@@ -999,12 +1018,17 @@ impl Mapper {
                         .and_then(Value::as_str)
                         .or_else(|| block.get("text").and_then(Value::as_str))
                         .unwrap_or("");
-                    out.push(AgentEvent::ItemCompleted(ThreadItem {
-                        id: format!("{msg_id}:{index}"),
-                        content: ItemContent::Reasoning {
-                            text: text.to_string(),
-                        },
-                    }));
+                    // The CLI redacts thinking content in this line even when it
+                    // streamed the deltas; completing with "" would blank the
+                    // reasoning the user just watched arrive.
+                    if !text.is_empty() {
+                        out.push(AgentEvent::ItemCompleted(ThreadItem {
+                            id: format!("{msg_id}:{index}"),
+                            content: ItemContent::Reasoning {
+                                text: text.to_string(),
+                            },
+                        }));
+                    }
                 }
                 Some("tool_use") => {
                     out.extend(self.on_tool_use(block));
@@ -1287,6 +1311,8 @@ impl Mapper {
             .current_turn_id
             .take()
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
+        // No message outlives its turn, so the block counters can go.
+        self.assistant_blocks_seen.clear();
         let mut status = result_status(msg);
         if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
             status = TurnStatus::Interrupted;
@@ -2348,6 +2374,56 @@ mod tests {
                 assert_eq!(text, "hmm");
             }
             other => panic!("expected reasoning Delta, got {other:?}"),
+        }
+    }
+
+    /// Captured from a real session: the CLI splits one message across several
+    /// `assistant` lines, each carrying a single-element `content` array — a
+    /// (redacted, empty) thinking block first, then the text block. Enumerating
+    /// each array on its own numbered the text block 0 while its deltas streamed
+    /// under index 1, so the timeline rendered the paragraph twice: once live,
+    /// once again from the completion. The completed item must land on the
+    /// stream's id, and the empty thinking block must not become an item at all.
+    #[test]
+    fn split_assistant_lines_keep_the_streams_block_numbering() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_s"}}}"#,
+        );
+        let streamed = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Added percent_off."}}}"#,
+        );
+        let streamed_id = match &streamed[0] {
+            AgentEvent::Delta { item_id, .. } => item_id.clone(),
+            other => panic!("expected Delta, got {other:?}"),
+        };
+        assert_eq!(streamed_id, "msg_s:1");
+
+        // First `assistant` line: the thinking block alone, with no content.
+        let thinking = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg_s","content":[{"type":"thinking","thinking":""}]}}"#,
+        );
+        assert!(
+            thinking.is_empty(),
+            "an empty thinking block must not blank the streamed reasoning: {thinking:?}"
+        );
+
+        // Second `assistant` line: the text block, which the stream called 1.
+        let completed = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg_s","content":[{"type":"text","text":"Added percent_off."}]}}"#,
+        );
+        match &completed[0] {
+            AgentEvent::ItemCompleted(item) => {
+                assert_eq!(
+                    item.id, streamed_id,
+                    "completion must reuse the streamed item id, or the text renders twice"
+                );
+            }
+            other => panic!("expected ItemCompleted, got {other:?}"),
         }
     }
 

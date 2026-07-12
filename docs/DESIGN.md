@@ -140,7 +140,12 @@ expandable detail (command text / file list), actions Deny / Always allow /
 Approve (primary).
 
 ### Diff panel
-Right resizable split (default 560px, min 320px): tab strip ("Diff" + "+"
+Right resizable split (default 560px, min 320px). Sidebar · chat · right panel
+are **one** resizable group: nesting a second group inside the chat panel does not
+shrink the chat — the right panel is painted over it and the timeline and composer
+are clipped mid-word. The chat column reflows; it never clips.
+
+Details: tab strip ("Diff" + "+"
 no-op) with expand/close cluster; toolbar "Turn N ⌄" selector + wrap toggle
 (+ no-op split/whitespace/¶ icons); body per file: header row (icon, relative
 path, "new" badge for creates, +N/-M) then unified diff: dual line-number
