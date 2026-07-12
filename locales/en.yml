@@ -29,6 +29,7 @@ chat:
   scroll_end: "Scroll to end"
   copy: "Copy"
   copied: "Copied!"
+  error_label: "Error"
   edit_message: "Edit"
   edit_message_tooltip: "Edit this message and resend it from here"
   edit_blocked: "Interrupt the current turn before editing a message."
