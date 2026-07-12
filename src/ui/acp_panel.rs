@@ -410,8 +410,9 @@ impl Render for AcpPanel {
         for (index, agent) in installed.iter().enumerate() {
             let row = self.render_installed(agent, window, cx);
             list = list.child(
-                div()
+                v_flex()
                     .w_full()
+                    .items_stretch()
                     .when(index > 0, |d| d.border_t_1().border_color(border))
                     .child(row),
             );
@@ -437,8 +438,9 @@ impl Render for AcpPanel {
         }
         for agent in &market {
             rows = rows.child(
-                div()
+                v_flex()
                     .w_full()
+                    .items_stretch()
                     .border_t_1()
                     .border_color(border)
                     .child(self.render_market_row(agent, cx)),
@@ -446,8 +448,9 @@ impl Render for AcpPanel {
         }
         let custom = self.render_custom(cx);
         rows = rows.child(
-            div()
+            v_flex()
                 .w_full()
+                .items_stretch()
                 .border_t_1()
                 .border_color(border)
                 .child(custom),

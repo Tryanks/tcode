@@ -423,8 +423,9 @@ impl SettingsPage {
             .overflow_hidden();
         for (index, (_, card)) in self.provider_cards.iter().enumerate() {
             list = list.child(
-                div()
+                v_flex()
                     .w_full()
+                    .items_stretch()
                     .when(index > 0, |d| {
                         d.border_t_1().border_color(cx.theme().border)
                     })
@@ -623,24 +624,35 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
-        let label = match mode {
-            ThemeMode::System => rust_i18n::t!("settings.theme.system"),
-            ThemeMode::Light => rust_i18n::t!("settings.theme.light"),
-            ThemeMode::Dark => rust_i18n::t!("settings.theme.dark"),
-        };
-        let muted = cx.theme().muted_foreground;
-
-        let trigger = Button::new("theme-dropdown").outline().compact().child(
+    fn dropdown_trigger(
+        &self,
+        id: &'static str,
+        label: impl Into<SharedString>,
+        cx: &Context<Self>,
+    ) -> Button {
+        Button::new(id).outline().compact().child(
             gpui_component::h_flex()
                 .w(px(160.))
                 .items_center()
                 .justify_between()
                 .gap_2()
                 .text_size(px(13.))
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-        );
+                .child(label.into())
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                ),
+        )
+    }
+
+    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
+        let label = match mode {
+            ThemeMode::System => rust_i18n::t!("settings.theme.system"),
+            ThemeMode::Light => rust_i18n::t!("settings.theme.light"),
+            ThemeMode::Dark => rust_i18n::t!("settings.theme.dark"),
+        };
+        let trigger = self.dropdown_trigger("theme-dropdown", label, cx);
 
         let this = cx.entity();
         let dropdown = Popover::new("theme-popover")
@@ -721,14 +733,7 @@ impl SettingsPage {
             Some(LANGUAGE_SIMPLIFIED_CHINESE) => rust_i18n::t!("settings.language.chinese"),
             _ => rust_i18n::t!("settings.language.system"),
         };
-        let trigger = Button::new("language-dropdown").outline().compact().child(
-            gpui_component::h_flex()
-                .w(px(160.))
-                .items_center()
-                .justify_between()
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall()),
-        );
+        let trigger = self.dropdown_trigger("language-dropdown", label, cx);
         let page = cx.entity();
         let dropdown =
             Popover::new("language-popover")
@@ -746,8 +751,10 @@ impl SettingsPage {
                             .w_full()
                             .px_2()
                             .py_1()
+                            .gap_2()
                             .items_center()
                             .rounded(px(6.))
+                            .text_size(px(13.))
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().accent))
                             .child(div().flex_1().child(rust_i18n::t!(key)))
