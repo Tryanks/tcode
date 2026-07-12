@@ -480,8 +480,11 @@ mod tests {
             if predicate(&state) {
                 return state;
             }
+            // Generous: this waits on a real PTY under a shared CI runner, where
+            // spawning a shell can stall for seconds. The test is about the
+            // output eventually arriving, not about how fast.
             assert!(
-                start.elapsed() < Duration::from_secs(5),
+                start.elapsed() < Duration::from_secs(30),
                 "terminal timed out: {:?}",
                 state.text()
             );
