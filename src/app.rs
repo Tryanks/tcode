@@ -3801,7 +3801,13 @@ impl AppState {
                         if matches_attempt {
                             if let Some(active) = state.active.as_mut() {
                                 active.runtime = Runtime::Idle;
-                                active.queue.clear();
+                                // The queue is deliberately KEPT: it holds text
+                                // the user typed but that was never sent. It
+                                // stays visible in the queue strip and flushes
+                                // on the next successful start; clearing it here
+                                // would destroy their words along with the
+                                // process (the T3 bug family this app tests
+                                // against).
                                 active.turn_in_flight = false;
                             }
                             let message =
@@ -5397,5 +5403,199 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&plain);
+    }
+
+    /// An `ActiveSession` wired to a fake live provider: commands land on the
+    /// returned receiver, nothing real is spawned.
+    fn fake_live_session(cwd: PathBuf) -> (ActiveSession, async_channel::Receiver<SessionCommand>) {
+        let (commands, receiver) = async_channel::unbounded();
+        let mut session =
+            AppState::build_draft_session("proj-t3".into(), cwd, ProviderKind::ClaudeCode, None);
+        session.draft = false;
+        session.runtime = Runtime::Live(commands);
+        // What `ensure_started` records at launch — without these, `send_turn`
+        // sees a live-config mismatch and restarts the provider instead of
+        // dispatching.
+        session.live_model = session.meta.model.clone();
+        session.live_approval_mode = Some(session.meta.approval_mode);
+        session.live_option_selections = session.meta.option_selections.clone();
+        (session, receiver)
+    }
+
+    /// The T3 Code regression this app must not inherit: send a message, hit
+    /// stop, get an error, then immediately open a new thread and send — and the
+    /// new thread's FIRST user message must be in its timeline (T3 loses the
+    /// bubble while the turn keeps working underneath).
+    ///
+    /// The guarantees this pins: a message is folded into the timeline at the
+    /// moment it is dispatched (not asynchronously after), the fold only accepts
+    /// events whose session id matches the active session, and the interrupted
+    /// session's error cannot leak into the new thread.
+    #[gpui::test]
+    fn stop_then_new_thread_keeps_the_first_message_visible(cx: &mut gpui::TestAppContext) {
+        let cwd = std::env::temp_dir().join(format!("tcode-t3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data = std::env::temp_dir().join(format!("tcode-t3-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            // No real provider may spawn if a start slips through.
+            state
+                .settings
+                .provider_mut(ProviderKind::ClaudeCode)
+                .binary_path = Some("/nonexistent/tcode-test-claude".into());
+
+            // Session A, live. Send → the bubble is in the timeline immediately.
+            let (session, commands_a) = fake_live_session(cwd.clone());
+            let id_a = session.meta.id.clone();
+            state.active = Some(session);
+            state.send_turn("first message".into(), Vec::new(), cx);
+            assert_eq!(state.last_user_turn(), Some(0));
+            assert!(matches!(
+                commands_a.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
+
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+                cx,
+            );
+
+            // Stop. The provider reports an error + an interrupted turn — the
+            // truncated-error moment in the T3 repro.
+            state.interrupt(cx);
+            assert!(matches!(
+                commands_a.try_recv(),
+                Ok(SessionCommand::Interrupt)
+            ));
+            state.on_event(
+                &id_a,
+                AgentEvent::Error {
+                    message: "Request was aborted\nwith a second line the toast never showed"
+                        .into(),
+                    fatal: false,
+                },
+                cx,
+            );
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Interrupted,
+                    usage: None,
+                },
+                cx,
+            );
+
+            // Immediately: new thread, send. The draft commits to a NEW session;
+            // the message waits in the queue while the provider starts (still
+            // visible in the queue strip — never dropped).
+            state.start_draft("proj-t3".into(), cwd.clone(), cx);
+            state.send_turn("second message".into(), Vec::new(), cx);
+            let active = state.active.as_ref().unwrap();
+            let id_b = active.meta.id.clone();
+            assert_ne!(id_a, id_b);
+            assert_eq!(active.queue.len(), 1);
+
+            // Provider comes up (simulated — the queue flush on start).
+            let (commands_b, receiver_b) = async_channel::unbounded();
+            state.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
+            assert_eq!(state.dispatch_next_queued(cx), Ok(true));
+            assert!(matches!(
+                receiver_b.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
+
+            // THE assertion: the new thread's first message is a visible user
+            // entry in a rendered turn, and session A's error did not leak in.
+            let active = state.active.as_ref().unwrap();
+            let users: Vec<&str> = active
+                .timeline
+                .entries
+                .iter()
+                .filter_map(|e| match &e.content {
+                    EntryContent::User { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(users, vec!["second message"]);
+            let entry_turn = active.timeline.entries[0].turn;
+            assert!(
+                entry_turn < active.timeline.turns.len(),
+                "user entry must belong to a rendered turn (turn {entry_turn} of {})",
+                active.timeline.turns.len()
+            );
+            assert!(
+                !active
+                    .timeline
+                    .entries
+                    .iter()
+                    .any(|e| matches!(e.content, EntryContent::Error { .. })),
+                "session A's interrupt error leaked into the new thread"
+            );
+            // And it is durable: a replay of the JSONL shows the same thing.
+            let replayed = Timeline::fold_events(state.store.read_events(&id_b));
+            assert!(replayed.entries.iter().any(
+                |e| matches!(&e.content, EntryContent::User { text } if text == "second message")
+            ));
+        });
+
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A failed provider start must not destroy what the user typed: the queued
+    /// message stays in the queue (visible in the strip, flushed by the next
+    /// successful start) instead of being cleared.
+    #[gpui::test]
+    fn failed_provider_start_keeps_the_queued_message(cx: &mut gpui::TestAppContext) {
+        let cwd = std::env::temp_dir().join(format!("tcode-t3f-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data = std::env::temp_dir().join(format!("tcode-t3f-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            // A binary that cannot exist → start_session fails fast.
+            state
+                .settings
+                .provider_mut(ProviderKind::ClaudeCode)
+                .binary_path = Some("/nonexistent/tcode-test-claude".into());
+            state.start_draft("proj-fail".into(), cwd.clone(), cx);
+            state.send_turn("do not lose me".into(), Vec::new(), cx);
+            assert_eq!(state.active.as_ref().unwrap().queue.len(), 1);
+        });
+
+        // Let the spawned start attempt run to its failure.
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            let active = state.active.as_ref().unwrap();
+            assert!(
+                matches!(active.runtime, Runtime::Idle),
+                "failed start must return to Idle"
+            );
+            assert_eq!(
+                active.queue.first().map(|m| m.text.as_str()),
+                Some("do not lose me"),
+                "the user's text must survive a failed provider start"
+            );
+            // The failure itself is on the record.
+            assert!(
+                active
+                    .timeline
+                    .entries
+                    .iter()
+                    .any(|e| matches!(e.content, EntryContent::Error { .. })),
+                "the start failure must be recorded in the timeline"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

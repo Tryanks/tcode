@@ -113,6 +113,14 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   uses) — and then sends the edited text as a fresh turn. Without a checkpoint
   (e.g. a non-git cwd) the transcript is still truncated and the message resent,
   and a toast says plainly that files on disk were not reverted.
+- **Errors are never truncated or folded away.** A provider/app error renders as
+  its own block: a danger-tinted card (10px radius, danger border at 35%, danger
+  bg at 6%) with an uppercase 11px ERROR label, a Copy button, and the FULL
+  message wrapped at 13px/20px. Errors deliberately do not join the Work Log's
+  activity rows — those are one-line ellipsized and collapse when the turn ends,
+  which is exactly how T3 Code ends up showing "Request was abo…" and then
+  nothing. A failed provider start additionally leaves the unsent message in the
+  queue strip (typed text is never destroyed by a dead process).
 - CHANGED FILES card per turn with file changes: header "CHANGED FILES (N) ·
   +A -D" + "Collapse all" ghost + "View diff" bordered button; body = directory
   tree, file rows with right-aligned per-file +a/-d; paths relative to the

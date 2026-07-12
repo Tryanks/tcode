@@ -346,7 +346,12 @@ impl ChatView {
             }
         }
 
-        // 2. Work Log: activity rows (commands / tools / reasoning / errors).
+        // 2. Work Log: activity rows (commands / tools / reasoning). Errors are
+        // deliberately NOT activity: an activity row is one ellipsized line
+        // inside a section that collapses when the turn ends — an error rendered
+        // there shows a few characters of its first line and then vanishes
+        // entirely (the exact T3 Code failure this app must not inherit). Errors
+        // get their own full-text card below.
         let activities: Vec<&TimelineEntry> = entries
             .iter()
             .copied()
@@ -356,13 +361,19 @@ impl ChatView {
                     EntryContent::Command { .. }
                         | EntryContent::Tool { .. }
                         | EntryContent::Reasoning { .. }
-                        | EntryContent::Error { .. }
                         | EntryContent::ContextCompacted
                 )
             })
             .collect();
         if !activities.is_empty() || turn.duration_secs().is_some() || turn.running {
             column = column.child(self.render_work_log(index, turn, &activities, cx));
+        }
+
+        // 2b. Error cards: full message, wrapped, never collapsed, copyable.
+        for entry in entries {
+            if let EntryContent::Error { message } = &entry.content {
+                column = column.child(self.render_error_card(&entry.id, message, cx));
+            }
         }
 
         // 3. Assistant markdown.
@@ -576,6 +587,56 @@ impl ChatView {
                     .child(content),
             )
             .child(self.reserve_action_row(actions, group_key, pinned))
+            .into_any_element()
+    }
+
+    /// A provider/app error as a first-class timeline block: a danger-tinted
+    /// card carrying the FULL message, wrapped across as many lines as it needs,
+    /// with a Copy action. Never a one-line ellipsis, never folded into the
+    /// collapsing Work Log — a truncated or hidden error is how T3 Code leaves
+    /// its users staring at "Request was abo…".
+    fn render_error_card(&self, id: &str, message: &str, cx: &mut Context<Self>) -> AnyElement {
+        let danger = cx.theme().danger;
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_3()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(danger.opacity(0.35))
+            .bg(danger.opacity(0.06))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .xsmall()
+                            .text_color(danger),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_medium()
+                            .text_color(danger)
+                            .child(rust_i18n::t!("chat.error_label").to_uppercase()),
+                    )
+                    .child(div().flex_1())
+                    .child(self.render_copy_button(
+                        &format!("error:{id}"),
+                        message.to_string(),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(13.))
+                    .line_height(px(20.))
+                    .text_color(cx.theme().foreground)
+                    .whitespace_normal()
+                    .child(message.to_string()),
+            )
             .into_any_element()
     }
 
@@ -949,17 +1010,6 @@ impl ChatView {
                     )
                     .into_any_element();
                 (IconName::Check, summary)
-            }
-            EntryContent::Error { message } => {
-                let summary = div()
-                    .min_w_0()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(cx.theme().danger)
-                    .child(one_line(message))
-                    .into_any_element();
-                (IconName::TriangleAlert, summary)
             }
             EntryContent::ContextCompacted => {
                 let summary = div()
