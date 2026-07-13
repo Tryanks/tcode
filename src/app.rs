@@ -2392,6 +2392,19 @@ impl AppState {
             .is_some_and(|s| s.turn_in_flight || !s.queue.is_empty())
     }
 
+    /// Number of active or parked sessions with a provider turn in flight.
+    pub fn turns_in_flight_count(&self) -> usize {
+        usize::from(
+            self.active
+                .as_ref()
+                .is_some_and(|session| session.turn_in_flight),
+        ) + self
+            .background
+            .values()
+            .filter(|session| session.turn_in_flight)
+            .count()
+    }
+
     /// Record that a thread has been visited now (clears its unread dot).
     fn mark_visited(&mut self, session_id: &str) {
         self.settings
@@ -4226,6 +4239,16 @@ impl AppState {
         }
     }
 
+    /// Shut down every provider process before the application exits.
+    pub fn shutdown_all(&mut self) {
+        self.shutdown_active();
+        for (_, parked) in self.background.drain() {
+            if let Runtime::Live(commands) = parked.runtime {
+                let _ = commands.try_send(SessionCommand::Shutdown);
+            }
+        }
+    }
+
     /// Leave the active session without killing its work: a live session with a
     /// turn in flight or queued messages is parked in `background` (process,
     /// pump and queue intact — see the field docs); an idle one is shut down as
@@ -5064,6 +5087,66 @@ mod tests {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
+    }
+
+    #[test]
+    fn shutdown_all_notifies_active_and_parked_live_providers() {
+        let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        let (active_commands, active_receiver) = async_channel::unbounded();
+        state.active = Some(live_session(ProviderKind::Codex, active_commands));
+
+        let (parked_commands, parked_receiver) = async_channel::unbounded();
+        let parked = live_session(ProviderKind::ClaudeCode, parked_commands);
+        state.background.insert(parked.meta.id.clone(), parked);
+
+        let (other_commands, other_receiver) = async_channel::unbounded();
+        let other = live_session(ProviderKind::Acp, other_commands);
+        state.background.insert(other.meta.id.clone(), other);
+
+        state.shutdown_all();
+
+        assert!(matches!(
+            active_receiver.try_recv(),
+            Ok(SessionCommand::Shutdown)
+        ));
+        assert!(matches!(
+            parked_receiver.try_recv(),
+            Ok(SessionCommand::Shutdown)
+        ));
+        assert!(matches!(
+            other_receiver.try_recv(),
+            Ok(SessionCommand::Shutdown)
+        ));
+        assert!(state.active.is_none());
+        assert!(state.background.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn turns_in_flight_count_includes_active_and_parked_sessions() {
+        let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+        active.turn_in_flight = true;
+        state.active = Some(active);
+
+        let mut parked = live_session(ProviderKind::ClaudeCode, async_channel::unbounded().0);
+        parked.turn_in_flight = true;
+        state.background.insert(parked.meta.id.clone(), parked);
+
+        let mut queued_only = live_session(ProviderKind::Acp, async_channel::unbounded().0);
+        queued_only.push_queued("waiting".into(), Vec::new());
+        state
+            .background
+            .insert(queued_only.meta.id.clone(), queued_only);
+
+        assert_eq!(state.turns_in_flight_count(), 2);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Enter always queues while a turn runs; ⌘Enter steers only where the
