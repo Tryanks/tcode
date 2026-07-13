@@ -8,6 +8,9 @@ mod assets;
 mod blocking;
 mod checkpoints;
 mod git;
+// Consumed by the follow-up import UI; keep the backend warning-free meanwhile.
+#[allow(dead_code, unused_imports)]
+mod import;
 mod process;
 mod provider_models;
 mod provider_status;
