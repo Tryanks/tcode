@@ -146,10 +146,11 @@ impl SettingsPage {
             .update(cx, |panel, cx| panel.prepare_to_open(cx));
         let panel = self.acp_panel.clone();
         window.open_dialog(cx, move |dialog, _, _| {
+            let panel = panel.clone();
             dialog
                 .w(px(620.))
                 .title(rust_i18n::t!("providers.acp.add_agent").into_owned())
-                .child(panel.clone())
+                .content(move |content, _, _| content.h(px(456.)).child(panel.clone()))
         });
     }
 
