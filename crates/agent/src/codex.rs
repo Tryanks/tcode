@@ -379,8 +379,16 @@ struct Actor {
     /// server-to-client JSON-RPC id we must reply to.
     user_inputs: HashMap<String, Value>,
     items: HashMap<String, ThreadItem>,
+    subagents: HashMap<String, CodexSubagent>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexSubagent {
+    agent_type: String,
+    description: String,
+    child_item_id: String,
 }
 
 async fn run_actor(
@@ -435,6 +443,7 @@ async fn run_actor(
         approvals: HashMap::new(),
         user_inputs: HashMap::new(),
         items: HashMap::new(),
+        subagents: HashMap::new(),
         usage_by_turn: HashMap::new(),
         active_turn: None,
     };
@@ -1322,6 +1331,10 @@ impl Actor {
     }
 
     async fn handle_notification(&mut self, method: &str, params: &Value) {
+        if let Some(activity) = find_subagent_activity(params) {
+            self.handle_subagent_activity(activity).await;
+            return;
+        }
         match method {
             "turn/started" => {
                 if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
@@ -1382,7 +1395,38 @@ impl Actor {
                     }
                     return;
                 }
-                if let Some(item) = item_value.and_then(map_item) {
+                if let Some(mut item) = item_value.and_then(map_item) {
+                    if let Some(subagent) = self.subagents.get(&item.id) {
+                        let status = if method == "item/completed" {
+                            item_status(&item.content)
+                        } else {
+                            ItemStatus::InProgress
+                        };
+                        let summary = if method == "item/completed" {
+                            item_summary(&item.content)
+                        } else {
+                            None
+                        };
+                        item.content = ItemContent::Subagent {
+                            agent_type: subagent.agent_type.clone(),
+                            description: subagent.description.clone(),
+                            status,
+                            summary: summary.clone(),
+                        };
+                        if method == "item/completed" {
+                            self.emit(AgentEvent::ItemCompleted(ThreadItem {
+                                id: subagent.child_item_id.clone(),
+                                parent_item_id: Some(item.id.clone()),
+                                content: ItemContent::Subagent {
+                                    agent_type: subagent.agent_type.clone(),
+                                    description: "child thread".into(),
+                                    status,
+                                    summary,
+                                },
+                            }))
+                            .await;
+                        }
+                    }
                     self.items.insert(item.id.clone(), item.clone());
                     let event = match method {
                         "item/started" => AgentEvent::ItemStarted(item),
@@ -1473,6 +1517,87 @@ impl Actor {
             }
             _ => log::trace!("ignored Codex notification {method}: {params}"),
         }
+    }
+
+    async fn handle_subagent_activity(&mut self, activity: &Value) {
+        let Some(parent_id) = activity.get("event_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(thread_id) = activity.get("agent_thread_id").and_then(Value::as_str) else {
+            return;
+        };
+        let path = activity
+            .get("agent_path")
+            .and_then(Value::as_str)
+            .unwrap_or("subagent");
+        let (agent_type, description) = self
+            .items
+            .get(parent_id)
+            .and_then(|item| match &item.content {
+                ItemContent::ToolCall { input, .. } => Some((
+                    input
+                        .get("agent_type")
+                        .or_else(|| input.get("subagent_type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| path.rsplit('/').next().unwrap_or("subagent"))
+                        .to_owned(),
+                    input
+                        .get("description")
+                        .or_else(|| input.get("prompt"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(path)
+                        .to_owned(),
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                (
+                    path.rsplit('/').next().unwrap_or("subagent").to_owned(),
+                    path.to_owned(),
+                )
+            });
+        let child_item_id = format!("{parent_id}:{thread_id}");
+        let subagent = self
+            .subagents
+            .entry(parent_id.to_owned())
+            .or_insert_with(|| CodexSubagent {
+                agent_type,
+                description,
+                child_item_id,
+            })
+            .clone();
+        let parent = ThreadItem {
+            id: parent_id.to_owned(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: subagent.agent_type.clone(),
+                description: subagent.description.clone(),
+                status: ItemStatus::InProgress,
+                summary: None,
+            },
+        };
+        self.items.insert(parent_id.to_owned(), parent.clone());
+        self.emit(AgentEvent::ItemUpdated(parent)).await;
+
+        let child = ThreadItem {
+            id: subagent.child_item_id,
+            parent_item_id: Some(parent_id.to_owned()),
+            content: ItemContent::Subagent {
+                agent_type: subagent.agent_type,
+                description: match activity.get("kind").and_then(Value::as_str) {
+                    Some("interacted") => "interacted with parent".into(),
+                    _ => "child thread started".into(),
+                },
+                status: ItemStatus::InProgress,
+                summary: None,
+            },
+        };
+        let event = if activity.get("kind").and_then(Value::as_str) == Some("started") {
+            AgentEvent::ItemStarted(child)
+        } else {
+            AgentEvent::ItemUpdated(child)
+        };
+        self.emit(event).await;
     }
 
     /// Settle every outstanding `requestUserInput` on teardown: reply with an
@@ -1678,7 +1803,42 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             summary: serde_json::to_string(item).unwrap_or_else(|_| provider_kind.into()),
         },
     };
-    Some(ThreadItem { id, content })
+    Some(ThreadItem {
+        id,
+        parent_item_id: None,
+        content,
+    })
+}
+
+fn find_subagent_activity(value: &Value) -> Option<&Value> {
+    if value.get("type").and_then(Value::as_str) == Some("sub_agent_activity") {
+        return Some(value);
+    }
+    match value {
+        Value::Object(fields) => fields.values().find_map(find_subagent_activity),
+        Value::Array(values) => values.iter().find_map(find_subagent_activity),
+        _ => None,
+    }
+}
+
+fn item_status(content: &ItemContent) -> ItemStatus {
+    match content {
+        ItemContent::CommandExecution { status, .. }
+        | ItemContent::FileChange { status, .. }
+        | ItemContent::ToolCall { status, .. }
+        | ItemContent::Subagent { status, .. } => *status,
+        _ => ItemStatus::Completed,
+    }
+}
+
+fn item_summary(content: &ItemContent) -> Option<String> {
+    match content {
+        ItemContent::ToolCall { output, .. } => output
+            .as_deref()
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")),
+        ItemContent::Subagent { summary, .. } => summary.clone(),
+        _ => None,
+    }
 }
 
 fn strings(value: Option<&Value>) -> Vec<&str> {
@@ -1814,6 +1974,7 @@ mod tests {
                 approvals: HashMap::new(),
                 user_inputs: HashMap::new(),
                 items: HashMap::new(),
+                subagents: HashMap::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
             },
@@ -2152,6 +2313,86 @@ mod tests {
                 AgentEvent::ProposedPlan { ref item_id, ref markdown } if item_id == "plan-1" && markdown == "# Final plan"
             ));
 
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn subagent_activity_is_found_in_defensive_notification_envelope() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.items.insert(
+                "call_spawn".into(),
+                ThreadItem {
+                    id: "call_spawn".into(),
+                    parent_item_id: None,
+                    content: ItemContent::ToolCall {
+                        name: "spawn_agent".into(),
+                        input: json!({"agent_type":"researcher","description":"Inspect protocol"}),
+                        output: None,
+                        status: ItemStatus::InProgress,
+                    },
+                },
+            );
+            actor
+                .handle_notification(
+                    "thread/event",
+                    &json!({
+                        "event": {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "sub_agent_activity",
+                                "event_id": "call_spawn",
+                                "occurred_at_ms": 1783944057000_u64,
+                                "agent_thread_id": "thread_child",
+                                "agent_path": "/root/researcher",
+                                "kind": "started"
+                            }
+                        }
+                    }),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemUpdated(ThreadItem {
+                    id,
+                    parent_item_id: None,
+                    content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
+                }) if id == "call_spawn"
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemStarted(ThreadItem {
+                    id,
+                    parent_item_id: Some(parent),
+                    content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
+                }) if id == "call_spawn:thread_child" && parent == "call_spawn"
+            ));
+
+            actor
+                .handle_notification(
+                    "item/completed",
+                    &json!({"item": {
+                        "type":"dynamicToolCall",
+                        "id":"call_spawn",
+                        "tool":"spawn_agent",
+                        "arguments":{},
+                        "contentItems":[{"type":"inputText","text":"done"}],
+                        "status":"completed"
+                    }}),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
+                    if parent == "call_spawn"
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
+                    if id == "call_spawn"
+            ));
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });

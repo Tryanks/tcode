@@ -123,6 +123,7 @@ fn segment_entries<'a>(entries: &'a [TimelineEntry]) -> Vec<Segment<'a>> {
         match &entry.content {
             EntryContent::Command { .. }
             | EntryContent::Tool { .. }
+            | EntryContent::Subagent { .. }
             | EntryContent::Reasoning { .. }
             | EntryContent::ContextCompacted => activities.push(entry),
             EntryContent::User { .. } => {
@@ -270,6 +271,17 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             input.to_string().len().hash(hash);
             output.as_ref().map(String::len).hash(hash);
             std::mem::discriminant(status).hash(hash);
+        }
+        EntryContent::Subagent {
+            agent_type,
+            description,
+            status,
+            summary,
+        } => {
+            agent_type.len().hash(hash);
+            description.len().hash(hash);
+            std::mem::discriminant(status).hash(hash);
+            summary.as_ref().map(String::len).hash(hash);
         }
         EntryContent::Error { message } => message.len().hash(hash),
         EntryContent::ContextCompacted => {}
@@ -1273,6 +1285,32 @@ impl ChatView {
                     })
                     .into_any_element();
                 (activity_icon(*status), summary)
+            }
+            EntryContent::Subagent {
+                agent_type,
+                description,
+                status,
+                summary,
+            } => {
+                let brief = summary.as_deref().unwrap_or(description);
+                let row = h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1()
+                    .overflow_hidden()
+                    .child(div().flex_none().child(agent_type.clone()))
+                    .when(!brief.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(muted)
+                                .child(one_line(brief)),
+                        )
+                    })
+                    .into_any_element();
+                (activity_icon(*status), row)
             }
             EntryContent::Reasoning { text } => {
                 let summary = h_flex()

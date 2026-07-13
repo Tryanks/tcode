@@ -1255,6 +1255,7 @@ impl State {
         };
         vec![AgentEvent::ItemCompleted(ThreadItem {
             id: stream.id,
+            parent_item_id: None,
             content,
         })]
     }
@@ -1457,6 +1458,7 @@ impl State {
         };
         ThreadItem {
             id: id.to_string(),
+            parent_item_id: None,
             content,
         }
     }
