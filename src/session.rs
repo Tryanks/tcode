@@ -361,7 +361,23 @@ impl Timeline {
                     turn,
                 });
             }
-            AgentEvent::SessionClosed { .. } => {
+            AgentEvent::SessionClosed { reason } => {
+                // An abnormal close carries the provider's dying words (exit
+                // status, stderr tail). Fold them into the transcript so the
+                // cause survives past the one-shot toast — a reopened session
+                // must still show why the work stopped.
+                if let Some(reason) = reason {
+                    let turn = self.ensure_turn(ts);
+                    let id = self.synthetic_id("error");
+                    self.entries.push(TimelineEntry {
+                        id,
+                        content: EntryContent::Error {
+                            message: reason.clone(),
+                        },
+                        ts,
+                        turn,
+                    });
+                }
                 self.turn_running = false;
                 self.pending_approvals.clear();
                 self.pending_user_input = None;
@@ -1226,6 +1242,20 @@ mod tests {
         assert!(matches!(
             &timeline.entries[0].content,
             EntryContent::Error { message } if message == "boom"
+        ));
+        // A silent close (reason: None) leaves no entry…
+        let entries_after_silent_close = timeline.entries.len();
+        // …but an abnormal close records the provider's dying words.
+        timeline.apply_at(
+            None,
+            &AgentEvent::SessionClosed {
+                reason: Some("codex app-server exited with exit status: 1\nstderr:\nboom".into()),
+            },
+        );
+        assert_eq!(timeline.entries.len(), entries_after_silent_close + 1);
+        assert!(matches!(
+            &timeline.entries.last().unwrap().content,
+            EntryContent::Error { message } if message.contains("stderr:\nboom")
         ));
     }
 
