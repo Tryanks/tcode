@@ -180,6 +180,8 @@ fn index_turns(
     turns: &[TurnMeta],
     entries: &[TimelineEntry],
     proposed_plan: Option<(usize, &str, &str)>,
+    children: &HashMap<String, Vec<TimelineEntry>>,
+    expanded: &HashSet<String>,
 ) -> Vec<TurnListItem> {
     debug_assert!(entries.windows(2).all(|pair| pair[0].turn <= pair[1].turn));
 
@@ -206,6 +208,19 @@ fn index_turns(
                 std::mem::discriminant(&entry.content).hash(&mut content);
                 entry.ts.hash(&mut content);
                 hash_entry_shape(&entry.content, &mut content);
+                if matches!(&entry.content, EntryContent::Subagent { .. }) {
+                    let subagent_expanded = expanded.contains(&format!("subagent-{}", entry.id));
+                    subagent_expanded.hash(&mut content);
+                    if subagent_expanded {
+                        let child_entries = children.get(&entry.id).map_or(&[][..], Vec::as_slice);
+                        child_entries.len().hash(&mut content);
+                        for child in child_entries {
+                            child.id.hash(&mut content);
+                            child.ts.hash(&mut content);
+                            hash_entry_shape(&child.content, &mut content);
+                        }
+                    }
+                }
             }
             if let Some(turn) = turns.get(index) {
                 turn.start_ts.hash(&mut content);
@@ -460,6 +475,8 @@ impl ChatView {
                         .proposed_plan
                         .as_ref()
                         .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
+                    &timeline.children,
+                    &self.expanded,
                 );
                 let turn_running =
                     |turn: usize| timeline.turns.get(turn).is_some_and(|t| t.running);
@@ -544,6 +561,10 @@ impl ChatView {
         if !self.expanded.remove(key) {
             self.expanded.insert(key.to_string());
         }
+        // Refresh the cached turn fingerprint immediately. Subagent keys feed
+        // `index_turns`, while the direct remeasure below still covers every
+        // other collapsible whose state is intentionally not fingerprinted.
+        self.sync_markdown_states(cx);
         self.list_state.remeasure_items(turn..turn + 1);
         cx.notify();
     }
@@ -570,6 +591,10 @@ impl ChatView {
         let last_assistant_id = entries.iter().rev().find_map(|entry| {
             matches!(entry.content, EntryContent::Assistant { .. }).then_some(entry.id.as_str())
         });
+        let subagent_count = entries
+            .iter()
+            .filter(|entry| matches!(&entry.content, EntryContent::Subagent { .. }))
+            .count();
         let last_segment_is_activity = matches!(segments.last(), Some(Segment::ActivityRun(_)));
         let append_tail_work_log = (turn.running && !last_segment_is_activity)
             || (segments
@@ -597,6 +622,7 @@ impl ChatView {
                         segment_id,
                         turn,
                         activities,
+                        subagent_count,
                         last_activity_segment == Some(segment_index),
                         cx,
                     ));
@@ -645,7 +671,15 @@ impl ChatView {
                 .last()
                 .map(|entry| format!("tail-{}", entry.id))
                 .unwrap_or_else(|| "tail".to_string());
-            column = column.child(self.render_work_log(index, &segment_id, turn, &[], true, cx));
+            column = column.child(self.render_work_log(
+                index,
+                &segment_id,
+                turn,
+                &[],
+                subagent_count,
+                true,
+                cx,
+            ));
         }
 
         // Proposed-plan card (the captured plan for this turn).
@@ -1113,12 +1147,14 @@ impl ChatView {
     /// rule is gone. Turns read as separate because of the space around them
     /// (`TURN_GAP`) and the uppercase 11px label that opens the section — rhythm
     /// and hierarchy, not another line.
+    #[allow(clippy::too_many_arguments)]
     fn render_work_log(
         &self,
         index: usize,
         segment_id: &str,
         turn: &TurnMeta,
         activities: &[&TimelineEntry],
+        subagent_count: usize,
         is_last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1132,13 +1168,28 @@ impl ChatView {
         let mut section = v_flex().w_full().gap_2();
 
         if expanded {
-            if !running {
+            if !running || subagent_count > 0 {
                 section = section.child(
-                    div()
+                    h_flex()
+                        .gap_2()
+                        .items_center()
                         .text_size(px(11.))
                         .font_medium()
                         .text_color(muted)
-                        .child(rust_i18n::t!("chat.work_log").to_uppercase()),
+                        .child(rust_i18n::t!("chat.work_log").to_uppercase())
+                        .when(subagent_count > 0, |row| {
+                            row.child(
+                                div()
+                                    .px_2()
+                                    .py(px(1.))
+                                    .rounded_full()
+                                    .bg(cx.theme().muted)
+                                    .child(rust_i18n::t!(
+                                        "chat.subagent_count",
+                                        count = subagent_count
+                                    )),
+                            )
+                        }),
                 );
             }
 
@@ -1152,7 +1203,7 @@ impl ChatView {
             };
 
             for entry in &visible {
-                section = section.child(self.render_activity_row(entry, cx));
+                section = section.child(self.render_activity_row(entry, false, cx));
             }
 
             if !rows_expanded && hidden > 0 {
@@ -1217,6 +1268,20 @@ impl ChatView {
                         this.toggle_expanded(index, &section_key, cx);
                     }))
                     .child(label)
+                    .when(subagent_count > 0 && !expanded, |row| {
+                        row.child(
+                            div()
+                                .px_2()
+                                .py(px(1.))
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .text_size(px(11.))
+                                .child(rust_i18n::t!(
+                                    "chat.subagent_count",
+                                    count = subagent_count
+                                )),
+                        )
+                    })
                     .child(Icon::new(chevron(expanded)).xsmall()),
             );
         }
@@ -1225,7 +1290,15 @@ impl ChatView {
     }
 
     /// One Work Log activity row: a muted status icon + a one-line summary.
-    fn render_activity_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_activity_row(
+        &self,
+        entry: &TimelineEntry,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if matches!(&entry.content, EntryContent::Subagent { .. }) {
+            return self.render_subagent_row(entry, cx);
+        }
         let muted = cx.theme().muted_foreground;
         let (icon, summary): (IconName, AnyElement) = match &entry.content {
             EntryContent::Command {
@@ -1286,32 +1359,6 @@ impl ChatView {
                     .into_any_element();
                 (activity_icon(*status), summary)
             }
-            EntryContent::Subagent {
-                agent_type,
-                description,
-                status,
-                summary,
-            } => {
-                let brief = summary.as_deref().unwrap_or(description);
-                let row = h_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .gap_1()
-                    .overflow_hidden()
-                    .child(div().flex_none().child(agent_type.clone()))
-                    .when(!brief.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_color(muted)
-                                .child(one_line(brief)),
-                        )
-                    })
-                    .into_any_element();
-                (activity_icon(*status), row)
-            }
             EntryContent::Reasoning { text } => {
                 let summary = h_flex()
                     .min_w_0()
@@ -1349,11 +1396,144 @@ impl ChatView {
             .w_full()
             .gap_2()
             .items_center()
-            .py_0p5()
-            .text_size(px(13.))
+            .when(!compact, |row| row.py_0p5())
+            .text_size(px(if compact { 12. } else { 13. }))
             .child(Icon::new(icon).xsmall().text_color(muted))
             .child(summary)
             .into_any_element()
+    }
+
+    fn render_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+        let EntryContent::Subagent {
+            agent_type,
+            description,
+            status,
+            summary,
+        } = &entry.content
+        else {
+            unreachable!();
+        };
+        let key = format!("subagent-{}", entry.id);
+        let expanded = self.expanded.contains(&key);
+        let parent_id = entry.id.clone();
+        let (children, truncated) = {
+            let state = self.app_state.read(cx);
+            state
+                .active
+                .as_ref()
+                .map(|active| {
+                    (
+                        active.timeline.children(&parent_id).to_vec(),
+                        active.timeline.children_truncated(&parent_id),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        let muted = cx.theme().muted_foreground;
+        let finished = !matches!(status, ItemStatus::InProgress);
+        let turn = entry.turn;
+        let click_key = key.clone();
+        let mut row = h_flex()
+            .id(SharedString::from(format!("subagent-row-{}", entry.id)))
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .py_0p5()
+            .text_size(px(13.))
+            .cursor_pointer()
+            .hover(|row| row.text_color(cx.theme().foreground))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_expanded(turn, &click_key, cx);
+            }))
+            .child(Icon::new(activity_icon(*status)).xsmall().text_color(muted))
+            .child(div().flex_none().font_medium().child(agent_type.clone()))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(muted)
+                    .child(one_line(description)),
+            );
+        if finished && let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty())
+        {
+            row = row.child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(muted)
+                    .child(one_line(summary)),
+            );
+        }
+        row = row.child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
+
+        let mut block = v_flex().w_full().gap_1().child(row);
+        if expanded {
+            let mut nested = v_flex()
+                .w_full()
+                .gap_1()
+                .ml_2()
+                .pl_3()
+                .py_1()
+                .border_l_1()
+                .border_color(cx.theme().border);
+            if truncated {
+                nested = nested.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(muted)
+                        .child(rust_i18n::t!("chat.earlier_steps_truncated")),
+                );
+            }
+            for child in &children {
+                nested = nested.child(self.render_subagent_child(child, cx));
+            }
+            block = block.child(nested);
+        }
+        block.into_any_element()
+    }
+
+    fn render_subagent_child(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        match &entry.content {
+            EntryContent::User { text, .. } => h_flex()
+                .w_full()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w_3_4()
+                        .px_2()
+                        .py_1()
+                        .rounded_lg()
+                        .bg(cx.theme().muted)
+                        .text_size(px(12.))
+                        .text_color(cx.theme().foreground)
+                        .child(text.clone()),
+                )
+                .into_any_element(),
+            EntryContent::Assistant { text } => div()
+                .w_full()
+                .text_size(px(12.))
+                .line_height(px(19.))
+                .text_color(cx.theme().foreground)
+                .child(text.clone())
+                .into_any_element(),
+            EntryContent::Error { message } => div()
+                .w_full()
+                .text_size(px(12.))
+                .text_color(cx.theme().danger)
+                .child(message.clone())
+                .into_any_element(),
+            EntryContent::FileChange { changes } => div()
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(rust_i18n::t!("chat.changed_files", count = changes.len()))
+                .into_any_element(),
+            _ => self.render_activity_row(entry, true, cx),
+        }
     }
 
     /// The CHANGED FILES card: header with totals + a directory-grouped tree.
@@ -2548,6 +2728,7 @@ mod tests {
     use agent::ItemStatus;
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::text::TextViewState;
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
     fn entry(id: &str, content: EntryContent) -> TimelineEntry {
@@ -2579,6 +2760,8 @@ mod tests {
     #[test]
     fn turn_list_index_and_sync_cover_stream_append_truncate_and_session_switch() {
         let turns = vec![TurnMeta::default()];
+        let children = HashMap::new();
+        let expanded = HashSet::new();
         let mut entries = vec![
             entry(
                 "user-0",
@@ -2594,14 +2777,14 @@ mod tests {
                 },
             ),
         ];
-        let initial = index_turns(&turns, &entries, None);
+        let initial = index_turns(&turns, &entries, None, &children, &expanded);
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].entry_range, 0..2);
 
         // Another entry joins the current turn: identity stays at item index 0,
         // but its variable height must be measured again.
         entries.push(command("command-0"));
-        let current_turn_append = index_turns(&turns, &entries, None);
+        let current_turn_append = index_turns(&turns, &entries, None, &children, &expanded);
         assert_eq!(current_turn_append[0].entry_range, 0..3);
         assert_eq!(
             list_sync(&initial, &current_turn_append, false),
@@ -2624,7 +2807,7 @@ mod tests {
             ),
             1,
         ));
-        let new_turn = index_turns(&turns, &entries, None);
+        let new_turn = index_turns(&turns, &entries, None, &children, &expanded);
         assert_eq!(new_turn[0].entry_range, 0..3);
         assert_eq!(new_turn[1].entry_range, 3..4);
         assert_eq!(
@@ -2644,6 +2827,50 @@ mod tests {
         assert_eq!(
             list_sync(&initial, &initial, true),
             ListSync::Reset { count: 1 }
+        );
+    }
+
+    #[test]
+    fn subagent_expansion_and_live_children_remeasure_the_turn() {
+        let turns = vec![TurnMeta::default()];
+        let entries = vec![entry(
+            "spawn",
+            EntryContent::Subagent {
+                agent_type: "researcher".into(),
+                description: "Inspect the protocol".into(),
+                status: ItemStatus::InProgress,
+                summary: None,
+            },
+        )];
+        let mut children = HashMap::new();
+        let collapsed = index_turns(&turns, &entries, None, &children, &HashSet::new());
+
+        let expanded_keys = HashSet::from(["subagent-spawn".to_string()]);
+        let expanded = index_turns(&turns, &entries, None, &children, &expanded_keys);
+        assert_eq!(
+            list_sync(&collapsed, &expanded, false),
+            ListSync::Incremental {
+                append: None,
+                remeasure: vec![0],
+            }
+        );
+
+        children.insert(
+            "spawn".to_string(),
+            vec![entry(
+                "spawn:child",
+                EntryContent::Assistant {
+                    text: "Found the event envelope".into(),
+                },
+            )],
+        );
+        let with_child = index_turns(&turns, &entries, None, &children, &expanded_keys);
+        assert_eq!(
+            list_sync(&expanded, &with_child, false),
+            ListSync::Incremental {
+                append: None,
+                remeasure: vec![0],
+            }
         );
     }
 
