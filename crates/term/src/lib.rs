@@ -16,10 +16,12 @@ use alacritty_terminal::{
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
     sync::FairMutex,
-    term::{Config, cell::Flags},
+    term::{Config, TermMode, cell::Flags},
     tty,
     vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb},
 };
+
+pub mod mappings;
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
@@ -78,6 +80,39 @@ pub struct TermState {
     pub exited: bool,
     pub exit_code: Option<i32>,
     pub display_offset: usize,
+    pub history_size: usize,
+    pub mode: ModeSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModeSnapshot {
+    pub mouse_click: bool,
+    pub mouse_motion: bool,
+    pub mouse_drag: bool,
+    pub sgr_mouse: bool,
+    pub utf8_mouse: bool,
+    pub alt_screen: bool,
+    pub alternate_scroll: bool,
+    pub bracketed_paste: bool,
+    pub app_cursor: bool,
+    pub focus_in_out: bool,
+}
+
+impl ModeSnapshot {
+    pub fn mouse_mode(self) -> bool {
+        self.mouse_click || self.mouse_motion || self.mouse_drag
+    }
+
+    pub fn routes_mouse(self, shift: bool) -> bool {
+        self.mouse_mode() && !shift
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionKind {
+    Simple,
+    Semantic,
+    Lines,
 }
 
 impl TermState {
@@ -394,6 +429,11 @@ impl Terminal {
 
     /// Start or update a simple selection using zero-based visible grid coordinates.
     pub fn select(&self, start: (usize, usize), end: (usize, usize)) {
+        self.select_kind(start, end, SelectionKind::Simple);
+    }
+
+    /// Start or update a selection of the requested kind.
+    pub fn select_kind(&self, start: (usize, usize), end: (usize, usize), kind: SelectionKind) {
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = |(row, col): (usize, usize)| {
@@ -402,9 +442,28 @@ impl Terminal {
                 Column(col.min(term.columns() - 1)),
             )
         };
-        let mut selection = Selection::new(SelectionType::Simple, point(start), Side::Left);
+        let selection_type = match kind {
+            SelectionKind::Simple => SelectionType::Simple,
+            SelectionKind::Semantic => SelectionType::Semantic,
+            SelectionKind::Lines => SelectionType::Lines,
+        };
+        let mut selection = Selection::new(selection_type, point(start), Side::Left);
         selection.update(point(end), Side::Right);
         term.selection = Some(selection);
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
+    }
+
+    pub fn extend_selection(&self, end: (usize, usize)) {
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = Point::new(
+            Line(end.0 as i32 - offset),
+            Column(end.1.min(term.columns() - 1)),
+        );
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, Side::Right);
+        }
         drop(term);
         let _ = self.events_tx.try_send(TermEvent::Wakeup);
     }
@@ -471,6 +530,7 @@ impl Terminal {
             })
             .collect();
         let shared = self.shared.lock().unwrap();
+        let mode = *term.mode();
         TermState {
             cols,
             rows,
@@ -480,6 +540,19 @@ impl Terminal {
             exited: shared.exited,
             exit_code: shared.exit_code,
             display_offset: content.display_offset,
+            history_size: term.history_size(),
+            mode: ModeSnapshot {
+                mouse_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+                mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
+                mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
+                sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+                utf8_mouse: mode.contains(TermMode::UTF8_MOUSE),
+                alt_screen: mode.contains(TermMode::ALT_SCREEN),
+                alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
+                bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+                app_cursor: mode.contains(TermMode::APP_CURSOR),
+                focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
+            },
         }
     }
 }
@@ -649,6 +722,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn real_pty_mouse_mode_changes_drawer_routing_decision() {
+        let term = command("printf '\\033[?1002h\\033[?1006h'; sleep 1");
+        let state = wait_until(&term, |state| state.mode.mouse_drag && state.mode.sgr_mouse);
+        assert!(state.mode.routes_mouse(false));
+        assert!(!state.mode.routes_mouse(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn emits_wakeup_when_pty_output_arrives() {
         let term = command("printf '__TCODE_TERM_READY__\\n'; read line; printf '%s\\n' \"$line\"");
         let events = term.events();
@@ -735,12 +817,12 @@ mod tests {
         assert!(state.text().contains("中文e\u{301}"));
         assert!(!state.text().contains("中 文"));
 
-        term.select((row, column), (row, column + 3));
+        term.select_kind((row, column), (row, column + 3), SelectionKind::Simple);
         assert_eq!(term.selected_text().unwrap().text, "中文");
 
         // Starting the drag on the trailing half still selects/highlights the
         // complete wide glyph; copied text never exposes spacer cells.
-        term.select((row, column + 1), (row, column + 3));
+        term.select_kind((row, column + 1), (row, column + 3), SelectionKind::Simple);
         assert_eq!(term.selected_text().unwrap().text, "中文");
         let selected = term.snapshot();
         assert!(selected.cells[first].selected);
@@ -892,7 +974,7 @@ mod tests {
             .lines()
             .position(|line| line.contains("beta"))
             .unwrap();
-        term.select((alpha_row, 0), (beta_row, 3));
+        term.select_kind((alpha_row, 0), (beta_row, 3), SelectionKind::Simple);
         let selected = term.selected_text().unwrap();
         assert_eq!(selected.text, "alpha\nbeta");
         assert_eq!(selected.line_end, selected.line_start + 1);
