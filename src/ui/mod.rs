@@ -1,4 +1,5 @@
 mod acp_panel;
+mod add_project_dialog;
 mod attachments;
 mod chat;
 mod commit_dialog;
