@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use agent::{
     ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest, Attachment,
-    FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommandKind,
-    ProviderKind, TokenUsage, UserInputQuestion,
+    FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommand,
+    ProviderCommandKind, ProviderKind, TokenUsage, UserInputQuestion,
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
@@ -37,13 +37,15 @@ use crate::ui::composer_trigger::{
     ComposerTrigger, TriggerKind, detect_composer_trigger, serialize_composer_file_link,
 };
 use crate::ui::context_meter;
+use crate::ui::palette::fuzzy_score;
 use crate::ui::workspace_walk::{PathEntry, filter_entries, list_workspace};
 
 /// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
 const METER_BLUE: u32 = 0x3B82F6;
 const METER_RED: u32 = 0xEF4444;
-/// Maximum rows shown in a trigger (`@`/`/`/`$`) menu.
-const MENU_ROW_CAP: usize = 50;
+/// File mentions are potentially unbounded; command and skill feeds are not
+/// capped and instead use the trigger menu's scrolling viewport.
+const FILE_MENU_ROW_CAP: usize = 50;
 
 fn normalize_terminal_context_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim_matches('\n').to_string()
@@ -283,6 +285,28 @@ struct MenuRow {
     /// header is rendered above the first row of each group. `None` = ungrouped
     /// (the `@` file menu).
     group: Option<&'static str>,
+}
+
+/// Select and rank one provider-command kind with the same fuzzy subsequence
+/// matcher as the command palette. Empty queries preserve provider order;
+/// non-empty queries put the strongest matches first and never truncate.
+fn filter_provider_commands<'a>(
+    commands: &'a [ProviderCommand],
+    kind: ProviderCommandKind,
+    query: &str,
+) -> Vec<&'a ProviderCommand> {
+    let mut matched: Vec<(i32, usize, &ProviderCommand)> = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command.kind == kind)
+        .filter_map(|(index, command)| {
+            fuzzy_score(query, &command.name).map(|score| (score, index, command))
+        })
+        .collect();
+    if !query.is_empty() {
+        matched.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    }
+    matched.into_iter().map(|(_, _, command)| command).collect()
 }
 
 /// T3's provider display name (used by the context meter's compaction line).
@@ -668,7 +692,7 @@ impl Composer {
                     .as_ref()
                     .map(|(_, e)| e.as_slice())
                     .unwrap_or(&[]);
-                let rows = filter_entries(entries, &trigger.query, MENU_ROW_CAP)
+                let rows = filter_entries(entries, &trigger.query, FILE_MENU_ROW_CAP)
                     .into_iter()
                     .map(|e| MenuRow {
                         primary: e.basename.clone(),
@@ -691,26 +715,25 @@ impl Composer {
             }
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
-                // filtered by the `$`-query prefix.
-                let query = trigger.query.to_lowercase();
-                let rows =
-                    self.app_state
-                        .read(cx)
-                        .active_provider_commands()
-                        .iter()
-                        .filter(|c| c.kind == ProviderCommandKind::Skill)
-                        .filter(|c| query.is_empty() || c.name.to_lowercase().contains(&query))
-                        .take(MENU_ROW_CAP)
-                        .map(|c| MenuRow {
-                            primary: format!("${}", c.name),
-                            secondary: c.description.clone().unwrap_or_else(|| {
-                                rust_i18n::t!("composer.run_skill").into_owned()
-                            }),
-                            icon: MenuIcon::Skill,
-                            accept: MenuAccept::InsertSkill(c.name.clone()),
-                            group: Some("composer.group_skills"),
-                        })
-                        .collect();
+                // fuzzily filtered by the `$` query with no item cap.
+                let state = self.app_state.read(cx);
+                let rows = filter_provider_commands(
+                    state.active_provider_commands(),
+                    ProviderCommandKind::Skill,
+                    &trigger.query,
+                )
+                .into_iter()
+                .map(|c| MenuRow {
+                    primary: format!("${}", c.name),
+                    secondary: c
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| rust_i18n::t!("composer.run_skill").into_owned()),
+                    icon: MenuIcon::Skill,
+                    accept: MenuAccept::InsertSkill(c.name.clone()),
+                    group: Some("composer.group_skills"),
+                })
+                .collect();
                 (
                     rows,
                     rust_i18n::t!("composer.no_skills").into_owned(),
@@ -718,7 +741,6 @@ impl Composer {
                 )
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let query = trigger.query.to_lowercase();
                 let builtins: [(&str, &str, MenuAccept); 3] = [
                     (
                         "model",
@@ -738,7 +760,7 @@ impl Composer {
                 ];
                 let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
-                    .filter(|(name, _, _)| query.is_empty() || name.starts_with(&query))
+                    .filter(|(name, _, _)| fuzzy_score(&trigger.query, name).is_some())
                     .map(|(name, desc, accept)| MenuRow {
                         primary: format!("/{name}"),
                         secondary: rust_i18n::t!(desc).into_owned(),
@@ -748,24 +770,24 @@ impl Composer {
                     })
                     .collect();
                 // Provider-native slash commands (Claude `slash_commands`), shown
-                // after the built-in group, filtered by the `/`-query prefix.
+                // after the built-in group, fuzzily filtered without truncation.
+                let state = self.app_state.read(cx);
                 rows.extend(
-                    self.app_state
-                        .read(cx)
-                        .active_provider_commands()
-                        .iter()
-                        .filter(|c| c.kind == ProviderCommandKind::Command)
-                        .filter(|c| query.is_empty() || c.name.to_lowercase().starts_with(&query))
-                        .take(MENU_ROW_CAP)
-                        .map(|c| MenuRow {
-                            primary: format!("/{}", c.name),
-                            secondary: c.description.clone().unwrap_or_else(|| {
-                                rust_i18n::t!("composer.run_provider_command").into_owned()
-                            }),
-                            icon: MenuIcon::Command,
-                            accept: MenuAccept::InsertCommand(c.name.clone()),
-                            group: Some("composer.group_provider"),
+                    filter_provider_commands(
+                        state.active_provider_commands(),
+                        ProviderCommandKind::Command,
+                        &trigger.query,
+                    )
+                    .into_iter()
+                    .map(|c| MenuRow {
+                        primary: format!("/{}", c.name),
+                        secondary: c.description.clone().unwrap_or_else(|| {
+                            rust_i18n::t!("composer.run_provider_command").into_owned()
                         }),
+                        icon: MenuIcon::Command,
+                        accept: MenuAccept::InsertCommand(c.name.clone()),
+                        group: Some("composer.group_provider"),
+                    }),
                 );
                 (
                     rows,
@@ -1392,9 +1414,10 @@ impl Composer {
 
         Some(
             div()
+                .id("composer-trigger-menu")
                 .w_full()
                 .max_h(px(288.))
-                .overflow_hidden()
+                .overflow_y_scroll()
                 .rounded(px(12.))
                 .border_1()
                 .border_color(cx.theme().border)
@@ -3900,6 +3923,35 @@ fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_menu_filter_is_fuzzy_kind_aware_and_uncapped() {
+        let mut commands: Vec<ProviderCommand> = (0..60)
+            .map(|index| ProviderCommand {
+                name: format!("command-{index:02}"),
+                description: Some(format!("Command {index}")),
+                kind: ProviderCommandKind::Command,
+            })
+            .collect();
+        commands.push(ProviderCommand {
+            name: "deep-review".into(),
+            description: None,
+            kind: ProviderCommandKind::Skill,
+        });
+
+        let all = filter_provider_commands(&commands, ProviderCommandKind::Command, "");
+        assert_eq!(all.len(), 60);
+        assert_eq!(all[0].name, "command-00");
+        assert_eq!(all[59].name, "command-59");
+
+        // Fuzzy subsequence rather than prefix-only matching.
+        let fuzzy = filter_provider_commands(&commands, ProviderCommandKind::Skill, "dprv");
+        assert_eq!(fuzzy.len(), 1);
+        assert_eq!(fuzzy[0].name, "deep-review");
+        assert!(
+            filter_provider_commands(&commands, ProviderCommandKind::Command, "dprv").is_empty()
+        );
+    }
 
     #[test]
     fn serializes_terminal_context_like_t3() {
