@@ -76,10 +76,14 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (mut child, mut stdin, lines) = spawn_server(binary_path.as_deref(), &[], &launch_env)?;
+    let (mut child, mut stdin, lines, mut stderr_tail) =
+        spawn_server(binary_path.as_deref(), &[], &launch_env)?;
     let result = collect_models(&mut stdin, &lines).await;
+    // Status is read before `stop_child` so a self-exited child's code is not
+    // masked by our kill.
+    let status = child.try_wait().ok().flatten();
     stop_child(&mut child, stdin);
-    result
+    result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
 }
 
 async fn collect_models(
@@ -393,7 +397,7 @@ async fn run_actor(
     };
     // Any additional launch arguments configured for this provider.
     extra_args.extend(opts.extra_args.iter().cloned());
-    let (mut child, mut stdin, lines) =
+    let (mut child, mut stdin, lines, mut stderr_tail) =
         match spawn_server(opts.binary_path.as_deref(), &extra_args, &opts.launch_env) {
             Ok(parts) => parts,
             Err(err) => {
@@ -406,8 +410,12 @@ async fn run_actor(
     let (thread_id, model, next_id, provider_commands) = match startup {
         Ok(value) => value,
         Err(err) => {
-            let _ = ready.send(Err(err)).await;
+            // Status is read before `stop_child` so a self-exited child's code
+            // is not masked by our kill.
+            let status = child.try_wait().ok().flatten();
             stop_child(&mut child, stdin);
+            let err = enrich_startup_error(err, status, &mut stderr_tail);
+            let _ = ready.send(Err(err)).await;
             return;
         }
     };
@@ -502,6 +510,10 @@ async fn run_actor(
     };
 
     stop_child(&mut actor.child, actor.stdin);
+    // Every Some(_) reason is an abnormal death (user shutdowns break with
+    // None), so the child's last stderr lines belong in the message.
+    let close_reason =
+        close_reason.map(|reason| describe_child_failure(reason, None, &mut stderr_tail));
     actor
         .events
         .send(AgentEvent::SessionClosed {
@@ -511,11 +523,86 @@ async fn run_actor(
         .ok();
 }
 
+/// Rolling tail of the child's stderr. Once the process dies its own last
+/// words are the only diagnostics there are, so they are folded into the
+/// startup / exit errors shown to the user.
+struct StderrTail {
+    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Joined before reading the tail so the reader has drained the pipe.
+    /// `None` after the tail has been read once.
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+const STDERR_TAIL_LINES: usize = 20;
+
+impl StderrTail {
+    /// The captured stderr tail, complete up to the child's death. Call only
+    /// after the child has exited (or been killed): that closes the pipe and
+    /// ends the reader. The wait is bounded because a grandchild that
+    /// inherited the pipe keeps it open past the child's death, and an
+    /// unconditional join would hang teardown on it.
+    fn text(&mut self) -> String {
+        if let Some(reader) = self.reader.take() {
+            for _ in 0..50 {
+                if reader.is_finished() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
+        }
+        self.lines.lock().unwrap().join("\n")
+    }
+}
+
+/// Append the child's exit status and captured stderr to a process-death
+/// message, so the error shows the provider's own words instead of a bare
+/// "exited".
+fn describe_child_failure(
+    base: String,
+    status: Option<std::process::ExitStatus>,
+    stderr_tail: &mut StderrTail,
+) -> String {
+    let mut message = base;
+    if let Some(status) = status {
+        message.push_str(&format!(" ({status})"));
+    }
+    let tail = stderr_tail.text();
+    if !tail.trim().is_empty() {
+        message.push_str(&format!("\nstderr:\n{tail}"));
+    }
+    message
+}
+
+/// Fold the child's death into a startup error. Protocol errors and I/O
+/// errors (an EPIPE means the child died mid-handshake) both make the process
+/// itself the story; Spawn/Provider errors already carry their own
+/// explanation and pass through untouched.
+fn enrich_startup_error(
+    err: AgentError,
+    status: Option<std::process::ExitStatus>,
+    stderr_tail: &mut StderrTail,
+) -> AgentError {
+    match err {
+        AgentError::Protocol(message) => {
+            AgentError::Protocol(describe_child_failure(message, status, stderr_tail))
+        }
+        AgentError::Io(io) => AgentError::Protocol(describe_child_failure(
+            format!("I/O error talking to codex: {io}"),
+            status,
+            stderr_tail,
+        )),
+        other => other,
+    }
+}
+
 fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
     launch_env: &LaunchEnv,
-) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>), AgentError> {
+) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>, StderrTail), AgentError> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
     let mut cmd = crate::process::command(&binary);
@@ -575,15 +662,28 @@ fn spawn_server(
             let _ = tx.send_blocking(ChildOutput::Eof);
         })
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
-    std::thread::Builder::new()
+    let stderr_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let stderr_reader = std::thread::Builder::new()
         .name("codex-app-server-stderr".into())
-        .spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log::debug!("codex app-server: {line}");
+        .spawn({
+            let lines = stderr_lines.clone();
+            move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    log::debug!("codex app-server: {line}");
+                    let mut lines = lines.lock().unwrap();
+                    if lines.len() == STDERR_TAIL_LINES {
+                        lines.remove(0);
+                    }
+                    lines.push(line);
+                }
             }
         })
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
-    Ok((child, stdin, rx))
+    let stderr_tail = StderrTail {
+        lines: stderr_lines,
+        reader: Some(stderr_reader),
+    };
+    Ok((child, stdin, rx, stderr_tail))
 }
 
 async fn initialize_and_open_thread(
@@ -804,6 +904,23 @@ fn load_codex_prompts(launch_env: &LaunchEnv) -> Vec<ProviderCommand> {
         .collect()
 }
 
+/// Render a JSON-RPC error object with everything the server sent — message,
+/// code, and the `data` payload — falling back to the raw JSON when even the
+/// message is missing. Losing any of it makes provider failures undiagnosable.
+fn describe_rpc_error(error: &Value) -> String {
+    let Some(message) = error.get("message").and_then(Value::as_str) else {
+        return error.to_string();
+    };
+    let mut out = message.to_owned();
+    if let Some(code) = error.get("code").and_then(Value::as_i64) {
+        out.push_str(&format!(" (code {code})"));
+    }
+    if let Some(data) = error.get("data").filter(|data| !data.is_null()) {
+        out.push_str(&format!(": {data}"));
+    }
+    out
+}
+
 async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Value, AgentError> {
     loop {
         match lines
@@ -819,13 +936,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
                     continue;
                 }
                 if let Some(error) = value.get("error") {
-                    return Err(AgentError::Provider(
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown JSON-RPC error")
-                            .into(),
-                    ));
+                    return Err(AgentError::Provider(describe_rpc_error(error)));
                 }
                 return value
                     .get("result")
@@ -1104,10 +1215,7 @@ impl Actor {
                     message: format!(
                         "Codex request {} failed: {}",
                         pending_name(method),
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown error")
+                        describe_rpc_error(error)
                     ),
                     fatal: false,
                 })
@@ -1331,11 +1439,13 @@ impl Actor {
                 }
             }
             "error" => {
+                // No message field → show the raw notification: a summary like
+                // "unknown error" leaves nothing to diagnose with.
                 let message = params
                     .pointer("/error/message")
                     .and_then(Value::as_str)
-                    .unwrap_or("Codex reported an unknown error")
-                    .to_owned();
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Codex reported an error: {params}"));
                 let fatal = !params
                     .get("willRetry")
                     .and_then(Value::as_bool)
@@ -1923,6 +2033,44 @@ mod tests {
         );
         assert_eq!(commands[2].description.as_deref(), Some("Ship it safely"));
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A codex binary that dies at startup (the npm-packaging failure mode:
+    /// a JS loader error on stderr, then exit 1) must surface its exit status
+    /// and stderr in the startup error, not just "exited during startup".
+    #[cfg(unix)]
+    #[test]
+    fn startup_failure_reports_exit_status_and_stderr_tail() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agent-codex-crash-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("codex");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             echo 'node:internal/modules/cjs/loader:1215' >&2\n\
+             echo \"Error: Cannot find module './dist/cli.js'\" >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = smol::block_on(list_models(
+            Some(bin),
+            LaunchEnv {
+                env: Vec::new(),
+                home: None,
+            },
+        ))
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("Cannot find module"), "{message}");
+        assert!(message.contains("exit status: 1"), "{message}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
