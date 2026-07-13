@@ -324,8 +324,8 @@ pub struct ActiveSession {
     next_queue_id: u64,
     turn_in_flight: bool,
     /// Provider-native commands / skills discovered at session start (Claude
-    /// `slash_commands` + `skills`; Codex `skills/list`). Feeds the composer's
-    /// `/` and `$` menus. In-memory only.
+    /// `slash_commands` + `skills`; Codex `skills/list` + custom prompts).
+    /// Seeded from the per-provider cache, then replaced by live updates.
     provider_commands: Vec<ProviderCommand>,
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed over the wire at session start and on every
@@ -1125,13 +1125,21 @@ impl AppState {
         .detach();
     }
 
-    /// Provider-native commands / skills for the active session (empty until the
-    /// session's provider reports them). Feeds the composer's `/` and `$` menus.
+    /// Provider-native commands / skills for the active session. Seeded from the
+    /// provider cache before a live process starts, then replaced by live data.
     pub fn active_provider_commands(&self) -> &[ProviderCommand] {
         self.active
             .as_ref()
             .map(|a| a.provider_commands.as_slice())
             .unwrap_or(&[])
+    }
+
+    fn cached_provider_commands(
+        &self,
+        provider: ProviderKind,
+        acp_agent_id: Option<&str>,
+    ) -> Vec<ProviderCommand> {
+        self.store.load_commands(provider, acp_agent_id)
     }
 
     /// The cached model catalog for `provider` (empty when never fetched).
@@ -1666,6 +1674,7 @@ impl AppState {
     /// provider rail). ACP agents have no model catalog: the agent publishes its
     /// models over the wire once the session starts.
     pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+        let provider_commands = self.cached_provider_commands(ProviderKind::Acp, Some(id));
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -1679,6 +1688,7 @@ impl AppState {
         active.meta.model = None;
         active.meta.option_selections.clear();
         active.provider_options.clear();
+        active.provider_commands = provider_commands;
         active.pending_ultrathink = false;
         if active.draft {
             cx.notify();
@@ -2841,6 +2851,8 @@ impl AppState {
         self.sessions = self.store.load_index();
         self.park_active();
         let git_branch = read_git_branch(&meta.cwd);
+        let provider_commands =
+            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline: Timeline::default(),
@@ -2858,7 +2870,7 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            provider_commands: Vec::new(),
+            provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -2883,9 +2895,12 @@ impl AppState {
         cwd: PathBuf,
         provider: ProviderKind,
         model: Option<String>,
+        acp_agent_id: Option<String>,
+        provider_commands: Vec<ProviderCommand>,
     ) -> ActiveSession {
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.project_id = Some(project_id);
+        meta.acp_agent_id = acp_agent_id;
         let git_branch = read_git_branch(&meta.cwd);
         ActiveSession {
             meta,
@@ -2904,7 +2919,7 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            provider_commands: Vec::new(),
+            provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -2918,10 +2933,10 @@ impl AppState {
 
     /// The provider + model a new draft should start with: the most recently
     /// used session's, else the Claude default.
-    fn draft_defaults(&self) -> (ProviderKind, Option<String>) {
+    fn draft_defaults(&self) -> (ProviderKind, Option<String>, Option<String>) {
         match self.sessions.first() {
-            Some(meta) => (meta.provider, meta.model.clone()),
-            None => (ProviderKind::ClaudeCode, None),
+            Some(meta) => (meta.provider, meta.model.clone(), meta.acp_agent_id.clone()),
+            None => (ProviderKind::ClaudeCode, None, None),
         }
     }
 
@@ -2930,8 +2945,16 @@ impl AppState {
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.park_active();
-        let (provider, model) = self.draft_defaults();
-        self.active = Some(Self::build_draft_session(project_id, cwd, provider, model));
+        let (provider, model, acp_agent_id) = self.draft_defaults();
+        let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());
+        self.active = Some(Self::build_draft_session(
+            project_id,
+            cwd,
+            provider,
+            model,
+            acp_agent_id,
+            provider_commands,
+        ));
         self.refresh_git_status(cx);
         cx.notify();
     }
@@ -3013,6 +3036,8 @@ impl AppState {
             terminal_workspace.height = preferences.height.clamp(120., 600.);
         }
         let git_branch = read_git_branch(&meta.cwd);
+        let provider_commands =
+            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline,
@@ -3030,7 +3055,7 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            provider_commands: Vec::new(),
+            provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -3341,6 +3366,7 @@ impl AppState {
     /// persist it. Takes effect on the next provider (re)start; if a provider
     /// is currently live, the next `send_turn` restarts it (see `send_turn`).
     pub fn set_active_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        let store = self.store.clone();
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -3353,11 +3379,13 @@ impl AppState {
             }
             if let Some(provider) = provider_for_model(model.as_deref()) {
                 active.meta.provider = provider;
+                active.meta.acp_agent_id = None;
             }
             active.meta.model = model;
             // A different model has different option descriptors: drop stale
             // selections so each resolves to the new model's defaults.
             active.meta.option_selections.clear();
+            active.provider_commands = store.load_commands(active.meta.provider, None);
             active.pending_ultrathink = false;
             cx.notify();
             return;
@@ -3535,6 +3563,7 @@ impl AppState {
         let option_selections = active.meta.option_selections.clone();
         let approval_mode = active.meta.approval_mode;
         let project_id = active.meta.project_id.clone();
+        let acp_agent_id = active.meta.acp_agent_id.clone();
 
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.title = title;
@@ -3542,6 +3571,7 @@ impl AppState {
         meta.approval_mode = approval_mode;
         meta.interaction_mode = InteractionMode::Build;
         meta.project_id = project_id;
+        meta.acp_agent_id = acp_agent_id;
         if let Err(err) = self.store.upsert_meta(&meta) {
             self.report_error(
                 rust_i18n::t!("errors.persist_session", error = err).into_owned(),
@@ -3551,6 +3581,8 @@ impl AppState {
         self.sessions = self.store.load_index();
         self.park_active();
         let git_branch = read_git_branch(&meta.cwd);
+        let provider_commands =
+            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline: Timeline::default(),
@@ -3568,7 +3600,7 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            provider_commands: Vec::new(),
+            provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -4061,16 +4093,30 @@ impl AppState {
         }
 
         // Provider commands/skills are session metadata for the composer menus —
-        // stored on the active session, never folded into the timeline or the
-        // persisted JSONL log.
+        // stored on the live session and in a per-provider cache, never folded
+        // into the timeline or the persisted JSONL log. Parked sessions still
+        // receive provider updates, so update/cache those too.
         if let AgentEvent::ProviderCommands { commands } = &event {
-            if let Some(active) = self
+            let cache_key = if let Some(active) = self
                 .active
                 .as_mut()
                 .filter(|active| active.meta.id == session_id)
             {
-                active.provider_commands = commands.clone();
+                active.provider_commands.clone_from(commands);
                 cx.notify();
+                Some((active.meta.provider, active.meta.acp_agent_id.clone()))
+            } else if let Some(parked) = self.background.get_mut(session_id) {
+                parked.provider_commands.clone_from(commands);
+                Some((parked.meta.provider, parked.meta.acp_agent_id.clone()))
+            } else {
+                None
+            };
+            if let Some((provider, acp_agent_id)) = cache_key
+                && let Err(err) =
+                    self.store
+                        .save_commands(provider, acp_agent_id.as_deref(), commands)
+            {
+                log::warn!("failed to persist {provider:?} command cache: {err}");
             }
             return;
         }
@@ -4874,6 +4920,8 @@ mod tests {
             project.root.clone(),
             ProviderKind::ClaudeCode,
             None,
+            None,
+            Vec::new(),
         );
         assert!(draft.draft);
         assert_eq!(draft.meta.cwd, project.root);
@@ -4892,6 +4940,35 @@ mod tests {
         assert_eq!(created.cwd, project.root);
         assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reopened_command_cache_seeds_a_draft_before_provider_start() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-command-seed-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let commands = vec![ProviderCommand {
+            name: "review".into(),
+            description: Some("Review changes".into()),
+            kind: agent::ProviderCommandKind::Command,
+        }];
+        store
+            .save_commands(ProviderKind::ClaudeCode, None, &commands)
+            .unwrap();
+
+        let state = AppState::new(SessionStore::open_at(root.clone()).unwrap());
+        let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None);
+        let draft = AppState::build_draft_session(
+            "project".into(),
+            PathBuf::from("/tmp/project"),
+            ProviderKind::ClaudeCode,
+            None,
+            None,
+            seeded,
+        );
+        assert_eq!(draft.provider_commands, commands);
+        assert!(matches!(draft.runtime, Runtime::Idle));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5715,8 +5792,14 @@ mod tests {
     /// returned receiver, nothing real is spawned.
     fn fake_live_session(cwd: PathBuf) -> (ActiveSession, async_channel::Receiver<SessionCommand>) {
         let (commands, receiver) = async_channel::unbounded();
-        let mut session =
-            AppState::build_draft_session("proj-t3".into(), cwd, ProviderKind::ClaudeCode, None);
+        let mut session = AppState::build_draft_session(
+            "proj-t3".into(),
+            cwd,
+            ProviderKind::ClaudeCode,
+            None,
+            None,
+            Vec::new(),
+        );
         session.draft = false;
         session.runtime = Runtime::Live(commands);
         // What `ensure_started` records at launch — without these, `send_turn`
