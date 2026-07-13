@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
     time::{Duration, Instant},
@@ -22,7 +22,7 @@ use gpui_component::{
     v_flex,
 };
 use term::{
-    Cell, Color, SelectionKind, TermEvent, TermState,
+    Cell, Color, CursorShape, HyperlinkMatch, SelectionKind, TermEvent, TermState,
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
 };
 
@@ -102,6 +102,8 @@ struct CursorPaint {
     cell_count: usize,
     color: Hsla,
     visible: bool,
+    shape: CursorShape,
+    focused: bool,
 }
 
 #[derive(Clone)]
@@ -124,6 +126,14 @@ pub struct TerminalDrawer {
     focus_subscriptions: Vec<gpui::Subscription>,
     event_subscriptions: HashMap<u64, TerminalEventSubscription>,
     marked_text: Option<MarkedText>,
+    bell_tabs: HashSet<u64>,
+    hovered_link: Option<(u64, HyperlinkMatch)>,
+    pressed_link: Option<(u64, String)>,
+    last_link_hover: Option<Instant>,
+    cursor_phase: bool,
+    last_input: Instant,
+    terminal_focused: bool,
+    blink_task: Option<Task<()>>,
     _app_state_subscription: gpui::Subscription,
 }
 
@@ -142,6 +152,14 @@ impl TerminalDrawer {
             focus_subscriptions: Vec::new(),
             event_subscriptions: HashMap::new(),
             marked_text: None,
+            bell_tabs: HashSet::new(),
+            hovered_link: None,
+            pressed_link: None,
+            last_link_hover: None,
+            cursor_phase: true,
+            last_input: Instant::now(),
+            terminal_focused: false,
+            blink_task: None,
             _app_state_subscription: app_state_subscription,
         }
     }
@@ -214,11 +232,15 @@ impl TerminalDrawer {
 
             let task_receiver = receiver.clone();
             let task = cx.spawn_in(window, async move |this, cx| {
-                while task_receiver.recv().await.is_ok() {
+                while let Ok(first_event) = task_receiver.recv().await {
                     // The first event is visible immediately. A short trailing
                     // window then collapses Wakeup floods from large PTY writes.
                     if this
-                        .update_in(cx, |_, window, cx| {
+                        .update_in(cx, |this, window, cx| {
+                            if matches!(first_event, TermEvent::Bell) {
+                                this.bell_tabs.insert(terminal_id);
+                                window.play_system_bell();
+                            }
                             window.invalidate_character_coordinates();
                             cx.notify();
                         })
@@ -246,6 +268,12 @@ impl TerminalDrawer {
                             return;
                         };
                         saw_batched_event = true;
+                        if matches!(event, TermEvent::Bell) {
+                            let _ = this.update_in(cx, |this, window, _| {
+                                this.bell_tabs.insert(terminal_id);
+                                window.play_system_bell();
+                            });
+                        }
                         if !matches!(event, TermEvent::Wakeup) {
                             non_wakeup_events += 1;
                             if non_wakeup_events >= 100 {
@@ -276,6 +304,7 @@ impl TerminalDrawer {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.note_input(cx);
         let keystroke = &event.keystroke;
         if event.prefer_character_input {
             return;
@@ -328,6 +357,21 @@ impl TerminalDrawer {
         if handled {
             cx.stop_propagation();
         }
+    }
+
+    fn note_input(&mut self, cx: &mut Context<Self>) {
+        self.last_input = Instant::now();
+        self.cursor_phase = true;
+        if let Some(id) = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|active| active.terminal_workspace.active_id)
+        {
+            self.bell_tabs.remove(&id);
+        }
+        cx.notify();
     }
 
     fn on_scroll(
@@ -395,7 +439,19 @@ impl TerminalDrawer {
             .as_ref()
             .filter(|marked| marked.terminal_id == terminal_id)
             .map(|marked| marked.text.clone());
-        let paint_data = layout_grid(state, palette, marked_text.is_some());
+        let hovered_link = self
+            .hovered_link
+            .as_ref()
+            .filter(|(id, _)| *id == terminal_id)
+            .map(|(_, link)| link);
+        let paint_data = layout_grid(
+            state,
+            palette,
+            marked_text.is_some(),
+            hovered_link,
+            self.terminal_focused,
+            self.cursor_phase || self.last_input.elapsed() < Duration::from_millis(500),
+        );
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
         let rows = state.rows;
@@ -452,7 +508,19 @@ impl TerminalDrawer {
                         && let Some(cursor) = paint_data.cursor.filter(|cursor| cursor.visible)
                         && let Some(cursor_bounds) = cursor_bounds
                     {
-                        window.paint_quad(fill(cursor_bounds, cursor.color));
+                        match (cursor.focused, cursor.shape) {
+                            (false, _) | (_, CursorShape::HollowBlock) => {
+                                let t = px(1.);
+                                window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(cursor_bounds.size.width, t)), cursor.color));
+                                window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - t), size(cursor_bounds.size.width, t)), cursor.color));
+                                window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(t, cursor_bounds.size.height)), cursor.color));
+                                window.paint_quad(fill(Bounds::new(point(cursor_bounds.right() - t, cursor_bounds.top()), size(t, cursor_bounds.size.height)), cursor.color));
+                            }
+                            (_, CursorShape::Bar) => window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(px(2.), cursor_bounds.size.height)), cursor.color)),
+                            (_, CursorShape::Underline) => window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - px(2.)), size(cursor_bounds.size.width, px(2.))), cursor.color)),
+                            (_, CursorShape::Block) => window.paint_quad(fill(cursor_bounds, cursor.color)),
+                            (_, CursorShape::Hidden) => {}
+                        }
                     }
 
                     for run in &paint_data.text_runs {
@@ -616,6 +684,12 @@ impl TerminalDrawer {
                 if event.button != MouseButton::Left {
                     return;
                 }
+                if event.modifiers.platform
+                    && let Some(link) = entry.terminal.hyperlink_at(point.0, point.1)
+                {
+                    self.pressed_link = Some((terminal_id, link.url));
+                    return;
+                }
                 if event.modifiers.shift {
                     entry.terminal.extend_selection(point);
                     return;
@@ -642,6 +716,7 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         let Some(point) = self.grid_point(terminal_id, event.position) else {
+            self.hovered_link = None;
             return;
         };
         if let Some(entry) = self
@@ -669,22 +744,35 @@ impl TerminalDrawer {
                 }
                 return;
             }
-            let Some((selection_id, start, kind)) = self.selection_anchor else {
-                return;
-            };
-            if selection_id != terminal_id || !event.dragging() {
-                return;
-            }
-            entry.terminal.select_kind(start, point, kind);
-            if !snapshot.mode.alt_screen
-                && snapshot.history_size > 0
-                && let Some(lines) = drag_scroll_lines(
-                    event.position.y,
-                    self.grid_bounds.borrow().get(&terminal_id).copied(),
-                    self.cell_height,
-                )
-            {
-                entry.terminal.scroll(lines);
+            if event.modifiers.platform {
+                if self
+                    .last_link_hover
+                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(16))
+                {
+                    self.last_link_hover = Some(Instant::now());
+                    self.hovered_link = entry
+                        .terminal
+                        .hyperlink_at(point.0, point.1)
+                        .map(|link| (terminal_id, link));
+                }
+            } else {
+                self.hovered_link = None;
+                if let Some((selection_id, start, kind)) = self.selection_anchor
+                    && selection_id == terminal_id
+                    && event.dragging()
+                {
+                    entry.terminal.select_kind(start, point, kind);
+                    if !snapshot.mode.alt_screen
+                        && snapshot.history_size > 0
+                        && let Some(lines) = drag_scroll_lines(
+                            event.position.y,
+                            self.grid_bounds.borrow().get(&terminal_id).copied(),
+                            self.cell_height,
+                        )
+                    {
+                        entry.terminal.scroll(lines);
+                    }
+                }
             }
         }
         cx.notify();
@@ -721,6 +809,18 @@ impl TerminalDrawer {
                 {
                     entry.terminal.write_input(bytes);
                 }
+            } else if event.button == MouseButton::Left && event.modifiers.platform {
+                let released = entry
+                    .terminal
+                    .hyperlink_at(point.0, point.1)
+                    .map(|link| link.url);
+                if let (Some((pressed_id, pressed)), Some(released)) =
+                    (self.pressed_link.take(), released)
+                    && pressed_id == terminal_id
+                    && pressed == released
+                {
+                    cx.open_url(&released);
+                }
             } else if let Some((selection_id, start, kind)) = self.selection_anchor
                 && selection_id == terminal_id
             {
@@ -728,6 +828,7 @@ impl TerminalDrawer {
             }
         }
         self.selection_anchor = None;
+        self.pressed_link = None;
         self.last_mouse_point.remove(&terminal_id);
         cx.notify();
     }
@@ -777,6 +878,10 @@ impl TerminalDrawer {
         let app_state = self.app_state.clone();
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
+        let link_hovered = self
+            .hovered_link
+            .as_ref()
+            .is_some_and(|(id, _)| *id == terminal_id);
         div()
             .id(("terminal-grid", terminal_id))
             .relative()
@@ -800,6 +905,7 @@ impl TerminalDrawer {
                     cx.theme().border
                 },
             )
+            .when(link_hovered, |this| this.cursor_pointer())
             .on_prepaint(move |bounds, _window, cx| {
                 let content_width =
                     f32::from(bounds.size.width) - 2. * (PANE_BORDER + PANE_PADDING_X);
@@ -902,6 +1008,23 @@ impl Focusable for TerminalDrawer {
 
 impl Render for TerminalDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.terminal_focused = self.focus_handle.is_focused(window);
+        if self.blink_task.is_none() {
+            self.blink_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    smol::Timer::after(Duration::from_millis(500)).await;
+                    if this
+                        .update(cx, |this, cx| {
+                            this.cursor_phase = !this.cursor_phase;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
         self.sync_event_subscriptions(window, cx);
         if self.focus_subscriptions.is_empty() {
             let app_state = self.app_state.clone();
@@ -966,6 +1089,7 @@ impl Render for TerminalDrawer {
                                 entry.id,
                                 entry.terminal.label(),
                                 entry.terminal.snapshot().exited,
+                                self.bell_tabs.contains(&entry.id),
                             )
                         })
                         .collect::<Vec<_>>(),
@@ -984,7 +1108,7 @@ impl Render for TerminalDrawer {
         }
 
         let mut tab_strip = h_flex().min_w_0().gap(px(2.)).overflow_hidden();
-        for (id, label, exited) in &tabs {
+        for (id, label, exited, bell) in &tabs {
             let id = *id;
             let selected = active_id == Some(id);
             let close_id = id;
@@ -1024,6 +1148,14 @@ impl Render for TerminalDrawer {
                             })
                             .child(label.clone()),
                     )
+                    .when(*bell, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(cx.theme().warning)
+                                .child("●"),
+                        )
+                    })
                     .child(
                         Button::new(("terminal-tab-close", close_id))
                             .ghost()
@@ -1043,7 +1175,7 @@ impl Render for TerminalDrawer {
         let can_split = !at_limit && active_id.is_some() && active_split.is_none();
         let active_exited = tabs
             .iter()
-            .any(|(id, _, exited)| Some(*id) == active_id && *exited);
+            .any(|(id, _, exited, _)| Some(*id) == active_id && *exited);
         let header = h_flex()
             .flex_none()
             .h(px(31.))
@@ -1076,9 +1208,20 @@ impl Render for TerminalDrawer {
                     .disabled(!can_split)
                     .tooltip(rust_i18n::t!("terminal.split_horizontal"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| {
-                            state.split_terminal(TerminalSplitDirection::Horizontal, cx)
-                        })
+                        let cwd = this
+                            .app_state
+                            .read(cx)
+                            .active
+                            .as_ref()
+                            .and_then(|active| active.terminal_workspace.active())
+                            .map(|entry| entry.terminal.working_directory());
+                        if let Some(cwd) = cwd {
+                            term::Terminal::with_spawn_cwd(cwd, || {
+                                this.app_state.update(cx, |state, cx| {
+                                    state.split_terminal(TerminalSplitDirection::Horizontal, cx)
+                                })
+                            });
+                        }
                     })),
             )
             .child(
@@ -1090,9 +1233,20 @@ impl Render for TerminalDrawer {
                     .disabled(!can_split)
                     .tooltip(rust_i18n::t!("terminal.split_vertical"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| {
-                            state.split_terminal(TerminalSplitDirection::Vertical, cx)
-                        })
+                        let cwd = this
+                            .app_state
+                            .read(cx)
+                            .active
+                            .as_ref()
+                            .and_then(|active| active.terminal_workspace.active())
+                            .map(|entry| entry.terminal.working_directory());
+                        if let Some(cwd) = cwd {
+                            term::Terminal::with_spawn_cwd(cwd, || {
+                                this.app_state.update(cx, |state, cx| {
+                                    state.split_terminal(TerminalSplitDirection::Vertical, cx)
+                                })
+                            });
+                        }
                     })),
             )
             .child(
@@ -1108,8 +1262,19 @@ impl Render for TerminalDrawer {
                         rust_i18n::t!("terminal.new")
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.new_terminal(cx))
+                        let cwd = this
+                            .app_state
+                            .read(cx)
+                            .active
+                            .as_ref()
+                            .and_then(|active| active.terminal_workspace.active())
+                            .map(|entry| entry.terminal.working_directory());
+                        if let Some(cwd) = cwd {
+                            term::Terminal::with_spawn_cwd(cwd, || {
+                                this.app_state
+                                    .update(cx, |state, cx| state.new_terminal(cx))
+                            });
+                        }
                     })),
             )
             .child(
@@ -1177,7 +1342,14 @@ impl Render for TerminalDrawer {
     }
 }
 
-fn layout_grid(state: &TermState, palette: TerminalPalette, composing: bool) -> GridPaintData {
+fn layout_grid(
+    state: &TermState,
+    palette: TerminalPalette,
+    composing: bool,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+) -> GridPaintData {
     let cursor = layout_cursor(state, palette);
     let cursor_cell = cursor.map(|cursor| (cursor.row, cursor.start_col));
     let mut text_runs: Vec<BatchedTextRun> = Vec::new();
@@ -1227,13 +1399,18 @@ fn layout_grid(state: &TermState, palette: TerminalPalette, composing: bool) -> 
             let cursor_visible = !composing
                 && !cell.selected
                 && state.display_offset == 0
-                && cursor_cell == Some((row, col));
+                && cursor_cell == Some((row, col))
+                && focused
+                && state.cursor_shape == CursorShape::Block
+                && (!state.cursor_blinking || blink_phase);
+            let hyperlink_hovered =
+                hovered_link.is_some_and(|link| (row, col) >= link.start && (row, col) <= link.end);
             let style = GridTextStyle {
                 fg,
                 bg,
                 bold: cell.bold,
                 italic: cell.italic,
-                underline: cell.underline,
+                underline: cell.underline || hyperlink_hovered,
                 selected: cell.selected,
                 cursor: cursor_visible,
             };
@@ -1261,7 +1438,11 @@ fn layout_grid(state: &TermState, palette: TerminalPalette, composing: bool) -> 
         text_runs,
         backgrounds,
         selections,
-        cursor,
+        cursor: cursor.map(|mut cursor| {
+            cursor.focused = focused;
+            cursor.visible &= !composing && (!state.cursor_blinking || blink_phase);
+            cursor
+        }),
     }
 }
 
@@ -1322,6 +1503,8 @@ fn layout_cursor(state: &TermState, palette: TerminalPalette) -> Option<CursorPa
         cell_count,
         color: terminal_color(fg, palette).opacity(0.72),
         visible: !color_cell.selected,
+        shape: state.cursor_shape,
+        focused: true,
     })
 }
 
@@ -1375,6 +1558,9 @@ impl InputHandler for TerminalInputHandler {
         let text = text.to_string();
         self.drawer.update(cx, |drawer, cx| {
             drawer.marked_text = None;
+            drawer.last_input = Instant::now();
+            drawer.cursor_phase = true;
+            drawer.bell_tabs.remove(&terminal_id);
             if !text.is_empty() {
                 drawer.with_terminal_id(terminal_id, cx, |terminal| {
                     terminal.write_input(text.into_bytes());
@@ -1549,6 +1735,8 @@ mod tests {
             rows: 1,
             cells,
             cursor: None,
+            cursor_shape: CursorShape::Block,
+            cursor_blinking: false,
             title: String::new(),
             exited: false,
             exit_code: None,
@@ -1562,7 +1750,7 @@ mod tests {
             selection: rgb(0x336699).into(),
         };
 
-        let runs = layout_grid(&state, palette, false).text_runs;
+        let runs = layout_grid(&state, palette, false, None, true, true).text_runs;
         let boundaries = runs
             .iter()
             .map(|run| (run.start_col, run.text.as_str(), run.cell_count))

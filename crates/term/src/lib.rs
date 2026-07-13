@@ -4,8 +4,13 @@ use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
+    time::Duration,
 };
 
 use alacritty_terminal::{
@@ -21,7 +26,10 @@ use alacritty_terminal::{
     vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb},
 };
 
+mod hyperlinks;
 pub mod mappings;
+mod pty_info;
+pub use hyperlinks::HyperlinkMatch;
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
@@ -59,6 +67,10 @@ pub enum TermEvent {
     Wakeup,
     /// The terminal title changed.
     TitleChanged,
+    /// The child changed whether its cursor should blink.
+    CursorBlinkingChanged,
+    /// The child rang the terminal bell.
+    Bell,
     /// The child process exited.
     Exited,
 }
@@ -76,12 +88,23 @@ pub struct TermState {
     pub rows: usize,
     pub cells: Vec<Cell>,
     pub cursor: Option<(usize, usize)>,
+    pub cursor_shape: CursorShape,
+    pub cursor_blinking: bool,
     pub title: String,
     pub exited: bool,
     pub exit_code: Option<i32>,
     pub display_offset: usize,
     pub history_size: usize,
     pub mode: ModeSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
+    HollowBlock,
+    Hidden,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,7 +200,9 @@ impl EventListener for Listener {
 }
 
 struct Shared {
-    title: String,
+    osc_title: Option<String>,
+    process_name: Option<String>,
+    working_directory: Option<PathBuf>,
     exited: bool,
     exit_code: Option<i32>,
     command_line: String,
@@ -193,6 +218,12 @@ pub struct Terminal {
     shared: Arc<Mutex<Shared>>,
     shell_name: String,
     cwd: PathBuf,
+    _pty_info: Arc<pty_info::PtyInfo>,
+    refresh_running: Arc<AtomicBool>,
+}
+
+thread_local! {
+    static SPAWN_CWD_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The interactive shell to spawn, as `(program, args)`.
@@ -233,6 +264,9 @@ impl Terminal {
     pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
         let (shell, args) = default_shell();
         let shell_name = shell_label(&shell);
+        let cwd = SPAWN_CWD_OVERRIDE
+            .with(|override_cwd| override_cwd.borrow().clone())
+            .unwrap_or_else(|| cwd.as_ref().to_path_buf());
         Self::spawn_command(cwd, shell, args, shell_name)
     }
 
@@ -260,6 +294,16 @@ impl Terminal {
             escape_args: false,
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
+        #[cfg(unix)]
+        let pty_info = {
+            use std::os::fd::AsRawFd as _;
+            Arc::new(pty_info::PtyInfo::new(
+                pty.file().as_raw_fd(),
+                pty.child().id(),
+            ))
+        };
+        #[cfg(not(unix))]
+        let pty_info = Arc::new(pty_info::PtyInfo::new());
         let (events_tx, events_rx) = mpsc::channel();
         let (term_events_tx, term_events_rx) = async_channel::unbounded();
         let listener = Listener(events_tx);
@@ -271,7 +315,9 @@ impl Terminal {
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
         let notifier = Notifier(event_loop.channel());
         let shared = Arc::new(Mutex::new(Shared {
-            title: shell_name.clone(),
+            osc_title: None,
+            process_name: None,
+            working_directory: Some(cwd.clone()),
             exited: false,
             exit_code: None,
             command_line: String::new(),
@@ -285,22 +331,20 @@ impl Terminal {
         let event_term = Arc::downgrade(&term);
         let event_notifier = Notifier(notifier.0.clone());
         let event_notifications = term_events_tx.clone();
-        let default_title = shell_name.clone();
+        let refresh_running = Arc::new(AtomicBool::new(false));
+        let event_pty_info = pty_info.clone();
+        let refresh_running_events = refresh_running.clone();
         thread::Builder::new()
             .name("tcode-terminal-events".into())
             .spawn(move || {
                 while let Ok(event) = events_rx.recv() {
                     match event {
                         Event::Title(title) => {
-                            event_shared.lock().unwrap().title = title;
+                            event_shared.lock().unwrap().osc_title = Some(title);
                             let _ = term_events_tx.try_send(TermEvent::TitleChanged);
                         }
                         Event::ResetTitle => {
-                            event_shared
-                                .lock()
-                                .unwrap()
-                                .title
-                                .clone_from(&default_title);
+                            event_shared.lock().unwrap().osc_title = None;
                             let _ = term_events_tx.try_send(TermEvent::TitleChanged);
                         }
                         Event::ChildExit(code) => {
@@ -320,8 +364,20 @@ impl Terminal {
                                 let _ = term_events_tx.try_send(TermEvent::Exited);
                             }
                         }
-                        Event::Wakeup | Event::CursorBlinkingChange => {
+                        Event::Wakeup => {
                             let _ = term_events_tx.try_send(TermEvent::Wakeup);
+                            schedule_process_refresh(
+                                event_pty_info.clone(),
+                                event_shared.clone(),
+                                term_events_tx.clone(),
+                                refresh_running_events.clone(),
+                            );
+                        }
+                        Event::CursorBlinkingChange => {
+                            let _ = term_events_tx.try_send(TermEvent::CursorBlinkingChanged);
+                        }
+                        Event::Bell => {
+                            let _ = term_events_tx.try_send(TermEvent::Bell);
                         }
                         // The terminal core emits these when the child asks the
                         // emulator a question (DA1/DSR, OSC color queries,
@@ -349,6 +405,13 @@ impl Terminal {
                 }
             })?;
 
+        schedule_process_refresh(
+            pty_info.clone(),
+            shared.clone(),
+            event_notifications.clone(),
+            refresh_running.clone(),
+        );
+
         Ok(Self {
             term,
             notifier,
@@ -357,6 +420,8 @@ impl Terminal {
             shared,
             shell_name,
             cwd,
+            _pty_info: pty_info,
+            refresh_running,
         })
     }
 
@@ -365,6 +430,28 @@ impl Terminal {
     }
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    pub fn working_directory(&self) -> PathBuf {
+        self.shared
+            .lock()
+            .unwrap()
+            .working_directory
+            .clone()
+            .unwrap_or_else(|| self.cwd.clone())
+    }
+
+    /// Apply a cwd override to `Terminal::spawn` calls made synchronously by `f`.
+    pub fn with_spawn_cwd<R>(cwd: impl Into<PathBuf>, f: impl FnOnce() -> R) -> R {
+        struct Reset(Option<PathBuf>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SPAWN_CWD_OVERRIDE.with(|slot| *slot.borrow_mut() = self.0.take());
+            }
+        }
+        let previous = SPAWN_CWD_OVERRIDE.with(|slot| slot.borrow_mut().replace(cwd.into()));
+        let _reset = Reset(previous);
+        f()
     }
 
     /// Return a receiver for rendering-relevant terminal events.
@@ -377,11 +464,11 @@ impl Terminal {
 
     /// Shell name, temporarily replaced by the argv0 of the last submitted command.
     pub fn label(&self) -> String {
-        self.shared
-            .lock()
-            .unwrap()
-            .command_label
+        let shared = self.shared.lock().unwrap();
+        shared
+            .osc_title
             .clone()
+            .or_else(|| shared.process_name.clone())
             .unwrap_or_else(|| self.shell_name.clone())
     }
 
@@ -394,6 +481,12 @@ impl Terminal {
             shared.command_label != previous_label
         };
         let _ = self.notifier.0.send(Msg::Input(bytes.into()));
+        schedule_process_refresh(
+            self._pty_info.clone(),
+            self.shared.clone(),
+            self.events_tx.clone(),
+            self.refresh_running.clone(),
+        );
         if label_changed {
             let _ = self.events_tx.try_send(TermEvent::Wakeup);
         }
@@ -496,6 +589,7 @@ impl Terminal {
     pub fn snapshot(&self) -> TermState {
         let term = self.term.lock();
         let content = term.renderable_content();
+        let cursor_style = term.cursor_style();
         let cols = term.columns();
         let rows = term.screen_lines();
         let display_cursor_line = content.cursor.point.line.0 + content.display_offset as i32;
@@ -536,7 +630,13 @@ impl Terminal {
             rows,
             cells,
             cursor,
-            title: shared.title.clone(),
+            cursor_shape: map_cursor_shape(content.cursor.shape),
+            cursor_blinking: cursor_style.blinking,
+            title: shared
+                .osc_title
+                .clone()
+                .or_else(|| shared.process_name.clone())
+                .unwrap_or_else(|| self.shell_name.clone()),
             exited: shared.exited,
             exit_code: shared.exit_code,
             display_offset: content.display_offset,
@@ -554,6 +654,68 @@ impl Terminal {
                 focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
             },
         }
+    }
+
+    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<HyperlinkMatch> {
+        let term = self.term.lock();
+        (row < term.screen_lines() && col < term.columns())
+            .then(|| hyperlinks::find(&term, row, col))
+            .flatten()
+    }
+}
+
+fn refresh_process_info(
+    info: &pty_info::PtyInfo,
+    shared: &Mutex<Shared>,
+    notifications: &async_channel::Sender<TermEvent>,
+) {
+    if let Some(process) = info.load() {
+        let mut shared = shared.lock().unwrap();
+        let changed = shared.process_name.as_deref() != Some(&process.name)
+            || shared.working_directory.as_ref() != Some(&process.cwd);
+        shared.process_name = Some(process.name);
+        shared.working_directory = Some(process.cwd);
+        drop(shared);
+        if changed {
+            let _ = notifications.try_send(TermEvent::TitleChanged);
+        }
+    }
+}
+
+fn schedule_process_refresh(
+    info: Arc<pty_info::PtyInfo>,
+    shared: Arc<Mutex<Shared>>,
+    notifications: async_channel::Sender<TermEvent>,
+    running: Arc<AtomicBool>,
+) {
+    if !info.should_refresh() || running.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let running_on_error = running.clone();
+    let spawn_result = thread::Builder::new()
+        .name("tcode-terminal-pty-info".into())
+        .spawn(move || {
+            refresh_process_info(&info, &shared, &notifications);
+            // Input/Wakeup can precede the shell applying `cd` or launching its
+            // foreground process. One bounded trailing refresh catches that
+            // transition even when the command itself produces no output.
+            thread::sleep(Duration::from_millis(300));
+            refresh_process_info(&info, &shared, &notifications);
+            running.store(false, Ordering::Release);
+        });
+    if spawn_result.is_err() {
+        running_on_error.store(false, Ordering::Release);
+    }
+}
+
+fn map_cursor_shape(shape: alacritty_terminal::vte::ansi::CursorShape) -> CursorShape {
+    use alacritty_terminal::vte::ansi::CursorShape as A;
+    match shape {
+        A::Block => CursorShape::Block,
+        A::Underline => CursorShape::Underline,
+        A::Beam => CursorShape::Bar,
+        A::HollowBlock => CursorShape::HollowBlock,
+        A::Hidden => CursorShape::Hidden,
     }
 }
 
@@ -672,6 +834,16 @@ mod tests {
         assert_eq!(shell_label(r"C:\Windows\system32\cmd.exe"), "cmd");
     }
 
+    #[test]
+    fn maps_all_alacritty_cursor_shapes() {
+        use alacritty_terminal::vte::ansi::CursorShape as A;
+        assert_eq!(map_cursor_shape(A::Block), CursorShape::Block);
+        assert_eq!(map_cursor_shape(A::Underline), CursorShape::Underline);
+        assert_eq!(map_cursor_shape(A::Beam), CursorShape::Bar);
+        assert_eq!(map_cursor_shape(A::HollowBlock), CursorShape::HollowBlock);
+        assert_eq!(map_cursor_shape(A::Hidden), CursorShape::Hidden);
+    }
+
     /// A shell that runs `script` and exits: `sh -c` on Unix, `cmd /c` on Windows.
     fn command(script: &str) -> Terminal {
         #[cfg(windows)]
@@ -731,6 +903,52 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn extracts_url_from_grid_line() {
+        let term = command("printf 'see https://example.com/docs?q=1 now\\n'; sleep 1");
+        let state = wait_until(&term, |state| {
+            state.text().contains("https://example.com/docs?q=1")
+        });
+        let index = state.cells.iter().position(|cell| cell.ch == 'h').unwrap();
+        let found = term
+            .hyperlink_at(index / state.cols, index % state.cols + 10)
+            .unwrap();
+        assert_eq!(found.url, "https://example.com/docs?q=1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc8_hyperlink_takes_precedence_over_visible_text() {
+        let term = command(
+            "printf '\\033]8;;https://example.com/target\\033\\\\click-me\\033]8;;\\033\\\\'; sleep 1",
+        );
+        let state = wait_until(&term, |state| state.text().contains("click-me"));
+        let index = state.cells.iter().position(|cell| cell.ch == 'c').unwrap();
+        let found = term
+            .hyperlink_at(index / state.cols, index % state.cols)
+            .unwrap();
+        assert_eq!(found.url, "https://example.com/target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "queries a real foreground PTY process group"]
+    fn tracks_real_pty_foreground_cwd() {
+        let term = command("cd /tmp && sleep 5");
+        let expected = std::fs::canonicalize("/tmp").unwrap();
+        let start = Instant::now();
+        while term.working_directory() != expected {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "cwd remained {}",
+                term.working_directory().display()
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(term.working_directory(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn emits_wakeup_when_pty_output_arrives() {
         let term = command("printf '__TCODE_TERM_READY__\\n'; read line; printf '%s\\n' \"$line\"");
         let events = term.events();
@@ -747,7 +965,12 @@ mod tests {
                     saw_readiness_event = true;
                     quiet_since = Instant::now();
                 }
-                Ok(TermEvent::TitleChanged | TermEvent::Exited) => {
+                Ok(
+                    TermEvent::TitleChanged
+                    | TermEvent::CursorBlinkingChanged
+                    | TermEvent::Bell
+                    | TermEvent::Exited,
+                ) => {
                     quiet_since = Instant::now();
                 }
                 Err(async_channel::TryRecvError::Empty) => {
@@ -775,7 +998,12 @@ mod tests {
         loop {
             match events.try_recv() {
                 Ok(TermEvent::Wakeup) => saw_wakeup = true,
-                Ok(TermEvent::TitleChanged | TermEvent::Exited) => {}
+                Ok(
+                    TermEvent::TitleChanged
+                    | TermEvent::CursorBlinkingChanged
+                    | TermEvent::Bell
+                    | TermEvent::Exited,
+                ) => {}
                 Err(async_channel::TryRecvError::Empty) => {}
                 Err(async_channel::TryRecvError::Closed) => {
                     panic!("terminal event stream closed before emitting Wakeup")
