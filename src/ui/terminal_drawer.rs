@@ -21,7 +21,10 @@ use gpui_component::{
     resizable::{h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
-use term::{Cell, Color, TermEvent, TermState};
+use term::{
+    Cell, Color, SelectionKind, TermEvent, TermState,
+    mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
+};
 
 use crate::app::{AppState, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 
@@ -116,7 +119,9 @@ pub struct TerminalDrawer {
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
-    selection_anchor: Option<(u64, (usize, usize))>,
+    selection_anchor: Option<(u64, (usize, usize), SelectionKind)>,
+    last_mouse_point: HashMap<u64, (usize, usize)>,
+    focus_subscriptions: Vec<gpui::Subscription>,
     event_subscriptions: HashMap<u64, TerminalEventSubscription>,
     marked_text: Option<MarkedText>,
     _app_state_subscription: gpui::Subscription,
@@ -133,6 +138,8 @@ impl TerminalDrawer {
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
             selection_anchor: None,
+            last_mouse_point: HashMap::new(),
+            focus_subscriptions: Vec::new(),
             event_subscriptions: HashMap::new(),
             marked_text: None,
             _app_state_subscription: app_state_subscription,
@@ -292,15 +299,33 @@ impl TerminalDrawer {
             if keystroke.key.eq_ignore_ascii_case("v")
                 && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
             {
-                let text = text.replace("\r\n", "\r").replace('\n', "\r");
-                self.with_terminal(cx, |terminal| terminal.write_input(text.into_bytes()));
+                self.with_terminal(cx, |terminal| {
+                    let mode = terminal.snapshot().mode;
+                    let text = if mode.bracketed_paste {
+                        format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
+                    } else {
+                        text.replace("\r\n", "\r").replace('\n', "\r")
+                    };
+                    terminal.write_input(text.into_bytes());
+                });
                 cx.stop_propagation();
             }
             return;
         }
 
-        if let Some(bytes) = key_bytes(keystroke) {
-            self.with_terminal(cx, |terminal| terminal.write_input(bytes));
+        let mut handled = false;
+        self.with_terminal(cx, |terminal| {
+            if let Some(bytes) = mappings::key_bytes(
+                &keystroke.key,
+                term_modifiers(keystroke.modifiers),
+                terminal.snapshot().mode,
+                true,
+            ) {
+                terminal.write_input(bytes);
+                handled = true;
+            }
+        });
+        if handled {
             cx.stop_propagation();
         }
     }
@@ -325,7 +350,28 @@ impl TerminalDrawer {
                 .as_ref()
                 .and_then(|active| active.terminal_workspace.terminal(terminal_id))
             {
-                entry.terminal.scroll(lines);
+                let snapshot = entry.terminal.snapshot();
+                let point = self
+                    .grid_point(terminal_id, event.position)
+                    .map(|(row, column)| GridPoint { row, column })
+                    .unwrap_or(GridPoint { row: 0, column: 0 });
+                if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                    if let Some(bytes) = mappings::scroll_report(
+                        point,
+                        lines,
+                        term_modifiers(event.modifiers),
+                        snapshot.mode,
+                    ) {
+                        entry.terminal.write_input(bytes);
+                    }
+                } else if snapshot.mode.alt_screen
+                    && snapshot.mode.alternate_scroll
+                    && !event.modifiers.shift
+                {
+                    entry.terminal.write_input(mappings::alt_scroll(lines));
+                } else {
+                    entry.terminal.scroll(lines);
+                }
             }
             cx.stop_propagation();
             cx.notify();
@@ -549,10 +595,42 @@ impl TerminalDrawer {
                 .as_ref()
                 .and_then(|active| active.terminal_workspace.terminal(terminal_id))
             {
+                let snapshot = entry.terminal.snapshot();
+                if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                    if let Some(button) = term_mouse_button(event.button)
+                        && let Some(bytes) = mappings::mouse_button_report(
+                            GridPoint {
+                                row: point.0,
+                                column: point.1,
+                            },
+                            button,
+                            term_modifiers(event.modifiers),
+                            true,
+                            snapshot.mode,
+                        )
+                    {
+                        entry.terminal.write_input(bytes);
+                    }
+                    return;
+                }
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                if event.modifiers.shift {
+                    entry.terminal.extend_selection(point);
+                    return;
+                }
                 entry.terminal.clear_selection();
+                let kind = match event.click_count {
+                    1 => SelectionKind::Simple,
+                    2 => SelectionKind::Semantic,
+                    3 => SelectionKind::Lines,
+                    _ => return,
+                };
+                entry.terminal.select_kind(point, point, kind);
+                self.selection_anchor = Some((terminal_id, point, kind));
             }
         });
-        self.selection_anchor = Some((terminal_id, point));
         cx.notify();
     }
 
@@ -563,12 +641,6 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((selection_id, start)) = self.selection_anchor else {
-            return;
-        };
-        if selection_id != terminal_id || !event.dragging() {
-            return;
-        }
         let Some(point) = self.grid_point(terminal_id, event.position) else {
             return;
         };
@@ -579,7 +651,41 @@ impl TerminalDrawer {
             .as_ref()
             .and_then(|active| active.terminal_workspace.terminal(terminal_id))
         {
-            entry.terminal.select(start, point);
+            let snapshot = entry.terminal.snapshot();
+            if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                if self.last_mouse_point.get(&terminal_id) != Some(&point) {
+                    self.last_mouse_point.insert(terminal_id, point);
+                    if let Some(bytes) = mappings::mouse_move_report(
+                        GridPoint {
+                            row: point.0,
+                            column: point.1,
+                        },
+                        event.pressed_button.and_then(term_mouse_button),
+                        term_modifiers(event.modifiers),
+                        snapshot.mode,
+                    ) {
+                        entry.terminal.write_input(bytes);
+                    }
+                }
+                return;
+            }
+            let Some((selection_id, start, kind)) = self.selection_anchor else {
+                return;
+            };
+            if selection_id != terminal_id || !event.dragging() {
+                return;
+            }
+            entry.terminal.select_kind(start, point, kind);
+            if !snapshot.mode.alt_screen
+                && snapshot.history_size > 0
+                && let Some(lines) = drag_scroll_lines(
+                    event.position.y,
+                    self.grid_bounds.borrow().get(&terminal_id).copied(),
+                    self.cell_height,
+                )
+            {
+                entry.terminal.scroll(lines);
+            }
         }
         cx.notify();
     }
@@ -591,12 +697,6 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((selection_id, start)) = self.selection_anchor else {
-            return;
-        };
-        if selection_id != terminal_id {
-            return;
-        }
         if let Some(point) = self.grid_point(terminal_id, event.position)
             && let Some(entry) = self
                 .app_state
@@ -605,13 +705,30 @@ impl TerminalDrawer {
                 .as_ref()
                 .and_then(|active| active.terminal_workspace.terminal(terminal_id))
         {
-            if start == point {
-                entry.terminal.clear_selection();
-            } else {
-                entry.terminal.select(start, point);
+            let snapshot = entry.terminal.snapshot();
+            if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                if let Some(button) = term_mouse_button(event.button)
+                    && let Some(bytes) = mappings::mouse_button_report(
+                        GridPoint {
+                            row: point.0,
+                            column: point.1,
+                        },
+                        button,
+                        term_modifiers(event.modifiers),
+                        false,
+                        snapshot.mode,
+                    )
+                {
+                    entry.terminal.write_input(bytes);
+                }
+            } else if let Some((selection_id, start, kind)) = self.selection_anchor
+                && selection_id == terminal_id
+            {
+                entry.terminal.select_kind(start, point, kind);
             }
         }
         self.selection_anchor = None;
+        self.last_mouse_point.remove(&terminal_id);
         cx.notify();
     }
 
@@ -715,11 +832,35 @@ impl TerminalDrawer {
                     this.terminal_mouse_down(terminal_id, event, window, cx)
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, event, window, cx| {
+                    this.terminal_mouse_down(terminal_id, event, window, cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event, window, cx| {
+                    this.terminal_mouse_down(terminal_id, event, window, cx)
+                }),
+            )
             .on_mouse_move(cx.listener(move |this, event, window, cx| {
                 this.terminal_mouse_move(terminal_id, event, window, cx)
             }))
             .on_mouse_up(
                 MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    this.terminal_mouse_up(terminal_id, event, window, cx)
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, event, window, cx| {
+                    this.terminal_mouse_up(terminal_id, event, window, cx)
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
                 cx.listener(move |this, event, window, cx| {
                     this.terminal_mouse_up(terminal_id, event, window, cx)
                 }),
@@ -762,6 +903,33 @@ impl Focusable for TerminalDrawer {
 impl Render for TerminalDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_event_subscriptions(window, cx);
+        if self.focus_subscriptions.is_empty() {
+            let app_state = self.app_state.clone();
+            let focus_in = window.on_focus_in(&self.focus_handle, cx, move |_, cx| {
+                if let Some(entry) = app_state
+                    .read(cx)
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.terminal_workspace.active())
+                    && entry.terminal.snapshot().mode.focus_in_out
+                {
+                    entry.terminal.write_input(b"\x1b[I".to_vec());
+                }
+            });
+            let app_state = self.app_state.clone();
+            let focus_out = window.on_focus_out(&self.focus_handle, cx, move |_, _, cx| {
+                if let Some(entry) = app_state
+                    .read(cx)
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.terminal_workspace.active())
+                    && entry.terminal.snapshot().mode.focus_in_out
+                {
+                    entry.terminal.write_input(b"\x1b[O".to_vec());
+                }
+            });
+            self.focus_subscriptions.extend([focus_in, focus_out]);
+        }
 
         // PTY dimensions and mouse hit-testing use the exact advance and
         // vertical metrics of the same resolved face used by StyledText.
@@ -1277,40 +1445,37 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
-fn key_bytes(key: &gpui::Keystroke) -> Option<Vec<u8>> {
-    let ctrl = key.modifiers.control;
-    if ctrl {
-        if let bytes @ Some(_) = match key.key.as_str() {
-            "space" => Some(vec![0]),
-            "[" => Some(vec![27]),
-            "\\" => Some(vec![28]),
-            "]" => Some(vec![29]),
-            "^" => Some(vec![30]),
-            "_" => Some(vec![31]),
-            _ => None,
-        } {
-            return bytes;
-        }
-        let ch = key.key.chars().next()?;
-        if ch.is_ascii_alphabetic() {
-            return Some(vec![(ch.to_ascii_lowercase() as u8) - b'a' + 1]);
-        }
-        return None;
+fn term_modifiers(modifiers: gpui::Modifiers) -> TermModifiers {
+    TermModifiers {
+        shift: modifiers.shift,
+        alt: modifiers.alt,
+        control: modifiers.control,
+        platform: modifiers.platform,
     }
-    let bytes = match key.key.as_str() {
-        "enter" => b"\r".to_vec(),
-        "backspace" => vec![0x7f],
-        "tab" => b"\t".to_vec(),
-        "escape" => vec![0x1b],
-        "up" => b"\x1b[A".to_vec(),
-        "down" => b"\x1b[B".to_vec(),
-        "right" => b"\x1b[C".to_vec(),
-        "left" => b"\x1b[D".to_vec(),
-        // Printable text is committed exactly once through InputHandler. This
-        // propagation is what lets the platform IME see composition keystrokes.
-        _ => return None,
+}
+
+fn term_mouse_button(button: MouseButton) -> Option<TermMouseButton> {
+    match button {
+        MouseButton::Left => Some(TermMouseButton::Left),
+        MouseButton::Middle => Some(TermMouseButton::Middle),
+        MouseButton::Right => Some(TermMouseButton::Right),
+        _ => None,
+    }
+}
+
+fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32) -> Option<i32> {
+    let geometry = geometry?;
+    let top = geometry.bounds.top() + px(PANE_BORDER + PANE_PADDING_Y);
+    let bottom = top + px(geometry.rows as f32 * geometry.cell_height);
+    let pixels = if y < top {
+        f32::from(top - y)
+    } else if y > bottom {
+        -f32::from(y - bottom)
+    } else {
+        return None;
     };
-    Some(bytes)
+    let lines = (pixels.abs().powf(1.1) / cell_height).ceil() as i32;
+    Some(lines.clamp(1, 3) * pixels.signum() as i32)
 }
 
 fn terminal_font() -> gpui::Font {
@@ -1388,6 +1553,8 @@ mod tests {
             exited: false,
             exit_code: None,
             display_offset: 0,
+            history_size: 0,
+            mode: term::ModeSnapshot::default(),
         };
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
@@ -1411,14 +1578,13 @@ mod tests {
 
     #[test]
     fn printable_keys_defer_to_input_handler_but_control_keys_stay_raw() {
-        assert_eq!(key_bytes(&gpui::Keystroke::parse("a").unwrap()), None);
-        assert_eq!(
-            key_bytes(&gpui::Keystroke::parse("ctrl-space").unwrap()),
-            Some(vec![0])
-        );
-        assert_eq!(
-            key_bytes(&gpui::Keystroke::parse("ctrl-c").unwrap()),
-            Some(vec![3])
-        );
+        let mode = term::ModeSnapshot::default();
+        let encode = |key: &str| {
+            let key = gpui::Keystroke::parse(key).unwrap();
+            mappings::key_bytes(&key.key, term_modifiers(key.modifiers), mode, true)
+        };
+        assert_eq!(encode("a"), None);
+        assert_eq!(encode("ctrl-space"), Some(vec![0]));
+        assert_eq!(encode("ctrl-c"), Some(vec![3]));
     }
 }
