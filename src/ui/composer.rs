@@ -225,6 +225,13 @@ enum SlashCommand {
     Model,
 }
 
+/// Strip a leading `/orchestrate` command token while rejecting lookalikes
+/// such as `/orchestrated`.
+fn strip_orchestrate_prefix(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("/orchestrate")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
+}
+
 /// Recognize a standalone `/plan`, `/default`, or `/model` message (T3 strips
 /// the command and switches mode / opens the picker instead of sending it).
 fn slash_command(text: &str) -> Option<SlashCommand> {
@@ -265,6 +272,8 @@ enum MenuAccept {
     InsertSkill(String),
     /// Insert `/<name> ` for this provider slash command.
     InsertCommand(String),
+    /// Insert the native orchestration command without consuming following text.
+    InsertOrchestrate,
     /// Strip the `/model` command and open the model picker.
     OpenModelPicker,
     /// Strip the command and switch interaction mode.
@@ -595,7 +604,9 @@ impl Composer {
             cx.notify();
             return;
         }
-        let text = append_terminal_contexts_to_prompt(&text, &terminal_contexts);
+        let orchestrate_text = strip_orchestrate_prefix(&text).map(str::to_string);
+        let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
+        let text = append_terminal_contexts_to_prompt(prompt_text, &terminal_contexts);
         let text = append_review_comments_to_prompt(&text, &review_comments);
         input.update(cx, |state, cx| state.set_value("", window, cx));
         // Image-only messages get T3's exact synthetic text. Attachments are
@@ -614,7 +625,9 @@ impl Composer {
                 active.terminal_workspace.contexts.clear();
             }
             state.clear_review_comments();
-            if steer {
+            if orchestrate_text.is_some() {
+                state.orchestrate_turn(sent_text, attachments, cx)
+            } else if steer {
                 state.steer(sent_text, attachments, cx)
             } else {
                 state.send_turn(sent_text, attachments, cx)
@@ -741,28 +754,42 @@ impl Composer {
                 )
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let builtins: [(&str, &str, MenuAccept); 3] = [
+                let builtins: [(&str, Option<&str>, &str, MenuAccept); 4] = [
                     (
                         "model",
+                        None,
                         "composer.cmd_model_desc",
                         MenuAccept::OpenModelPicker,
                     ),
                     (
                         "plan",
+                        None,
                         "composer.cmd_plan_desc",
                         MenuAccept::SetMode(InteractionMode::Plan),
                     ),
                     (
                         "default",
+                        None,
                         "composer.cmd_default_desc",
                         MenuAccept::SetMode(InteractionMode::Build),
+                    ),
+                    (
+                        "orchestrate",
+                        Some("composer.cmd_orchestrate_label"),
+                        "composer.cmd_orchestrate_desc",
+                        MenuAccept::InsertOrchestrate,
                     ),
                 ];
                 let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
-                    .filter(|(name, _, _)| fuzzy_score(&trigger.query, name).is_some())
-                    .map(|(name, desc, accept)| MenuRow {
-                        primary: format!("/{name}"),
+                    .filter(|(name, _, _, _)| fuzzy_score(&trigger.query, name).is_some())
+                    .map(|(name, label, desc, accept)| MenuRow {
+                        primary: format!(
+                            "/{}",
+                            label
+                                .map(|key| rust_i18n::t!(key).into_owned())
+                                .unwrap_or_else(|| name.to_string())
+                        ),
                         secondary: rust_i18n::t!(desc).into_owned(),
                         icon: MenuIcon::Command,
                         accept,
@@ -825,6 +852,7 @@ impl Composer {
             MenuAccept::InsertCommand(name) => {
                 self.replace_trigger(&format!("/{name} "), window, cx)
             }
+            MenuAccept::InsertOrchestrate => self.replace_trigger("/orchestrate ", window, cx),
             MenuAccept::OpenModelPicker => {
                 self.replace_trigger("", window, cx);
                 self.model_picker_token = self.model_picker_token.wrapping_add(1);
@@ -3923,6 +3951,17 @@ fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orchestrate_prefix_requires_a_complete_command_token() {
+        assert_eq!(strip_orchestrate_prefix("/orchestrate"), Some(""));
+        assert_eq!(
+            strip_orchestrate_prefix("/orchestrate   split the work"),
+            Some("split the work")
+        );
+        assert_eq!(strip_orchestrate_prefix("/orchestrated"), None);
+        assert_eq!(strip_orchestrate_prefix("hello /orchestrate"), None);
+    }
 
     #[test]
     fn provider_menu_filter_is_fuzzy_kind_aware_and_uncapped() {

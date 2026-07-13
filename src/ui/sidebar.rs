@@ -712,6 +712,13 @@ impl SessionsSidebar {
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
         let unread = self.app_state.read(cx).session_unread(&session_id);
         let is_worktree = meta.worktree.is_some();
+        let is_child = meta.parent_session_id.as_ref().is_some_and(|parent_id| {
+            self.app_state
+                .read(cx)
+                .sessions
+                .iter()
+                .any(|session| session.id == *parent_id)
+        });
 
         // Inline rename takes over the whole row's content area.
         let renaming = self
@@ -730,7 +737,7 @@ impl SessionsSidebar {
             .h(px(30.))
             .items_center()
             .gap_2()
-            .pl(px(30.))
+            .pl(px(if is_child { 42. } else { 30. }))
             .pr_2()
             .rounded(cx.theme().radius)
             .cursor_pointer()
@@ -758,6 +765,15 @@ impl SessionsSidebar {
                                 .text_color(cx.theme().success)
                                 .child(rust_i18n::t!("sidebar.working")),
                         ),
+                )
+            })
+            .when(is_child, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("↳"),
                 )
             });
 

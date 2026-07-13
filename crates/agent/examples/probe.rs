@@ -134,6 +134,7 @@ fn main() {
             option_selections,
             interaction_mode,
             mcp_server: None,
+            orchestrate_server: None,
             launch_env: Default::default(),
             extra_args: Vec::new(),
             acp: None,

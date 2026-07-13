@@ -24,6 +24,7 @@ use crate::store::{
 };
 
 const TITLE_MAX_CHARS: usize = 40;
+const ORCHESTRATE_CALLBACK_CAP: usize = 100;
 pub const MAX_TERMINALS_PER_SESSION: usize = 6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -146,7 +147,7 @@ pub fn group_sessions(
                 .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
                 .cloned()
                 .collect();
-            sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+            sessions = order_sessions_with_children(sessions);
             ProjectGroup {
                 project: project.clone(),
                 sessions,
@@ -177,6 +178,59 @@ pub fn group_sessions(
         }
     }
     groups
+}
+
+/// Stable parent-first ordering for one project. Orphans are roots; each
+/// parent's newest children follow it immediately.
+fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMeta> {
+    let ids: std::collections::HashSet<&str> =
+        sessions.iter().map(|session| session.id.as_str()).collect();
+    let mut roots: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|session| {
+            session
+                .parent_session_id
+                .as_deref()
+                .is_none_or(|parent| !ids.contains(parent))
+        })
+        .collect();
+    roots.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+
+    fn append(
+        parent: &SessionMeta,
+        sessions: &[SessionMeta],
+        output: &mut Vec<SessionMeta>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        if !visited.insert(parent.id.clone()) {
+            return;
+        }
+        output.push(parent.clone());
+        let mut children: Vec<&SessionMeta> = sessions
+            .iter()
+            .filter(|session| session.parent_session_id.as_deref() == Some(parent.id.as_str()))
+            .collect();
+        children.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        for child in children {
+            append(child, sessions, output, visited);
+        }
+    }
+
+    let mut output = Vec::with_capacity(sessions.len());
+    let mut visited = std::collections::HashSet::new();
+    for root in roots {
+        append(root, &sessions, &mut output, &mut visited);
+    }
+    // Defensive cycle handling: malformed cyclic metadata stays visible.
+    let mut remainder: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|session| !visited.contains(&session.id))
+        .collect();
+    remainder.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    for session in remainder {
+        append(session, &sessions, &mut output, &mut visited);
+    }
+    output
 }
 
 /// Events emitted for UI side-effects (notifications need a `Window`).
@@ -627,6 +681,14 @@ pub struct AppState {
     /// Automation-request receiver from the preview MCP server. `AppShell` takes
     /// this once to pump requests into the live `PreviewPanel` WebView.
     pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    /// App-wide orchestrator endpoint and its per-parent bearer-token issuer.
+    orchestrate_url: Option<String>,
+    orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
+    orchestrate_registrations: HashMap<String, agent::McpRegistration>,
+    /// Requests from the orchestrate MCP runtime, pumped on the gpui thread.
+    pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
+    callback_counts: HashMap<String, usize>,
+    callback_last_turn: HashMap<String, usize>,
     /// A URL the preview panel should navigate to on its next render (set by the
     /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
     pub pending_preview_url: Option<String>,
@@ -730,6 +792,12 @@ impl AppState {
             acp_installing: std::collections::HashSet::new(),
             mcp_registration: None,
             preview_requests: None,
+            orchestrate_url: None,
+            orchestrate_tokens: None,
+            orchestrate_registrations: HashMap::new(),
+            orchestrate_requests: None,
+            callback_counts: HashMap::new(),
+            callback_last_turn: HashMap::new(),
             pending_preview_url: None,
             git_status: None,
             git_busy: false,
@@ -769,10 +837,361 @@ impl AppState {
     /// every spawned session) and the request receiver (taken by `AppShell`).
     pub fn attach_preview_mcp(&mut self, server: preview_mcp::PreviewMcpServer) {
         self.mcp_registration = Some(agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
             url: server.url,
             bearer_token: server.bearer_token,
         });
         self.preview_requests = Some(server.requests);
+    }
+
+    pub fn attach_orchestrate_mcp(&mut self, server: orchestrate_mcp::OrchestrateMcpServer) {
+        self.orchestrate_url = Some(server.url);
+        self.orchestrate_tokens = Some(server.tokens);
+        self.orchestrate_requests = Some(server.requests);
+    }
+
+    /// Persistently opt a session into native orchestration. Callers restart a
+    /// currently-live provider so its next spawn receives the MCP registration.
+    pub fn enable_orchestrate(
+        &mut self,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(mut meta) = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .cloned()
+            .or_else(|| self.meta_mut(session_id).cloned())
+        else {
+            return Err("unknown session".into());
+        };
+        meta.orchestrate_enabled = true;
+        meta.updated_at = now_secs();
+        if let Some(live_meta) = self.meta_mut(session_id) {
+            live_meta.orchestrate_enabled = true;
+            live_meta.updated_at = meta.updated_at;
+        }
+        self.persist_meta(&meta, cx);
+        let _ = self.orchestrate_registration_for(&meta);
+        Ok(())
+    }
+
+    /// Enable orchestration on first use, restart so the MCP registration is
+    /// present, and submit the provider-specific guidance plus the user's text.
+    pub fn orchestrate_turn(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let provider = active.meta.provider;
+        let enabling = !active.meta.orchestrate_enabled;
+        let session_id = active.meta.id.clone();
+        let Some(text) = compose_orchestrate_text(provider, enabling, &text) else {
+            self.report_error(
+                rust_i18n::t!("composer.orchestrate_acp_unsupported").into_owned(),
+                cx,
+            );
+            return;
+        };
+
+        if enabling {
+            if let Err(message) = self.enable_orchestrate(&session_id, cx) {
+                self.report_error(message, cx);
+                return;
+            }
+            if let Some(active) = self.active.as_mut() {
+                active.shutdown_to_idle();
+            }
+        }
+
+        // `steer` sends ordinarily when idle and injects into a live turn. On
+        // first enable the restart above intentionally makes this an ordinary
+        // queued send for the resumed, MCP-enabled process.
+        self.steer(text, attachments, cx);
+    }
+
+    fn orchestrate_registration_for(
+        &mut self,
+        meta: &SessionMeta,
+    ) -> Option<agent::McpRegistration> {
+        if !meta.orchestrate_enabled {
+            return None;
+        }
+        if let Some(registration) = self.orchestrate_registrations.get(&meta.id) {
+            return Some(registration.clone());
+        }
+        let token = self.orchestrate_tokens.as_ref()?.register(&meta.id);
+        let registration = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
+            url: self.orchestrate_url.clone()?,
+            bearer_token: token,
+        };
+        self.orchestrate_registrations
+            .insert(meta.id.clone(), registration.clone());
+        Some(registration)
+    }
+
+    #[allow(clippy::too_many_arguments)] // mirrors the MCP dispatch schema
+    pub fn create_child_session(
+        &mut self,
+        parent_id: &str,
+        provider: ProviderKind,
+        model: Option<String>,
+        effort: Option<String>,
+        title: String,
+        cwd: Option<PathBuf>,
+        brief: String,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let parent = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == parent_id)
+            .cloned()
+            .or_else(|| {
+                self.active
+                    .as_ref()
+                    .filter(|active| active.meta.id == parent_id)
+                    .map(|active| active.meta.clone())
+            })
+            .or_else(|| self.background.get(parent_id).map(|s| s.meta.clone()))
+            .ok_or_else(|| "unknown parent session".to_string())?;
+        let cwd = match cwd {
+            Some(path) => {
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    parent.cwd.join(path)
+                };
+                let canonical = path
+                    .canonicalize()
+                    .map_err(|_| format!("invalid cwd: {}", path.display()))?;
+                if !canonical.is_dir() {
+                    return Err(format!("invalid cwd: {}", canonical.display()));
+                }
+                canonical
+            }
+            None => parent.cwd.clone(),
+        };
+        let meta = build_child_meta(&parent, provider, model, effort, title, cwd);
+        self.store
+            .upsert_meta(&meta)
+            .map_err(|err| format!("failed to persist child session: {err}"))?;
+        self.sessions = self.store.load_index();
+        let id = meta.id.clone();
+        let provider_commands =
+            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let mut child = Self::build_draft_session(
+            meta.project_id.clone().unwrap_or_default(),
+            meta.cwd.clone(),
+            meta.provider,
+            meta.model.clone(),
+            None,
+            provider_commands,
+        );
+        child.meta = meta;
+        child.draft = false;
+        child.push_queued(brief, Vec::new());
+        self.background.insert(id.clone(), child);
+        self.ensure_session_started(&id, cx);
+        cx.notify();
+        Ok(id)
+    }
+
+    /// Resolve one MCP operation on the gpui thread.
+    pub fn handle_orchestrate_op(
+        &mut self,
+        op: orchestrate_mcp::OrchestrateOp,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        use orchestrate_mcp::OrchestrateOp;
+        match op {
+            OrchestrateOp::Dispatch {
+                parent_id,
+                provider,
+                model,
+                effort,
+                title,
+                brief,
+                cwd,
+            } => {
+                let provider = match provider.as_str() {
+                    "claude" => ProviderKind::ClaudeCode,
+                    "codex" => ProviderKind::Codex,
+                    _ => return Err(format!("unknown provider: {provider}")),
+                };
+                let id = self.create_child_session(
+                    &parent_id,
+                    provider,
+                    model,
+                    effort,
+                    title,
+                    cwd.map(PathBuf::from),
+                    brief,
+                    cx,
+                )?;
+                Ok(serde_json::json!({ "thread_id": id }))
+            }
+            OrchestrateOp::Status {
+                parent_id,
+                thread_id,
+            } => {
+                let mut children: Vec<_> = self
+                    .sessions
+                    .iter()
+                    .filter(|meta| meta.parent_session_id.as_deref() == Some(&parent_id))
+                    .filter(|meta| thread_id.as_ref().is_none_or(|id| id == &meta.id))
+                    .map(|meta| self.child_status_json(meta))
+                    .collect();
+                if thread_id.is_some() && children.is_empty() {
+                    return Err("unknown thread or not a child of this parent".into());
+                }
+                children.sort_by_key(|value| value["updated_at"].as_u64().unwrap_or_default());
+                children.reverse();
+                Ok(serde_json::Value::Array(children))
+            }
+            OrchestrateOp::Send {
+                parent_id,
+                thread_id,
+                message,
+            } => {
+                self.require_child(&parent_id, &thread_id)?;
+                if self.active_session_id() == Some(&thread_id) {
+                    let child = self.active.as_mut().unwrap();
+                    child.push_queued(message, Vec::new());
+                    let idle = matches!(child.runtime, Runtime::Idle);
+                    if self.dispatch_next_queued(cx).is_err() {
+                        return Err("child provider is unavailable".into());
+                    }
+                    if idle {
+                        self.ensure_started(cx);
+                    }
+                    return Ok(serde_json::json!({ "ok": true }));
+                }
+                self.ensure_child_loaded(&thread_id)?;
+                let child = self.background.get_mut(&thread_id).unwrap();
+                child.push_queued(message, Vec::new());
+                let idle = matches!(child.runtime, Runtime::Idle);
+                if !idle && !child.turn_in_flight {
+                    self.on_background_turn_completed(&thread_id, cx);
+                }
+                if idle {
+                    self.ensure_session_started(&thread_id, cx);
+                }
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            OrchestrateOp::Result {
+                parent_id,
+                thread_id,
+            } => {
+                let meta = self.require_child(&parent_id, &thread_id)?;
+                let (state, final_message) = self.child_result(meta);
+                if state == "running" {
+                    return Err("thread is still running".into());
+                }
+                Ok(serde_json::json!({ "state": state, "final_message": final_message }))
+            }
+            OrchestrateOp::Cancel {
+                parent_id,
+                thread_id,
+            } => {
+                self.require_child(&parent_id, &thread_id)?;
+                if self.active_session_id() == Some(&thread_id) {
+                    if let Some(child) = self.active.as_mut() {
+                        child.queue.clear();
+                        child.shutdown_to_idle();
+                    }
+                } else {
+                    self.drop_background(&thread_id);
+                }
+                Ok(serde_json::json!({ "ok": true }))
+            }
+        }
+    }
+
+    fn require_child(&self, parent_id: &str, thread_id: &str) -> Result<&SessionMeta, String> {
+        self.sessions
+            .iter()
+            .find(|meta| {
+                meta.id == thread_id && meta.parent_session_id.as_deref() == Some(parent_id)
+            })
+            .ok_or_else(|| "unknown thread or not a child of this parent".into())
+    }
+
+    fn ensure_child_loaded(&mut self, thread_id: &str) -> Result<(), String> {
+        if self.background.contains_key(thread_id) {
+            return Ok(());
+        }
+        let meta = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == thread_id)
+            .cloned()
+            .ok_or_else(|| "unknown thread".to_string())?;
+        if self.active_session_id() == Some(thread_id) {
+            return Err("child thread is currently open in the foreground".into());
+        }
+        self.load_background_session(meta);
+        Ok(())
+    }
+
+    fn load_background_session(&mut self, meta: SessionMeta) {
+        let thread_id = meta.id.clone();
+        let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
+        let mut child = Self::build_draft_session(
+            meta.project_id.clone().unwrap_or_default(),
+            meta.cwd.clone(),
+            meta.provider,
+            meta.model.clone(),
+            meta.acp_agent_id.clone(),
+            commands,
+        );
+        child.meta = meta;
+        child.draft = false;
+        child.timeline = Timeline::fold_events(self.store.read_events(&thread_id));
+        child.timeline.mark_idle();
+        self.background.insert(thread_id, child);
+    }
+
+    fn child_result(&self, meta: &SessionMeta) -> (&'static str, String) {
+        let timeline = Timeline::fold_events(self.store.read_events(&meta.id));
+        let running = self
+            .active
+            .as_ref()
+            .filter(|child| child.meta.id == meta.id)
+            .or_else(|| self.background.get(&meta.id))
+            .is_some_and(|child| {
+                child.turn_in_flight
+                    || !child.queue.is_empty()
+                    || matches!(child.runtime, Runtime::Starting { .. })
+            });
+        let state = if running {
+            "running"
+        } else {
+            match timeline.last_turn_status {
+                Some(TurnStatus::Completed) => "completed",
+                Some(TurnStatus::Failed | TurnStatus::Interrupted) => "failed",
+                None => "idle",
+            }
+        };
+        (state, final_assistant_message(&timeline))
+    }
+
+    fn child_status_json(&self, meta: &SessionMeta) -> serde_json::Value {
+        let (state, final_message) = self.child_result(meta);
+        serde_json::json!({
+            "thread_id": meta.id,
+            "title": meta.title,
+            "provider": match meta.provider { ProviderKind::ClaudeCode => "claude", ProviderKind::Codex => "codex", ProviderKind::Acp => "acp" },
+            "state": state,
+            "last_output_tail": tail_chars(&final_message, 600),
+            "updated_at": meta.updated_at,
+        })
     }
 
     /// Kick off a background refresh of every provider's model catalog (called
@@ -2329,6 +2748,7 @@ impl AppState {
         if self.active_session_id() == Some(session_id) {
             self.shutdown_active();
         }
+        self.close_orchestrator_children(session_id);
         if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
             meta.archived_at = Some(now_secs());
             let meta = meta.clone();
@@ -2396,6 +2816,7 @@ impl AppState {
         }
         // Deleting a thread that is working in the background kills it for real.
         self.drop_background(session_id);
+        self.close_orchestrator_children(session_id);
         if let Some(meta) = &meta {
             // Best-effort checkpoint ref cleanup in the session cwd.
             if crate::checkpoints::is_git_repo(&meta.cwd) {
@@ -3207,6 +3628,33 @@ impl AppState {
         };
         parked.turn_in_flight = false;
         if parked.queue.is_empty() {
+            if parked.meta.parent_session_id.is_some() {
+                let child_id = session_id.to_string();
+                let idle_turns = Timeline::fold_events(self.store.read_events(session_id))
+                    .turns
+                    .len();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(30 * 60))
+                        .await;
+                    let _ = this.update(cx, |state, cx| {
+                        let still_idle =
+                            state.background.get(&child_id).is_some_and(|child| {
+                                child.queue.is_empty() && !child.turn_in_flight
+                            }) && Timeline::fold_events(state.store.read_events(&child_id))
+                                .turns
+                                .len()
+                                == idle_turns;
+                        if still_idle {
+                            state.drop_background(&child_id);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                cx.notify();
+                return;
+            }
             log::info!("parked session {session_id} finished its work; shutting down");
             self.drop_background(session_id);
             cx.notify();
@@ -3222,6 +3670,89 @@ impl AppState {
             log::warn!("parked session {session_id}: dispatch failed (process gone)");
         }
         cx.notify();
+    }
+
+    fn deliver_child_callback(
+        &mut self,
+        child_id: &str,
+        status: TurnStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(child) = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .active
+            .as_ref()
+            .filter(|child| child.meta.id == child_id)
+            .or_else(|| self.background.get(child_id))
+            .is_some_and(|child| !child.queue.is_empty())
+        {
+            return;
+        }
+        let timeline = Timeline::fold_events(self.store.read_events(child_id));
+        let turn = timeline.turns.len();
+        if self.callback_last_turn.get(child_id).copied() == Some(turn) {
+            return;
+        }
+        let parent_id = child.parent_session_id.clone().unwrap();
+        let count = self.callback_counts.entry(parent_id.clone()).or_default();
+        let first_breach = *count == ORCHESTRATE_CALLBACK_CAP;
+        if !take_callback_slot(count) {
+            if first_breach {
+                self.report_error(
+                    format!(
+                        "Orchestrate callback limit ({ORCHESTRATE_CALLBACK_CAP}) reached for thread {parent_id}; automatic callbacks stopped."
+                    ),
+                    cx,
+                );
+            }
+            return;
+        }
+        self.callback_last_turn.insert(child_id.to_string(), turn);
+        let text = assemble_callback_text(
+            child_id,
+            &child.title,
+            status,
+            &final_assistant_message(&timeline),
+        );
+        if self.active_session_id() == Some(&parent_id) {
+            let running = self
+                .active
+                .as_ref()
+                .is_some_and(|parent| parent.turn_in_flight);
+            if running {
+                self.steer(text, Vec::new(), cx);
+            } else {
+                self.send_turn(text, Vec::new(), cx);
+            }
+            return;
+        }
+        if !self.background.contains_key(&parent_id)
+            && let Some(parent) = self
+                .sessions
+                .iter()
+                .find(|meta| meta.id == parent_id)
+                .cloned()
+        {
+            self.load_background_session(parent);
+        }
+        if let Some(parent) = self.background.get_mut(&parent_id) {
+            parent.push_queued(text, Vec::new());
+            let idle_runtime = matches!(parent.runtime, Runtime::Idle);
+            let can_dispatch = !parent.turn_in_flight && !idle_runtime;
+            if can_dispatch {
+                self.on_background_turn_completed(&parent_id, cx);
+            }
+            if idle_runtime {
+                self.ensure_session_started(&parent_id, cx);
+            }
+        }
     }
 
     /// Append a user message to the session transcript. Providers don't echo
@@ -3923,10 +4454,26 @@ impl AppState {
 
     /// Spawn the provider process for the active session if it isn't running.
     fn ensure_started(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_ref() else {
+        let Some(session_id) = self.active_session_id().map(str::to_owned) else {
             return;
         };
-        if !matches!(active.runtime, Runtime::Idle) {
+        self.ensure_session_started(&session_id, cx);
+    }
+
+    /// Spawn a provider for either the foreground session or a parked child.
+    fn ensure_session_started(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let idle = self
+            .active
+            .as_ref()
+            .filter(|active| active.meta.id == session_id)
+            .map(|active| matches!(active.runtime, Runtime::Idle))
+            .or_else(|| {
+                self.background
+                    .get(session_id)
+                    .map(|active| matches!(active.runtime, Runtime::Idle))
+            })
+            .unwrap_or(false);
+        if !idle {
             return;
         }
         self.next_start_generation = self
@@ -3934,7 +4481,12 @@ impl AppState {
             .checked_add(1)
             .expect("provider start generation overflow");
         let generation = self.next_start_generation;
-        let active = self.active.as_mut().unwrap();
+        let active = self
+            .active
+            .as_mut()
+            .filter(|active| active.meta.id == session_id)
+            .or_else(|| self.background.get_mut(session_id))
+            .unwrap();
         active.runtime = Runtime::Starting { generation };
         // Remember the model + approval mode this process is being launched
         // with so a later switch can detect the mismatch and restart.
@@ -3946,6 +4498,7 @@ impl AppState {
         let settings = self.settings.clone();
         let launch_env = self.session_launch_env(&meta);
         let mcp_registration = self.mcp_registration.clone();
+        let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
             log::info!(
@@ -3958,7 +4511,13 @@ impl AppState {
         }
 
         cx.spawn(async move |this, cx| {
-            let opts = session_options(&meta, &settings, launch_env, mcp_registration);
+            let opts = session_options(
+                &meta,
+                &settings,
+                launch_env,
+                mcp_registration,
+                orchestrate_registration,
+            );
             let result = start_session(meta.provider, opts).await;
             let _ = this.update(cx, |state, cx| {
                 let matches_active = state.active.as_ref().is_some_and(|active| {
@@ -4035,6 +4594,15 @@ impl AppState {
                                 fatal: true,
                             };
                             state.record_event(&session_id, &error_event, cx);
+                            let is_child = state.sessions.iter().any(|meta| {
+                                meta.id == session_id && meta.parent_session_id.is_some()
+                            });
+                            if is_child {
+                                if let Some(child) = state.background.get_mut(&session_id) {
+                                    child.queue.clear();
+                                }
+                                state.deliver_child_callback(&session_id, TurnStatus::Failed, cx);
+                            }
                             state.report_error(message, cx);
                             cx.notify();
                         }
@@ -4060,6 +4628,7 @@ impl AppState {
         }
 
         if let AgentEvent::SessionClosed { reason } = &event {
+            self.close_orchestrator_children(session_id);
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
                 // A parked session's process died on its own (crash, fatal
@@ -4068,6 +4637,16 @@ impl AppState {
                 // forget the dead runtime.
                 if self.background.contains_key(session_id) {
                     self.record_event(session_id, &event, cx);
+                    let is_child = self
+                        .sessions
+                        .iter()
+                        .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
+                    if is_child {
+                        if let Some(child) = self.background.get_mut(session_id) {
+                            child.queue.clear();
+                        }
+                        self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+                    }
                     self.background.remove(session_id);
                     cx.notify();
                 }
@@ -4077,6 +4656,13 @@ impl AppState {
             }
 
             self.record_event(session_id, &event, cx);
+            if self
+                .sessions
+                .iter()
+                .any(|meta| meta.id == session_id && meta.parent_session_id.is_some())
+            {
+                self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+            }
             if let Some(active) = self.active.as_mut() {
                 active.runtime = Runtime::Idle;
                 active.turn_in_flight = false;
@@ -4199,6 +4785,10 @@ impl AppState {
         }
 
         self.record_event(session_id, &event, cx);
+
+        if let AgentEvent::TurnCompleted { status, .. } = &event {
+            self.deliver_child_callback(session_id, *status, cx);
+        }
 
         // Plan surfaces: a fresh proposed plan re-arms the composer's plan-ready
         // state; a new turn clears the per-turn auto-open suppression; the first
@@ -4410,10 +5000,122 @@ impl AppState {
         }
     }
 
+    fn close_orchestrator_children(&mut self, parent_id: &str) {
+        let child_ids: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.parent_session_id.as_deref() == Some(parent_id))
+            .map(|meta| meta.id.clone())
+            .collect();
+        for child_id in child_ids {
+            self.drop_background(&child_id);
+        }
+        if let Some(registration) = self.orchestrate_registrations.remove(parent_id)
+            && let Some(tokens) = &self.orchestrate_tokens
+        {
+            tokens.revoke(&registration.bearer_token);
+        }
+    }
+
     fn report_error(&mut self, message: String, cx: &mut Context<Self>) {
         log::error!("{message}");
         cx.emit(AppEvent::Error(message));
     }
+}
+
+const CLAUDE_ORCHESTRATE_GUIDANCE: &str = include_str!("../assets/orchestrate/claude.md");
+const CODEX_ORCHESTRATE_GUIDANCE: &str = include_str!("../assets/orchestrate/codex.md");
+
+fn compose_orchestrate_text(
+    provider: ProviderKind,
+    enabling: bool,
+    user_text: &str,
+) -> Option<String> {
+    if !enabling {
+        return (provider != ProviderKind::Acp).then(|| user_text.to_string());
+    }
+    let guidance = match provider {
+        ProviderKind::ClaudeCode => CLAUDE_ORCHESTRATE_GUIDANCE,
+        ProviderKind::Codex => CODEX_ORCHESTRATE_GUIDANCE,
+        ProviderKind::Acp => return None,
+    };
+    if user_text.is_empty() {
+        Some(guidance.to_string())
+    } else {
+        let separator = if guidance.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        Some(format!("{guidance}{separator}{user_text}"))
+    }
+}
+
+fn build_child_meta(
+    parent: &SessionMeta,
+    provider: ProviderKind,
+    model: Option<String>,
+    effort: Option<String>,
+    title: String,
+    cwd: PathBuf,
+) -> SessionMeta {
+    let mut meta = SessionMeta::new(provider, cwd, model);
+    meta.title = title;
+    meta.project_id = parent.project_id.clone();
+    meta.parent_session_id = Some(parent.id.clone());
+    if let Some(effort) = effort {
+        meta.option_selections.push(OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::Value::String(effort),
+        });
+    }
+    meta
+}
+
+fn final_assistant_message(timeline: &Timeline) -> String {
+    timeline
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.content {
+            EntryContent::Assistant { text } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+fn tail_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    text.chars().skip(count.saturating_sub(max)).collect()
+}
+
+fn assemble_callback_text(
+    child_id: &str,
+    title: &str,
+    status: TurnStatus,
+    final_message: &str,
+) -> String {
+    let state = match status {
+        TurnStatus::Completed => "completed",
+        TurnStatus::Failed | TurnStatus::Interrupted => "failed",
+    };
+    format!(
+        "[orchestrate] thread {child_id} (\"{title}\") {state}.\n{}",
+        truncate_chars(final_message, 4000)
+    )
+}
+
+fn take_callback_slot(count: &mut usize) -> bool {
+    if *count >= ORCHESTRATE_CALLBACK_CAP {
+        *count = count.saturating_add(1);
+        return false;
+    }
+    *count += 1;
+    true
 }
 
 /// The bare command name for a provider (fallback when no path resolves).
@@ -4808,6 +5510,7 @@ fn session_options(
     settings: &Settings,
     launch_env: LaunchEnv,
     mcp_server: Option<agent::McpRegistration>,
+    orchestrate_server: Option<agent::McpRegistration>,
 ) -> SessionOptions {
     let provider_settings = settings.provider(meta.provider);
     // For an ACP session, which agent to launch (and how) comes from the
@@ -4826,6 +5529,11 @@ fn session_options(
         option_selections: meta.option_selections.clone(),
         interaction_mode: meta.interaction_mode,
         mcp_server,
+        orchestrate_server: if meta.orchestrate_enabled {
+            orchestrate_server
+        } else {
+            None
+        },
         launch_env,
         // Claude's "Launch arguments"; an ACP agent carries its own from the
         // installed-agent card (Codex has no such field).
@@ -4911,6 +5619,69 @@ mod tests {
         assert_eq!(by_name[0].project.name, "Empty");
         assert_eq!(by_name[1].project.name, "New");
         assert_eq!(by_name[2].project.name, "Old");
+    }
+
+    #[test]
+    fn group_sessions_places_children_after_their_parent() {
+        let projects = vec![Project {
+            id: "p".into(),
+            name: "Project".into(),
+            root: PathBuf::from("/p"),
+            created_at: 1,
+        }];
+        let make = |id: &str, updated_at: u64, parent: Option<&str>| {
+            let mut meta = session_in("p", updated_at);
+            meta.id = id.into();
+            meta.parent_session_id = parent.map(str::to_string);
+            meta
+        };
+        let sessions = vec![
+            make("child-old", 10, Some("parent-new")),
+            make("parent-old", 90, None),
+            make("orphan", 95, Some("deleted-parent")),
+            make("child-new", 500, Some("parent-new")),
+            make("parent-new", 100, None),
+        ];
+
+        let groups = group_sessions(&projects, &sessions, ProjectSort::RecentActivity);
+        let ids: Vec<_> = groups[0]
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "parent-new",
+                "child-new",
+                "child-old",
+                "orphan",
+                "parent-old"
+            ]
+        );
+    }
+
+    #[test]
+    fn orchestrate_guidance_is_prepended_only_when_enabling() {
+        let first = compose_orchestrate_text(ProviderKind::ClaudeCode, true, "Ship it").unwrap();
+        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE));
+        assert!(first.ends_with("\n\nShip it"));
+        assert_eq!(
+            compose_orchestrate_text(ProviderKind::ClaudeCode, false, "Follow up"),
+            Some("Follow up".into())
+        );
+
+        let codex = compose_orchestrate_text(ProviderKind::Codex, true, "Implement").unwrap();
+        assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE));
+        assert!(codex.ends_with("\n\nImplement"));
+        assert_eq!(
+            compose_orchestrate_text(ProviderKind::Acp, true, "No"),
+            None
+        );
+        assert_eq!(
+            compose_orchestrate_text(ProviderKind::Acp, false, "No"),
+            None
+        );
     }
 
     #[test]
@@ -5006,8 +5777,8 @@ mod tests {
         settings.provider_mut(ProviderKind::ClaudeCode).binary_path =
             Some(PathBuf::from("/custom/claude"));
 
-        let codex_options = session_options(&codex, &settings, LaunchEnv::default(), None);
-        let claude_options = session_options(&claude, &settings, LaunchEnv::default(), None);
+        let codex_options = session_options(&codex, &settings, LaunchEnv::default(), None, None);
+        let claude_options = session_options(&claude, &settings, LaunchEnv::default(), None, None);
 
         assert_eq!(
             codex_options.binary_path,
@@ -5036,7 +5807,7 @@ mod tests {
             home: settings.provider(ProviderKind::ClaudeCode).effective_home(),
         };
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-        let opts = session_options(&meta, &settings, launch_env, None);
+        let opts = session_options(&meta, &settings, launch_env, None, None);
         assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
         assert_eq!(
             opts.launch_env.pairs(ProviderKind::ClaudeCode),
@@ -5055,7 +5826,7 @@ mod tests {
             home: settings.provider(ProviderKind::Codex).effective_home(),
         };
         let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-        let opts = session_options(&meta, &settings, launch_env, None);
+        let opts = session_options(&meta, &settings, launch_env, None, None);
         assert!(opts.extra_args.is_empty());
         assert_eq!(
             opts.launch_env.pairs(ProviderKind::Codex),
@@ -5111,13 +5882,86 @@ mod tests {
         let settings = Settings::default();
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
         let reg = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
             url: "http://127.0.0.1:7/mcp".into(),
             bearer_token: "tok".into(),
         };
-        let opts = session_options(&meta, &settings, LaunchEnv::default(), Some(reg));
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), Some(reg), None);
         let mcp = opts.mcp_server.expect("registration threaded through");
         assert_eq!(mcp.url, "http://127.0.0.1:7/mcp");
         assert_eq!(mcp.bearer_token, "tok");
+    }
+
+    #[test]
+    fn session_options_isolates_orchestrate_registration_by_meta_flag() {
+        let settings = Settings::default();
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
+        let registration = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
+            url: "http://127.0.0.1:8/mcp".into(),
+            bearer_token: "parent-token".into(),
+        };
+        let normal = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            None,
+            Some(registration.clone()),
+        );
+        assert!(normal.mcp_server.is_none());
+        assert!(normal.orchestrate_server.is_none());
+
+        meta.orchestrate_enabled = true;
+        let enabled = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            None,
+            Some(registration),
+        );
+        assert_eq!(
+            enabled.orchestrate_server.unwrap().name,
+            agent::McpRegistration::SERVER_NAME_ORCHESTRATE
+        );
+    }
+
+    #[test]
+    fn child_meta_links_parent_project_and_maps_effort() {
+        let mut parent = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/p"), None);
+        parent.id = "parent".into();
+        parent.project_id = Some("project".into());
+        let child = build_child_meta(
+            &parent,
+            ProviderKind::Codex,
+            Some("gpt-test".into()),
+            Some("high".into()),
+            "Research".into(),
+            PathBuf::from("/p/sub"),
+        );
+        assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(child.project_id.as_deref(), Some("project"));
+        assert_eq!(child.model.as_deref(), Some("gpt-test"));
+        assert_eq!(child.title, "Research");
+        assert_eq!(child.option_selections.len(), 1);
+        assert_eq!(child.option_selections[0].id, "reasoningEffort");
+        assert_eq!(child.option_selections[0].value, serde_json::json!("high"));
+    }
+
+    #[test]
+    fn callback_text_truncates_and_cap_stops_at_one_hundred() {
+        let text =
+            assemble_callback_text("child", "Title", TurnStatus::Completed, &"x".repeat(5000));
+        assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
+        assert_eq!(text.lines().nth(1).unwrap().chars().count(), 4000);
+        let failed = assemble_callback_text("child", "Title", TurnStatus::Interrupted, "done");
+        assert!(failed.contains(") failed.\ndone"));
+
+        let mut count = 0;
+        for _ in 0..ORCHESTRATE_CALLBACK_CAP {
+            assert!(take_callback_slot(&mut count));
+        }
+        assert!(!take_callback_slot(&mut count));
+        assert_eq!(count, ORCHESTRATE_CALLBACK_CAP + 1);
     }
 
     #[test]
