@@ -166,6 +166,8 @@ impl TurnMeta {
 pub enum EntryContent {
     User {
         text: String,
+        /// Whether this message was injected into an already-open turn.
+        steered: bool,
     },
     Assistant {
         text: String,
@@ -262,7 +264,7 @@ impl Timeline {
     /// First user message in the timeline, if any (used for session titles).
     pub fn first_user_message(&self) -> Option<&str> {
         self.entries.iter().find_map(|entry| match &entry.content {
-            EntryContent::User { text } => Some(text.as_str()),
+            EntryContent::User { text, .. } => Some(text.as_str()),
             _ => None,
         })
     }
@@ -438,7 +440,7 @@ impl Timeline {
     fn begin_user_turn(&mut self, ts: Option<u64>) -> usize {
         let need_new = match self.current_turn {
             None => true,
-            Some(turn) => self.turns[turn].end_ts.is_some(),
+            Some(turn) => self.turns[turn].end_ts.is_some() || self.turns[turn].status.is_some(),
         };
         if need_new {
             self.push_turn(ts)
@@ -453,7 +455,7 @@ impl Timeline {
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
-        let incoming = Self::content_from_item(&item.content);
+        let mut incoming = Self::content_from_item(&item.content);
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
             entry.content = merge_content(
                 std::mem::replace(&mut entry.content, incoming.clone()),
@@ -461,7 +463,13 @@ impl Timeline {
             );
         } else {
             let turn = if matches!(incoming, EntryContent::User { .. }) {
-                self.begin_user_turn(ts)
+                let turn = self.begin_user_turn(ts);
+                if let EntryContent::User { steered, .. } = &mut incoming {
+                    *steered = self.entries.iter().any(|entry| {
+                        entry.turn == turn && matches!(entry.content, EntryContent::User { .. })
+                    });
+                }
+                turn
             } else {
                 self.ensure_turn(ts)
             };
@@ -476,7 +484,10 @@ impl Timeline {
 
     fn content_from_item(content: &ItemContent) -> EntryContent {
         match content {
-            ItemContent::UserMessage { text } => EntryContent::User { text: text.clone() },
+            ItemContent::UserMessage { text } => EntryContent::User {
+                text: text.clone(),
+                steered: false,
+            },
             ItemContent::AssistantMessage { text } => {
                 EntryContent::Assistant { text: text.clone() }
             }
@@ -608,6 +619,9 @@ pub fn implement_prompt(markdown: &str) -> String {
 /// delta-accumulated text when the snapshot's text field is empty.
 fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
+        (EntryContent::User { steered, .. }, EntryContent::User { text, .. }) => {
+            EntryContent::User { text, steered }
+        }
         (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
             EntryContent::Assistant {
                 text: merge_text(old, new),
@@ -718,7 +732,7 @@ mod tests {
         assert_eq!(timeline.entries.len(), 2);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text } if text == "hi"
+            EntryContent::User { text, .. } if text == "hi"
         ));
         assert!(matches!(
             &timeline.entries[1].content,
@@ -730,6 +744,43 @@ mod tests {
         assert_eq!(timeline.model.as_deref(), Some("claude-opus-4-8"));
         assert!(timeline.resume.is_some());
         assert_eq!(timeline.first_user_message(), Some("hi"));
+    }
+
+    #[test]
+    fn fold_marks_only_mid_turn_user_messages_as_steered() {
+        let events = vec![
+            user_msg("user-a", "A"),
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "assistant-a".into(),
+                content: ItemContent::AssistantMessage {
+                    text: "working".into(),
+                },
+            }),
+            user_msg("user-b", "B"),
+            AgentEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            user_msg("user-c", "C"),
+            AgentEvent::TurnStarted {
+                turn_id: "t2".into(),
+            },
+        ];
+        let timeline = Timeline::fold_events(events);
+        let users: Vec<(&str, bool)> = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::User { text, steered } => Some((text.as_str(), *steered)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(users, vec![("A", false), ("B", true), ("C", false)]);
     }
 
     fn assistant_delta(id: &str, text: &str) -> AgentEvent {
@@ -1031,7 +1082,7 @@ mod tests {
         let u2 = timeline
             .entries
             .iter()
-            .find(|e| matches!(&e.content, EntryContent::User { text } if text == "second"))
+            .find(|e| matches!(&e.content, EntryContent::User { text, .. } if text == "second"))
             .unwrap();
         assert_eq!(u2.turn, 1);
 
