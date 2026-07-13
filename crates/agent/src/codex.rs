@@ -602,7 +602,15 @@ fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
     launch_env: &LaunchEnv,
-) -> Result<(Child, BufWriter<ChildStdin>, Receiver<ChildOutput>, StderrTail), AgentError> {
+) -> Result<
+    (
+        Child,
+        BufWriter<ChildStdin>,
+        Receiver<ChildOutput>,
+        StderrTail,
+    ),
+    AgentError,
+> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
     let mut cmd = crate::process::command(&binary);
