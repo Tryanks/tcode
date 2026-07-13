@@ -94,6 +94,58 @@ fn md_sync(synced: &str, text: &str, can_push: bool) -> MdSync {
     }
 }
 
+/// A chronological block in a turn. File-change entries are intentionally
+/// omitted: they continue to feed the turn-level CHANGED FILES aggregate.
+#[derive(Debug)]
+enum Segment<'a> {
+    ActivityRun(Vec<&'a TimelineEntry>),
+    User(&'a TimelineEntry),
+    Assistant(&'a TimelineEntry),
+    Error(&'a TimelineEntry),
+}
+
+/// Coalesce only adjacent activity entries, leaving messages and errors at
+/// their exact positions in the timeline.
+fn segment_entries<'a>(entries: &[&'a TimelineEntry]) -> Vec<Segment<'a>> {
+    let mut segments = Vec::new();
+    let mut activities = Vec::new();
+
+    let flush_activities = |segments: &mut Vec<Segment<'a>>,
+                            activities: &mut Vec<&'a TimelineEntry>| {
+        if !activities.is_empty() {
+            segments.push(Segment::ActivityRun(std::mem::take(activities)));
+        }
+    };
+
+    for entry in entries {
+        match &entry.content {
+            EntryContent::Command { .. }
+            | EntryContent::Tool { .. }
+            | EntryContent::Reasoning { .. }
+            | EntryContent::ContextCompacted => activities.push(*entry),
+            EntryContent::User { .. } => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::User(entry));
+            }
+            EntryContent::Assistant { .. } => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::Assistant(entry));
+            }
+            EntryContent::Error { .. } => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::Error(entry));
+            }
+            // Aggregate-only: file changes render in the CHANGED FILES card,
+            // not in place. They must not split an activity run either — a
+            // command → edit → command sequence is one continuous work log,
+            // not three stacked sections.
+            EntryContent::FileChange { .. } => {}
+        }
+    }
+    flush_activities(&mut segments, &mut activities);
+    segments
+}
+
 impl MdState {
     /// Mirror `text`. `streaming` marks text that is still being produced (its
     /// turn is running): it is seeded empty and pushed, so the background parse
@@ -310,7 +362,7 @@ impl ChatView {
 
     // -- turn rendering -----------------------------------------------------
 
-    /// Render one turn ("Work Log" section) and its surrounding blocks.
+    /// Render one turn as chronological messages, errors, and Work Log runs.
     ///
     /// `pinned` carries the ids of the last user / last assistant message in the
     /// whole timeline: their action rows stay visible instead of waiting for a
@@ -326,69 +378,88 @@ impl ChatView {
     ) -> AnyElement {
         let mut column = v_flex().w_full().gap_4();
 
-        // 1. User messages (right-aligned bubbles + their action row).
+        let segments = segment_entries(entries);
+        let last_assistant_id = entries.iter().rev().find_map(|entry| {
+            matches!(entry.content, EntryContent::Assistant { .. }).then_some(entry.id.as_str())
+        });
+        let last_segment_is_activity = matches!(segments.last(), Some(Segment::ActivityRun(_)));
+        let append_tail_work_log = (turn.running && !last_segment_is_activity)
+            || (segments
+                .iter()
+                .all(|segment| !matches!(segment, Segment::ActivityRun(_)))
+                && turn.duration_secs().is_some());
+        let last_activity_segment = (!append_tail_work_log)
+            .then(|| {
+                segments
+                    .iter()
+                    .rposition(|segment| matches!(segment, Segment::ActivityRun(_)))
+            })
+            .flatten();
+
         // Only the turn's FIRST user message opens it — a steered/queued message
         // can join a turn already in progress — so it alone carries the rewind
         // actions (Edit & resend / Revert), whose boundary is the turn.
         let mut head_seen = false;
-        for entry in entries {
-            if let EntryContent::User { text } = &entry.content {
-                let is_head = !head_seen;
-                head_seen = true;
-                column = column.child(self.render_user(
-                    index,
-                    &entry.id,
-                    text,
-                    is_head,
-                    pinned.0 == Some(entry.id.as_str()),
-                    cx,
-                ));
+        for (segment_index, segment) in segments.iter().enumerate() {
+            match segment {
+                Segment::ActivityRun(activities) => {
+                    let segment_id = activities[0].id.as_str();
+                    column = column.child(self.render_work_log(
+                        index,
+                        segment_id,
+                        turn,
+                        activities,
+                        last_activity_segment == Some(segment_index),
+                        cx,
+                    ));
+                }
+                Segment::User(entry) => {
+                    let EntryContent::User { text } = &entry.content else {
+                        unreachable!();
+                    };
+                    let is_head = !head_seen;
+                    head_seen = true;
+                    column = column.child(self.render_user(
+                        index,
+                        &entry.id,
+                        text,
+                        is_head,
+                        pinned.0 == Some(entry.id.as_str()),
+                        cx,
+                    ));
+                }
+                Segment::Assistant(entry) => {
+                    let EntryContent::Assistant { text } = &entry.content else {
+                        unreachable!();
+                    };
+                    let streaming =
+                        turn.running && last_assistant_id.is_some_and(|id| id == entry.id.as_str());
+                    column = column.child(self.render_assistant(
+                        &entry.id,
+                        text,
+                        pinned.1 == Some(entry.id.as_str()),
+                        !streaming,
+                        cx,
+                    ));
+                }
+                Segment::Error(entry) => {
+                    let EntryContent::Error { message } = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(self.render_error_card(&entry.id, message, cx));
+                }
             }
         }
 
-        // 2. Work Log: activity rows (commands / tools / reasoning). Errors are
-        // deliberately NOT activity: an activity row is one ellipsized line
-        // inside a section that collapses when the turn ends — an error rendered
-        // there shows a few characters of its first line and then vanishes
-        // entirely (the exact T3 Code failure this app must not inherit). Errors
-        // get their own full-text card below.
-        let activities: Vec<&TimelineEntry> = entries
-            .iter()
-            .copied()
-            .filter(|e| {
-                matches!(
-                    e.content,
-                    EntryContent::Command { .. }
-                        | EntryContent::Tool { .. }
-                        | EntryContent::Reasoning { .. }
-                        | EntryContent::ContextCompacted
-                )
-            })
-            .collect();
-        if !activities.is_empty() || turn.duration_secs().is_some() || turn.running {
-            column = column.child(self.render_work_log(index, turn, &activities, cx));
+        if append_tail_work_log {
+            let segment_id = entries
+                .last()
+                .map(|entry| format!("tail-{}", entry.id))
+                .unwrap_or_else(|| "tail".to_string());
+            column = column.child(self.render_work_log(index, &segment_id, turn, &[], true, cx));
         }
 
-        // 2b. Error cards: full message, wrapped, never collapsed, copyable.
-        for entry in entries {
-            if let EntryContent::Error { message } = &entry.content {
-                column = column.child(self.render_error_card(&entry.id, message, cx));
-            }
-        }
-
-        // 3. Assistant markdown.
-        for entry in entries {
-            if let EntryContent::Assistant { text } = &entry.content {
-                column = column.child(self.render_assistant(
-                    &entry.id,
-                    text,
-                    pinned.1 == Some(entry.id.as_str()),
-                    cx,
-                ));
-            }
-        }
-
-        // 3b. Proposed-plan card (the captured plan for this turn).
+        // Proposed-plan card (the captured plan for this turn).
         if let Some((item_id, markdown)) = {
             let state = self.app_state.read(cx);
             state
@@ -561,6 +632,7 @@ impl ChatView {
         id: &str,
         text: &str,
         pinned: bool,
+        show_actions: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let content: AnyElement = if let Some(md) = self.md_states.get(id) {
@@ -568,24 +640,25 @@ impl ChatView {
         } else {
             div().child(text.to_string()).into_any_element()
         };
+        let message = v_flex().w_full().items_start().gap(px(2.)).child(
+            div()
+                .w_full()
+                .text_size(px(15.))
+                .line_height(px(26.))
+                .child(content),
+        );
+
+        if !show_actions {
+            return message.into_any_element();
+        }
+
         let group_key = SharedString::from(format!("assistant-{id}"));
         let actions = h_flex()
             .gap_1()
             .items_center()
             .child(self.render_copy_button(&format!("assistant:{id}"), text.to_string(), cx));
-
-        v_flex()
+        message
             .group(group_key.clone())
-            .w_full()
-            .items_start()
-            .gap(px(2.))
-            .child(
-                div()
-                    .w_full()
-                    .text_size(px(15.))
-                    .line_height(px(26.))
-                    .child(content),
-            )
             .child(self.reserve_action_row(actions, group_key, pinned))
             .into_any_element()
     }
@@ -830,20 +903,23 @@ impl ChatView {
     fn render_work_log(
         &self,
         index: usize,
+        segment_id: &str,
         turn: &TurnMeta,
         activities: &[&TimelineEntry],
+        is_last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let section_key = format!("worklog-{index}");
-        let rows_key = format!("worklog-rows-{index}");
-        // Finished turns collapse by default; running turns are always open.
-        let expanded = turn.running || self.expanded.contains(&section_key);
+        let section_key = format!("worklog-{index}-{segment_id}");
+        let rows_key = format!("worklog-rows-{index}-{segment_id}");
+        let running = is_last && turn.running;
+        // Only the final segment can be live; finished segments collapse by default.
+        let expanded = running || self.expanded.contains(&section_key);
         let muted = cx.theme().muted_foreground;
 
         let mut section = v_flex().w_full().gap_2();
 
         if expanded {
-            if !turn.running {
+            if !running {
                 section = section.child(
                     div()
                         .text_size(px(11.))
@@ -869,7 +945,9 @@ impl ChatView {
             if !rows_expanded && hidden > 0 {
                 section = section.child(
                     h_flex()
-                        .id(("worklog-more", index))
+                        .id(SharedString::from(format!(
+                            "worklog-more-{index}-{segment_id}"
+                        )))
                         .gap_1()
                         .items_center()
                         .py_0p5()
@@ -887,7 +965,7 @@ impl ChatView {
         }
 
         // Footer: live "Working" indicator, or the toggleable "Worked for" row.
-        if turn.running {
+        if running {
             let secs = turn
                 .start_ts
                 .map(|start| now_millis().saturating_sub(start) / 1000)
@@ -905,7 +983,7 @@ impl ChatView {
                     )),
             );
         } else {
-            let label = match turn.duration_secs() {
+            let label = match is_last.then(|| turn.duration_secs()).flatten() {
                 Some(secs) => {
                     rust_i18n::t!("chat.worked_for", duration = format_duration(secs)).into_owned()
                 }
@@ -913,7 +991,9 @@ impl ChatView {
             };
             section = section.child(
                 h_flex()
-                    .id(("worklog-footer", index))
+                    .id(SharedString::from(format!(
+                        "worklog-footer-{index}-{segment_id}"
+                    )))
                     .gap_1()
                     .items_center()
                     .text_size(px(13.))
@@ -2190,10 +2270,118 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MdState, MdSync, copy_payload, md_sync, relativize};
+    use super::{MdState, MdSync, Segment, copy_payload, md_sync, relativize, segment_entries};
+    use crate::session::{EntryContent, TimelineEntry};
+    use agent::ItemStatus;
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::text::TextViewState;
     use std::path::Path;
+
+    fn entry(id: &str, content: EntryContent) -> TimelineEntry {
+        TimelineEntry {
+            id: id.to_string(),
+            content,
+            ts: None,
+            turn: 0,
+        }
+    }
+
+    fn command(id: &str) -> TimelineEntry {
+        entry(
+            id,
+            EntryContent::Command {
+                command: id.to_string(),
+                output: String::new(),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            },
+        )
+    }
+
+    #[test]
+    fn segment_entries_preserves_interleaved_timeline_order() {
+        let entries = [
+            entry("user", EntryContent::User { text: "go".into() }),
+            command("cmd-1"),
+            command("cmd-2"),
+            entry(
+                "assistant-1",
+                EntryContent::Assistant {
+                    text: "first".into(),
+                },
+            ),
+            command("cmd-3"),
+            entry(
+                "assistant-2",
+                EntryContent::Assistant {
+                    text: "second".into(),
+                },
+            ),
+            entry(
+                "error",
+                EntryContent::Error {
+                    message: "boom".into(),
+                },
+            ),
+        ];
+        let refs = entries.iter().collect::<Vec<_>>();
+        let segments = segment_entries(&refs);
+
+        assert_eq!(segments.len(), 6);
+        assert!(matches!(segments[0], Segment::User(entry) if entry.id == "user"));
+        assert!(matches!(
+            &segments[1],
+            Segment::ActivityRun(entries)
+                if entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["cmd-1", "cmd-2"]
+        ));
+        assert!(matches!(segments[2], Segment::Assistant(entry) if entry.id == "assistant-1"));
+        assert!(matches!(
+            &segments[3],
+            Segment::ActivityRun(entries)
+                if entries.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["cmd-3"]
+        ));
+        assert!(matches!(segments[4], Segment::Assistant(entry) if entry.id == "assistant-2"));
+        assert!(matches!(segments[5], Segment::Error(entry) if entry.id == "error"));
+    }
+
+    #[test]
+    fn segment_entries_coalesces_an_all_activity_turn() {
+        let entries = [command("cmd-1"), command("cmd-2")];
+        let refs = entries.iter().collect::<Vec<_>>();
+        let segments = segment_entries(&refs);
+
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::ActivityRun(entries)] if entries.len() == 2
+        ));
+    }
+
+    #[test]
+    fn segment_entries_handles_an_empty_turn() {
+        assert!(segment_entries(&[]).is_empty());
+    }
+
+    /// A file edit between two commands is one continuous work log — FileChange
+    /// entries are aggregate-only (CHANGED FILES card) and must be transparent
+    /// to activity adjacency, not split the run into stacked sections.
+    #[test]
+    fn segment_entries_keeps_activity_runs_continuous_across_file_changes() {
+        let entries = [
+            command("cmd-1"),
+            entry("edit", EntryContent::FileChange { changes: vec![] }),
+            command("cmd-2"),
+        ];
+        let refs = entries.iter().collect::<Vec<_>>();
+        let segments = segment_entries(&refs);
+
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::ActivityRun(run)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["cmd-1", "cmd-2"]
+        ));
+    }
 
     /// A message's Copy action puts the RAW text on the clipboard — the markdown
     /// source, not the document the timeline renders from it (which drops the
