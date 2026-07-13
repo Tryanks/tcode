@@ -28,7 +28,6 @@ const TERMINAL_FONT_FAMILY: &str = "DejaVu Sans Mono";
 const PANE_PADDING_X: f32 = 8.;
 const PANE_PADDING_Y: f32 = 5.;
 const PANE_BORDER: f32 = 1.;
-const SELECTION_ACTION_HEIGHT: f32 = 28.;
 
 #[derive(Clone, Copy)]
 struct GridGeometry {
@@ -37,7 +36,6 @@ struct GridGeometry {
     rows: usize,
     cell_width: f32,
     cell_height: f32,
-    content_top: f32,
 }
 
 pub struct TerminalDrawer {
@@ -208,11 +206,8 @@ impl TerminalDrawer {
         let geometry = *self.grid_bounds.borrow().get(&terminal_id)?;
         let x =
             (f32::from(position.x - geometry.bounds.left()) - PANE_BORDER - PANE_PADDING_X).max(0.);
-        let y = (f32::from(position.y - geometry.bounds.top())
-            - PANE_BORDER
-            - PANE_PADDING_Y
-            - geometry.content_top)
-            .max(0.);
+        let y =
+            (f32::from(position.y - geometry.bounds.top()) - PANE_BORDER - PANE_PADDING_Y).max(0.);
         Some((
             ((y / geometry.cell_height) as usize).min(geometry.rows.saturating_sub(1)),
             ((x / geometry.cell_width) as usize).min(geometry.cols.saturating_sub(1)),
@@ -332,13 +327,10 @@ impl TerminalDrawer {
             );
         }
 
+        // The add-to-context button is a pure overlay: it must never affect the
+        // grid's geometry. Reserving space for it while a selection exists
+        // resized the PTY mid-drag — rows jumped and blank lines appeared.
         let has_selection = snapshot.cells.iter().any(|cell| cell.selected);
-        let content_top = if has_selection {
-            SELECTION_ACTION_HEIGHT
-        } else {
-            0.
-        };
-        grid = grid.when(has_selection, |grid| grid.pt(px(SELECTION_ACTION_HEIGHT)));
         let grid_bounds = self.grid_bounds.clone();
         let app_state = self.app_state.clone();
         let cell_width = self.cell_width;
@@ -369,9 +361,8 @@ impl TerminalDrawer {
             .on_prepaint(move |bounds, _window, cx| {
                 let content_width =
                     f32::from(bounds.size.width) - 2. * (PANE_BORDER + PANE_PADDING_X);
-                let content_height = f32::from(bounds.size.height)
-                    - 2. * (PANE_BORDER + PANE_PADDING_Y)
-                    - content_top;
+                let content_height =
+                    f32::from(bounds.size.height) - 2. * (PANE_BORDER + PANE_PADDING_Y);
                 let cols = (content_width / cell_width).floor().max(2.) as usize;
                 let rows = (content_height / cell_height).floor().max(2.) as usize;
                 grid_bounds.borrow_mut().insert(
@@ -382,7 +373,6 @@ impl TerminalDrawer {
                         rows,
                         cell_width,
                         cell_height,
-                        content_top,
                     },
                 );
                 if let Some(entry) = app_state
