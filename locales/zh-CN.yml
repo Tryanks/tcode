@@ -6,6 +6,8 @@ chat:
   work_log: "工作日志"
   context_compacted: "上下文已压缩"
   previous_logs: "前面还有 %{count} 条日志"
+  subagent_count: "%{count} 个子代理"
+  earlier_steps_truncated: "+更早的步骤已截断"
   working_for: "已工作 %{duration}"
   worked_for: "工作了 %{duration}"
   worked: "已完成"

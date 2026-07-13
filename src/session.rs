@@ -3,7 +3,7 @@
 //! The same fold is used for live event streams and for JSONL replay, so the
 //! UI renders identically in both cases.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use agent::{
     AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, PlanStep,
@@ -222,6 +222,8 @@ pub struct Timeline {
     pub entries: Vec<TimelineEntry>,
     /// Child activity grouped by the top-level subagent spawn item id.
     pub children: HashMap<String, Vec<TimelineEntry>>,
+    /// Parent ids whose child activity exceeded the in-memory progress cap.
+    truncated_children: HashSet<String>,
     /// One entry per turn ("Work Log" section), in order.
     pub turns: Vec<TurnMeta>,
     pub turn_running: bool,
@@ -252,6 +254,10 @@ impl Timeline {
     #[allow(dead_code)]
     pub fn children(&self, parent_id: &str) -> &[TimelineEntry] {
         self.children.get(parent_id).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn children_truncated(&self, parent_id: &str) -> bool {
+        self.truncated_children.contains(parent_id)
     }
 
     /// Fold a whole event sequence (replay path). Accepts either bare
@@ -504,6 +510,7 @@ impl Timeline {
                 });
                 if children.len() > 200 {
                     children.remove(0);
+                    self.truncated_children.insert(parent_id.clone());
                 }
             }
             return;
@@ -1378,6 +1385,26 @@ mod tests {
             &timeline.children("spawn")[0].content,
             EntryContent::User { text, .. } if text == "ping"
         ));
+    }
+
+    #[test]
+    fn subagent_child_cap_records_actual_truncation() {
+        let mut timeline = Timeline::default();
+        for index in 0..=200 {
+            timeline.apply_at(
+                None,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: format!("spawn:child-{index}"),
+                    parent_item_id: Some("spawn".into()),
+                    content: ItemContent::AssistantMessage {
+                        text: index.to_string(),
+                    },
+                }),
+            );
+        }
+        assert_eq!(timeline.children("spawn").len(), 200);
+        assert!(timeline.children_truncated("spawn"));
+        assert_eq!(timeline.children("spawn")[0].id, "spawn:child-1");
     }
 
     #[test]
