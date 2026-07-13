@@ -397,12 +397,8 @@ async fn run_actor(
     events: Sender<AgentEvent>,
     ready: Sender<Result<(), AgentError>>,
 ) {
-    // Register the embedded preview MCP server (streamable HTTP) via a `-c`
-    // config override so the agent can drive the in-app browser.
-    let mut extra_args: Vec<String> = match &opts.mcp_server {
-        Some(mcp) => vec!["-c".to_string(), mcp.codex_config_override()],
-        None => Vec::new(),
-    };
+    // Register tcode's enabled streamable-HTTP MCP servers via `-c` overrides.
+    let mut extra_args = mcp_args(opts.mcp_server.as_ref(), opts.orchestrate_server.as_ref());
     // Any additional launch arguments configured for this provider.
     extra_args.extend(opts.extra_args.iter().cloned());
     let (mut child, mut stdin, lines, mut stderr_tail) =
@@ -530,6 +526,17 @@ async fn run_actor(
         })
         .await
         .ok();
+}
+
+fn mcp_args(
+    preview: Option<&crate::McpRegistration>,
+    orchestrate: Option<&crate::McpRegistration>,
+) -> Vec<String> {
+    [preview, orchestrate]
+        .into_iter()
+        .flatten()
+        .flat_map(|mcp| ["-c".to_string(), mcp.codex_config_override()])
+        .collect()
 }
 
 /// Rolling tail of the child's stderr. Once the process dies its own last
@@ -1939,6 +1946,28 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_builder_handles_both_one_and_none() {
+        let preview = crate::McpRegistration {
+            name: "tcode_preview".into(),
+            url: "http://p".into(),
+            bearer_token: "p".into(),
+        };
+        let orchestrate = crate::McpRegistration {
+            name: "tcode_orchestrate".into(),
+            url: "http://o".into(),
+            bearer_token: "o".into(),
+        };
+        assert!(mcp_args(None, None).is_empty());
+        let one = mcp_args(Some(&preview), None);
+        assert_eq!(one.len(), 2);
+        assert!(one[1].starts_with("mcp_servers.tcode_preview="));
+        let both = mcp_args(Some(&preview), Some(&orchestrate));
+        assert_eq!(both.len(), 4);
+        assert!(both[1].starts_with("mcp_servers.tcode_preview="));
+        assert!(both[3].starts_with("mcp_servers.tcode_orchestrate="));
+    }
 
     fn test_actor() -> (Actor, Receiver<AgentEvent>) {
         let mut child = crate::process::command("cat")

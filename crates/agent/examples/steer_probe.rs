@@ -60,6 +60,7 @@ fn main() {
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::Build,
             mcp_server: None,
+            orchestrate_server: None,
             launch_env: Default::default(),
             extra_args: Vec::new(),
             acp: None,

@@ -124,6 +124,9 @@ pub struct SessionOptions {
     /// Codex: `-c mcp_servers.tcode_preview=…`) so the agent can drive the
     /// embedded preview browser. `None` = don't register any preview tooling.
     pub mcp_server: Option<McpRegistration>,
+    /// The tcode orchestrator MCP server, scoped to this parent session by its
+    /// bearer token. Only orchestrate-enabled sessions receive it.
+    pub orchestrate_server: Option<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
     /// into the child's environment, plus the home-directory override. See
     /// [`LaunchEnv`].
@@ -175,6 +178,8 @@ impl LaunchEnv {
 /// provider maps it onto its native MCP-server config shape.
 #[derive(Debug, Clone)]
 pub struct McpRegistration {
+    /// MCP server name (and tool namespace).
+    pub name: String,
     /// Streamable-HTTP endpoint, e.g. `http://127.0.0.1:53211/mcp`.
     pub url: String,
     /// Bearer token presented on every request (`Authorization: Bearer <token>`).
@@ -182,25 +187,20 @@ pub struct McpRegistration {
 }
 
 impl McpRegistration {
-    /// The MCP server name registered with agents (also the tool namespace).
-    pub const SERVER_NAME: &'static str = "tcode_preview";
+    pub const SERVER_NAME_PREVIEW: &'static str = "tcode_preview";
+    pub const SERVER_NAME_ORCHESTRATE: &'static str = "tcode_orchestrate";
 
     /// Claude Code `--mcp-config` JSON: a single `mcpServers` map entry for an
     /// HTTP server carrying the bearer token as an `Authorization` header.
     /// Verified shape for `claude` 2.1.x (`.mcp.json` `type: "http"`).
-    pub fn claude_mcp_config_json(&self) -> String {
-        let value = serde_json::json!({
-            "mcpServers": {
-                Self::SERVER_NAME: {
+    pub fn claude_mcp_entry(&self) -> serde_json::Value {
+        serde_json::json!({
                     "type": "http",
                     "url": self.url,
                     "headers": {
                         "Authorization": format!("Bearer {}", self.bearer_token),
                     }
-                }
-            }
-        });
-        value.to_string()
+        })
     }
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
@@ -211,11 +211,22 @@ impl McpRegistration {
         // TOML basic strings; our url/token are ASCII with no quotes/backslashes.
         format!(
             "mcp_servers.{name}={{url=\"{url}\",http_headers={{Authorization=\"Bearer {token}\"}}}}",
-            name = Self::SERVER_NAME,
+            name = self.name,
             url = self.url,
             token = self.bearer_token,
         )
     }
+}
+
+/// Claude Code `--mcp-config` JSON containing every supplied registration.
+pub fn claude_mcp_config_json<'a>(
+    registrations: impl IntoIterator<Item = &'a McpRegistration>,
+) -> String {
+    let servers: serde_json::Map<String, serde_json::Value> = registrations
+        .into_iter()
+        .map(|registration| (registration.name.clone(), registration.claude_mcp_entry()))
+        .collect();
+    serde_json::json!({ "mcpServers": servers }).to_string()
 }
 
 /// One model a provider offers, with its selectable options (T3-style descriptors).
@@ -873,6 +884,7 @@ mod mcp_registration_tests {
 
     fn reg() -> McpRegistration {
         McpRegistration {
+            name: McpRegistration::SERVER_NAME_PREVIEW.into(),
             url: "http://127.0.0.1:53211/mcp".into(),
             bearer_token: "abc123".into(),
         }
@@ -880,8 +892,9 @@ mod mcp_registration_tests {
 
     #[test]
     fn claude_mcp_config_json_shape() {
+        let registration = reg();
         let json: serde_json::Value =
-            serde_json::from_str(&reg().claude_mcp_config_json()).unwrap();
+            serde_json::from_str(&claude_mcp_config_json([&registration])).unwrap();
         let server = &json["mcpServers"]["tcode_preview"];
         assert_eq!(server["type"], "http");
         assert_eq!(server["url"], "http://127.0.0.1:53211/mcp");

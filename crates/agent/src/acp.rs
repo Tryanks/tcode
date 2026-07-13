@@ -407,17 +407,21 @@ async fn handshake(
     };
 
     let caps = init.agent_capabilities.clone();
-    // Capability gate: our preview MCP server is a loopback streamable-HTTP
-    // endpoint, so it may only be offered to agents that speak MCP over HTTP.
-    let mcp_servers = mcp_servers(opts.mcp_server.as_ref(), &caps);
-    if opts.mcp_server.is_some() && mcp_servers.is_empty() {
+    // Capability gate: tcode's MCP servers are loopback streamable-HTTP
+    // endpoints, so they may only be offered to agents that speak MCP over HTTP.
+    let registrations: Vec<_> = [&opts.mcp_server, &opts.orchestrate_server]
+        .into_iter()
+        .flatten()
+        .collect();
+    let mcp_servers = mcp_servers(&registrations, &caps);
+    if !registrations.is_empty() && mcp_servers.is_empty() {
         log::info!(
-            "acp[{}]: no mcpCapabilities.http; the preview MCP server is not registered",
+            "acp[{}]: no mcpCapabilities.http; tcode MCP servers are not registered",
             agent.id
         );
         let _ = events
             .send(AgentEvent::Warning(format!(
-                "{} does not support HTTP MCP servers; the preview-browser tools are unavailable in this session",
+                "{} does not support HTTP MCP servers; tcode MCP tools are unavailable in this session",
                 agent.name
             )))
             .await;
@@ -636,20 +640,24 @@ fn describe(err: &acp::Error) -> String {
     }
 }
 
-/// The `mcpServers` array for `session/new` — our preview server, but only when
-/// the agent advertises `mcpCapabilities.http`.
+/// The `mcpServers` array for `session/new`, gated on `mcpCapabilities.http`.
 pub(crate) fn mcp_servers(
-    registration: Option<&McpRegistration>,
+    registrations: &[&McpRegistration],
     caps: &acp::AgentCapabilities,
 ) -> Vec<acp::McpServer> {
-    match registration {
-        Some(mcp) if caps.mcp_capabilities.http => vec![acp::McpServer::Http(
-            acp::McpServerHttp::new(McpRegistration::SERVER_NAME, mcp.url.clone()).headers(vec![
-                acp::HttpHeader::new("Authorization", format!("Bearer {}", mcp.bearer_token)),
-            ]),
-        )],
-        _ => Vec::new(),
+    if !caps.mcp_capabilities.http {
+        return Vec::new();
     }
+    registrations
+        .iter()
+        .map(|mcp| {
+            acp::McpServer::Http(
+                acp::McpServerHttp::new(mcp.name.clone(), mcp.url.clone()).headers(vec![
+                    acp::HttpHeader::new("Authorization", format!("Bearer {}", mcp.bearer_token)),
+                ]),
+            )
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2173,17 +2181,18 @@ mod tests {
     #[test]
     fn mcp_server_is_gated_on_the_http_capability() {
         let registration = McpRegistration {
+            name: McpRegistration::SERVER_NAME_PREVIEW.into(),
             url: "http://127.0.0.1:5321/mcp".into(),
             bearer_token: "tok".into(),
         };
         let mut caps = acp::AgentCapabilities::default();
         assert!(
-            mcp_servers(Some(&registration), &caps).is_empty(),
+            mcp_servers(&[&registration], &caps).is_empty(),
             "an agent without mcpCapabilities.http must not be sent the HTTP server"
         );
 
         caps.mcp_capabilities.http = true;
-        let servers = mcp_servers(Some(&registration), &caps);
+        let servers = mcp_servers(&[&registration], &caps);
         let value = serde_json::to_value(&servers[0]).unwrap();
         assert_eq!(value["type"], "http");
         assert_eq!(value["name"], "tcode_preview");
@@ -2192,7 +2201,15 @@ mod tests {
         assert_eq!(value["headers"][0]["value"], "Bearer tok");
 
         // No preview server running → nothing to send, capability or not.
-        assert!(mcp_servers(None, &caps).is_empty());
+        assert!(mcp_servers(&[], &caps).is_empty());
+
+        let orchestrate = McpRegistration {
+            name: McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
+            url: "http://127.0.0.1:5321/mcp".into(),
+            bearer_token: "other".into(),
+        };
+        assert_eq!(mcp_servers(&[&registration, &orchestrate], &caps).len(), 2);
+        assert_eq!(mcp_servers(&[&orchestrate], &caps).len(), 1);
     }
 
     #[test]

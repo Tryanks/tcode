@@ -5447,6 +5447,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "orchestrate-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "axum",
+ "log",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ordered-float"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7998,6 +8013,7 @@ dependencies = [
  "gpui_platform",
  "lb-wry",
  "log",
+ "orchestrate-mcp",
  "preview-mcp",
  "raw-window-handle",
  "rust-i18n",
