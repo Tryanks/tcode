@@ -16,6 +16,7 @@
 
 /// Printed by the shell before `env -0` so config-file noise on stdout can be
 /// discarded (some rc files `echo` unconditionally).
+#[cfg(unix)]
 const MARKER: &str = "__TCODE_LOGIN_SHELL_ENV__";
 
 /// How long the login shell gets to start and dump its environment. Generous —
@@ -26,6 +27,7 @@ const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Session-local vars the shell reports that describe *its* session, not the
 /// user's configuration; importing them would be meaningless or misleading.
+#[cfg(unix)]
 const SKIP_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_", "PS1", "PROMPT"];
 
 /// Merge the login shell's environment into this process. Must be called from
@@ -100,6 +102,7 @@ fn default_shell() -> &'static str {
 }
 
 /// Extract the `env -0` block after [`MARKER`] into key/value pairs.
+#[cfg(unix)]
 fn parse_env_output(stdout: &str) -> Vec<(String, String)> {
     let Some((_, tail)) = stdout.split_once(MARKER) else {
         return Vec::new();
@@ -128,7 +131,7 @@ fn apply(vars: Vec<(String, String)>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
