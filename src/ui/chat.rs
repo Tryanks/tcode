@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::ops::Range;
 use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
 use agent::{FileChange, ItemStatus};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, Focusable as _,
+    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -106,7 +108,7 @@ enum Segment<'a> {
 
 /// Coalesce only adjacent activity entries, leaving messages and errors at
 /// their exact positions in the timeline.
-fn segment_entries<'a>(entries: &[&'a TimelineEntry]) -> Vec<Segment<'a>> {
+fn segment_entries<'a>(entries: &'a [TimelineEntry]) -> Vec<Segment<'a>> {
     let mut segments = Vec::new();
     let mut activities = Vec::new();
 
@@ -122,7 +124,7 @@ fn segment_entries<'a>(entries: &[&'a TimelineEntry]) -> Vec<Segment<'a>> {
             EntryContent::Command { .. }
             | EntryContent::Tool { .. }
             | EntryContent::Reasoning { .. }
-            | EntryContent::ContextCompacted => activities.push(*entry),
+            | EntryContent::ContextCompacted => activities.push(entry),
             EntryContent::User { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::User(entry));
@@ -144,6 +146,165 @@ fn segment_entries<'a>(entries: &[&'a TimelineEntry]) -> Vec<Segment<'a>> {
     }
     flush_activities(&mut segments, &mut activities);
     segments
+}
+
+/// Cached indexing and cheap height-affecting identity for one virtualized turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnListItem {
+    entry_range: Range<usize>,
+    entry_count: usize,
+    identity: u64,
+    content: u64,
+}
+
+/// Mutation to apply to the persistent [`ListState`] after a timeline sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListSync {
+    None,
+    Reset {
+        count: usize,
+    },
+    Incremental {
+        append: Option<Range<usize>>,
+        remeasure: Vec<usize>,
+    },
+}
+
+/// Build contiguous entry ranges and fingerprints for turn-level list items.
+///
+/// Timeline entries are chronological, so all entries for a turn are adjacent.
+/// The max entry turn keeps a temporary orphan bucket renderable if a provider
+/// ever exposes an entry before its corresponding `TurnMeta`.
+fn index_turns(
+    turns: &[TurnMeta],
+    entries: &[TimelineEntry],
+    proposed_plan: Option<(usize, &str, &str)>,
+) -> Vec<TurnListItem> {
+    debug_assert!(entries.windows(2).all(|pair| pair[0].turn <= pair[1].turn));
+
+    let item_count = turns
+        .len()
+        .max(entries.last().map_or(0, |entry| entry.turn + 1));
+    let mut ranges = vec![entries.len()..entries.len(); item_count];
+    for (index, entry) in entries.iter().enumerate() {
+        let range = &mut ranges[entry.turn];
+        if range.start == entries.len() {
+            range.start = index;
+        }
+        range.end = index + 1;
+    }
+
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry_range)| {
+            let mut identity = DefaultHasher::new();
+            let mut content = DefaultHasher::new();
+            for entry in &entries[entry_range.clone()] {
+                entry.id.hash(&mut identity);
+                std::mem::discriminant(&entry.content).hash(&mut content);
+                entry.ts.hash(&mut content);
+                hash_entry_shape(&entry.content, &mut content);
+            }
+            if let Some(turn) = turns.get(index) {
+                turn.start_ts.hash(&mut content);
+                turn.end_ts.hash(&mut content);
+                turn.running.hash(&mut content);
+                turn.status
+                    .as_ref()
+                    .map(std::mem::discriminant)
+                    .hash(&mut content);
+            }
+            if let Some((turn, item_id, markdown)) = proposed_plan
+                && turn == index
+            {
+                item_id.hash(&mut identity);
+                markdown.len().hash(&mut content);
+            }
+            TurnListItem {
+                entry_count: entry_range.len(),
+                entry_range,
+                identity: identity.finish(),
+                content: content.finish(),
+            }
+        })
+        .collect()
+}
+
+/// Hash only data that can alter a turn's layout. Text lengths make streaming
+/// updates O(number of entries) without repeatedly hashing growing markdown.
+fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
+    match content {
+        EntryContent::User { text, steered } => {
+            text.len().hash(hash);
+            steered.hash(hash);
+        }
+        EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
+            text.len().hash(hash);
+        }
+        EntryContent::Command {
+            command,
+            output,
+            exit_code,
+            status,
+        } => {
+            command.len().hash(hash);
+            output.len().hash(hash);
+            exit_code.hash(hash);
+            std::mem::discriminant(status).hash(hash);
+        }
+        EntryContent::FileChange { changes } => {
+            changes.len().hash(hash);
+            for change in changes {
+                change.path.len().hash(hash);
+                change.diff.as_ref().map(String::len).hash(hash);
+            }
+        }
+        EntryContent::Tool {
+            name,
+            input,
+            output,
+            status,
+        } => {
+            name.len().hash(hash);
+            input.to_string().len().hash(hash);
+            output.as_ref().map(String::len).hash(hash);
+            std::mem::discriminant(status).hash(hash);
+        }
+        EntryContent::Error { message } => message.len().hash(hash),
+        EntryContent::ContextCompacted => {}
+    }
+}
+
+fn list_sync(old: &[TurnListItem], new: &[TurnListItem], session_changed: bool) -> ListSync {
+    let common = old.len().min(new.len());
+    let replaced = (0..common).any(|index| {
+        let old = &old[index];
+        let new = &new[index];
+        new.entry_count < old.entry_count
+            || (new.entry_count == old.entry_count && new.identity != old.identity)
+    });
+    if session_changed || new.len() < old.len() || replaced {
+        return ListSync::Reset { count: new.len() };
+    }
+
+    let append = (new.len() > old.len()).then_some(old.len()..new.len());
+    let mut remeasure = (0..common)
+        .filter(|&index| {
+            old[index].entry_count != new[index].entry_count
+                || old[index].content != new[index].content
+        })
+        .collect::<Vec<_>>();
+    // The former last item gains an inter-turn gap when a new turn appears.
+    if append.is_some() && !old.is_empty() && !remeasure.contains(&(old.len() - 1)) {
+        remeasure.push(old.len() - 1);
+    }
+
+    if append.is_none() && remeasure.is_empty() {
+        ListSync::None
+    } else {
+        ListSync::Incremental { append, remeasure }
+    }
 }
 
 impl MdState {
@@ -198,17 +359,14 @@ pub struct ChatView {
     app_state: Entity<AppState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
-    scroll_handle: ScrollHandle,
+    list_state: ListState,
+    turn_items: Vec<TurnListItem>,
     md_states: HashMap<String, MdState>,
     /// The open inline message editor, if any (at most one at a time).
     editor: Option<MessageEditor>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
     session_key: Option<String>,
-    /// Whether the timeline follows streaming output to the bottom. Engaged on
-    /// submit and whenever the user scrolls back near the bottom; disengaged
-    /// when the user scrolls up to read earlier content.
-    follow: bool,
     /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
     _tick: Option<Task<()>>,
     /// Which copy button is currently showing its "Copied!" confirmation (2s):
@@ -223,15 +381,15 @@ pub struct ChatView {
 impl ChatView {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| Composer::new(app_state.clone(), window, cx));
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(1024.));
+        list_state.set_follow_mode(FollowMode::Tail);
 
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, event, cx| {
                 let ComposerEvent::Submitted = event;
-                // Force the timeline to the bottom and (re)engage follow-mode so
-                // the streaming reply stays visible even if the user had
-                // scrolled up before sending.
-                this.follow = true;
-                this.scroll_handle.scroll_to_bottom();
+                // Re-engage tail following even if the user had scrolled up.
+                this.list_state.set_follow_mode(FollowMode::Tail);
+                this.list_state.scroll_to_end();
                 cx.notify();
             }),
             cx.observe(&app_state, |this, _, cx| {
@@ -249,22 +407,24 @@ impl ChatView {
         ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(app_state.clone(), cx));
 
-        Self {
+        let mut this = Self {
             app_state,
             composer,
             terminal_drawer,
-            scroll_handle: ScrollHandle::new(),
+            list_state,
+            turn_items: Vec::new(),
             md_states: HashMap::new(),
             editor: None,
             expanded: HashSet::new(),
             session_key: None,
-            follow: true,
             _tick: None,
             copied: None,
             _copied_task: None,
             commit_dialog: None,
             _subscriptions: subscriptions,
-        }
+        };
+        this.sync_markdown_states(cx);
+        this
     }
 
     /// Mirror timeline markdown text into `TextViewState` entities, growing
@@ -272,14 +432,23 @@ impl ChatView {
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
         // (id, text, streaming): `streaming` marks text whose turn is still
         // running, i.e. text that further deltas will grow.
-        let (session_key, texts, running) = {
+        let (session_key, texts, running, turn_items) = {
             let state = self.app_state.read(cx);
             let session_key = state.active_session_id().map(str::to_string);
             let mut texts: Vec<(String, String, bool)> = Vec::new();
             let mut running = false;
+            let mut turn_items = Vec::new();
             if let Some(active) = &state.active {
                 let timeline = &active.timeline;
                 running = timeline.turn_running;
+                turn_items = index_turns(
+                    &timeline.turns,
+                    &timeline.entries,
+                    timeline
+                        .proposed_plan
+                        .as_ref()
+                        .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
+                );
                 let turn_running =
                     |turn: usize| timeline.turns.get(turn).is_some_and(|t| t.running);
                 for entry in &timeline.entries {
@@ -299,17 +468,38 @@ impl ChatView {
                     ));
                 }
             }
-            (session_key, texts, running)
+            (session_key, texts, running, turn_items)
         };
 
         let session_changed = session_key != self.session_key;
+        let list_sync = list_sync(&self.turn_items, &turn_items, session_changed);
         if session_changed {
             self.md_states.clear();
             self.expanded.clear();
             self.editor = None;
             self.session_key = session_key;
-            // A freshly opened session starts pinned to the latest content.
-            self.follow = true;
+        }
+        self.turn_items = turn_items;
+
+        match list_sync {
+            ListSync::None => {}
+            ListSync::Reset { count } => {
+                self.list_state.reset(count);
+                if session_changed {
+                    // Reset also clears stale item focus handles. A newly opened
+                    // session always starts actively following its tail.
+                    self.list_state.set_follow_mode(FollowMode::Tail);
+                }
+            }
+            ListSync::Incremental { append, remeasure } => {
+                if let Some(range) = append {
+                    let count = range.len();
+                    self.list_state.splice(range.start..range.start, count);
+                }
+                for index in remeasure {
+                    self.list_state.remeasure_items(index..index + 1);
+                }
+            }
         }
 
         for (id, text, streaming) in texts {
@@ -336,27 +526,13 @@ impl ChatView {
         } else if !running {
             self._tick = None;
         }
-
-        if session_changed || (running && self.follow) {
-            self.scroll_handle.scroll_to_bottom();
-        }
     }
 
-    fn is_near_bottom(&self) -> bool {
-        const BOTTOM_FOLLOW_THRESHOLD: f32 = 32.0;
-        let remaining = self.scroll_handle.max_offset().y + self.scroll_handle.offset().y;
-        remaining <= px(BOTTOM_FOLLOW_THRESHOLD)
-    }
-
-    /// Whether there is scrolled-away content below the viewport.
-    fn has_content_below(&self) -> bool {
-        self.scroll_handle.max_offset().y > px(1.) && !self.is_near_bottom()
-    }
-
-    fn toggle_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn toggle_expanded(&mut self, turn: usize, key: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(key) {
             self.expanded.insert(key.to_string());
         }
+        self.list_state.remeasure_items(turn..turn + 1);
         cx.notify();
     }
 
@@ -372,7 +548,7 @@ impl ChatView {
         index: usize,
         turn: &TurnMeta,
         cwd: &Path,
-        entries: &[&TimelineEntry],
+        entries: &[TimelineEntry],
         pinned: (Option<&str>, Option<&str>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -796,12 +972,17 @@ impl ChatView {
                 .default_value(text)
         });
         // Enter (without shift) resends; Esc is handled on the editor's wrapper.
-        let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+        let subscription = cx.subscribe_in(&input, window, move |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.list_state.remeasure_items(turn..turn + 1);
+            }
             if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                 this.confirm_edit(window, cx);
             }
         });
         input.update(cx, |input, cx| input.focus(window, cx));
+        self.list_state
+            .splice_focusable(turn..turn + 1, [Some(input.focus_handle(cx))]);
         self.editor = Some(MessageEditor {
             turn,
             entry_id,
@@ -812,7 +993,10 @@ impl ChatView {
     }
 
     fn cancel_edit(&mut self, cx: &mut Context<Self>) {
-        self.editor = None;
+        if let Some(editor) = self.editor.take() {
+            // Replace the item to clear the editor's registered focus handle.
+            self.list_state.splice(editor.turn..editor.turn + 1, 1);
+        }
         cx.notify();
     }
 
@@ -823,15 +1007,17 @@ impl ChatView {
         let Some(editor) = self.editor.take() else {
             return;
         };
+        self.list_state.splice(editor.turn..editor.turn + 1, 1);
         let text = editor.input.read(cx).value().trim().to_string();
         if text.is_empty() {
+            cx.notify();
             return;
         }
         let turn = editor.turn;
         self.app_state
             .update(cx, |state, cx| state.edit_and_resend_turn(turn, text, cx));
-        self.follow = true;
-        self.scroll_handle.scroll_to_bottom();
+        self.list_state.set_follow_mode(FollowMode::Tail);
+        self.list_state.scroll_to_end();
         cx.notify();
     }
 
@@ -971,7 +1157,7 @@ impl ChatView {
                         .cursor_pointer()
                         .hover(|s| s.text_color(cx.theme().foreground))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_expanded(&rows_key, cx);
+                            this.toggle_expanded(index, &rows_key, cx);
                         }))
                         .child(Icon::new(IconName::ChevronDown).xsmall())
                         .child(rust_i18n::t!("chat.previous_logs", count = hidden)),
@@ -1016,7 +1202,7 @@ impl ChatView {
                     .cursor_pointer()
                     .hover(|s| s.text_color(cx.theme().foreground))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_expanded(&section_key, cx);
+                        this.toggle_expanded(index, &section_key, cx);
                     }))
                     .child(label)
                     .child(Icon::new(chevron(expanded)).xsmall()),
@@ -1187,7 +1373,7 @@ impl ChatView {
                         rust_i18n::t!("chat.collapse_all")
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_expanded(&card_key, cx);
+                        this.toggle_expanded(index, &card_key, cx);
                     })),
             )
             .child(
@@ -1349,7 +1535,7 @@ impl ChatView {
                                     rust_i18n::t!("plan.collapse")
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_expanded(&key, cx);
+                                    this.toggle_expanded(turn, &key, cx);
                                 })),
                         )
                     }),
@@ -1870,8 +2056,8 @@ impl ChatView {
                     .icon(IconName::ChevronDown)
                     .label(rust_i18n::t!("chat.scroll_end"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.follow = true;
-                        this.scroll_handle.scroll_to_bottom();
+                        this.list_state.set_follow_mode(FollowMode::Tail);
+                        this.list_state.scroll_to_end();
                         cx.notify();
                     })),
             )
@@ -1927,8 +2113,6 @@ impl Render for ChatView {
             state.active.as_ref().map(|active| {
                 (
                     active.meta.title.clone(),
-                    active.timeline.entries.clone(),
-                    active.timeline.turns.clone(),
                     active.meta.cwd.clone(),
                     active.draft,
                 )
@@ -1937,7 +2121,7 @@ impl Render for ChatView {
 
         let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
 
-        let Some((title, entries, turns, cwd, is_draft)) = active else {
+        let Some((title, cwd, is_draft)) = active else {
             return root
                 .child(self.render_header(None, false, None, window, cx))
                 .child(self.render_empty_state(cx));
@@ -1961,31 +2145,73 @@ impl Render for ChatView {
         // diff panel narrows the chat region.
         // The newest user / assistant message: their action rows stay visible
         // (hover is not the only way to reach Copy / Edit / Revert).
-        let last_user_id = entries
-            .iter()
-            .rev()
-            .find(|e| matches!(e.content, EntryContent::User { .. }))
-            .map(|e| e.id.clone());
-        let last_assistant_id = entries
-            .iter()
-            .rev()
-            .find(|e| matches!(e.content, EntryContent::Assistant { .. }))
-            .map(|e| e.id.clone());
-        let pinned = (last_user_id.as_deref(), last_assistant_id.as_deref());
+        let (last_user_id, last_assistant_id) = {
+            let state = self.app_state.read(cx);
+            let entries = &state
+                .active
+                .as_ref()
+                .expect("active session")
+                .timeline
+                .entries;
+            (
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| matches!(entry.content, EntryContent::User { .. }))
+                    .map(|entry| entry.id.clone()),
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| matches!(entry.content, EntryContent::Assistant { .. }))
+                    .map(|entry| entry.id.clone()),
+            )
+        };
 
-        let mut column = v_flex()
-            .w_full()
-            .max_w(px(CONTENT_MAX_WIDTH))
-            .py_6()
-            .gap(px(TURN_GAP));
-        for (index, turn) in turns.iter().enumerate() {
-            let turn_entries: Vec<&TimelineEntry> =
-                entries.iter().filter(|e| e.turn == index).collect();
-            if turn_entries.is_empty() {
-                continue;
-            }
-            column = column.child(self.render_turn(index, turn, &cwd, &turn_entries, pinned, cx));
-        }
+        let item_count = self.turn_items.len();
+        let item_cwd = cwd.clone();
+        let timeline = list(
+            self.list_state.clone(),
+            cx.processor(move |this, index: usize, _window, cx| {
+                let Some(item) = this.turn_items.get(index) else {
+                    return div().into_any_element();
+                };
+                // Clone only the handful of entries in this visible/overdrawn
+                // turn. The full history remains in AppState and is never
+                // cloned by the render path.
+                let Some((turn, entries)) = this.app_state.read(cx).active.as_ref().map(|active| {
+                    (
+                        active
+                            .timeline
+                            .turns
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default(),
+                        active.timeline.entries[item.entry_range.clone()].to_vec(),
+                    )
+                }) else {
+                    return div().into_any_element();
+                };
+                let rendered = this.render_turn(
+                    index,
+                    &turn,
+                    &item_cwd,
+                    &entries,
+                    (last_user_id.as_deref(), last_assistant_id.as_deref()),
+                    cx,
+                );
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .px(px(CONTENT_MIN_PADDING))
+                    .when(index + 1 < item_count, |item| item.pb(px(TURN_GAP)))
+                    .child(div().w_full().max_w(px(CONTENT_MAX_WIDTH)).child(rendered))
+                    .into_any_element()
+            }),
+        )
+        .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+        .flex_1()
+        .min_h_0()
+        .py_6();
 
         let main = v_flex()
             .size_full()
@@ -1993,27 +2219,16 @@ impl Render for ChatView {
             .child(
                 div()
                     .id("timeline")
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                        // Following disengages when the user scrolls up to read,
-                        // and re-engages once they return near the bottom.
-                        this.follow = this.is_near_bottom();
-                        cx.notify();
-                    }))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_center()
-                            .px(px(CONTENT_MIN_PADDING))
-                            .child(column),
-                    ),
+                    .child(timeline),
             )
-            .when(self.has_content_below(), |this| {
-                this.child(self.render_scroll_pill(cx))
-            })
+            .when(
+                self.list_state.is_scrolled_to_end() == Some(false),
+                |this| this.child(self.render_scroll_pill(cx)),
+            )
             .child(self.composer.clone());
 
         let body: AnyElement = if terminal_open {
@@ -2287,8 +2502,11 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MdState, MdSync, Segment, copy_payload, md_sync, relativize, segment_entries};
-    use crate::session::{EntryContent, TimelineEntry};
+    use super::{
+        ListSync, MdState, MdSync, Segment, copy_payload, index_turns, list_sync, md_sync,
+        relativize, segment_entries,
+    };
+    use crate::session::{EntryContent, TimelineEntry, TurnMeta};
     use agent::ItemStatus;
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::text::TextViewState;
@@ -2313,6 +2531,82 @@ mod tests {
                 status: ItemStatus::Completed,
             },
         )
+    }
+
+    fn at_turn(mut entry: TimelineEntry, turn: usize) -> TimelineEntry {
+        entry.turn = turn;
+        entry
+    }
+
+    #[test]
+    fn turn_list_index_and_sync_cover_stream_append_truncate_and_session_switch() {
+        let turns = vec![TurnMeta::default()];
+        let mut entries = vec![
+            entry(
+                "user-0",
+                EntryContent::User {
+                    text: "go".into(),
+                    steered: false,
+                },
+            ),
+            entry(
+                "assistant-0",
+                EntryContent::Assistant {
+                    text: "working".into(),
+                },
+            ),
+        ];
+        let initial = index_turns(&turns, &entries, None);
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].entry_range, 0..2);
+
+        // Another entry joins the current turn: identity stays at item index 0,
+        // but its variable height must be measured again.
+        entries.push(command("command-0"));
+        let current_turn_append = index_turns(&turns, &entries, None);
+        assert_eq!(current_turn_append[0].entry_range, 0..3);
+        assert_eq!(
+            list_sync(&initial, &current_turn_append, false),
+            ListSync::Incremental {
+                append: None,
+                remeasure: vec![0],
+            }
+        );
+
+        // A new turn adds exactly one list item. The former tail is also
+        // remeasured because it gains the visual inter-turn gap.
+        let turns = vec![TurnMeta::default(), TurnMeta::default()];
+        entries.push(at_turn(
+            entry(
+                "user-1",
+                EntryContent::User {
+                    text: "next".into(),
+                    steered: false,
+                },
+            ),
+            1,
+        ));
+        let new_turn = index_turns(&turns, &entries, None);
+        assert_eq!(new_turn[0].entry_range, 0..3);
+        assert_eq!(new_turn[1].entry_range, 3..4);
+        assert_eq!(
+            list_sync(&current_turn_append, &new_turn, false),
+            ListSync::Incremental {
+                append: Some(1..2),
+                remeasure: vec![0],
+            }
+        );
+
+        // Revert/truncate cannot leave ListState with stale item indices.
+        assert_eq!(
+            list_sync(&new_turn, &initial, false),
+            ListSync::Reset { count: 1 }
+        );
+        // Even an equal-shaped replacement must reset when the session changes.
+        assert_eq!(
+            list_sync(&initial, &initial, true),
+            ListSync::Reset { count: 1 }
+        );
     }
 
     #[test]
@@ -2347,8 +2641,7 @@ mod tests {
                 },
             ),
         ];
-        let refs = entries.iter().collect::<Vec<_>>();
-        let segments = segment_entries(&refs);
+        let segments = segment_entries(&entries);
 
         assert_eq!(segments.len(), 6);
         assert!(matches!(segments[0], Segment::User(entry) if entry.id == "user"));
@@ -2371,8 +2664,7 @@ mod tests {
     #[test]
     fn segment_entries_coalesces_an_all_activity_turn() {
         let entries = [command("cmd-1"), command("cmd-2")];
-        let refs = entries.iter().collect::<Vec<_>>();
-        let segments = segment_entries(&refs);
+        let segments = segment_entries(&entries);
 
         assert!(matches!(
             segments.as_slice(),
@@ -2395,8 +2687,7 @@ mod tests {
             entry("edit", EntryContent::FileChange { changes: vec![] }),
             command("cmd-2"),
         ];
-        let refs = entries.iter().collect::<Vec<_>>();
-        let segments = segment_entries(&refs);
+        let segments = segment_entries(&entries);
 
         assert!(matches!(
             segments.as_slice(),
