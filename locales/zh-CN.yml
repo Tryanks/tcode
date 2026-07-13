@@ -74,6 +74,11 @@ checkpoint:
   revert_action: "回退"
   revert_blocked: "回退检查点前请先中断当前轮次。"
   reverted: "已回退到较早的检查点"
+quit:
+  menu_item: "退出 tcode"
+  title: "退出 tcode？"
+  description: "仍有 %{count} 个会话正在工作。退出将停止这些会话。"
+  confirm: "退出"
 settings:
   title: "设置"
   general: "通用"

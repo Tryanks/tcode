@@ -92,7 +92,11 @@ fn capture_login_shell_env() -> Result<String, String> {
 
 #[cfg(unix)]
 fn default_shell() -> &'static str {
-    if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/sh" }
+    if cfg!(target_os = "macos") {
+        "/bin/zsh"
+    } else {
+        "/bin/sh"
+    }
 }
 
 /// Extract the `env -0` block after [`MARKER`] into key/value pairs.

@@ -74,6 +74,11 @@ checkpoint:
   revert_action: "Revert"
   revert_blocked: "Interrupt the current turn before reverting checkpoints."
   reverted: "Reverted to an earlier checkpoint"
+quit:
+  menu_item: "Quit tcode"
+  title: "Quit tcode?"
+  description: "%{count} session(s) are still working. Quitting will stop them."
+  confirm: "Quit"
 settings:
   title: "Settings"
   general: "General"

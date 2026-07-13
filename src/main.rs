@@ -174,6 +174,8 @@ fn main() {
             // macOS, control on Windows/Linux — where a literal `cmd-` binding
             // would mean the Super/Win key, which the OS intercepts.
             cx.bind_keys([KeyBinding::new("secondary-k", ui::TogglePalette, None)]);
+            #[cfg(target_os = "macos")]
+            cx.bind_keys([KeyBinding::new("cmd-q", ui::Quit, None)]);
 
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(assets::DM_SANS)])
@@ -244,6 +246,11 @@ fn main() {
                 || debug_edit_resend.is_some()
                 || debug_edit_open;
             settings::apply_locale(app_state.read(cx).settings.language.as_deref());
+            #[cfg(target_os = "macos")]
+            cx.set_menus([gpui::Menu::new("tcode").items([gpui::MenuItem::action(
+                rust_i18n::t!("quit.menu_item"),
+                ui::Quit,
+            )])]);
             match app_state.read(cx).settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
                 settings::ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
@@ -257,7 +264,7 @@ fn main() {
             let quit_subscription = cx.on_app_quit({
                 let app_state = app_state.clone();
                 move |cx| {
-                    app_state.update(cx, |state, _| state.shutdown_active());
+                    app_state.update(cx, |state, _| state.shutdown_all());
                     async {}
                 }
             });
