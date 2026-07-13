@@ -211,7 +211,7 @@ providers:
   # ACP agents (Settings → Providers → ACP Agents): the marketplace over the
   # Agent Client Protocol registry, plus the installed agents' cards.
   acp:
-    section: "ACP AGENTS"
+    add_agent: "Add agent"
     search: "Search agents…"
     install: "Install"
     installed: "Installed"

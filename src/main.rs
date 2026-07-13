@@ -137,6 +137,8 @@ fn main() {
     let debug_acp_search = std::env::args()
         .skip_while(|arg| arg != "--debug-acp-search")
         .nth(1);
+    // Screenshot-only: open the ACP Add agent dialog.
+    let debug_acp_dialog = std::env::args().any(|arg| arg == "--debug-acp-dialog");
     // Screenshot-only: expand one provider card (pairs with the above).
     let debug_provider_expanded = std::env::args()
         .skip_while(|arg| arg != "--debug-provider-expanded")
@@ -225,6 +227,7 @@ fn main() {
                     state.debug_palette = dp;
                     state.debug_settings_section = dsec;
                     state.debug_acp_search = dacp;
+                    state.debug_acp_dialog = debug_acp_dialog;
                     state.debug_provider_expanded = dexp;
                 });
             }

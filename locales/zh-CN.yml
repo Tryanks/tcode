@@ -204,7 +204,7 @@ providers:
     err_too_long: "模型标识不能超过 %{limit} 个字符。"
     err_saved: "该自定义模型已保存。"
   acp:
-    section: "ACP 智能体"
+    add_agent: "添加智能体"
     search: "搜索智能体…"
     install: "安装"
     installed: "已安装"

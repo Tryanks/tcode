@@ -604,6 +604,8 @@ pub struct AppState {
     pub debug_settings_section: Option<String>,
     /// Screenshot-only: seed the ACP marketplace's search box.
     pub debug_acp_search: Option<String>,
+    /// Screenshot-only: open the ACP Add agent dialog on the Providers page.
+    pub debug_acp_dialog: bool,
     /// Screenshot-only: which provider card starts expanded (`codex` / `claude`).
     pub debug_provider_expanded: Option<String>,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
@@ -733,6 +735,7 @@ impl AppState {
             debug_palette: None,
             debug_settings_section: None,
             debug_acp_search: None,
+            debug_acp_dialog: false,
             debug_provider_expanded: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),

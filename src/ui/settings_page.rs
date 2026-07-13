@@ -25,7 +25,7 @@ use agent::ProviderKind;
 
 use crate::app::AppState;
 use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
-use crate::ui::acp_panel::AcpPanel;
+use crate::ui::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::ui::provider_card::ProviderCard;
 use crate::ui::window_drag_area;
 
@@ -61,8 +61,11 @@ pub struct SettingsPage {
     app_state: Entity<AppState>,
     /// One card per provider, in T3's driver order (Codex, then Claude).
     provider_cards: Vec<(ProviderKind, Entity<ProviderCard>)>,
-    /// The ACP marketplace + installed-agent cards, below the native ones.
+    /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
+    /// Stable entities keep expanded state and lazily-created inputs across rerenders.
+    acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
+    debug_acp_dialog_pending: bool,
     section: Section,
     _subscriptions: Vec<Subscription>,
 }
@@ -78,14 +81,18 @@ impl SettingsPage {
             _ => Section::General,
         };
         let acp_panel = cx.new(|cx| AcpPanel::new(app_state.clone(), window, cx));
+        let debug_acp_dialog_pending = app_state.read(cx).debug_acp_dialog;
         let mut page = Self {
             app_state,
             provider_cards: Vec::new(),
             acp_panel,
+            acp_cards: Vec::new(),
+            debug_acp_dialog_pending,
             section,
             _subscriptions: subscriptions,
         };
         page.build_provider_cards(window, cx);
+        page.sync_acp_cards(window, cx);
         page
     }
 
@@ -104,6 +111,46 @@ impl SettingsPage {
                 (provider, card)
             })
             .collect();
+    }
+
+    /// Reconcile card entities by installed id, preserving editors for agents
+    /// that were not installed or removed since the previous render.
+    fn sync_acp_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let installed: Vec<_> = self
+            .app_state
+            .read(cx)
+            .settings
+            .installed_acp_agents()
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut old = std::mem::take(&mut self.acp_cards);
+        self.acp_cards = installed
+            .into_iter()
+            .map(|agent| {
+                let card = old
+                    .iter()
+                    .position(|(id, _)| id == &agent.id)
+                    .map(|index| old.swap_remove(index).1)
+                    .unwrap_or_else(|| {
+                        let app_state = self.app_state.clone();
+                        cx.new(|cx| AcpAgentCard::new(app_state, &agent, window, cx))
+                    });
+                (agent.id, card)
+            })
+            .collect();
+    }
+
+    fn open_acp_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.acp_panel
+            .update(cx, |panel, cx| panel.prepare_to_open(cx));
+        let panel = self.acp_panel.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .w(px(620.))
+                .title(rust_i18n::t!("providers.acp.add_agent").into_owned())
+                .child(panel.clone())
+        });
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
@@ -305,10 +352,10 @@ impl SettingsPage {
         });
     }
 
-    fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let column = match self.section {
             Section::General => self.render_general(cx),
-            Section::Providers => self.render_providers(cx),
+            Section::Providers => self.render_providers(window, cx),
             Section::Archived => self.render_archived(cx),
         };
         div()
@@ -368,11 +415,10 @@ impl SettingsPage {
             ))
     }
 
-    /// Settings → Providers: one card per native provider inside a single
-    /// bordered container, under a section header carrying the last-checked time
-    /// and a refresh action (T3 §1) — then the ACP agents section (marketplace +
-    /// installed cards).
-    fn render_providers(&self, cx: &mut Context<Self>) -> gpui::Div {
+    /// Settings → Providers: native providers and installed ACP agents share one
+    /// bordered list. The marketplace lives behind the Add agent dialog.
+    fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        self.sync_acp_cards(window, cx);
         let state = self.app_state.read(cx);
         let checked_at = state.providers_checked_at();
         let checking = state.providers_checking();
@@ -400,6 +446,16 @@ impl SettingsPage {
                     .child(rust_i18n::t!("providers.checked", when = ago).into_owned()),
             );
         }
+        header = header.child(
+            Button::new("add-acp-agent")
+                .outline()
+                .xsmall()
+                .icon(IconName::Plus)
+                .label(rust_i18n::t!("providers.acp.add_agent").into_owned())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_acp_dialog(window, cx);
+                })),
+        );
         header = header.child(
             Button::new("refresh-providers")
                 .ghost()
@@ -432,11 +488,18 @@ impl SettingsPage {
                     .child(card.clone()),
             );
         }
+        for (_, card) in &self.acp_cards {
+            list = list.child(
+                v_flex()
+                    .w_full()
+                    .items_stretch()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(card.clone()),
+            );
+        }
 
-        v_flex()
-            .child(header)
-            .child(list)
-            .child(self.acp_panel.clone())
+        v_flex().child(header).child(list)
     }
 
     /// Archived Threads: archived sessions grouped by project, each with
@@ -800,6 +863,10 @@ impl SettingsPage {
 
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.debug_acp_dialog_pending {
+            self.debug_acp_dialog_pending = false;
+            self.open_acp_dialog(window, cx);
+        }
         gpui_component::h_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -811,7 +878,7 @@ impl Render for SettingsPage {
                     .min_w_0()
                     .h_full()
                     .child(self.render_header(window, cx))
-                    .child(self.render_content(cx)),
+                    .child(self.render_content(window, cx)),
             )
     }
 }
