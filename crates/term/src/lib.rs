@@ -10,7 +10,7 @@ use std::{
 
 use alacritty_terminal::{
     Term,
-    event::{Event, EventListener, WindowSize},
+    event::{Event, EventListener, Notify as _, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
     grid::{Dimensions, Scroll},
     index::{Column, Line, Point, Side},
@@ -18,7 +18,7 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{Config, cell::Flags},
     tty,
-    vte::ansi::{Color as AlacrittyColor, NamedColor},
+    vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb},
 };
 
 const DEFAULT_COLS: usize = 80;
@@ -222,17 +222,37 @@ impl Terminal {
         event_loop.spawn();
 
         let event_shared = shared.clone();
+        let event_term = term.clone();
+        let event_notifier = Notifier(notifier.0.clone());
         thread::Builder::new()
             .name("tcode-terminal-events".into())
             .spawn(move || {
                 while let Ok(event) = events_rx.recv() {
-                    let mut shared = event_shared.lock().unwrap();
                     match event {
-                        Event::Title(title) => shared.title = title,
+                        Event::Title(title) => event_shared.lock().unwrap().title = title,
                         Event::ChildExit(code) => {
+                            let mut shared = event_shared.lock().unwrap();
                             shared.exited = true;
                             shared.exit_code = Some(code);
                             shared.command_label = None;
+                        }
+                        // The terminal core emits these when the child asks the
+                        // emulator a question (DA1/DSR, OSC color queries,
+                        // text-area size). Dropping them leaves shells such as
+                        // fish blocked until their device-query timeout.
+                        Event::PtyWrite(text) => event_notifier.notify(text.into_bytes()),
+                        Event::ColorRequest(index, format) => {
+                            event_notifier.notify(format(query_color(index)).into_bytes())
+                        }
+                        Event::TextAreaSizeRequest(format) => {
+                            let term = event_term.lock();
+                            let size = Size {
+                                cols: term.columns(),
+                                rows: term.screen_lines(),
+                            }
+                            .window_size();
+                            drop(term);
+                            event_notifier.notify(format(size).into_bytes());
                         }
                         _ => {}
                     }
@@ -365,6 +385,33 @@ impl Terminal {
             exit_code: shared.exit_code,
             display_offset: content.display_offset,
         }
+    }
+}
+
+fn query_color(index: usize) -> Rgb {
+    const ANSI: [u32; 16] = [
+        0x1f2329, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xabb2bf, 0x5c6370,
+        0xff616e, 0x7bc275, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
+    ];
+    let value = match index {
+        0..=15 => ANSI[index],
+        16..=231 => {
+            let n = (index - 16) as u32;
+            let component = |value: u32| if value == 0 { 0 } else { 55 + value * 40 };
+            (component(n / 36) << 16) | (component((n % 36) / 6) << 8) | component(n % 6)
+        }
+        232..=255 => {
+            let gray = 8 + (index - 232) as u32 * 10;
+            (gray << 16) | (gray << 8) | gray
+        }
+        index if index == NamedColor::Background as usize => 0xffffff,
+        index if index == NamedColor::Cursor as usize => 0x1f2329,
+        _ => 0x1f2329,
+    };
+    Rgb {
+        r: (value >> 16) as u8,
+        g: (value >> 8) as u8,
+        b: value as u8,
     }
 }
 
@@ -504,6 +551,23 @@ mod tests {
         assert_eq!(state.exit_code, Some(0));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn forwards_primary_device_attribute_response_to_pty() {
+        let term = command(
+            "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=5 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
+        );
+        let state = wait_until(&term, |state| {
+            let text = state.text();
+            let fields = text.split_whitespace().collect::<Vec<_>>();
+            state.exited
+                && fields
+                    .windows(5)
+                    .any(|window| window == ["1b", "5b", "3f", "36", "63"])
+        });
+        assert_eq!(state.exit_code, Some(0));
+    }
+
     #[cfg(windows)]
     #[test]
     fn captures_process_output_and_exit() {
@@ -539,6 +603,64 @@ mod tests {
         term.write_input(b"echo tcode-term-ok\r".to_vec());
         let state = wait_until(&term, |state| state.text().contains("echo tcode-term-ok"));
         assert!(state.text().contains("echo tcode-term-ok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handles_large_output_and_scrollback() {
+        let term = command("seq 1 5000");
+        let state = wait_until(&term, |state| state.exited && state.text().contains("5000"));
+        assert_eq!(state.exit_code, Some(0));
+
+        term.scroll(800);
+        let scrolled = term.snapshot();
+        assert!(scrolled.display_offset > 0);
+        assert!(!scrolled.text().contains("5000"));
+    }
+
+    /// Manual launch-environment smoke test. It is ignored in the normal suite
+    /// because it deliberately loads the developer's real login-shell config.
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn default_login_shell_accepts_input_and_history() {
+        let started = Instant::now();
+        let term = Terminal::spawn(std::env::temp_dir()).unwrap();
+        term.write_input(b"echo __TCODE_SHELL_READY__\r".to_vec());
+        let ready = wait_until(&term, |state| {
+            state.text().contains("__TCODE_SHELL_READY__")
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "login shell did not become interactive within two seconds"
+        );
+        assert!(!ready.text().contains("could not read response"));
+
+        term.write_input(b"\x1b[A\r".to_vec());
+        let history = wait_until(&term, |state| {
+            state.text().matches("__TCODE_SHELL_READY__").count() >= 4
+        });
+        assert!(!history.text().contains("could not read response"));
+    }
+
+    /// Manual PTY/TUI smoke test for the macOS `top` used in the bug pass.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn top_starts_and_quits_with_q() {
+        let term = Terminal::spawn_command(
+            std::env::temp_dir(),
+            "/usr/bin/top".to_string(),
+            Vec::new(),
+            "top".to_string(),
+        )
+        .unwrap();
+        wait_until(&term, |state| {
+            state.text().contains("Processes:") || state.text().contains("PID")
+        });
+        term.write_input(b"q".to_vec());
+        let state = wait_until(&term, |state| state.exited);
+        assert_eq!(state.exit_code, Some(0));
     }
 
     #[cfg(windows)]
