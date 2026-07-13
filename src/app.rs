@@ -147,7 +147,7 @@ pub fn group_sessions(
                 .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
                 .cloned()
                 .collect();
-            sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+            sessions = order_sessions_with_children(sessions);
             ProjectGroup {
                 project: project.clone(),
                 sessions,
@@ -178,6 +178,59 @@ pub fn group_sessions(
         }
     }
     groups
+}
+
+/// Stable parent-first ordering for one project. Orphans are roots; each
+/// parent's newest children follow it immediately.
+fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMeta> {
+    let ids: std::collections::HashSet<&str> =
+        sessions.iter().map(|session| session.id.as_str()).collect();
+    let mut roots: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|session| {
+            session
+                .parent_session_id
+                .as_deref()
+                .is_none_or(|parent| !ids.contains(parent))
+        })
+        .collect();
+    roots.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+
+    fn append(
+        parent: &SessionMeta,
+        sessions: &[SessionMeta],
+        output: &mut Vec<SessionMeta>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        if !visited.insert(parent.id.clone()) {
+            return;
+        }
+        output.push(parent.clone());
+        let mut children: Vec<&SessionMeta> = sessions
+            .iter()
+            .filter(|session| session.parent_session_id.as_deref() == Some(parent.id.as_str()))
+            .collect();
+        children.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        for child in children {
+            append(child, sessions, output, visited);
+        }
+    }
+
+    let mut output = Vec::with_capacity(sessions.len());
+    let mut visited = std::collections::HashSet::new();
+    for root in roots {
+        append(root, &sessions, &mut output, &mut visited);
+    }
+    // Defensive cycle handling: malformed cyclic metadata stays visible.
+    let mut remainder: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|session| !visited.contains(&session.id))
+        .collect();
+    remainder.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    for session in remainder {
+        append(session, &sessions, &mut output, &mut visited);
+    }
+    output
 }
 
 /// Events emitted for UI side-effects (notifications need a `Window`).
@@ -797,9 +850,8 @@ impl AppState {
         self.orchestrate_requests = Some(server.requests);
     }
 
-    /// Persistently opt a session into native orchestration. The follow-up UI
-    /// slice is responsible for respawning a currently-live provider.
-    #[allow(dead_code)] // wired by the follow-up composer command slice
+    /// Persistently opt a session into native orchestration. Callers restart a
+    /// currently-live provider so its next spawn receives the MCP registration.
     pub fn enable_orchestrate(
         &mut self,
         session_id: &str,
@@ -823,6 +875,44 @@ impl AppState {
         self.persist_meta(&meta, cx);
         let _ = self.orchestrate_registration_for(&meta);
         Ok(())
+    }
+
+    /// Enable orchestration on first use, restart so the MCP registration is
+    /// present, and submit the provider-specific guidance plus the user's text.
+    pub fn orchestrate_turn(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let provider = active.meta.provider;
+        let enabling = !active.meta.orchestrate_enabled;
+        let session_id = active.meta.id.clone();
+        let Some(text) = compose_orchestrate_text(provider, enabling, &text) else {
+            self.report_error(
+                rust_i18n::t!("composer.orchestrate_acp_unsupported").into_owned(),
+                cx,
+            );
+            return;
+        };
+
+        if enabling {
+            if let Err(message) = self.enable_orchestrate(&session_id, cx) {
+                self.report_error(message, cx);
+                return;
+            }
+            if let Some(active) = self.active.as_mut() {
+                active.shutdown_to_idle();
+            }
+        }
+
+        // `steer` sends ordinarily when idle and injects into a live turn. On
+        // first enable the restart above intentionally makes this an ordinary
+        // queued send for the resumed, MCP-enabled process.
+        self.steer(text, attachments, cx);
     }
 
     fn orchestrate_registration_for(
@@ -4933,6 +5023,34 @@ impl AppState {
     }
 }
 
+const CLAUDE_ORCHESTRATE_GUIDANCE: &str = include_str!("../assets/orchestrate/claude.md");
+const CODEX_ORCHESTRATE_GUIDANCE: &str = include_str!("../assets/orchestrate/codex.md");
+
+fn compose_orchestrate_text(
+    provider: ProviderKind,
+    enabling: bool,
+    user_text: &str,
+) -> Option<String> {
+    if !enabling {
+        return (provider != ProviderKind::Acp).then(|| user_text.to_string());
+    }
+    let guidance = match provider {
+        ProviderKind::ClaudeCode => CLAUDE_ORCHESTRATE_GUIDANCE,
+        ProviderKind::Codex => CODEX_ORCHESTRATE_GUIDANCE,
+        ProviderKind::Acp => return None,
+    };
+    if user_text.is_empty() {
+        Some(guidance.to_string())
+    } else {
+        let separator = if guidance.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        Some(format!("{guidance}{separator}{user_text}"))
+    }
+}
+
 fn build_child_meta(
     parent: &SessionMeta,
     provider: ProviderKind,
@@ -5501,6 +5619,69 @@ mod tests {
         assert_eq!(by_name[0].project.name, "Empty");
         assert_eq!(by_name[1].project.name, "New");
         assert_eq!(by_name[2].project.name, "Old");
+    }
+
+    #[test]
+    fn group_sessions_places_children_after_their_parent() {
+        let projects = vec![Project {
+            id: "p".into(),
+            name: "Project".into(),
+            root: PathBuf::from("/p"),
+            created_at: 1,
+        }];
+        let make = |id: &str, updated_at: u64, parent: Option<&str>| {
+            let mut meta = session_in("p", updated_at);
+            meta.id = id.into();
+            meta.parent_session_id = parent.map(str::to_string);
+            meta
+        };
+        let sessions = vec![
+            make("child-old", 10, Some("parent-new")),
+            make("parent-old", 90, None),
+            make("orphan", 95, Some("deleted-parent")),
+            make("child-new", 500, Some("parent-new")),
+            make("parent-new", 100, None),
+        ];
+
+        let groups = group_sessions(&projects, &sessions, ProjectSort::RecentActivity);
+        let ids: Vec<_> = groups[0]
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "parent-new",
+                "child-new",
+                "child-old",
+                "orphan",
+                "parent-old"
+            ]
+        );
+    }
+
+    #[test]
+    fn orchestrate_guidance_is_prepended_only_when_enabling() {
+        let first = compose_orchestrate_text(ProviderKind::ClaudeCode, true, "Ship it").unwrap();
+        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE));
+        assert!(first.ends_with("\n\nShip it"));
+        assert_eq!(
+            compose_orchestrate_text(ProviderKind::ClaudeCode, false, "Follow up"),
+            Some("Follow up".into())
+        );
+
+        let codex = compose_orchestrate_text(ProviderKind::Codex, true, "Implement").unwrap();
+        assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE));
+        assert!(codex.ends_with("\n\nImplement"));
+        assert_eq!(
+            compose_orchestrate_text(ProviderKind::Acp, true, "No"),
+            None
+        );
+        assert_eq!(
+            compose_orchestrate_text(ProviderKind::Acp, false, "No"),
+            None
+        );
     }
 
     #[test]
