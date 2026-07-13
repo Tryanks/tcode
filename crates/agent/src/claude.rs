@@ -174,16 +174,26 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
     .detach();
 
-    // Stderr drain: never protocol, just diagnostics.
-    smol::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Some(Ok(line)) = lines.next().await {
-            if !line.trim().is_empty() {
+    // Stderr drain: never protocol, but the tail is kept so an unexpected exit
+    // can be reported in the CLI's own words (crash stacks land here).
+    let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let stderr_task = smol::spawn({
+        let tail = stderr_tail.clone();
+        async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Some(Ok(line)) = lines.next().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
                 log::warn!("claude[stderr]: {line}");
+                let mut tail = tail.lock().unwrap();
+                if tail.len() == STDERR_TAIL_LINES {
+                    tail.remove(0);
+                }
+                tail.push(line);
             }
         }
-    })
-    .detach();
+    });
 
     let session_config = SessionConfig {
         ultrathink: launch.ultrathink,
@@ -198,6 +208,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         line_rx,
         event_tx,
         session_config,
+        stderr_tail,
+        stderr_task,
     ))
     .detach();
 
@@ -295,6 +307,10 @@ fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// How many trailing stderr lines to keep for exit diagnostics.
+const STDERR_TAIL_LINES: usize = 20;
+
+#[allow(clippy::too_many_arguments)]
 async fn actor_loop(
     mut child: smol::process::Child,
     mut stdin: smol::process::ChildStdin,
@@ -302,10 +318,15 @@ async fn actor_loop(
     line_rx: async_channel::Receiver<String>,
     event_tx: async_channel::Sender<AgentEvent>,
     config: SessionConfig,
+    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_task: smol::Task<()>,
 ) {
     let mut mapper = Mapper::new();
     mapper.configure(config);
 
+    // Set when the child died on its own (stdout EOF): only then do its exit
+    // status and stderr tail belong in the close reason.
+    let mut provider_exited = false;
     let closed_reason: Option<String> = loop {
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
@@ -350,8 +371,13 @@ async fn actor_loop(
                 }
             }
             Sel::Line(None) => {
-                // stdout closed: child is exiting.
-                break Some("provider process exited".into());
+                // stdout closed: child is exiting. Status is read before our
+                // kill below so the child's own exit code is not masked by it.
+                provider_exited = true;
+                break Some(match child.try_status().ok().flatten() {
+                    Some(status) => format!("claude exited with {status}"),
+                    None => "claude closed stdout".into(),
+                });
             }
         }
     };
@@ -359,6 +385,21 @@ async fn actor_loop(
     let _ = stdin.close().await;
     let _ = child.kill();
     let _ = child.status().await;
+    // The child is gone, so its stderr pipe normally closes and the drain task
+    // finishes; the timeout covers a grandchild keeping the pipe open, which
+    // would otherwise hang the close event forever.
+    futures_lite::future::or(stderr_task, async {
+        smol::Timer::after(std::time::Duration::from_millis(500)).await;
+    })
+    .await;
+    let closed_reason = closed_reason.map(|reason| {
+        let tail = stderr_tail.lock().unwrap().join("\n");
+        if provider_exited && !tail.trim().is_empty() {
+            format!("{reason}\nstderr:\n{tail}")
+        } else {
+            reason
+        }
+    });
     let _ = event_tx
         .send(AgentEvent::SessionClosed {
             reason: closed_reason,
@@ -1324,11 +1365,31 @@ impl Mapper {
             usage.total_processed_tokens = Some(self.cumulative_processed);
             usage
         });
-        vec![AgentEvent::TurnCompleted {
+        let mut events = Vec::new();
+        if status == TurnStatus::Failed {
+            // The `result` field carries the CLI's own error text (API errors,
+            // crashes); a bare "failed" turn marker would discard it.
+            let detail = msg
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| msg.to_string());
+            let subtype = msg
+                .get("subtype")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            events.push(AgentEvent::Error {
+                message: format!("claude turn failed ({subtype}): {detail}"),
+                fatal: false,
+            });
+        }
+        events.push(AgentEvent::TurnCompleted {
             turn_id,
             status,
             usage,
-        }]
+        });
+        events
     }
 }
 
@@ -2858,8 +2919,14 @@ mod tests {
             &mut idle,
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"provider failed"}"#,
         );
+        // A failed turn discloses the CLI's raw result text before the marker.
         assert!(matches!(
-            idle_result[0],
+            &idle_result[0],
+            AgentEvent::Error { message, fatal: false }
+                if message == "claude turn failed (error_during_execution): provider failed"
+        ));
+        assert!(matches!(
+            idle_result[1],
             AgentEvent::TurnCompleted {
                 status: TurnStatus::Failed,
                 ..

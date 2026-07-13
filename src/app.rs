@@ -4188,6 +4188,12 @@ impl AppState {
             AgentEvent::Error { message, .. } => {
                 cx.emit(AppEvent::Error(message.clone()));
             }
+            AgentEvent::Warning(message) => {
+                // Provider warnings (config problems, deprecations, failed
+                // mode switches) explain later misbehavior: a log line alone
+                // hides them from the person who needs to act on them.
+                cx.emit(AppEvent::Notice(message.clone()));
+            }
             _ => {}
         }
 
