@@ -322,6 +322,16 @@ async fn run_actor(
             .await;
     }
     let _ = child.kill();
+    // Every Some(_) reason here is a dead transport (user shutdowns break with
+    // None), so the agent's last stderr lines belong in the message.
+    let close_reason = close_reason.map(|reason| {
+        let tail = stderr_tail.borrow().join("\n");
+        if tail.trim().is_empty() {
+            reason
+        } else {
+            format!("{reason}\nstderr:\n{tail}")
+        }
+    });
     let _ = events
         .send(AgentEvent::SessionClosed {
             reason: close_reason,

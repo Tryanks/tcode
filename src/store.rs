@@ -12,8 +12,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalMode, InteractionMode, ModelSpec, OptionSelection, ProviderKind,
-    ResumeCursor,
+    AgentEvent, ApprovalMode, InteractionMode, ModelSpec, OptionSelection, ProviderCommand,
+    ProviderKind, ResumeCursor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -261,6 +261,27 @@ impl SessionStore {
         self.root.join(format!("models-{name}.json"))
     }
 
+    fn commands_path(&self, provider: ProviderKind, acp_agent_id: Option<&str>) -> Option<PathBuf> {
+        let name = match provider {
+            ProviderKind::Codex => "codex".to_string(),
+            ProviderKind::ClaudeCode => "claude".to_string(),
+            ProviderKind::Acp => {
+                let id = acp_agent_id?;
+                // Registry ids are external input and may contain path separators.
+                // Hex keeps the filename reversible and collision-free without
+                // allowing an id to escape the data directory.
+                let mut encoded = String::with_capacity(id.len() * 2);
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                for byte in id.as_bytes() {
+                    encoded.push(HEX[(byte >> 4) as usize] as char);
+                    encoded.push(HEX[(byte & 0x0f) as usize] as char);
+                }
+                format!("acp-{encoded}")
+            }
+        };
+        Some(self.root.join(format!("commands-{name}.json")))
+    }
+
     /// Load the last-fetched model catalog for `provider` so the picker is
     /// instant offline. Empty when never fetched / unreadable.
     pub fn load_models(&self, provider: ProviderKind) -> Vec<ModelSpec> {
@@ -275,6 +296,45 @@ impl SessionStore {
         let path = self.models_path(provider);
         let tmp = path.with_extension("json.tmp");
         let data = serde_json::to_vec_pretty(models)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, path)
+    }
+
+    /// Load the most recently reported command/skill list for a native provider
+    /// or one specific ACP agent. Empty when missing, unreadable, or when an ACP
+    /// agent id was not supplied.
+    pub fn load_commands(
+        &self,
+        provider: ProviderKind,
+        acp_agent_id: Option<&str>,
+    ) -> Vec<ProviderCommand> {
+        let Some(path) = self.commands_path(provider, acp_agent_id) else {
+            return Vec::new();
+        };
+        let Ok(bytes) = fs::read(path) else {
+            return Vec::new();
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    /// Atomically persist the complete command/skill list reported by a native
+    /// provider or one specific ACP agent. Empty lists are meaningful: they
+    /// replace a stale non-empty cache.
+    pub fn save_commands(
+        &self,
+        provider: ProviderKind,
+        acp_agent_id: Option<&str>,
+        commands: &[ProviderCommand],
+    ) -> std::io::Result<()> {
+        let path = self.commands_path(provider, acp_agent_id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ACP command cache requires an agent id",
+            )
+        })?;
+        let tmp = path.with_extension("json.tmp");
+        let data = serde_json::to_vec_pretty(commands)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(&tmp, data)?;
         fs::rename(&tmp, path)
@@ -510,7 +570,7 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::TurnStatus;
+    use agent::{ProviderCommandKind, TurnStatus};
 
     fn temp_root() -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -545,6 +605,50 @@ mod tests {
             "renamed"
         );
         let _ = fs::remove_dir_all(store.root());
+    }
+
+    #[test]
+    fn command_cache_roundtrips_per_provider_and_acp_agent() {
+        let root = temp_root();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let native = vec![ProviderCommand {
+            name: "review".into(),
+            description: Some("Review the current changes".into()),
+            kind: ProviderCommandKind::Command,
+        }];
+        let acp = vec![ProviderCommand {
+            name: "browser".into(),
+            description: None,
+            kind: ProviderCommandKind::Skill,
+        }];
+        store
+            .save_commands(ProviderKind::ClaudeCode, None, &native)
+            .unwrap();
+        store
+            .save_commands(ProviderKind::Acp, Some("vendor/agent"), &acp)
+            .unwrap();
+
+        // Reopen the store to prove the values come from disk, not memory.
+        let reopened = SessionStore::open_at(root.clone()).unwrap();
+        assert_eq!(
+            reopened.load_commands(ProviderKind::ClaudeCode, None),
+            native
+        );
+        assert_eq!(
+            reopened.load_commands(ProviderKind::Acp, Some("vendor/agent")),
+            acp
+        );
+        assert!(
+            reopened
+                .load_commands(ProviderKind::Acp, Some("different-agent"))
+                .is_empty()
+        );
+        assert!(root.join("commands-claude.json").is_file());
+        assert!(
+            root.join("commands-acp-76656e646f722f6167656e74.json")
+                .is_file()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

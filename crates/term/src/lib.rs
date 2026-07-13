@@ -4,8 +4,13 @@ use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
+    time::Duration,
 };
 
 use alacritty_terminal::{
@@ -16,10 +21,15 @@ use alacritty_terminal::{
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
     sync::FairMutex,
-    term::{Config, cell::Flags},
+    term::{Config, TermMode, cell::Flags},
     tty,
     vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb},
 };
+
+mod hyperlinks;
+pub mod mappings;
+mod pty_info;
+pub use hyperlinks::HyperlinkMatch;
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
@@ -35,6 +45,8 @@ pub enum Color {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
+    /// The cell's primary character followed by any combining characters.
+    pub text: String,
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
@@ -42,6 +54,25 @@ pub struct Cell {
     pub underline: bool,
     pub inverse: bool,
     pub selected: bool,
+    /// Whether this cell contains a glyph which occupies two grid columns.
+    pub wide: bool,
+    /// Whether this cell is the second-column placeholder for a wide glyph.
+    pub wide_spacer: bool,
+}
+
+/// A rendering-relevant event emitted by the terminal backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TermEvent {
+    /// The terminal grid or cursor changed.
+    Wakeup,
+    /// The terminal title changed.
+    TitleChanged,
+    /// The child changed whether its cursor should blink.
+    CursorBlinkingChanged,
+    /// The child rang the terminal bell.
+    Bell,
+    /// The child process exited.
+    Exited,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,10 +88,54 @@ pub struct TermState {
     pub rows: usize,
     pub cells: Vec<Cell>,
     pub cursor: Option<(usize, usize)>,
+    pub cursor_shape: CursorShape,
+    pub cursor_blinking: bool,
     pub title: String,
     pub exited: bool,
     pub exit_code: Option<i32>,
     pub display_offset: usize,
+    pub history_size: usize,
+    pub mode: ModeSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
+    HollowBlock,
+    Hidden,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModeSnapshot {
+    pub mouse_click: bool,
+    pub mouse_motion: bool,
+    pub mouse_drag: bool,
+    pub sgr_mouse: bool,
+    pub utf8_mouse: bool,
+    pub alt_screen: bool,
+    pub alternate_scroll: bool,
+    pub bracketed_paste: bool,
+    pub app_cursor: bool,
+    pub focus_in_out: bool,
+}
+
+impl ModeSnapshot {
+    pub fn mouse_mode(self) -> bool {
+        self.mouse_click || self.mouse_motion || self.mouse_drag
+    }
+
+    pub fn routes_mouse(self, shift: bool) -> bool {
+        self.mouse_mode() && !shift
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionKind {
+    Simple,
+    Semantic,
+    Lines,
 }
 
 impl TermState {
@@ -72,11 +147,14 @@ impl TermState {
         self.cells
             .chunks(self.cols)
             .map(|row| {
-                row.iter()
-                    .map(|cell| cell.ch)
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
+                let text = row.iter().filter(|cell| !cell.wide_spacer).fold(
+                    String::new(),
+                    |mut text, cell| {
+                        text.push_str(&cell.text);
+                        text
+                    },
+                );
+                text.trim_end().to_string()
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -122,7 +200,9 @@ impl EventListener for Listener {
 }
 
 struct Shared {
-    title: String,
+    osc_title: Option<String>,
+    process_name: Option<String>,
+    working_directory: Option<PathBuf>,
     exited: bool,
     exit_code: Option<i32>,
     command_line: String,
@@ -133,9 +213,17 @@ struct Shared {
 pub struct Terminal {
     term: Arc<FairMutex<Term<Listener>>>,
     notifier: Notifier,
+    events_tx: async_channel::Sender<TermEvent>,
+    events: async_channel::Receiver<TermEvent>,
     shared: Arc<Mutex<Shared>>,
     shell_name: String,
     cwd: PathBuf,
+    _pty_info: Arc<pty_info::PtyInfo>,
+    refresh_running: Arc<AtomicBool>,
+}
+
+thread_local! {
+    static SPAWN_CWD_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The interactive shell to spawn, as `(program, args)`.
@@ -176,6 +264,9 @@ impl Terminal {
     pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
         let (shell, args) = default_shell();
         let shell_name = shell_label(&shell);
+        let cwd = SPAWN_CWD_OVERRIDE
+            .with(|override_cwd| override_cwd.borrow().clone())
+            .unwrap_or_else(|| cwd.as_ref().to_path_buf());
         Self::spawn_command(cwd, shell, args, shell_name)
     }
 
@@ -203,7 +294,18 @@ impl Terminal {
             escape_args: false,
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
+        #[cfg(unix)]
+        let pty_info = {
+            use std::os::fd::AsRawFd as _;
+            Arc::new(pty_info::PtyInfo::new(
+                pty.file().as_raw_fd(),
+                pty.child().id(),
+            ))
+        };
+        #[cfg(not(unix))]
+        let pty_info = Arc::new(pty_info::PtyInfo::new());
         let (events_tx, events_rx) = mpsc::channel();
+        let (term_events_tx, term_events_rx) = async_channel::unbounded();
         let listener = Listener(events_tx);
         let config = Config {
             scrolling_history: 1000,
@@ -213,7 +315,9 @@ impl Terminal {
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
         let notifier = Notifier(event_loop.channel());
         let shared = Arc::new(Mutex::new(Shared {
-            title: shell_name.clone(),
+            osc_title: None,
+            process_name: None,
+            working_directory: Some(cwd.clone()),
             exited: false,
             exit_code: None,
             command_line: String::new(),
@@ -222,19 +326,58 @@ impl Terminal {
         event_loop.spawn();
 
         let event_shared = shared.clone();
-        let event_term = term.clone();
+        // Do not let the event thread keep the terminal (and therefore its
+        // Listener sender) alive forever while it blocks on `recv`.
+        let event_term = Arc::downgrade(&term);
         let event_notifier = Notifier(notifier.0.clone());
+        let event_notifications = term_events_tx.clone();
+        let refresh_running = Arc::new(AtomicBool::new(false));
+        let event_pty_info = pty_info.clone();
+        let refresh_running_events = refresh_running.clone();
         thread::Builder::new()
             .name("tcode-terminal-events".into())
             .spawn(move || {
                 while let Ok(event) = events_rx.recv() {
                     match event {
-                        Event::Title(title) => event_shared.lock().unwrap().title = title,
+                        Event::Title(title) => {
+                            event_shared.lock().unwrap().osc_title = Some(title);
+                            let _ = term_events_tx.try_send(TermEvent::TitleChanged);
+                        }
+                        Event::ResetTitle => {
+                            event_shared.lock().unwrap().osc_title = None;
+                            let _ = term_events_tx.try_send(TermEvent::TitleChanged);
+                        }
                         Event::ChildExit(code) => {
                             let mut shared = event_shared.lock().unwrap();
                             shared.exited = true;
                             shared.exit_code = Some(code);
                             shared.command_label = None;
+                            drop(shared);
+                            let _ = term_events_tx.try_send(TermEvent::Exited);
+                        }
+                        Event::Exit => {
+                            let mut shared = event_shared.lock().unwrap();
+                            if !shared.exited {
+                                shared.exited = true;
+                                shared.command_label = None;
+                                drop(shared);
+                                let _ = term_events_tx.try_send(TermEvent::Exited);
+                            }
+                        }
+                        Event::Wakeup => {
+                            let _ = term_events_tx.try_send(TermEvent::Wakeup);
+                            schedule_process_refresh(
+                                event_pty_info.clone(),
+                                event_shared.clone(),
+                                term_events_tx.clone(),
+                                refresh_running_events.clone(),
+                            );
+                        }
+                        Event::CursorBlinkingChange => {
+                            let _ = term_events_tx.try_send(TermEvent::CursorBlinkingChanged);
+                        }
+                        Event::Bell => {
+                            let _ = term_events_tx.try_send(TermEvent::Bell);
                         }
                         // The terminal core emits these when the child asks the
                         // emulator a question (DA1/DSR, OSC color queries,
@@ -245,6 +388,9 @@ impl Terminal {
                             event_notifier.notify(format(query_color(index)).into_bytes())
                         }
                         Event::TextAreaSizeRequest(format) => {
+                            let Some(event_term) = event_term.upgrade() else {
+                                continue;
+                            };
                             let term = event_term.lock();
                             let size = Size {
                                 cols: term.columns(),
@@ -259,12 +405,23 @@ impl Terminal {
                 }
             })?;
 
+        schedule_process_refresh(
+            pty_info.clone(),
+            shared.clone(),
+            event_notifications.clone(),
+            refresh_running.clone(),
+        );
+
         Ok(Self {
             term,
             notifier,
+            events_tx: event_notifications,
+            events: term_events_rx,
             shared,
             shell_name,
             cwd,
+            _pty_info: pty_info,
+            refresh_running,
         })
     }
 
@@ -275,20 +432,64 @@ impl Terminal {
         &self.cwd
     }
 
-    /// Shell name, temporarily replaced by the argv0 of the last submitted command.
-    pub fn label(&self) -> String {
+    pub fn working_directory(&self) -> PathBuf {
         self.shared
             .lock()
             .unwrap()
-            .command_label
+            .working_directory
             .clone()
+            .unwrap_or_else(|| self.cwd.clone())
+    }
+
+    /// Apply a cwd override to `Terminal::spawn` calls made synchronously by `f`.
+    pub fn with_spawn_cwd<R>(cwd: impl Into<PathBuf>, f: impl FnOnce() -> R) -> R {
+        struct Reset(Option<PathBuf>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SPAWN_CWD_OVERRIDE.with(|slot| *slot.borrow_mut() = self.0.take());
+            }
+        }
+        let previous = SPAWN_CWD_OVERRIDE.with(|slot| slot.borrow_mut().replace(cwd.into()));
+        let _reset = Reset(previous);
+        f()
+    }
+
+    /// Return a receiver for rendering-relevant terminal events.
+    ///
+    /// Cloned receivers compete for events; callers should create one draining
+    /// task per terminal and fan notifications out from there when necessary.
+    pub fn events(&self) -> async_channel::Receiver<TermEvent> {
+        self.events.clone()
+    }
+
+    /// Shell name, temporarily replaced by the argv0 of the last submitted command.
+    pub fn label(&self) -> String {
+        let shared = self.shared.lock().unwrap();
+        shared
+            .osc_title
+            .clone()
+            .or_else(|| shared.process_name.clone())
             .unwrap_or_else(|| self.shell_name.clone())
     }
 
     pub fn write_input(&self, bytes: impl Into<Vec<u8>>) {
         let bytes = bytes.into();
-        track_command_input(&mut self.shared.lock().unwrap(), &bytes);
+        let label_changed = {
+            let mut shared = self.shared.lock().unwrap();
+            let previous_label = shared.command_label.clone();
+            track_command_input(&mut shared, &bytes);
+            shared.command_label != previous_label
+        };
         let _ = self.notifier.0.send(Msg::Input(bytes.into()));
+        schedule_process_refresh(
+            self._pty_info.clone(),
+            self.shared.clone(),
+            self.events_tx.clone(),
+            self.refresh_running.clone(),
+        );
+        if label_changed {
+            let _ = self.events_tx.try_send(TermEvent::Wakeup);
+        }
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
@@ -305,14 +506,27 @@ impl Terminal {
             .notifier
             .0
             .send(Msg::Resize(Size { cols, rows }.window_size()));
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
     }
 
     pub fn scroll(&self, lines: i32) {
-        self.term.lock().scroll_display(Scroll::Delta(lines));
+        let mut term = self.term.lock();
+        let display_offset = term.grid().display_offset();
+        term.scroll_display(Scroll::Delta(lines));
+        let changed = term.grid().display_offset() != display_offset;
+        drop(term);
+        if changed {
+            let _ = self.events_tx.try_send(TermEvent::Wakeup);
+        }
     }
 
     /// Start or update a simple selection using zero-based visible grid coordinates.
     pub fn select(&self, start: (usize, usize), end: (usize, usize)) {
+        self.select_kind(start, end, SelectionKind::Simple);
+    }
+
+    /// Start or update a selection of the requested kind.
+    pub fn select_kind(&self, start: (usize, usize), end: (usize, usize), kind: SelectionKind) {
         let mut term = self.term.lock();
         let offset = term.grid().display_offset() as i32;
         let point = |(row, col): (usize, usize)| {
@@ -321,13 +535,39 @@ impl Terminal {
                 Column(col.min(term.columns() - 1)),
             )
         };
-        let mut selection = Selection::new(SelectionType::Simple, point(start), Side::Left);
+        let selection_type = match kind {
+            SelectionKind::Simple => SelectionType::Simple,
+            SelectionKind::Semantic => SelectionType::Semantic,
+            SelectionKind::Lines => SelectionType::Lines,
+        };
+        let mut selection = Selection::new(selection_type, point(start), Side::Left);
         selection.update(point(end), Side::Right);
         term.selection = Some(selection);
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
+    }
+
+    pub fn extend_selection(&self, end: (usize, usize)) {
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = Point::new(
+            Line(end.0 as i32 - offset),
+            Column(end.1.min(term.columns() - 1)),
+        );
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, Side::Right);
+        }
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
     }
 
     pub fn clear_selection(&self) {
-        self.term.lock().selection = None;
+        let mut term = self.term.lock();
+        let changed = term.selection.take().is_some();
+        drop(term);
+        if changed {
+            let _ = self.events_tx.try_send(TermEvent::Wakeup);
+        }
     }
 
     pub fn selected_text(&self) -> Option<SelectedText> {
@@ -349,6 +589,7 @@ impl Terminal {
     pub fn snapshot(&self) -> TermState {
         let term = self.term.lock();
         let content = term.renderable_content();
+        let cursor_style = term.cursor_style();
         let cols = term.columns();
         let rows = term.screen_lines();
         let display_cursor_line = content.cursor.point.line.0 + content.display_offset as i32;
@@ -361,30 +602,120 @@ impl Terminal {
         let cells = content
             .display_iter
             .map(|indexed| {
+                let selected = selection.is_some_and(|range| {
+                    range.contains_cell(&indexed, content.cursor.point, content.cursor.shape)
+                });
                 let cell = indexed.cell;
+                let mut text = String::from(cell.c);
+                text.extend(cell.zerowidth().into_iter().flatten());
                 Cell {
                     ch: cell.c,
+                    text,
                     fg: convert_color(cell.fg),
                     bg: convert_color(cell.bg),
                     bold: cell.flags.contains(Flags::BOLD),
                     italic: cell.flags.contains(Flags::ITALIC),
                     underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                     inverse: cell.flags.contains(Flags::INVERSE),
-                    selected: selection.is_some_and(|range| range.contains(indexed.point)),
+                    selected,
+                    wide: cell.flags.contains(Flags::WIDE_CHAR),
+                    wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
                 }
             })
             .collect();
         let shared = self.shared.lock().unwrap();
+        let mode = *term.mode();
         TermState {
             cols,
             rows,
             cells,
             cursor,
-            title: shared.title.clone(),
+            cursor_shape: map_cursor_shape(content.cursor.shape),
+            cursor_blinking: cursor_style.blinking,
+            title: shared
+                .osc_title
+                .clone()
+                .or_else(|| shared.process_name.clone())
+                .unwrap_or_else(|| self.shell_name.clone()),
             exited: shared.exited,
             exit_code: shared.exit_code,
             display_offset: content.display_offset,
+            history_size: term.history_size(),
+            mode: ModeSnapshot {
+                mouse_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+                mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
+                mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
+                sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+                utf8_mouse: mode.contains(TermMode::UTF8_MOUSE),
+                alt_screen: mode.contains(TermMode::ALT_SCREEN),
+                alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
+                bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+                app_cursor: mode.contains(TermMode::APP_CURSOR),
+                focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
+            },
         }
+    }
+
+    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<HyperlinkMatch> {
+        let term = self.term.lock();
+        (row < term.screen_lines() && col < term.columns())
+            .then(|| hyperlinks::find(&term, row, col))
+            .flatten()
+    }
+}
+
+fn refresh_process_info(
+    info: &pty_info::PtyInfo,
+    shared: &Mutex<Shared>,
+    notifications: &async_channel::Sender<TermEvent>,
+) {
+    if let Some(process) = info.load() {
+        let mut shared = shared.lock().unwrap();
+        let changed = shared.process_name.as_deref() != Some(&process.name)
+            || shared.working_directory.as_ref() != Some(&process.cwd);
+        shared.process_name = Some(process.name);
+        shared.working_directory = Some(process.cwd);
+        drop(shared);
+        if changed {
+            let _ = notifications.try_send(TermEvent::TitleChanged);
+        }
+    }
+}
+
+fn schedule_process_refresh(
+    info: Arc<pty_info::PtyInfo>,
+    shared: Arc<Mutex<Shared>>,
+    notifications: async_channel::Sender<TermEvent>,
+    running: Arc<AtomicBool>,
+) {
+    if !info.should_refresh() || running.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let running_on_error = running.clone();
+    let spawn_result = thread::Builder::new()
+        .name("tcode-terminal-pty-info".into())
+        .spawn(move || {
+            refresh_process_info(&info, &shared, &notifications);
+            // Input/Wakeup can precede the shell applying `cd` or launching its
+            // foreground process. One bounded trailing refresh catches that
+            // transition even when the command itself produces no output.
+            thread::sleep(Duration::from_millis(300));
+            refresh_process_info(&info, &shared, &notifications);
+            running.store(false, Ordering::Release);
+        });
+    if spawn_result.is_err() {
+        running_on_error.store(false, Ordering::Release);
+    }
+}
+
+fn map_cursor_shape(shape: alacritty_terminal::vte::ansi::CursorShape) -> CursorShape {
+    use alacritty_terminal::vte::ansi::CursorShape as A;
+    match shape {
+        A::Block => CursorShape::Block,
+        A::Underline => CursorShape::Underline,
+        A::Beam => CursorShape::Bar,
+        A::HollowBlock => CursorShape::HollowBlock,
+        A::Hidden => CursorShape::Hidden,
     }
 }
 
@@ -503,6 +834,16 @@ mod tests {
         assert_eq!(shell_label(r"C:\Windows\system32\cmd.exe"), "cmd");
     }
 
+    #[test]
+    fn maps_all_alacritty_cursor_shapes() {
+        use alacritty_terminal::vte::ansi::CursorShape as A;
+        assert_eq!(map_cursor_shape(A::Block), CursorShape::Block);
+        assert_eq!(map_cursor_shape(A::Underline), CursorShape::Underline);
+        assert_eq!(map_cursor_shape(A::Beam), CursorShape::Bar);
+        assert_eq!(map_cursor_shape(A::HollowBlock), CursorShape::HollowBlock);
+        assert_eq!(map_cursor_shape(A::Hidden), CursorShape::Hidden);
+    }
+
     /// A shell that runs `script` and exits: `sh -c` on Unix, `cmd /c` on Windows.
     fn command(script: &str) -> Terminal {
         #[cfg(windows)]
@@ -549,6 +890,171 @@ mod tests {
             state.text().contains("hello") && state.exited
         });
         assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_mouse_mode_changes_drawer_routing_decision() {
+        let term = command("printf '\\033[?1002h\\033[?1006h'; sleep 1");
+        let state = wait_until(&term, |state| state.mode.mouse_drag && state.mode.sgr_mouse);
+        assert!(state.mode.routes_mouse(false));
+        assert!(!state.mode.routes_mouse(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracts_url_from_grid_line() {
+        let term = command("printf 'see https://example.com/docs?q=1 now\\n'; sleep 1");
+        let state = wait_until(&term, |state| {
+            state.text().contains("https://example.com/docs?q=1")
+        });
+        let index = state.cells.iter().position(|cell| cell.ch == 'h').unwrap();
+        let found = term
+            .hyperlink_at(index / state.cols, index % state.cols + 10)
+            .unwrap();
+        assert_eq!(found.url, "https://example.com/docs?q=1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc8_hyperlink_takes_precedence_over_visible_text() {
+        let term = command(
+            "printf '\\033]8;;https://example.com/target\\033\\\\click-me\\033]8;;\\033\\\\'; sleep 1",
+        );
+        let state = wait_until(&term, |state| state.text().contains("click-me"));
+        let index = state.cells.iter().position(|cell| cell.ch == 'c').unwrap();
+        let found = term
+            .hyperlink_at(index / state.cols, index % state.cols)
+            .unwrap();
+        assert_eq!(found.url, "https://example.com/target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "queries a real foreground PTY process group"]
+    fn tracks_real_pty_foreground_cwd() {
+        let term = command("cd /tmp && sleep 5");
+        let expected = std::fs::canonicalize("/tmp").unwrap();
+        let start = Instant::now();
+        while term.working_directory() != expected {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "cwd remained {}",
+                term.working_directory().display()
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(term.working_directory(), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emits_wakeup_when_pty_output_arrives() {
+        let term = command("printf '__TCODE_TERM_READY__\\n'; read line; printf '%s\\n' \"$line\"");
+        let events = term.events();
+
+        wait_until(&term, |state| state.text().contains("__TCODE_TERM_READY__"));
+        // Wait for the forwarding thread to go quiet so a late readiness event
+        // cannot satisfy the assertion for the next write.
+        let settle_started = Instant::now();
+        let mut quiet_since = Instant::now();
+        let mut saw_readiness_event = false;
+        while !saw_readiness_event || quiet_since.elapsed() < Duration::from_millis(50) {
+            match events.try_recv() {
+                Ok(TermEvent::Wakeup) => {
+                    saw_readiness_event = true;
+                    quiet_since = Instant::now();
+                }
+                Ok(
+                    TermEvent::TitleChanged
+                    | TermEvent::CursorBlinkingChanged
+                    | TermEvent::Bell
+                    | TermEvent::Exited,
+                ) => {
+                    quiet_since = Instant::now();
+                }
+                Err(async_channel::TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("terminal event stream closed while settling startup events")
+                }
+            }
+            assert!(
+                settle_started.elapsed() < Duration::from_secs(5),
+                "terminal event stream did not settle after readiness output"
+            );
+        }
+
+        // Bypass write_input's own label-change Wakeup: this test isolates the
+        // Alacritty Wakeup generated when the PTY produces output.
+        let _ = term
+            .notifier
+            .0
+            .send(Msg::Input(b"__TCODE_TERM_WAKEUP__\r".to_vec().into()));
+
+        let started = Instant::now();
+        let mut saw_wakeup = false;
+        loop {
+            match events.try_recv() {
+                Ok(TermEvent::Wakeup) => saw_wakeup = true,
+                Ok(
+                    TermEvent::TitleChanged
+                    | TermEvent::CursorBlinkingChanged
+                    | TermEvent::Bell
+                    | TermEvent::Exited,
+                ) => {}
+                Err(async_channel::TryRecvError::Empty) => {}
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("terminal event stream closed before emitting Wakeup")
+                }
+            }
+
+            if saw_wakeup && term.snapshot().text().contains("__TCODE_TERM_WAKEUP__") {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "terminal event stream timed out waiting for PTY output"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshots_wide_cells_spacers_and_combining_characters() {
+        let term = command("echo '中文e\u{301}'; sleep 1");
+        let state = wait_until(&term, |state| state.text().contains("中文e\u{301}"));
+
+        let first = state
+            .cells
+            .iter()
+            .position(|cell| cell.ch == '中')
+            .expect("snapshot should contain the first CJK cell");
+        let row = first / state.cols;
+        let column = first % state.cols;
+
+        assert_eq!(state.cells[first].text, "中");
+        assert!(state.cells[first].wide);
+        assert!(state.cells[first + 1].wide_spacer);
+        assert_eq!(state.cells[first + 2].text, "文");
+        assert!(state.cells[first + 2].wide);
+        assert!(state.cells[first + 3].wide_spacer);
+        assert_eq!(state.cells[first + 4].text, "e\u{301}");
+        assert!(state.text().contains("中文e\u{301}"));
+        assert!(!state.text().contains("中 文"));
+
+        term.select_kind((row, column), (row, column + 3), SelectionKind::Simple);
+        assert_eq!(term.selected_text().unwrap().text, "中文");
+
+        // Starting the drag on the trailing half still selects/highlights the
+        // complete wide glyph; copied text never exposes spacer cells.
+        term.select_kind((row, column + 1), (row, column + 3), SelectionKind::Simple);
+        assert_eq!(term.selected_text().unwrap().text, "中文");
+        let selected = term.snapshot();
+        assert!(selected.cells[first].selected);
+        assert!(selected.cells[first + 1].selected);
     }
 
     #[cfg(unix)]
@@ -696,7 +1202,7 @@ mod tests {
             .lines()
             .position(|line| line.contains("beta"))
             .unwrap();
-        term.select((alpha_row, 0), (beta_row, 3));
+        term.select_kind((alpha_row, 0), (beta_row, 3), SelectionKind::Simple);
         let selected = term.selected_text().unwrap();
         assert_eq!(selected.text, "alpha\nbeta");
         assert_eq!(selected.line_end, selected.line_start + 1);
