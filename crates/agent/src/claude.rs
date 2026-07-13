@@ -94,11 +94,10 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(session_id) = resume_session_id(&opts.resume) {
         cmd.arg("--resume").arg(session_id);
     }
-    // Register the embedded preview MCP server so the agent can drive the
-    // in-app browser. The token rides in an Authorization header (see
-    // `McpRegistration::claude_mcp_config_json`).
-    if let Some(mcp) = &opts.mcp_server {
-        cmd.arg("--mcp-config").arg(mcp.claude_mcp_config_json());
+    // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
+    // headers inside the merged `--mcp-config` JSON.
+    for arg in mcp_args(opts.mcp_server.as_ref(), opts.orchestrate_server.as_ref()) {
+        cmd.arg(arg);
     }
     // Settings → Providers "Launch arguments", appended last so the user can
     // override anything we set above.
@@ -232,6 +231,21 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         commands: cmd_tx,
         events: event_rx,
     })
+}
+
+fn mcp_args(
+    preview: Option<&crate::McpRegistration>,
+    orchestrate: Option<&crate::McpRegistration>,
+) -> Vec<String> {
+    let registrations: Vec<_> = [preview, orchestrate].into_iter().flatten().collect();
+    if registrations.is_empty() {
+        Vec::new()
+    } else {
+        vec![
+            "--mcp-config".into(),
+            crate::claude_mcp_config_json(registrations),
+        ]
+    }
 }
 
 /// Model-scoped launch flags resolved from the session's option selections.
@@ -2410,6 +2424,30 @@ pub async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_builder_handles_both_one_and_none() {
+        let preview = crate::McpRegistration {
+            name: "tcode_preview".into(),
+            url: "http://p".into(),
+            bearer_token: "p".into(),
+        };
+        let orchestrate = crate::McpRegistration {
+            name: "tcode_orchestrate".into(),
+            url: "http://o".into(),
+            bearer_token: "o".into(),
+        };
+        assert!(mcp_args(None, None).is_empty());
+        let one = mcp_args(Some(&preview), None);
+        assert_eq!(one[0], "--mcp-config");
+        let one_json: Value = serde_json::from_str(&one[1]).unwrap();
+        assert!(one_json["mcpServers"].get("tcode_preview").is_some());
+        assert!(one_json["mcpServers"].get("tcode_orchestrate").is_none());
+        let both_json: Value =
+            serde_json::from_str(&mcp_args(Some(&preview), Some(&orchestrate))[1]).unwrap();
+        assert!(both_json["mcpServers"].get("tcode_preview").is_some());
+        assert!(both_json["mcpServers"].get("tcode_orchestrate").is_some());
+    }
 
     fn feed(mapper: &mut Mapper, line: &str) -> Vec<AgentEvent> {
         let msg: Value = serde_json::from_str(line).expect("valid json fixture line");

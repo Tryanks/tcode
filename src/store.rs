@@ -141,6 +141,12 @@ pub struct SessionMeta {
     /// absent in every index file written before ACP existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent_id: Option<String>,
+    /// Parent orchestrator thread for native child sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// Whether this session receives the tcode_orchestrate MCP registration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub orchestrate_enabled: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -164,6 +170,8 @@ impl SessionMeta {
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::default(),
             acp_agent_id: None,
+            parent_session_id: None,
+            orchestrate_enabled: false,
             created_at: now,
             updated_at: now,
         }
@@ -858,6 +866,28 @@ mod tests {
         assert!(json.contains("\"approval_mode\":\"supervised\""));
         let back: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.approval_mode, ApprovalMode::Supervised);
+    }
+
+    #[test]
+    fn orchestration_fields_are_legacy_safe_and_roundtrip() {
+        let legacy = serde_json::json!({
+            "id": "s1", "title": "One", "provider": "codex",
+            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
+        });
+        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.parent_session_id, None);
+        assert!(!meta.orchestrate_enabled);
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("parent_session_id"));
+        assert!(!json.contains("orchestrate_enabled"));
+
+        let mut meta = meta;
+        meta.parent_session_id = Some("parent".into());
+        meta.orchestrate_enabled = true;
+        let back: SessionMeta =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(back.parent_session_id.as_deref(), Some("parent"));
+        assert!(back.orchestrate_enabled);
     }
 
     #[test]
