@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent", "crates/term", "crates/preview-mcp"]
+members = ["crates/agent", "crates/term", "crates/preview-mcp", "crates/orchestrate-mcp"]
 
 [package]
 name = "tcode"
@@ -10,6 +10,7 @@ edition = "2024"
 agent = { path = "crates/agent" }
 term = { path = "crates/term" }
 preview-mcp = { path = "crates/preview-mcp" }
+orchestrate-mcp = { path = "crates/orchestrate-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 # `x11`/`wayland` are mandatory on Linux: without them gpui_linux's
 # `current_platform()` hits `unreachable!("At least one of the \"wayland\" or

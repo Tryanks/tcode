@@ -161,6 +161,19 @@ impl AppShell {
             .detach();
         }
 
+        let requests = app_state.update(cx, |state, _| state.orchestrate_requests.take());
+        if let Some(requests) = requests {
+            let state = app_state.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                while let Ok(request) = requests.recv().await {
+                    let orchestrate_mcp::BrokerRequest { op, reply } = request;
+                    let result = state.update(cx, |state, cx| state.handle_orchestrate_op(op, cx));
+                    let _ = reply.send(result).await;
+                }
+            })
+            .detach();
+        }
+
         // The rich toast overlay, shared with AppState so long-running git flows
         // can mutate a single progress toast in place.
         let toasts = cx.new(|_| ToastCenter::new());
