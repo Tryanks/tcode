@@ -355,6 +355,14 @@ impl SessionStore {
         self.write_file(&file)
     }
 
+    /// Remove a project from the index. Its sessions are removed separately so
+    /// their event logs receive the same cleanup as an ordinary thread delete.
+    pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
+        let mut file = self.read_file();
+        file.projects.retain(|project| project.id != id);
+        self.write_file(&file)
+    }
+
     fn write_file(&self, file: &IndexFile) -> std::io::Result<()> {
         let tmp = self.index_path().with_extension("json.tmp");
         let data = serde_json::to_vec_pretty(file)

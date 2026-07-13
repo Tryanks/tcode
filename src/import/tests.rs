@@ -206,7 +206,11 @@ fn scanner_groups_attributes_orders_and_excludes() {
     let recent = scan_recent_dirs(&roots, std::slice::from_ref(&excluded_cwd));
     assert_eq!(recent.len(), 2);
     assert_eq!(recent[0].path, desktop_cwd);
-    assert_eq!(recent[0].threads.len(), 1, "sidechain files must not surface");
+    assert_eq!(
+        recent[0].threads.len(),
+        1,
+        "sidechain files must not surface"
+    );
     assert_eq!(recent[0].threads[0].source, SourceTool::ClaudeDesktop);
     assert_eq!(
         recent[0].threads[0].title_hint.as_deref(),
@@ -283,7 +287,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
     let timeline = Timeline::fold_events(store.read_events(&meta.id));
     assert!(!timeline.entries.is_empty());
     assert!(timeline.entries.iter().any(
-        |entry| matches!(&entry.content, EntryContent::User { text } if text == "Imported question")
+        |entry| matches!(&entry.content, EntryContent::User { text, .. } if text == "Imported question")
     ));
     assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "Imported answer")));
 }

@@ -168,12 +168,28 @@ pub fn import_thread(
         )
     };
 
+    // Harness-injected user messages (`<task-notification>`, `<system-reminder>`,
+    // …) make terrible titles: prefer the first human-looking message.
+    let title_user = converted
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            ConvertedEntry::Item { item, .. } => match &item.content {
+                agent::ItemContent::UserMessage { text } if !text.trim_start().starts_with('<') => {
+                    Some(text.clone())
+                }
+                _ => None,
+            },
+            ConvertedEntry::Compacted { .. } => None,
+        })
+        .or(converted.first_user.clone());
+
     let mut meta = SessionMeta::new(provider, project.root.clone(), None);
     meta.project_id = Some(project.id.clone());
     meta.title = thread
         .title_hint
         .clone()
-        .or_else(|| converted.first_user.as_deref().map(title_from_text))
+        .or_else(|| title_user.as_deref().map(title_from_text))
         .unwrap_or_else(|| format!("Imported {} thread", thread.source.display_name()));
     meta.created_at = converted.created_ms / 1000;
     meta.updated_at = converted.updated_ms / 1000;
