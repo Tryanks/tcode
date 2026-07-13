@@ -3230,6 +3230,7 @@ impl AppState {
     fn record_user_message(&mut self, session_id: &str, text: &str, cx: &mut Context<Self>) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
             id: format!("local-user-{}", uuid::Uuid::new_v4()),
+            parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
             },
@@ -5661,6 +5662,7 @@ mod tests {
             &id,
             &AgentEvent::ItemCompleted(ThreadItem {
                 id: format!("assistant-{turn}"),
+                parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: reply.to_string(),
                 },
@@ -6001,6 +6003,7 @@ mod tests {
                 &id_a,
                 AgentEvent::ItemCompleted(ThreadItem {
                     id: "bg-1".into(),
+                    parent_item_id: None,
                     content: ItemContent::AssistantMessage {
                         text: "Migration step 1 done.".into(),
                     },
