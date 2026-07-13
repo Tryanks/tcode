@@ -2214,6 +2214,34 @@ impl AppState {
         Some(id)
     }
 
+    /// Clone the persistence handles needed by the blocking external-history
+    /// importer without exposing mutable application state across threads.
+    pub(crate) fn external_import_context(
+        &self,
+        project_id: &str,
+    ) -> Option<(SessionStore, Project, Vec<SessionMeta>)> {
+        let project = self.projects.iter().find(|p| p.id == project_id)?.clone();
+        Some((self.store.clone(), project, self.sessions.clone()))
+    }
+
+    /// Reload sessions written by the external-history importer and make its
+    /// project group visible in the sidebar.
+    pub(crate) fn finish_external_import(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.sessions = self.store.load_index();
+        if self
+            .settings
+            .collapsed_projects
+            .iter()
+            .any(|id| id == project_id)
+        {
+            let mut settings = self.settings.clone();
+            settings.collapsed_projects.retain(|id| id != project_id);
+            self.update_settings(settings, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     /// Toggle a project's collapsed state (persisted in settings).
     pub fn toggle_project_collapsed(&mut self, project_id: &str, cx: &mut Context<Self>) {
         let mut settings = self.settings.clone();
@@ -2382,6 +2410,42 @@ impl AppState {
         let settings = self.settings.clone();
         let _ = self.settings_store.save(&settings);
         self.sessions = self.store.load_index();
+        cx.notify();
+    }
+
+    /// Permanently remove a project and all of its threads from tcode. Project
+    /// files and worktrees on disk are left in place.
+    pub fn delete_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let session_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.project_id.as_deref() == Some(project_id))
+            .map(|meta| meta.id.clone())
+            .collect();
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.project_id.as_deref() == Some(project_id))
+        {
+            self.shutdown_active();
+        }
+        for session_id in session_ids {
+            self.delete_session(&session_id, false, cx);
+        }
+        if let Err(err) = self.store.remove_project(project_id) {
+            self.report_error(
+                rust_i18n::t!("errors.delete_project", error = err).into_owned(),
+                cx,
+            );
+            return;
+        }
+        self.settings
+            .collapsed_projects
+            .retain(|id| id != project_id);
+        let settings = self.settings.clone();
+        let _ = self.settings_store.save(&settings);
+        self.sessions = self.store.load_index();
+        self.projects = self.store.load_projects();
         cx.notify();
     }
 
@@ -5760,7 +5824,7 @@ mod tests {
                 .entries
                 .iter()
                 .filter_map(|e| match &e.content {
-                    EntryContent::User { text } => Some(text.as_str()),
+                    EntryContent::User { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -5782,7 +5846,7 @@ mod tests {
             // And it is durable: a replay of the JSONL shows the same thing.
             let replayed = Timeline::fold_events(state.store.read_events(&id_b));
             assert!(replayed.entries.iter().any(
-                |e| matches!(&e.content, EntryContent::User { text } if text == "second message")
+                |e| matches!(&e.content, EntryContent::User { text, .. } if text == "second message")
             ));
         });
 
@@ -5885,7 +5949,7 @@ mod tests {
             )));
             assert!(active.timeline.entries.iter().any(|e| matches!(
                 &e.content,
-                EntryContent::User { text } if text == "queued follow-up"
+                EntryContent::User { text, .. } if text == "queued follow-up"
             )));
 
             // The second turn completes with nothing queued: NOW the provider

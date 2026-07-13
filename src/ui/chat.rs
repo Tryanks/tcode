@@ -414,7 +414,7 @@ impl ChatView {
                     ));
                 }
                 Segment::User(entry) => {
-                    let EntryContent::User { text } = &entry.content else {
+                    let EntryContent::User { text, steered } = &entry.content else {
                         unreachable!();
                     };
                     let is_head = !head_seen;
@@ -423,6 +423,7 @@ impl ChatView {
                         index,
                         &entry.id,
                         text,
+                        *steered,
                         is_head,
                         pinned.0 == Some(entry.id.as_str()),
                         cx,
@@ -510,11 +511,13 @@ impl ChatView {
     ///
     /// While this message is being edited the bubble is replaced by the inline
     /// editor.
+    #[allow(clippy::too_many_arguments)]
     fn render_user(
         &self,
         turn: usize,
         entry_id: &str,
         text: &str,
+        steered: bool,
         is_head: bool,
         pinned: bool,
         cx: &mut Context<Self>,
@@ -609,6 +612,18 @@ impl ChatView {
             .w_full()
             .items_end()
             .gap(px(2.))
+            .when(steered, |column| {
+                column.child(
+                    div()
+                        .px_2()
+                        .py(px(1.))
+                        .rounded_full()
+                        .bg(cx.theme().muted)
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(rust_i18n::t!("chat.steered")),
+                )
+            })
             .child(
                 div()
                     .max_w_3_4()
@@ -1897,7 +1912,9 @@ impl Render for ChatView {
                     .iter()
                     .rev()
                     .find_map(|e| match &e.content {
-                        EntryContent::User { text } => Some((e.turn, e.id.clone(), text.clone())),
+                        EntryContent::User { text, .. } => {
+                            Some((e.turn, e.id.clone(), text.clone()))
+                        }
                         _ => None,
                     })
             })
@@ -2301,7 +2318,13 @@ mod tests {
     #[test]
     fn segment_entries_preserves_interleaved_timeline_order() {
         let entries = [
-            entry("user", EntryContent::User { text: "go".into() }),
+            entry(
+                "user",
+                EntryContent::User {
+                    text: "go".into(),
+                    steered: false,
+                },
+            ),
             command("cmd-1"),
             command("cmd-2"),
             entry(

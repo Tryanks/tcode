@@ -122,6 +122,10 @@ pub struct SessionMeta {
     pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
+    /// Set when this thread was imported from another tool's local history
+    /// ("claude:<id>" / "codex:<id>"). Used to keep re-imports idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
     /// Chosen values for the selected model's option descriptors (reasoning
     /// effort, context window, service tier, fast mode, thinking, …). Absent in
     /// index files written before this slice; defaults to no selections (each
@@ -156,6 +160,7 @@ impl SessionMeta {
             checkpoints: Vec::new(),
             approval_mode: ApprovalMode::default(),
             resume_cursor: None,
+            imported_from: None,
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::default(),
             acp_agent_id: None,
@@ -347,6 +352,14 @@ impl SessionStore {
         } else {
             file.projects.push(project.clone());
         }
+        self.write_file(&file)
+    }
+
+    /// Remove a project from the index. Its sessions are removed separately so
+    /// their event logs receive the same cleanup as an ordinary thread delete.
+    pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
+        let mut file = self.read_file();
+        file.projects.retain(|project| project.id != id);
         self.write_file(&file)
     }
 
