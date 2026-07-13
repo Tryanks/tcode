@@ -238,6 +238,7 @@ fn push_item(
                 .filter(|id| !id.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("imported-codex-{next_id}")),
+            parent_item_id: None,
             content,
         },
     });

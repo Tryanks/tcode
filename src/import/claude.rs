@@ -51,6 +51,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 ts,
                                 item: ThreadItem {
                                     id: format!("imported-user-{next_id}"),
+                                    parent_item_id: None,
                                     content: ItemContent::UserMessage { text },
                                 },
                             });
@@ -125,7 +126,11 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                             .unwrap_or_else(|| format!("imported-assistant-{next_id}"));
                         entries.push(ConvertedEntry::Item {
                             ts,
-                            item: ThreadItem { id, content },
+                            item: ThreadItem {
+                                id,
+                                parent_item_id: None,
+                                content,
+                            },
                         });
                     }
                 }
