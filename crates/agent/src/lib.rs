@@ -10,6 +10,7 @@ pub mod acp;
 pub mod claude;
 pub mod codex;
 mod process;
+mod subagent_tail;
 
 use std::path::PathBuf;
 
@@ -711,6 +712,9 @@ pub enum ItemStatus {
 pub struct ThreadItem {
     /// Provider-scoped stable id; deltas and later lifecycle events reference it.
     pub id: String,
+    /// Spawn item that owns this child activity, when the item came from a subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_item_id: Option<String>,
     pub content: ItemContent,
 }
 
@@ -741,6 +745,13 @@ pub enum ItemContent {
         input: serde_json::Value,
         output: Option<String>,
         status: ItemStatus,
+    },
+    Subagent {
+        agent_type: String,
+        description: String,
+        status: ItemStatus,
+        /// Final one-line summary when finished.
+        summary: Option<String>,
     },
     WebSearch {
         query: String,
@@ -1173,5 +1184,38 @@ mod pathext_logic_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
+    }
+}
+
+#[cfg(test)]
+mod thread_item_serde_tests {
+    use super::*;
+
+    #[test]
+    fn parent_item_id_round_trips_and_legacy_items_default_to_none() {
+        let event = AgentEvent::ItemCompleted(ThreadItem {
+            id: "child".into(),
+            parent_item_id: Some("spawn".into()),
+            content: ItemContent::AssistantMessage {
+                text: "working".into(),
+            },
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), .. })
+                if parent == "spawn"
+        ));
+
+        let legacy = r#"{"type":"item_completed","id":"old","content":{"kind":"user_message","text":"hello"}}"#;
+        let decoded: AgentEvent = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            decoded,
+            AgentEvent::ItemCompleted(ThreadItem {
+                parent_item_id: None,
+                ..
+            })
+        ));
     }
 }

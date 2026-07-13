@@ -200,6 +200,20 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         interaction_mode: opts.interaction_mode,
         base_permission_mode: permission_mode_flag(opts.approval_mode),
         approval_mode: opts.approval_mode,
+        claude_dir: opts
+            .launch_env
+            .home
+            .clone()
+            .or_else(|| {
+                opts.launch_env
+                    .env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "HOME")
+                    .map(|(_, value)| PathBuf::from(value))
+            })
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .map(|home| home.join(".claude")),
     };
     smol::spawn(actor_loop(
         child,
@@ -297,6 +311,7 @@ struct SessionConfig {
     interaction_mode: InteractionMode,
     base_permission_mode: &'static str,
     approval_mode: ApprovalMode,
+    claude_dir: Option<PathBuf>,
 }
 
 fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<String> {
@@ -322,7 +337,9 @@ async fn actor_loop(
     stderr_task: smol::Task<()>,
 ) {
     let mut mapper = Mapper::new();
+    let claude_dir = config.claude_dir.clone();
     mapper.configure(config);
+    let mut tailers = HashMap::new();
 
     // Set when the child died on its own (stdout EOF): only then do its exit
     // status and stderr tail belong in the close reason.
@@ -369,6 +386,13 @@ async fn actor_loop(
                 for write in mapper.take_outgoing() {
                     let _ = write_line(&mut stdin, &write).await;
                 }
+                process_tail_requests(
+                    mapper.take_tail_requests(),
+                    &mut tailers,
+                    claude_dir.as_deref(),
+                    &event_tx,
+                )
+                .await;
             }
             Sel::Line(None) => {
                 // stdout closed: child is exiting. Status is read before our
@@ -383,6 +407,9 @@ async fn actor_loop(
     };
 
     let _ = stdin.close().await;
+    for control in tailers.into_values() {
+        let _ = control.send(TailControl::Stop).await;
+    }
     let _ = child.kill();
     let _ = child.status().await;
     // The child is gone, so its stderr pipe normally closes and the drain task
@@ -410,6 +437,107 @@ async fn actor_loop(
 enum Sel {
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
+}
+
+enum TailControl {
+    PreferPath(PathBuf),
+    Stop,
+}
+
+async fn process_tail_requests(
+    requests: Vec<TailRequest>,
+    tailers: &mut HashMap<String, async_channel::Sender<TailControl>>,
+    claude_dir: Option<&Path>,
+    event_tx: &async_channel::Sender<AgentEvent>,
+) {
+    for request in requests {
+        match request {
+            TailRequest::Start {
+                parent_id,
+                task_id,
+                session_id,
+            } => {
+                if tailers.contains_key(&parent_id) {
+                    continue;
+                }
+                let (control_tx, control_rx) = async_channel::unbounded();
+                tailers.insert(parent_id.clone(), control_tx);
+                let claude_dir = claude_dir.map(Path::to_path_buf);
+                let events = event_tx.clone();
+                smol::spawn(run_subagent_tail(
+                    parent_id, task_id, session_id, claude_dir, control_rx, events,
+                ))
+                .detach();
+            }
+            TailRequest::PreferPath { parent_id, path } => {
+                if let Some(control) = tailers.get(&parent_id) {
+                    let _ = control.send(TailControl::PreferPath(path)).await;
+                }
+            }
+            TailRequest::Stop { parent_id } => {
+                if let Some(control) = tailers.get(&parent_id) {
+                    let _ = control.send(TailControl::Stop).await;
+                }
+            }
+        }
+    }
+}
+
+async fn run_subagent_tail(
+    parent_id: String,
+    task_id: String,
+    session_id: String,
+    claude_dir: Option<PathBuf>,
+    controls: async_channel::Receiver<TailControl>,
+    events: async_channel::Sender<AgentEvent>,
+) {
+    let mut path = None;
+    let mut reader = None;
+    let mut stopping = false;
+    loop {
+        while let Ok(control) = controls.try_recv() {
+            match control {
+                TailControl::PreferPath(preferred) => {
+                    if path.as_ref() != Some(&preferred) {
+                        path = Some(preferred.clone());
+                        reader = Some(crate::subagent_tail::TailReader::new(
+                            preferred,
+                            parent_id.clone(),
+                        ));
+                    }
+                }
+                TailControl::Stop => stopping = true,
+            }
+        }
+        if path.is_none()
+            && let Some(root) = &claude_dir
+            && let Some(found) =
+                crate::subagent_tail::find_transcript(root, &session_id, &task_id, &parent_id)
+        {
+            path = Some(found.clone());
+            reader = Some(crate::subagent_tail::TailReader::new(
+                found,
+                parent_id.clone(),
+            ));
+        }
+        if let Some(reader) = &mut reader {
+            match reader.read_appended() {
+                Ok(mapped) => {
+                    for event in mapped {
+                        if events.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => log::debug!("claude subagent tail read failed: {err}"),
+            }
+        }
+        if stopping {
+            return;
+        }
+        smol::Timer::after(std::time::Duration::from_millis(400)).await;
+    }
 }
 
 /// Whether the actor loop should stop.
@@ -632,9 +760,37 @@ fn user_message(text: &str, attachments: &[Attachment]) -> Value {
 /// the matching `tool_result` arrives we can emit the right `ItemCompleted`.
 #[derive(Debug, Clone)]
 enum ToolItem {
-    Command { command: String },
-    File { changes: Vec<FileChange> },
-    Tool { name: String, input: Value },
+    Command {
+        command: String,
+    },
+    File {
+        changes: Vec<FileChange>,
+    },
+    Tool {
+        name: String,
+        input: Value,
+    },
+    Subagent {
+        agent_type: String,
+        description: String,
+        summary: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+enum TailRequest {
+    Start {
+        parent_id: String,
+        task_id: String,
+        session_id: String,
+    },
+    PreferPath {
+        parent_id: String,
+        path: PathBuf,
+    },
+    Stop {
+        parent_id: String,
+    },
 }
 
 /// A pending permission prompt, kept so `RespondApproval` can echo the tool's
@@ -664,6 +820,9 @@ pub(crate) struct Mapper {
     current_turn_id: Option<String>,
     control_counter: usize,
     tool_items: HashMap<String, ToolItem>,
+    task_tools: HashMap<String, String>,
+    child_mappers: HashMap<String, crate::subagent_tail::TranscriptMapper>,
+    tail_requests: Vec<TailRequest>,
     pending_approvals: HashMap<String, PendingApproval>,
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
@@ -704,6 +863,9 @@ impl Mapper {
             current_turn_id: None,
             control_counter: 0,
             tool_items: HashMap::new(),
+            task_tools: HashMap::new(),
+            child_mappers: HashMap::new(),
+            tail_requests: Vec::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
             full_access: false,
@@ -729,6 +891,10 @@ impl Mapper {
     /// Drain queued control-response writes for the actor to send.
     fn take_outgoing(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.outgoing)
+    }
+
+    fn take_tail_requests(&mut self) -> Vec<TailRequest> {
+        std::mem::take(&mut self.tail_requests)
     }
 
     /// Allocate the next synthesized turn id and mark it in-flight.
@@ -904,6 +1070,17 @@ impl Mapper {
 
     /// Map one CLI stdout message to zero or more outcomes.
     pub(crate) fn on_message(&mut self, msg: Value) -> Vec<AgentEvent> {
+        if let Some(parent_id) = msg
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            return self
+                .child_mappers
+                .entry(parent_id.to_owned())
+                .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
+                .map_value(&msg);
+        }
         match msg.get("type").and_then(Value::as_str) {
             Some("system") => self.on_system(&msg),
             Some("stream_event") => self.on_stream_event(&msg),
@@ -924,6 +1101,9 @@ impl Mapper {
             // Claude compacted its context window (verified shape:
             // `{type:"system", subtype:"compact_boundary", compact_metadata:{…}}`).
             Some("compact_boundary") => return vec![AgentEvent::ContextCompacted],
+            Some("task_started") => return self.on_task_started(msg),
+            Some("task_updated") => return self.on_task_updated(msg),
+            Some("task_notification") => return self.on_task_notification(msg),
             other => {
                 log::debug!("claude: ignoring system/{other:?}");
                 return Vec::new();
@@ -950,6 +1130,114 @@ impl Mapper {
             events.push(AgentEvent::ProviderCommands { commands });
         }
         events
+    }
+
+    fn on_task_started(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let Some(tool_use_id) = msg.get("tool_use_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        if let Some(task_id) = msg.get("task_id").and_then(Value::as_str) {
+            self.task_tools
+                .insert(task_id.to_owned(), tool_use_id.to_owned());
+            self.tail_requests.push(TailRequest::Start {
+                parent_id: tool_use_id.to_owned(),
+                task_id: task_id.to_owned(),
+                session_id: msg
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            });
+        }
+        self.update_subagent(tool_use_id, ItemStatus::InProgress, None, false)
+    }
+
+    fn on_task_updated(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let Some(task_id) = msg.get("task_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let Some(tool_use_id) = self.task_tools.get(task_id).cloned() else {
+            return Vec::new();
+        };
+        let Some(status) = msg.pointer("/patch/status").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let status = subagent_status(status);
+        if status != ItemStatus::InProgress {
+            self.tail_requests.push(TailRequest::Stop {
+                parent_id: tool_use_id.clone(),
+            });
+        }
+        self.update_subagent(&tool_use_id, status, None, false)
+    }
+
+    fn on_task_notification(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let tool_use_id = msg
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                msg.get("task_id")
+                    .and_then(Value::as_str)
+                    .and_then(|task_id| self.task_tools.get(task_id).cloned())
+            });
+        let Some(tool_use_id) = tool_use_id else {
+            return Vec::new();
+        };
+        if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
+            self.tail_requests.push(TailRequest::PreferPath {
+                parent_id: tool_use_id.clone(),
+                path: PathBuf::from(path),
+            });
+        }
+        self.tail_requests.push(TailRequest::Stop {
+            parent_id: tool_use_id.clone(),
+        });
+        let status = subagent_status(
+            msg.get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("completed"),
+        );
+        let summary = msg
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(one_line_summary);
+        self.update_subagent(&tool_use_id, status, summary, false)
+    }
+
+    fn update_subagent(
+        &mut self,
+        tool_use_id: &str,
+        status: ItemStatus,
+        summary: Option<String>,
+        completed_event: bool,
+    ) -> Vec<AgentEvent> {
+        let Some(ToolItem::Subagent {
+            agent_type,
+            description,
+            summary: saved_summary,
+        }) = self.tool_items.get_mut(tool_use_id)
+        else {
+            return Vec::new();
+        };
+        if summary.is_some() {
+            *saved_summary = summary;
+        }
+        let item = ThreadItem {
+            id: tool_use_id.to_owned(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: agent_type.clone(),
+                description: description.clone(),
+                status,
+                summary: saved_summary.clone(),
+            },
+        };
+        vec![if completed_event {
+            AgentEvent::ItemCompleted(item)
+        } else {
+            AgentEvent::ItemUpdated(item)
+        }]
     }
 
     fn on_stream_event(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1048,6 +1336,7 @@ impl Mapper {
                     let text = block.get("text").and_then(Value::as_str).unwrap_or("");
                     out.push(AgentEvent::ItemCompleted(ThreadItem {
                         id: format!("{msg_id}:{index}"),
+                        parent_item_id: None,
                         content: ItemContent::AssistantMessage {
                             text: text.to_string(),
                         },
@@ -1065,6 +1354,7 @@ impl Mapper {
                     if !text.is_empty() {
                         out.push(AgentEvent::ItemCompleted(ThreadItem {
                             id: format!("{msg_id}:{index}"),
+                            parent_item_id: None,
                             content: ItemContent::Reasoning {
                                 text: text.to_string(),
                             },
@@ -1115,7 +1405,38 @@ impl Mapper {
             return Vec::new();
         }
 
-        let (item, content) = if name == "Bash" {
+        let (item, content) = if is_agent_tool(&name.to_lowercase()) {
+            let agent_type = input
+                .get("subagent_type")
+                .and_then(Value::as_str)
+                .unwrap_or("subagent")
+                .to_owned();
+            let description = input
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    input
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .map(|prompt| prompt.chars().take(200).collect())
+                        .unwrap_or_default()
+                });
+            (
+                ToolItem::Subagent {
+                    agent_type: agent_type.clone(),
+                    description: description.clone(),
+                    summary: None,
+                },
+                ItemContent::Subagent {
+                    agent_type,
+                    description,
+                    status: ItemStatus::InProgress,
+                    summary: None,
+                },
+            )
+        } else if name == "Bash" {
             let command = input
                 .get("command")
                 .and_then(Value::as_str)
@@ -1161,6 +1482,7 @@ impl Mapper {
         self.tool_items.insert(tool_use_id.clone(), item);
         vec![AgentEvent::ItemStarted(ThreadItem {
             id: tool_use_id,
+            parent_item_id: None,
             content,
         })]
     }
@@ -1211,9 +1533,21 @@ impl Mapper {
                     output: Some(output),
                     status,
                 },
+                ToolItem::Subagent {
+                    agent_type,
+                    description,
+                    summary,
+                } => ItemContent::Subagent {
+                    agent_type,
+                    description,
+                    status,
+                    summary: summary
+                        .or_else(|| (!output.trim().is_empty()).then(|| one_line_summary(&output))),
+                },
             };
             out.push(AgentEvent::ItemCompleted(ThreadItem {
                 id: tool_use_id,
+                parent_item_id: None,
                 content,
             }));
         }
@@ -1395,6 +1729,18 @@ impl Mapper {
 
 fn is_file_tool(name: &str) -> bool {
     matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+}
+
+fn subagent_status(status: &str) -> ItemStatus {
+    match status {
+        "completed" | "done" | "succeeded" => ItemStatus::Completed,
+        "failed" | "error" | "cancelled" | "canceled" => ItemStatus::Failed,
+        _ => ItemStatus::InProgress,
+    }
+}
+
+fn one_line_summary(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The reduced canonical request type our approval kinds distinguish. T3's
@@ -3039,5 +3385,72 @@ mod tests {
             )),
             "expected completed TurnCompleted"
         );
+    }
+
+    #[test]
+    fn subagent_fixture_maps_lifecycle_and_parented_activity() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_trace.jsonl");
+        let mut mapper = Mapper::new();
+        let mut events = Vec::new();
+        for line in trace.lines() {
+            events.extend(feed(&mut mapper, line));
+        }
+
+        let spawn_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item)
+                    if item.id == "toolu_spawn_1" =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spawn_events.len(), 5);
+        assert!(matches!(
+            &spawn_events[0].content,
+            ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None }
+                if agent_type == "general-purpose" && description == "Ping test"
+        ));
+        assert!(spawn_events.iter().any(|item| matches!(
+            &item.content,
+            ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
+                if summary == "pong"
+        )));
+        assert!(matches!(
+            &spawn_events.last().unwrap().content,
+            ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
+                if summary == "pong"
+        ));
+
+        let children: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ItemStarted(item)
+                | AgentEvent::ItemUpdated(item)
+                | AgentEvent::ItemCompleted(item)
+                    if item.parent_item_id.as_deref() == Some("toolu_spawn_1") =>
+                {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(children.len(), 1);
+        assert!(matches!(
+            &children[0].content,
+            ItemContent::UserMessage { text } if text.contains("Reply with pong")
+        ));
+        assert!(events.iter().all(|event| match event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item) => {
+                item.id == "toolu_spawn_1" || item.parent_item_id.is_some()
+            }
+            _ => true,
+        }));
     }
 }

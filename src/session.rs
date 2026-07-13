@@ -3,6 +3,8 @@
 //! The same fold is used for live event streams and for JSONL replay, so the
 //! UI renders identically in both cases.
 
+use std::collections::{HashMap, HashSet};
+
 use agent::{
     AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, PlanStep,
     ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
@@ -190,6 +192,12 @@ pub enum EntryContent {
         output: Option<String>,
         status: ItemStatus,
     },
+    Subagent {
+        agent_type: String,
+        description: String,
+        status: ItemStatus,
+        summary: Option<String>,
+    },
     Error {
         message: String,
     },
@@ -212,6 +220,10 @@ pub struct ProposedPlan {
 #[derive(Debug, Clone, Default)]
 pub struct Timeline {
     pub entries: Vec<TimelineEntry>,
+    /// Child activity grouped by the top-level subagent spawn item id.
+    pub children: HashMap<String, Vec<TimelineEntry>>,
+    /// Parent ids whose child activity exceeded the in-memory progress cap.
+    truncated_children: HashSet<String>,
     /// One entry per turn ("Work Log" section), in order.
     pub turns: Vec<TurnMeta>,
     pub turn_running: bool,
@@ -239,6 +251,15 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    #[allow(dead_code)]
+    pub fn children(&self, parent_id: &str) -> &[TimelineEntry] {
+        self.children.get(parent_id).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn children_truncated(&self, parent_id: &str) -> bool {
+        self.truncated_children.contains(parent_id)
+    }
+
     /// Fold a whole event sequence (replay path). Accepts either bare
     /// [`AgentEvent`]s (ts unknown) or timestamped [`StoredEvent`]s.
     pub fn fold_events(events: impl IntoIterator<Item = impl Into<StoredEvent>>) -> Self {
@@ -472,6 +493,28 @@ impl Timeline {
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
         let mut incoming = Self::content_from_item(&item.content);
+        if let Some(parent_id) = &item.parent_item_id {
+            let turn = self.ensure_turn(ts);
+            let children = self.children.entry(parent_id.clone()).or_default();
+            if let Some(entry) = children.iter_mut().find(|entry| entry.id == item.id) {
+                entry.content = merge_content(
+                    std::mem::replace(&mut entry.content, incoming.clone()),
+                    incoming,
+                );
+            } else {
+                children.push(TimelineEntry {
+                    id: item.id.clone(),
+                    content: incoming,
+                    ts,
+                    turn,
+                });
+                if children.len() > 200 {
+                    children.remove(0);
+                    self.truncated_children.insert(parent_id.clone());
+                }
+            }
+            return;
+        }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
             entry.content = merge_content(
                 std::mem::replace(&mut entry.content, incoming.clone()),
@@ -532,6 +575,17 @@ impl Timeline {
                 input: input.clone(),
                 output: output.clone(),
                 status: *status,
+            },
+            ItemContent::Subagent {
+                agent_type,
+                description,
+                status,
+                summary,
+            } => EntryContent::Subagent {
+                agent_type: agent_type.clone(),
+                description: description.clone(),
+                status: *status,
+                summary: summary.clone(),
             },
             ItemContent::WebSearch { query } => EntryContent::Tool {
                 name: "web_search".into(),
@@ -664,6 +718,23 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             exit_code,
             status,
         },
+        (
+            EntryContent::Subagent {
+                summary: old_summary,
+                ..
+            },
+            EntryContent::Subagent {
+                agent_type,
+                description,
+                status,
+                summary,
+            },
+        ) => EntryContent::Subagent {
+            agent_type,
+            description,
+            status,
+            summary: summary.or(old_summary),
+        },
         (_, incoming) => incoming,
     }
 }
@@ -699,6 +770,7 @@ mod tests {
     fn user_msg(id: &str, text: &str) -> AgentEvent {
         AgentEvent::ItemCompleted(ThreadItem {
             id: id.into(),
+            parent_item_id: None,
             content: ItemContent::UserMessage { text: text.into() },
         })
     }
@@ -729,6 +801,7 @@ mod tests {
             },
             AgentEvent::ItemCompleted(ThreadItem {
                 id: "msg_011".into(),
+                parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "Hi! How can I help you today?".into(),
                 },
@@ -771,6 +844,7 @@ mod tests {
             },
             AgentEvent::ItemCompleted(ThreadItem {
                 id: "assistant-a".into(),
+                parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "working".into(),
                 },
@@ -810,6 +884,7 @@ mod tests {
     fn assistant_snapshot(id: &str, text: &str) -> AgentEvent {
         AgentEvent::ItemUpdated(ThreadItem {
             id: id.into(),
+            parent_item_id: None,
             content: ItemContent::AssistantMessage { text: text.into() },
         })
     }
@@ -844,6 +919,7 @@ mod tests {
             // Authoritative final snapshot: replaces, never concatenates.
             AgentEvent::ItemCompleted(ThreadItem {
                 id: "msg".into(),
+                parent_item_id: None,
                 content: ItemContent::AssistantMessage {
                     text: "Para one.\n\nPara two. Tail.".into(),
                 },
@@ -888,6 +964,7 @@ mod tests {
             None,
             &AgentEvent::ItemStarted(ThreadItem {
                 id: "patch-1".into(),
+                parent_item_id: None,
                 content: ItemContent::FileChange {
                     changes: changes.clone(),
                     status: ItemStatus::InProgress,
@@ -956,6 +1033,7 @@ mod tests {
             None,
             &AgentEvent::ItemCompleted(ThreadItem {
                 id: "patch-1".into(),
+                parent_item_id: None,
                 content: ItemContent::FileChange {
                     changes: changes.clone(),
                     status: ItemStatus::Completed,
@@ -1000,6 +1078,7 @@ mod tests {
             None,
             &AgentEvent::ItemStarted(ThreadItem {
                 id: "cmd-1".into(),
+                parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "echo hi".into(),
                     output: String::new(),
@@ -1020,6 +1099,7 @@ mod tests {
             None,
             &AgentEvent::ItemCompleted(ThreadItem {
                 id: "cmd-1".into(),
+                parent_item_id: None,
                 content: ItemContent::CommandExecution {
                     command: "echo hi".into(),
                     output: String::new(),
@@ -1054,6 +1134,7 @@ mod tests {
                 ts: Some(1_002_000),
                 event: AgentEvent::ItemCompleted(ThreadItem {
                     id: "a1".into(),
+                    parent_item_id: None,
                     content: ItemContent::AssistantMessage { text: "hi".into() },
                 }),
             },
@@ -1257,6 +1338,73 @@ mod tests {
             &timeline.entries.last().unwrap().content,
             EntryContent::Error { message } if message.contains("stderr:\nboom")
         ));
+    }
+
+    #[test]
+    fn subagent_children_fold_below_spawn_only() {
+        let spawn = ThreadItem {
+            id: "spawn".into(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "general-purpose".into(),
+                description: "Ping test".into(),
+                status: ItemStatus::InProgress,
+                summary: None,
+            },
+        };
+        let child = ThreadItem {
+            id: "spawn:user-1".into(),
+            parent_item_id: Some("spawn".into()),
+            content: ItemContent::UserMessage {
+                text: "ping".into(),
+            },
+        };
+        let completed = ThreadItem {
+            content: ItemContent::Subagent {
+                agent_type: "general-purpose".into(),
+                description: "Ping test".into(),
+                status: ItemStatus::Completed,
+                summary: Some("pong".into()),
+            },
+            ..spawn.clone()
+        };
+        let timeline = Timeline::fold_events([
+            AgentEvent::ItemStarted(spawn),
+            AgentEvent::ItemCompleted(child),
+            AgentEvent::ItemCompleted(completed),
+        ]);
+        assert_eq!(timeline.entries.len(), 1);
+        assert_eq!(timeline.entries[0].id, "spawn");
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
+                if summary == "pong"
+        ));
+        assert_eq!(timeline.children("spawn").len(), 1);
+        assert!(matches!(
+            &timeline.children("spawn")[0].content,
+            EntryContent::User { text, .. } if text == "ping"
+        ));
+    }
+
+    #[test]
+    fn subagent_child_cap_records_actual_truncation() {
+        let mut timeline = Timeline::default();
+        for index in 0..=200 {
+            timeline.apply_at(
+                None,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: format!("spawn:child-{index}"),
+                    parent_item_id: Some("spawn".into()),
+                    content: ItemContent::AssistantMessage {
+                        text: index.to_string(),
+                    },
+                }),
+            );
+        }
+        assert_eq!(timeline.children("spawn").len(), 200);
+        assert!(timeline.children_truncated("spawn"));
+        assert_eq!(timeline.children("spawn")[0].id, "spawn:child-1");
     }
 
     #[test]

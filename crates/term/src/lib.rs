@@ -869,10 +869,11 @@ mod tests {
                 return state;
             }
             // Generous: this waits on a real PTY under a shared CI runner, where
-            // spawning a shell can stall for seconds. The test is about the
-            // output eventually arriving, not about how fast.
+            // spawning a shell can stall for tens of seconds on a degraded host
+            // (observed 2026-07-13). The test is about the output eventually
+            // arriving, not about how fast.
             assert!(
-                start.elapsed() < Duration::from_secs(30),
+                start.elapsed() < Duration::from_secs(120),
                 "terminal timed out: {:?}",
                 state.text()
             );
