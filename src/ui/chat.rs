@@ -511,6 +511,7 @@ impl ChatView {
     ///
     /// While this message is being edited the bubble is replaced by the inline
     /// editor.
+    #[allow(clippy::too_many_arguments)]
     fn render_user(
         &self,
         turn: usize,
