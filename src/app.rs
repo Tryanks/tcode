@@ -575,6 +575,11 @@ pub struct AppState {
     pub route: Route,
     /// Whether the command palette (⌘K) overlay is showing.
     pub palette_open: bool,
+    /// Generation of the transient quit confirmation. Timers capture this value
+    /// so an expired prompt cannot dismiss a newer (or unrelated) dialog.
+    pub quit_prompt_epoch: u64,
+    /// Prevents repeated quit signals from stacking confirmation dialogs.
+    pub quit_prompt_open: bool,
     /// Per-provider model catalog (from `agent::list_models`): loaded instantly
     /// from the persisted cache, then refreshed in the background at start and
     /// whenever a binary path changes. Absent entry = never fetched.
@@ -706,6 +711,8 @@ impl AppState {
             sidebar_collapsed: settings_collapsed,
             route: Route::Chat,
             palette_open: false,
+            quit_prompt_epoch: 0,
+            quit_prompt_open: false,
             model_catalogs,
             models_loading: HashMap::new(),
             terminal_preferences_path,
