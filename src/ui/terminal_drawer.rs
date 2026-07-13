@@ -4,8 +4,8 @@ use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontStyle,
     FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
-    ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, StyledText, Task,
-    UnderlineStyle, Window, div, prelude::FluentBuilder as _, px, rgb,
+    ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, StyledText, Task, TextRun,
+    UnderlineStyle, Window, div, font, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _,
@@ -18,14 +18,35 @@ use term::{Color, TermState};
 
 use crate::app::{AppState, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 
-const FONT_SIZE: f32 = 12.;
-const LINE_HEIGHT: f32 = 17.;
-const CELL_WIDTH: f32 = 7.25;
+const FONT_SIZE: f32 = 13.;
+#[cfg(target_os = "macos")]
+const TERMINAL_FONT_FAMILY: &str = "Menlo";
+#[cfg(target_os = "windows")]
+const TERMINAL_FONT_FAMILY: &str = "Consolas";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const TERMINAL_FONT_FAMILY: &str = "DejaVu Sans Mono";
+const PANE_PADDING_X: f32 = 8.;
+const PANE_PADDING_Y: f32 = 5.;
+const PANE_BORDER: f32 = 1.;
+const SELECTION_ACTION_HEIGHT: f32 = 28.;
+
+#[derive(Clone, Copy)]
+struct GridGeometry {
+    bounds: Bounds<Pixels>,
+    cols: usize,
+    rows: usize,
+    cell_width: f32,
+    cell_height: f32,
+    content_top: f32,
+}
 
 pub struct TerminalDrawer {
     app_state: Entity<AppState>,
     focus_handle: FocusHandle,
-    grid_bounds: Rc<RefCell<HashMap<u64, Bounds<Pixels>>>>,
+    grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
+    cell_width: f32,
+    cell_height: f32,
+    scroll_remainder: HashMap<u64, f32>,
     selection_anchor: Option<(u64, (usize, usize))>,
     _ticker: Task<()>,
 }
@@ -44,18 +65,18 @@ impl TerminalDrawer {
             app_state,
             focus_handle: cx.focus_handle(),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
+            cell_width: 7.83,
+            cell_height: 17.,
+            scroll_remainder: HashMap::new(),
             selection_anchor: None,
             _ticker: ticker,
         }
     }
 
-    pub fn resize(&self, width: f32, height: f32, cx: &mut Context<Self>) {
-        let cols = (width / CELL_WIDTH).floor().max(2.) as usize;
-        let rows = ((height - 34.) / LINE_HEIGHT).floor().max(2.) as usize;
+    pub fn resize(&self, _width: f32, height: f32, cx: &mut Context<Self>) {
         self.app_state.update(cx, |state, _| {
             state.set_terminal_height(height);
         });
-        let _ = (cols, rows);
     }
 
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&term::Terminal)) {
@@ -106,14 +127,27 @@ impl TerminalDrawer {
 
     fn on_scroll(
         &mut self,
+        terminal_id: u64,
         event: &ScrollWheelEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let delta = event.delta.pixel_delta(px(LINE_HEIGHT)).y;
-        let lines = (f32::from(delta) / LINE_HEIGHT).round() as i32;
+        let delta = f32::from(event.delta.pixel_delta(px(self.cell_height)).y);
+        let remainder = self.scroll_remainder.entry(terminal_id).or_default();
+        let total = *remainder + delta;
+        let lines = (total / self.cell_height).trunc() as i32;
+        *remainder = total - lines as f32 * self.cell_height;
         if lines != 0 {
-            self.with_terminal(cx, |terminal| terminal.scroll(lines));
+            if let Some(entry) = self
+                .app_state
+                .read(cx)
+                .active
+                .as_ref()
+                .and_then(|active| active.terminal_workspace.terminal(terminal_id))
+            {
+                entry.terminal.scroll(lines);
+            }
+            cx.stop_propagation();
             cx.notify();
         }
     }
@@ -159,8 +193,8 @@ impl TerminalDrawer {
             ));
         }
         div()
-            .h(px(LINE_HEIGHT))
-            .line_height(px(LINE_HEIGHT))
+            .h(px(self.cell_height))
+            .line_height(px(self.cell_height))
             .whitespace_nowrap()
             .child(StyledText::new(text).with_highlights(runs))
             .into_any_element()
@@ -171,10 +205,18 @@ impl TerminalDrawer {
         terminal_id: u64,
         position: gpui::Point<Pixels>,
     ) -> Option<(usize, usize)> {
-        let bounds = *self.grid_bounds.borrow().get(&terminal_id)?;
-        let x = (f32::from(position.x - bounds.left()) - 8.).max(0.);
-        let y = (f32::from(position.y - bounds.top()) - 4.).max(0.);
-        Some(((y / LINE_HEIGHT) as usize, (x / CELL_WIDTH) as usize))
+        let geometry = *self.grid_bounds.borrow().get(&terminal_id)?;
+        let x =
+            (f32::from(position.x - geometry.bounds.left()) - PANE_BORDER - PANE_PADDING_X).max(0.);
+        let y = (f32::from(position.y - geometry.bounds.top())
+            - PANE_BORDER
+            - PANE_PADDING_Y
+            - geometry.content_top)
+            .max(0.);
+        Some((
+            ((y / geometry.cell_height) as usize).min(geometry.rows.saturating_sub(1)),
+            ((x / geometry.cell_width) as usize).min(geometry.cols.saturating_sub(1)),
+        ))
     }
 
     fn terminal_mouse_down(
@@ -195,7 +237,7 @@ impl TerminalDrawer {
                 .as_ref()
                 .and_then(|active| active.terminal_workspace.terminal(terminal_id))
             {
-                entry.terminal.select(point, point);
+                entry.terminal.clear_selection();
             }
         });
         self.selection_anchor = Some((terminal_id, point));
@@ -251,7 +293,11 @@ impl TerminalDrawer {
                 .as_ref()
                 .and_then(|active| active.terminal_workspace.terminal(terminal_id))
         {
-            entry.terminal.select(start, point);
+            if start == point {
+                entry.terminal.clear_selection();
+            } else {
+                entry.terminal.select(start, point);
+            }
         }
         self.selection_anchor = None;
         cx.notify();
@@ -280,28 +326,33 @@ impl TerminalDrawer {
                 .unwrap_or_else(|| rust_i18n::t!("terminal.exited").into_owned());
             grid = grid.child(
                 div()
-                    .h(px(LINE_HEIGHT))
+                    .h(px(self.cell_height))
                     .text_color(cx.theme().muted_foreground)
                     .child(status),
             );
         }
 
-        let selected_row = snapshot
-            .cells
-            .iter()
-            .rposition(|cell| cell.selected)
-            .map(|index| index / snapshot.cols);
+        let has_selection = snapshot.cells.iter().any(|cell| cell.selected);
+        let content_top = if has_selection {
+            SELECTION_ACTION_HEIGHT
+        } else {
+            0.
+        };
+        grid = grid.when(has_selection, |grid| grid.pt(px(SELECTION_ACTION_HEIGHT)));
         let grid_bounds = self.grid_bounds.clone();
         let app_state = self.app_state.clone();
+        let cell_width = self.cell_width;
+        let cell_height = self.cell_height;
         div()
             .id(("terminal-grid", terminal_id))
             .relative()
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .px_2()
-            .py_1()
+            .px(px(PANE_PADDING_X))
+            .py(px(PANE_PADDING_Y))
             .border_1()
+            .rounded(cx.theme().radius)
             .border_color(
                 if self
                     .app_state
@@ -310,17 +361,30 @@ impl TerminalDrawer {
                     .as_ref()
                     .is_some_and(|active| active.terminal_workspace.active_id == Some(terminal_id))
                 {
-                    cx.theme().primary.opacity(0.45)
+                    cx.theme().ring.opacity(0.72)
                 } else {
                     cx.theme().border
                 },
             )
             .on_prepaint(move |bounds, _window, cx| {
-                grid_bounds.borrow_mut().insert(terminal_id, bounds);
-                let cols = (f32::from(bounds.size.width) / CELL_WIDTH).floor().max(2.) as usize;
-                let rows = ((f32::from(bounds.size.height) - 8.) / LINE_HEIGHT)
-                    .floor()
-                    .max(2.) as usize;
+                let content_width =
+                    f32::from(bounds.size.width) - 2. * (PANE_BORDER + PANE_PADDING_X);
+                let content_height = f32::from(bounds.size.height)
+                    - 2. * (PANE_BORDER + PANE_PADDING_Y)
+                    - content_top;
+                let cols = (content_width / cell_width).floor().max(2.) as usize;
+                let rows = (content_height / cell_height).floor().max(2.) as usize;
+                grid_bounds.borrow_mut().insert(
+                    terminal_id,
+                    GridGeometry {
+                        bounds,
+                        cols,
+                        rows,
+                        cell_width,
+                        cell_height,
+                        content_top,
+                    },
+                );
                 if let Some(entry) = app_state
                     .read(cx)
                     .active
@@ -346,14 +410,16 @@ impl TerminalDrawer {
                 }),
             )
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_scroll_wheel(cx.listener(move |this, event, window, cx| {
+                this.on_scroll(terminal_id, event, window, cx)
+            }))
             .child(grid)
-            .when_some(selected_row, |this, row| {
+            .when(has_selection, |this| {
                 this.child(
                     Button::new(("terminal-add-context", terminal_id))
                         .absolute()
-                        .right(px(12.))
-                        .top(px((row as f32 * LINE_HEIGHT + 8.).min(170.)))
+                        .right(px(PANE_BORDER + PANE_PADDING_X))
+                        .top(px(PANE_BORDER + PANE_PADDING_Y))
                         .small()
                         .label(rust_i18n::t!("terminal.add_context"))
                         .tooltip(format!(
@@ -361,6 +427,7 @@ impl TerminalDrawer {
                             label,
                             rust_i18n::t!("terminal.selection")
                         ))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.app_state.update(cx, |state, cx| {
                                 state.capture_terminal_selection(terminal_id, cx)
@@ -379,7 +446,26 @@ impl Focusable for TerminalDrawer {
 }
 
 impl Render for TerminalDrawer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // PTY dimensions and mouse hit-testing use the exact advance and
+        // vertical metrics of the same resolved face used by StyledText.
+        let shaped_cell = window.text_system().shape_line(
+            "MMMMMMMMMM".into(),
+            px(FONT_SIZE),
+            &[TextRun {
+                len: 10,
+                font: font(TERMINAL_FONT_FAMILY),
+                color: cx.theme().foreground,
+                background_color: None,
+                strikethrough: None,
+                underline: None,
+            }],
+            None,
+        );
+        self.cell_width = f32::from(shaped_cell.width) / 10.;
+        self.cell_height = f32::from(shaped_cell.ascent + shaped_cell.descent)
+            .ceil()
+            .max(FONT_SIZE + 2.);
         let (tabs, active_id, active_split) = self
             .app_state
             .read(cx)
@@ -405,7 +491,7 @@ impl Render for TerminalDrawer {
             })
             .unwrap_or_default();
 
-        let mut tab_strip = h_flex().min_w_0().gap_1().overflow_hidden();
+        let mut tab_strip = h_flex().min_w_0().gap(px(2.)).overflow_hidden();
         for (id, label, exited) in &tabs {
             let id = *id;
             let selected = active_id == Some(id);
@@ -413,21 +499,21 @@ impl Render for TerminalDrawer {
             tab_strip = tab_strip.child(
                 h_flex()
                     .id(("terminal-tab", id))
-                    .h(px(27.))
-                    .gap_1()
+                    .h(px(25.))
+                    .gap(px(2.))
                     .px_2()
-                    .rounded(px(6.))
+                    .rounded_t(px(5.))
                     .cursor_pointer()
                     .bg(if selected {
-                        cx.theme().muted
+                        cx.theme().muted.opacity(0.72)
                     } else {
-                        cx.theme().background
+                        cx.theme().background.opacity(0.)
                     })
-                    .border_1()
+                    .border_b_1()
                     .border_color(if selected {
-                        cx.theme().primary.opacity(0.45)
+                        cx.theme().primary
                     } else {
-                        cx.theme().border
+                        cx.theme().border.opacity(0.)
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app_state
@@ -439,7 +525,7 @@ impl Render for TerminalDrawer {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(px(11.))
-                            .text_color(if *exited {
+                            .text_color(if *exited || !selected {
                                 cx.theme().muted_foreground
                             } else {
                                 cx.theme().foreground
@@ -468,7 +554,7 @@ impl Render for TerminalDrawer {
             .any(|(id, _, exited)| Some(*id) == active_id && *exited);
         let header = h_flex()
             .flex_none()
-            .h(px(33.))
+            .h(px(31.))
             .px_2()
             .gap_1()
             .items_center()
@@ -548,24 +634,32 @@ impl Render for TerminalDrawer {
             );
 
         let body: AnyElement = match (active_id, active_split) {
-            (_, Some(split)) => {
-                let first = resizable_panel().child(self.render_terminal(split.first, cx));
-                let second = resizable_panel().child(self.render_terminal(split.second, cx));
-                match split.direction {
-                    TerminalSplitDirection::Horizontal => {
-                        h_resizable(("terminal-split-h", split.first))
-                            .child(first)
-                            .child(second)
-                            .into_any_element()
-                    }
-                    TerminalSplitDirection::Vertical => {
-                        v_resizable(("terminal-split-v", split.first))
-                            .child(first)
-                            .child(second)
-                            .into_any_element()
-                    }
+            (_, Some(split)) => match split.direction {
+                TerminalSplitDirection::Horizontal => {
+                    let first = resizable_panel()
+                        .pr(px(2.))
+                        .child(self.render_terminal(split.first, cx));
+                    let second = resizable_panel()
+                        .pl(px(2.))
+                        .child(self.render_terminal(split.second, cx));
+                    h_resizable(("terminal-split-h", split.first))
+                        .child(first)
+                        .child(second)
+                        .into_any_element()
                 }
-            }
+                TerminalSplitDirection::Vertical => {
+                    let first = resizable_panel()
+                        .pb(px(2.))
+                        .child(self.render_terminal(split.first, cx));
+                    let second = resizable_panel()
+                        .pt(px(2.))
+                        .child(self.render_terminal(split.second, cx));
+                    v_resizable(("terminal-split-v", split.first))
+                        .child(first)
+                        .child(second)
+                        .into_any_element()
+                }
+            },
             (Some(id), None) => self.render_terminal(id, cx),
             _ => div()
                 .p_3()
@@ -577,7 +671,7 @@ impl Render for TerminalDrawer {
             .size_full()
             .min_h_0()
             .bg(cx.theme().background)
-            .font_family("SF Mono")
+            .font_family(TERMINAL_FONT_FAMILY)
             .text_size(px(FONT_SIZE))
             .child(header)
             .child(
