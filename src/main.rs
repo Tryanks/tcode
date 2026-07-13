@@ -21,16 +21,127 @@ mod version_check;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 
 use gpui::{
-    AppContext as _, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
+    App, AppContext as _, Entity, KeyBinding, ParentElement as _, TitlebarOptions, WindowBounds,
+    WindowOptions, point, px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry,
+    ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    dialog::DialogFooter,
 };
 
 const TCODE_THEME: &str = include_str!("../themes/tcode.json");
+const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn finish_quit_prompt(app_state: &Entity<app::AppState>, epoch: u64, cx: &mut App) -> bool {
+    app_state.update(cx, |state, _| {
+        if !state.quit_prompt_open || state.quit_prompt_epoch != epoch {
+            return false;
+        }
+        state.quit_prompt_epoch = state.quit_prompt_epoch.wrapping_add(1);
+        state.quit_prompt_open = false;
+        true
+    })
+}
+
+fn handle_quit(_: &ui::Quit, app_state: &Entity<app::AppState>, cx: &mut App) {
+    let count = app_state.read(cx).turns_in_flight_count();
+    if count == 0 {
+        cx.quit();
+        return;
+    }
+
+    let Some(window_handle) = cx
+        .active_window()
+        .or_else(|| cx.windows().into_iter().next())
+    else {
+        cx.quit();
+        return;
+    };
+
+    let epoch = app_state.update(cx, |state, _| {
+        if state.quit_prompt_open {
+            return None;
+        }
+        state.quit_prompt_epoch = state.quit_prompt_epoch.wrapping_add(1);
+        state.quit_prompt_open = true;
+        Some(state.quit_prompt_epoch)
+    });
+    let Some(epoch) = epoch else {
+        return;
+    };
+
+    let prompt_state = app_state.clone();
+    if window_handle
+        .update(cx, move |_, window, cx| {
+            let quit_state = prompt_state.clone();
+            let cancel_state = prompt_state.clone();
+            let enter_state = prompt_state.clone();
+            let escape_state = prompt_state.clone();
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let quit_state = quit_state.clone();
+                let cancel_state = cancel_state.clone();
+                let enter_state = enter_state.clone();
+                let escape_state = escape_state.clone();
+                alert
+                    .title(rust_i18n::t!("quit.title"))
+                    .description(rust_i18n::t!("quit.description", count = count))
+                    // The stock alert maps Enter to OK. A custom footer keeps
+                    // both Enter and Escape safe while retaining the alert's
+                    // normal visual style and explicit danger action.
+                    .footer(
+                        DialogFooter::new()
+                            .child(
+                                Button::new("quit-working-sessions")
+                                    .label(rust_i18n::t!("quit.confirm"))
+                                    .danger()
+                                    .on_click(move |_, window, cx| {
+                                        finish_quit_prompt(&quit_state, epoch, cx);
+                                        window.close_dialog(cx);
+                                        cx.quit();
+                                    }),
+                            )
+                            .child(
+                                Button::new("cancel-quit")
+                                    .label(rust_i18n::t!("settings.cancel"))
+                                    .primary()
+                                    .on_click(move |_, window, cx| {
+                                        finish_quit_prompt(&cancel_state, epoch, cx);
+                                        window.close_dialog(cx);
+                                    }),
+                            ),
+                    )
+                    .on_ok(move |_, _, cx| {
+                        finish_quit_prompt(&enter_state, epoch, cx);
+                        true
+                    })
+                    .on_cancel(move |_, _, cx| {
+                        finish_quit_prompt(&escape_state, epoch, cx);
+                        true
+                    })
+            });
+        })
+        .is_err()
+    {
+        finish_quit_prompt(app_state, epoch, cx);
+        cx.quit();
+        return;
+    }
+
+    let timeout_state = app_state.clone();
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(QUIT_PROMPT_TIMEOUT).await;
+        cx.update(|cx| {
+            if finish_quit_prompt(&timeout_state, epoch, cx) {
+                let _ = window_handle.update(cx, |_, window, cx| window.close_dialog(cx));
+            }
+        });
+    })
+    .detach();
+}
 
 fn main() {
     env_logger::init();
@@ -189,6 +300,10 @@ fn main() {
             Theme::global_mut(cx).apply_config(&dark);
 
             let app_state = cx.new(|_| app::AppState::new(store));
+            cx.on_action::<ui::Quit>({
+                let app_state = app_state.clone();
+                move |action, cx| handle_quit(action, &app_state, cx)
+            });
             // Bring up the in-process preview MCP server and register it with the
             // app so every spawned agent session can drive the embedded browser.
             match preview_mcp::start() {

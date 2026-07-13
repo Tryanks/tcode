@@ -25,10 +25,7 @@ use gpui::{
     Subscription, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, WindowExt as _,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    h_flex,
+    ActiveTheme as _, Root, h_flex,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
 
@@ -194,31 +191,6 @@ impl AppShell {
         self.app_state
             .update(cx, |state, cx| state.toggle_palette(cx));
     }
-
-    fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
-        let count = self.app_state.read(cx).turns_in_flight_count();
-        if count == 0 {
-            cx.quit();
-            return;
-        }
-
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            alert
-                .title(rust_i18n::t!("quit.title"))
-                .description(rust_i18n::t!("quit.description", count = count))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(rust_i18n::t!("quit.confirm"))
-                        .cancel_text(rust_i18n::t!("settings.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(|_, _, cx| {
-                    cx.quit();
-                    true
-                })
-        });
-    }
 }
 
 impl Render for AppShell {
@@ -248,7 +220,6 @@ impl Render for AppShell {
                 .size_full()
                 .bg(cx.theme().background)
                 .text_color(cx.theme().foreground)
-                .on_action(cx.listener(Self::on_quit))
                 .on_action(cx.listener(Self::on_toggle_palette))
                 .child(self.settings_page.clone())
                 .child(self.toasts.clone())
@@ -355,7 +326,6 @@ impl Render for AppShell {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_toggle_palette))
             .child(
                 div()
