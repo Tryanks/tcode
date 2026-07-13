@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use gpui::{
     Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
@@ -52,6 +52,17 @@ struct ThreadArchive(String);
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadDelete(String);
 
+// Project-header context-menu actions.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_project, no_json)]
+struct ProjectArchiveAll(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_project, no_json)]
+struct ProjectDelete(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_project, no_json)]
+struct ProjectReveal(String);
+
 /// In-progress inline rename of a thread row.
 struct RenameState {
     session_id: String,
@@ -83,28 +94,7 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some(rust_i18n::t!("sidebar.select_project").into_owned().into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = rx.await
-                && let Some(path) = paths.pop()
-            {
-                let _ = this.update(cx, |this, cx| {
-                    this.app_state.update(cx, |state, cx| {
-                        // Create the project, then drop into a draft thread
-                        // for it (composer focused, empty timeline).
-                        if let Some(project_id) = state.create_project(path.clone(), cx) {
-                            state.start_draft(project_id, path, cx);
-                        }
-                    });
-                });
-            }
-        })
-        .detach();
+        super::add_project_dialog::open(self.app_state.clone(), window, cx);
     }
 
     fn toggle_group(&mut self, project_id: &str, cx: &mut Context<Self>) {
@@ -221,6 +211,123 @@ impl SessionsSidebar {
             .map(|m| m.title.clone())
             .unwrap_or_default();
         self.delete_thread(&id, &title, window, cx);
+    }
+
+    fn on_project_archive_all(
+        &mut self,
+        action: &ProjectArchiveAll,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_state = self.app_state.clone();
+        let session_ids: Vec<String> = app_state
+            .read(cx)
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.project_id.as_deref() == Some(action.0.as_str())
+                    && meta.archived_at.is_none()
+                    && !app_state.read(cx).turn_running_for(&meta.id)
+            })
+            .map(|meta| meta.id.clone())
+            .collect();
+        if session_ids.is_empty() {
+            return;
+        }
+        let count = session_ids.len();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_state = app_state.clone();
+            let session_ids = session_ids.clone();
+            alert
+                .title(rust_i18n::t!("sidebar.archive_all_title"))
+                .description(rust_i18n::t!(
+                    "sidebar.archive_all_description",
+                    count = count
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(rust_i18n::t!("sidebar.archive_all_action"))
+                        .cancel_text(rust_i18n::t!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    app_state.update(cx, |state, cx| {
+                        for session_id in &session_ids {
+                            state.archive_session(session_id, cx);
+                        }
+                    });
+                    true
+                })
+        });
+    }
+
+    fn on_project_delete(
+        &mut self,
+        action: &ProjectDelete,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_state = self.app_state.clone();
+        let project_id = action.0.clone();
+        let (project_name, count) = {
+            let state = app_state.read(cx);
+            let Some(project) = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+            else {
+                return;
+            };
+            let count = state
+                .sessions
+                .iter()
+                .filter(|meta| meta.project_id.as_deref() == Some(project_id.as_str()))
+                .count();
+            (project.name.clone(), count)
+        };
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_state = app_state.clone();
+            let project_id = project_id.clone();
+            alert
+                .title(rust_i18n::t!(
+                    "sidebar.remove_project_title",
+                    project = project_name.clone()
+                ))
+                .description(rust_i18n::t!(
+                    "sidebar.remove_project_description",
+                    count = count
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(rust_i18n::t!("sidebar.remove_project_action"))
+                        .cancel_text(rust_i18n::t!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    app_state.update(cx, |state, cx| state.delete_project(&project_id, cx));
+                    true
+                })
+        });
+    }
+
+    fn on_project_reveal(
+        &mut self,
+        action: &ProjectReveal,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(root) = self
+            .app_state
+            .read(cx)
+            .projects
+            .iter()
+            .find(|project| project.id == action.0)
+            .map(|project| project.root.clone())
+        {
+            cx.reveal_path(&root);
+        }
     }
 
     /// Archive a thread, honoring the delete-confirmation setting. Blocked while
@@ -460,82 +567,107 @@ impl SessionsSidebar {
         let header_toggle_id = project_id.clone();
         let plus_cwd = group.project.root.clone();
         let plus_project_id = project_id.clone();
+        let menu_project_id = project_id.clone();
+        let can_archive = group
+            .sessions
+            .iter()
+            .any(|meta| !self.app_state.read(cx).turn_running_for(&meta.id));
 
-        let mut container = v_flex().flex_none().child(
-            h_flex()
-                .id(gpui::SharedString::from(format!(
-                    "project-header-{project_id}"
-                )))
-                .group(group_key.clone())
-                .h(px(30.))
-                .items_center()
-                .gap_1()
-                .px_2()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().sidebar_accent))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.app_state.update(cx, |state, cx| {
-                        state.toggle_project_collapsed(&header_toggle_id, cx);
-                    });
-                }))
-                .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
+        let header = h_flex()
+            .id(gpui::SharedString::from(format!(
+                "project-header-{project_id}"
+            )))
+            .group(group_key.clone())
+            .h(px(30.))
+            .items_center()
+            .gap_1()
+            .px_2()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().sidebar_accent))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.app_state.update(cx, |state, cx| {
+                    state.toggle_project_collapsed(&header_toggle_id, cx);
+                });
+            }))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size_4()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                Icon::new(IconName::Folder)
                     .size_4()
                     .text_color(cx.theme().muted_foreground),
-                )
-                .child(
-                    Icon::new(IconName::Folder)
-                        .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_sm()
+                    .font_medium()
+                    .text_color(cx.theme().sidebar_foreground)
+                    .child(group.project.name.clone()),
+            )
+            // Unread dot when any child thread is unread (hidden on hover so
+            // the "+" can take the slot).
+            .when(has_unread, |row| {
+                row.child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(cx.theme().sidebar_foreground)
-                        .child(group.project.name.clone()),
+                        .flex_none()
+                        .group_hover(group_key.clone(), |s| s.invisible())
+                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
                 )
-                // Unread dot when any child thread is unread (hidden on hover so
-                // the "+" can take the slot).
-                .when(has_unread, |row| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .group_hover(group_key.clone(), |s| s.invisible())
-                            .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
+            })
+            .child(
+                div()
+                    .invisible()
+                    .group_hover(group_key.clone(), |s| s.visible())
+                    .child(
+                        Button::new("new-thread")
+                            .ghost()
+                            .xsmall()
+                            .compact()
+                            .icon(IconName::Plus)
+                            .tooltip(rust_i18n::t!("sidebar.create_thread"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                let cwd = plus_cwd.clone();
+                                let project_id = plus_project_id.clone();
+                                this.app_state.update(cx, |state, cx| {
+                                    state.start_draft(project_id, cwd, cx);
+                                });
+                            })),
+                    ),
+            );
+        let mut container =
+            v_flex()
+                .flex_none()
+                .child(header.context_menu(move |menu, _window, _cx| {
+                    let id = menu_project_id.clone();
+                    let delete_label = rust_i18n::t!("sidebar.remove_project").into_owned();
+                    menu.menu_with_enable(
+                        rust_i18n::t!("sidebar.archive_all").into_owned(),
+                        Box::new(ProjectArchiveAll(id.clone())),
+                        can_archive,
                     )
-                })
-                .child(
-                    div()
-                        .invisible()
-                        .group_hover(group_key.clone(), |s| s.visible())
-                        .child(
-                            Button::new("new-thread")
-                                .ghost()
-                                .xsmall()
-                                .compact()
-                                .icon(IconName::Plus)
-                                .tooltip(rust_i18n::t!("sidebar.create_thread"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    let cwd = plus_cwd.clone();
-                                    let project_id = plus_project_id.clone();
-                                    this.app_state.update(cx, |state, cx| {
-                                        state.start_draft(project_id, cwd, cx);
-                                    });
-                                })),
-                        ),
-                ),
-        );
+                    .menu_element(Box::new(ProjectDelete(id.clone())), move |_window, cx| {
+                        div()
+                            .flex_1()
+                            .text_color(cx.theme().danger)
+                            .child(delete_label.clone())
+                    })
+                    .menu(
+                        rust_i18n::t!("sidebar.reveal_project").into_owned(),
+                        Box::new(ProjectReveal(id)),
+                    )
+                }));
 
         if !collapsed {
             for meta in group.sessions.iter().take(visible) {
@@ -918,6 +1050,9 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_copy_id))
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_project_archive_all))
+            .on_action(cx.listener(Self::on_project_delete))
+            .on_action(cx.listener(Self::on_project_reveal))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
             .child(self.render_projects_header(cx))
