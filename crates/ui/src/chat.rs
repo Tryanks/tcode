@@ -29,7 +29,7 @@ use gpui_component::{
 };
 
 use tcode_core::git::GitAction;
-use tcode_core::session::{EntryContent, TimelineEntry, TurnMeta};
+use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
 use tcode_runtime::app::{AppState, RightTab};
 
 use crate::commit_dialog::CommitDialog;
@@ -380,9 +380,9 @@ fn index_turns(
 /// updates O(number of entries) without repeatedly hashing growing markdown.
 fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
     match content {
-        EntryContent::User { text, steered } => {
+        EntryContent::User { text, steering } => {
             text.len().hash(hash);
-            steered.hash(hash);
+            steering.hash(hash);
         }
         EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
             text.len().hash(hash);
@@ -745,7 +745,7 @@ impl ChatView {
                     ));
                 }
                 Segment::User(entry) => {
-                    let EntryContent::User { text, steered } = &entry.content else {
+                    let EntryContent::User { text, steering } = &entry.content else {
                         unreachable!();
                     };
                     let is_head = !head_seen;
@@ -754,7 +754,7 @@ impl ChatView {
                         index,
                         &entry.id,
                         text,
-                        *steered,
+                        *steering,
                         is_head,
                         pinned.0 == Some(entry.id.as_str()),
                         cx,
@@ -854,7 +854,7 @@ impl ChatView {
         turn: usize,
         entry_id: &str,
         text: &str,
-        steered: bool,
+        steering: Option<SteeringStatus>,
         is_head: bool,
         pinned: bool,
         cx: &mut Context<Self>,
@@ -949,7 +949,7 @@ impl ChatView {
             .w_full()
             .items_end()
             .gap(px(2.))
-            .when(steered, |column| {
+            .when_some(steering, |column, steering| {
                 column.child(
                     div()
                         .px_2()
@@ -958,7 +958,10 @@ impl ChatView {
                         .bg(cx.theme().muted)
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("chat.steered")),
+                        .child(match steering {
+                            SteeringStatus::Pending => tcode_i18n::tr!("chat.steering"),
+                            SteeringStatus::Accepted => tcode_i18n::tr!("chat.steered"),
+                        }),
                 )
             })
             .child(
@@ -2895,6 +2898,19 @@ mod tests {
     }
 
     #[test]
+    fn steering_status_strings_are_exact_in_both_locales() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(tcode_i18n::tr!("chat.steering"), "Steering…");
+        assert_eq!(tcode_i18n::tr!("chat.steered"), "Steered");
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(tcode_i18n::tr!("chat.steering"), "引导中…");
+        assert_eq!(tcode_i18n::tr!("chat.steered"), "已引导");
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+    }
+
+    #[test]
     fn timeline_overdraw_keeps_multiple_viewports_warm() {
         // Headless/early construction still gets a useful buffer.
         assert_eq!(timeline_overdraw(0.), 3072.);
@@ -2946,7 +2962,7 @@ mod tests {
                 "user-0",
                 EntryContent::User {
                     text: "go".into(),
-                    steered: false,
+                    steering: None,
                 },
             ),
             entry(
@@ -2981,7 +2997,7 @@ mod tests {
                 "user-1",
                 EntryContent::User {
                     text: "next".into(),
-                    steered: false,
+                    steering: None,
                 },
             ),
             1,
@@ -3060,7 +3076,7 @@ mod tests {
                 "user",
                 EntryContent::User {
                     text: "go".into(),
-                    steered: false,
+                    steering: None,
                 },
             ),
             command("cmd-1"),

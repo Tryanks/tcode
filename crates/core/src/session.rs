@@ -181,8 +181,8 @@ impl TurnMeta {
 pub enum EntryContent {
     User {
         text: String,
-        /// Whether this message was injected into an already-open turn.
-        steered: bool,
+        /// Delivery state for a message injected into an already-open turn.
+        steering: Option<SteeringStatus>,
     },
     Assistant {
         text: String,
@@ -218,6 +218,12 @@ pub enum EntryContent {
     ProviderStartError { error: String },
     /// The provider compacted its context window (a "Context compacted" work-log row).
     ContextCompacted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SteeringStatus {
+    Pending,
+    Accepted,
 }
 
 /// A proposed plan captured this session (Codex plan item / Claude
@@ -359,6 +365,10 @@ impl Timeline {
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)
             | AgentEvent::ItemCompleted(item) => self.upsert_item(ts, item),
+            AgentEvent::SteerRequested { request_id, text } => {
+                self.request_steer(ts, request_id, text)
+            }
+            AgentEvent::SteerAccepted { request_id } => self.accept_steer(request_id),
             AgentEvent::Delta {
                 item_id,
                 kind,
@@ -556,10 +566,14 @@ impl Timeline {
         } else {
             let turn = if matches!(incoming, EntryContent::User { .. }) {
                 let turn = self.begin_user_turn(ts);
-                if let EntryContent::User { steered, .. } = &mut incoming {
-                    *steered = self.entries.iter().any(|entry| {
+                if let EntryContent::User { steering, .. } = &mut incoming
+                    && self.entries.iter().any(|entry| {
                         entry.turn == turn && matches!(entry.content, EntryContent::User { .. })
-                    });
+                    })
+                {
+                    // Legacy logs represented a steer as a second UserMessage
+                    // item. Preserve their historical accepted rendering.
+                    *steering = Some(SteeringStatus::Accepted);
                 }
                 turn
             } else {
@@ -574,11 +588,40 @@ impl Timeline {
         }
     }
 
+    fn request_steer(&mut self, ts: Option<u64>, request_id: &str, text: &str) {
+        if self.entries.iter().any(|entry| entry.id == request_id) {
+            return;
+        }
+        let turn = self.ensure_turn(ts);
+        self.entries.push(Arc::new(TimelineEntry {
+            id: request_id.to_owned(),
+            content: EntryContent::User {
+                text: text.to_owned(),
+                steering: Some(SteeringStatus::Pending),
+            },
+            ts,
+            turn,
+        }));
+    }
+
+    fn accept_steer(&mut self, request_id: &str) {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == request_id) else {
+            return;
+        };
+        if let EntryContent::User {
+            steering: steering @ Some(SteeringStatus::Pending),
+            ..
+        } = &mut Arc::make_mut(entry).content
+        {
+            *steering = Some(SteeringStatus::Accepted);
+        }
+    }
+
     fn content_from_item(content: &ItemContent) -> EntryContent {
         match content {
             ItemContent::UserMessage { text } => EntryContent::User {
                 text: text.clone(),
-                steered: false,
+                steering: None,
             },
             ItemContent::AssistantMessage { text } => {
                 EntryContent::Assistant { text: text.clone() }
@@ -723,8 +766,8 @@ pub fn implement_prompt(markdown: &str) -> String {
 /// delta-accumulated text when the snapshot's text field is empty.
 fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
-        (EntryContent::User { steered, .. }, EntryContent::User { text, .. }) => {
-            EntryContent::User { text, steered }
+        (EntryContent::User { steering, .. }, EntryContent::User { text, .. }) => {
+            EntryContent::User { text, steering }
         }
         (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
             EntryContent::Assistant {
@@ -915,16 +958,94 @@ mod tests {
             },
         ];
         let timeline = Timeline::fold_events(events);
-        let users: Vec<(&str, bool)> = timeline
+        let users: Vec<(&str, Option<SteeringStatus>)> = timeline
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::User { text, steered } => Some((text.as_str(), *steered)),
+                EntryContent::User { text, steering } => Some((text.as_str(), *steering)),
                 _ => None,
             })
             .collect();
 
-        assert_eq!(users, vec![("A", false), ("B", true), ("C", false)]);
+        assert_eq!(
+            users,
+            vec![
+                ("A", None),
+                ("B", Some(SteeringStatus::Accepted)),
+                ("C", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn correlated_steering_replays_pending_then_only_matching_acceptance() {
+        let request = AgentEvent::SteerRequested {
+            request_id: "steer-a".into(),
+            text: "change direction".into(),
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
+        let mut timeline = Timeline::fold_events([
+            user_msg("user-a", "start"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-a".into(),
+            },
+            decoded,
+        ]);
+
+        assert!(matches!(
+            &timeline.entries[1].content,
+            EntryContent::User {
+                text,
+                steering: Some(SteeringStatus::Pending),
+            } if text == "change direction"
+        ));
+
+        timeline.apply_at(
+            None,
+            &AgentEvent::SteerAccepted {
+                request_id: "steer-b".into(),
+            },
+        );
+        assert!(matches!(
+            timeline.entries[1].content,
+            EntryContent::User {
+                steering: Some(SteeringStatus::Pending),
+                ..
+            }
+        ));
+
+        let accepted = AgentEvent::SteerAccepted {
+            request_id: "steer-a".into(),
+        };
+        let accepted: AgentEvent =
+            serde_json::from_str(&serde_json::to_string(&accepted).unwrap()).unwrap();
+        timeline.apply_at(None, &accepted);
+        assert!(matches!(
+            timeline.entries[1].content,
+            EntryContent::User {
+                steering: Some(SteeringStatus::Accepted),
+                ..
+            }
+        ));
+
+        // A restart folds the persisted request and acceptance to the same
+        // accepted state; confirmation cannot regress to pending on replay.
+        let replayed = Timeline::fold_events([
+            user_msg("user-a", "start"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-a".into(),
+            },
+            request,
+            accepted,
+        ]);
+        assert!(matches!(
+            replayed.entries[1].content,
+            EntryContent::User {
+                steering: Some(SteeringStatus::Accepted),
+                ..
+            }
+        ));
     }
 
     fn assistant_delta(id: &str, text: &str) -> AgentEvent {
