@@ -3268,8 +3268,9 @@ impl AppState {
 
     /// The provider + model a new draft should start with: the most recently
     /// updated, non-archived session in this project. Only reasoning effort is
-    /// inherited from its model options. Projects without history retain the
-    /// previous global-session fallback (or the Claude default).
+    /// inherited from its model options. Projects without active history fall
+    /// back to the most recently updated non-archived global session (or the
+    /// Claude default), without inheriting model options.
     fn draft_defaults(
         &self,
         project_id: &str,
@@ -3300,7 +3301,12 @@ impl AppState {
             );
         }
 
-        match self.sessions.first() {
+        match self
+            .sessions
+            .iter()
+            .filter(|meta| meta.archived_at.is_none())
+            .max_by_key(|meta| meta.updated_at)
+        {
             Some(meta) => (
                 meta.provider,
                 meta.model.clone(),
@@ -5602,6 +5608,91 @@ mod tests {
                     .any(|meta| meta.id == draft_id)
             );
         });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_global_fallback_ignores_target_projects_archived_history() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-archived-fallback-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        let mut target_archived = SessionMeta::new(
+            ProviderKind::Codex,
+            PathBuf::from("/tmp/target-archived"),
+            Some("gpt-5.2-codex".into()),
+        );
+        target_archived.project_id = Some("project-target".into());
+        target_archived.updated_at = 900;
+        target_archived.archived_at = Some(901);
+        target_archived.option_selections.push(OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("high"),
+        });
+
+        let mut other_active = SessionMeta::new(
+            ProviderKind::Acp,
+            PathBuf::from("/tmp/other-active"),
+            Some("active-model".into()),
+        );
+        other_active.project_id = Some("project-other".into());
+        other_active.acp_agent_id = Some("active-agent".into());
+        other_active.updated_at = 100;
+        other_active.option_selections.push(OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("low"),
+        });
+
+        // The target's archived session is globally newest and first, but must
+        // not be reselected by the global fallback.
+        state.sessions = vec![target_archived, other_active];
+        let (provider, model, acp_agent_id, effort) = state.draft_defaults("project-target");
+        assert_eq!(provider, ProviderKind::Acp);
+        assert_eq!(model.as_deref(), Some("active-model"));
+        assert_eq!(acp_agent_id.as_deref(), Some("active-agent"));
+        assert!(effort.is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_defaults_to_claude_when_all_sessions_are_archived() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-all-archived-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        let mut target_archived = SessionMeta::new(
+            ProviderKind::Codex,
+            PathBuf::from("/tmp/target-archived"),
+            Some("gpt-5.2-codex".into()),
+        );
+        target_archived.project_id = Some("project-target".into());
+        target_archived.updated_at = 200;
+        target_archived.archived_at = Some(201);
+
+        let mut other_archived = SessionMeta::new(
+            ProviderKind::Acp,
+            PathBuf::from("/tmp/other-archived"),
+            Some("archived-model".into()),
+        );
+        other_archived.project_id = Some("project-other".into());
+        other_archived.acp_agent_id = Some("archived-agent".into());
+        other_archived.updated_at = 300;
+        other_archived.archived_at = Some(301);
+
+        state.sessions = vec![other_archived, target_archived];
+        let (provider, model, acp_agent_id, effort) = state.draft_defaults("project-target");
+        assert_eq!(provider, ProviderKind::ClaudeCode);
+        assert!(model.is_none());
+        assert!(acp_agent_id.is_none());
+        assert!(effort.is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
