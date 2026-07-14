@@ -227,54 +227,68 @@ fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
     counts
 }
 
-fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
+fn localized_count(count: usize, one_key: &str, many_key: &str) -> Option<String> {
+    (count > 0).then(|| {
+        if count == 1 {
+            tcode_i18n::tr!(one_key).into_owned()
+        } else {
+            tcode_i18n::tr!(many_key, count = count).into_owned()
+        }
+    })
+}
+
+fn work_log_summary_with_command_keys(
+    counts: &WorkLogCounts,
+    command_one_key: &str,
+    commands_key: &str,
+) -> Option<String> {
     let mut clauses = Vec::new();
-    if counts.commands > 0 {
-        clauses.push(if counts.commands == 1 {
-            tcode_i18n::tr!("chat.summary_command_one").into_owned()
-        } else {
-            tcode_i18n::tr!("chat.summary_commands", count = counts.commands).into_owned()
-        });
-    }
-    if counts.files > 0 {
-        clauses.push(if counts.files == 1 {
-            tcode_i18n::tr!("chat.summary_file_one").into_owned()
-        } else {
-            tcode_i18n::tr!("chat.summary_files", count = counts.files).into_owned()
-        });
-    }
-    if counts.tools > 0 {
-        clauses.push(if counts.tools == 1 {
-            tcode_i18n::tr!("chat.summary_tool_one").into_owned()
-        } else {
-            tcode_i18n::tr!("chat.summary_tools", count = counts.tools).into_owned()
-        });
-    }
-    if counts.subagents > 0 {
-        clauses.push(if counts.subagents == 1 {
-            tcode_i18n::tr!("chat.summary_subagent_one").into_owned()
-        } else {
-            tcode_i18n::tr!("chat.summary_subagents", count = counts.subagents).into_owned()
-        });
-    }
-    if counts.compactions > 0 {
-        clauses.push(if counts.compactions == 1 {
-            tcode_i18n::tr!("chat.summary_compaction_one").into_owned()
-        } else {
-            tcode_i18n::tr!("chat.summary_compactions", count = counts.compactions).into_owned()
-        });
-    }
+    clauses.extend(localized_count(
+        counts.commands,
+        command_one_key,
+        commands_key,
+    ));
+    clauses.extend(localized_count(
+        counts.files,
+        "chat.summary_file_one",
+        "chat.summary_files",
+    ));
+    clauses.extend(localized_count(
+        counts.tools,
+        "chat.summary_tool_one",
+        "chat.summary_tools",
+    ));
+    clauses.extend(localized_count(
+        counts.subagents,
+        "chat.summary_subagent_one",
+        "chat.summary_subagents",
+    ));
+    clauses.extend(localized_count(
+        counts.compactions,
+        "chat.summary_compaction_one",
+        "chat.summary_compactions",
+    ));
     (!clauses.is_empty()).then(|| clauses.join(" · "))
+}
+
+fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
+    work_log_summary_with_command_keys(counts, "chat.summary_command_one", "chat.summary_commands")
+}
+
+fn turn_work_log_summary(counts: &WorkLogCounts) -> Option<String> {
+    work_log_summary_with_command_keys(counts, "chat.total_command_one", "chat.total_commands")
+        .map(|summary| tcode_i18n::tr!("chat.total_summary", summary = summary).into_owned())
 }
 
 fn finished_work_log_label(
     is_last_activity: bool,
+    segment_counts: &WorkLogCounts,
     turn_counts: &WorkLogCounts,
-) -> Option<Cow<'static, str>> {
+) -> Option<String> {
     if is_last_activity {
-        work_log_summary(turn_counts).map(Cow::Owned)
+        turn_work_log_summary(turn_counts)
     } else {
-        Some(tcode_i18n::tr!("chat.work_log"))
+        work_log_summary(segment_counts)
     }
 }
 
@@ -1289,6 +1303,7 @@ impl ChatView {
             .iter()
             .filter(|entry| matches!(entry.content, EntryContent::Subagent { .. }))
             .count();
+        let segment_counts = work_log_counts(activities);
 
         let mut section = v_flex().w_full().gap_2();
 
@@ -1383,7 +1398,7 @@ impl ChatView {
                         duration = format_duration(secs)
                     )),
             );
-        } else if let Some(label) = finished_work_log_label(is_last, turn_counts) {
+        } else if let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts) {
             section = section.child(
                 h_flex()
                     .id(SharedString::from(format!(
@@ -2846,7 +2861,8 @@ mod tests {
     use super::{
         ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload, displayed_error_text,
         finished_work_log_label, index_turns, list_sync, md_sync, previous_logs_toggle_label,
-        segment_entries, timeline_overdraw, work_log_counts, work_log_summary,
+        segment_entries, timeline_overdraw, turn_work_log_summary, work_log_counts,
+        work_log_summary,
     };
     use agent::{FileChange, FileChangeKind, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
@@ -3279,6 +3295,23 @@ mod tests {
     }
 
     #[test]
+    fn chinese_turn_summary_prefixes_the_whole_sentence_once() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let counts = WorkLogCounts {
+            commands: 5,
+            files: 3,
+            tools: 2,
+            ..WorkLogCounts::default()
+        };
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(
+            turn_work_log_summary(&counts).as_deref(),
+            Some("共执行 5 条命令 · 编辑 3 个文件 · 调用 2 次工具")
+        );
+    }
+
+    #[test]
     fn work_log_summary_omits_zero_counts_and_empty_rows() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let tools_only = WorkLogCounts {
@@ -3293,7 +3326,18 @@ mod tests {
         );
         assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
         assert_eq!(
-            finished_work_log_label(true, &WorkLogCounts::default()),
+            finished_work_log_label(true, &WorkLogCounts::default(), &WorkLogCounts::default()),
+            None
+        );
+        assert_eq!(
+            finished_work_log_label(
+                false,
+                &WorkLogCounts::default(),
+                &WorkLogCounts {
+                    commands: 1,
+                    ..WorkLogCounts::default()
+                }
+            ),
             None
         );
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
@@ -3315,7 +3359,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_turn_has_one_turn_wide_summary_across_activity_runs() {
+    fn finished_activity_runs_show_real_counts_and_end_with_turn_wide_summary() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let entries = [
             command("command-1"),
@@ -3347,9 +3391,12 @@ mod tests {
             activity_indexes
                 .iter()
                 .map(|index| {
-                    finished_work_log_label(*index == last_activity, counts)
+                    let Segment::ActivityRun(activities) = &segments[*index] else {
+                        unreachable!();
+                    };
+                    let segment_counts = work_log_counts(activities);
+                    finished_work_log_label(*index == last_activity, &segment_counts, counts)
                         .expect("each real activity run has a footer affordance")
-                        .into_owned()
                 })
                 .collect::<Vec<_>>()
         };
@@ -3358,12 +3405,18 @@ mod tests {
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
         assert_eq!(
             labels(last_activity, &counts),
-            ["Work Log", "Ran 2 commands · Edited 1 file"]
+            [
+                "Ran 1 command · Edited 1 file",
+                "Ran 2 commands · Edited 1 file"
+            ]
         );
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             labels(last_activity, &counts),
-            ["工作日志", "已执行 2 条命令 · 编辑 1 个文件"]
+            [
+                "已执行 1 条命令 · 编辑 1 个文件",
+                "共执行 2 条命令 · 编辑 1 个文件"
+            ]
         );
     }
 

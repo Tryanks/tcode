@@ -84,14 +84,18 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
 - **Turn separation is rhythm, not rules.** Turns are 44px apart; inside a turn
   blocks sit 16px apart. There is deliberately **no divider/hairline under the
   user bubble** — the eye separates turns by the space around them and by the
-  typographic step down from the 15px bubble to the 11px uppercase "WORK LOG"
-  label that opens the turn's activity.
-- Turn = "Work Log" section: 11px uppercase muted label; activity rows (muted ✓
-  + one-line summary; command/file/tool/reasoning); >2 rows → last 2 +
+  typographic step down from the 15px bubble to the muted activity summary.
+- Turn activity = collapsible "Work Log" sections: an expanded section starts
+  with an 11px uppercase muted label, followed by activity rows (muted ✓ +
+  one-line summary; command/tool/subagent/reasoning); >2 rows → last 2 +
   "+N previous log entries" expander. Once expanded, that row becomes "Hide N
   previous log entries" with an upward chevron so the rows can be collapsed
-  again. Footer "Worked for XmYYs ›" is collapsed by default when finished and
-  expanded live with "••• Working for Ns" ticking.
+  again. A completed section's toggle summarizes only its real, nonzero events
+  (commands, unique edited files, tool calls, subagents, and compactions); an
+  earlier section uses its own counts and the final section uses turn-wide
+  counts, prefixed once with Chinese “共” to make the aggregate scope explicit.
+  A zero-event summary is omitted. The active section stays expanded with "•••
+  Working for Ns" ticking.
 - Assistant markdown 15px, relaxed line-height, inline code chips (mono 13,
   muted bg, 4px radius). Streaming appends via push_str with
   follow-when-near-bottom.
