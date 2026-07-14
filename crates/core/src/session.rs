@@ -4,6 +4,7 @@
 //! UI renders identically in both cases.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use agent::{
     AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, PlanStep,
@@ -233,9 +234,13 @@ pub struct ProposedPlan {
 /// Folded view of a session's event history.
 #[derive(Debug, Clone, Default)]
 pub struct Timeline {
-    pub entries: Vec<TimelineEntry>,
+    /// Top-level entries are shared so virtualized UI snapshots can retain a
+    /// turn without cloning its potentially large message, command-output, and
+    /// diff payloads. Updates use [`Arc::make_mut`], preserving the value
+    /// semantics of a cloned [`Timeline`] while keeping read snapshots cheap.
+    pub entries: Vec<Arc<TimelineEntry>>,
     /// Child activity grouped by the top-level subagent spawn item id.
-    pub children: HashMap<String, Vec<TimelineEntry>>,
+    pub children: HashMap<String, Vec<Arc<TimelineEntry>>>,
     /// Parent ids whose child activity exceeded the in-memory progress cap.
     truncated_children: HashSet<String>,
     /// One entry per turn ("Work Log" section), in order.
@@ -266,7 +271,7 @@ pub struct Timeline {
 
 impl Timeline {
     #[allow(dead_code)]
-    pub fn children(&self, parent_id: &str) -> &[TimelineEntry] {
+    pub fn children(&self, parent_id: &str) -> &[Arc<TimelineEntry>] {
         self.children.get(parent_id).map_or(&[], Vec::as_slice)
     }
 
@@ -387,26 +392,26 @@ impl Timeline {
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn(ts);
                 let id = self.synthetic_id("error");
-                self.entries.push(TimelineEntry {
+                self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ProviderStartError {
                         error: error.clone(),
                     },
                     ts,
                     turn,
-                });
+                }));
             }
             AgentEvent::Error { message, .. } => {
                 let turn = self.ensure_turn(ts);
                 let id = self.synthetic_id("error");
-                self.entries.push(TimelineEntry {
+                self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::Error {
                         message: message.clone(),
                     },
                     ts,
                     turn,
-                });
+                }));
             }
             AgentEvent::SessionClosed { reason } => {
                 // An abnormal close carries the provider's dying words (exit
@@ -416,14 +421,14 @@ impl Timeline {
                 if let Some(reason) = reason {
                     let turn = self.ensure_turn(ts);
                     let id = self.synthetic_id("error");
-                    self.entries.push(TimelineEntry {
+                    self.entries.push(Arc::new(TimelineEntry {
                         id,
                         content: EntryContent::Error {
                             message: reason.clone(),
                         },
                         ts,
                         turn,
-                    });
+                    }));
                 }
                 self.turn_running = false;
                 self.pending_approvals.clear();
@@ -462,12 +467,12 @@ impl Timeline {
             AgentEvent::ContextCompacted => {
                 let turn = self.ensure_turn(ts);
                 let id = self.synthetic_id("compacted");
-                self.entries.push(TimelineEntry {
+                self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ContextCompacted,
                     ts,
                     turn,
-                });
+                }));
             }
             // Session metadata (composer menus) — not folded into the timeline.
             // Session metadata (composer menus / traits picker) — held on the
@@ -523,17 +528,18 @@ impl Timeline {
             let turn = self.ensure_turn(ts);
             let children = self.children.entry(parent_id.clone()).or_default();
             if let Some(entry) = children.iter_mut().find(|entry| entry.id == item.id) {
+                let entry = Arc::make_mut(entry);
                 entry.content = merge_content(
                     std::mem::replace(&mut entry.content, incoming.clone()),
                     incoming,
                 );
             } else {
-                children.push(TimelineEntry {
+                children.push(Arc::new(TimelineEntry {
                     id: item.id.clone(),
                     content: incoming,
                     ts,
                     turn,
-                });
+                }));
                 if children.len() > 200 {
                     children.remove(0);
                     self.truncated_children.insert(parent_id.clone());
@@ -542,6 +548,7 @@ impl Timeline {
             return;
         }
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
+            let entry = Arc::make_mut(entry);
             entry.content = merge_content(
                 std::mem::replace(&mut entry.content, incoming.clone()),
                 incoming,
@@ -558,12 +565,12 @@ impl Timeline {
             } else {
                 self.ensure_turn(ts)
             };
-            self.entries.push(TimelineEntry {
+            self.entries.push(Arc::new(TimelineEntry {
                 id: item.id.clone(),
                 content: incoming,
                 ts,
                 turn,
-            });
+            }));
         }
     }
 
@@ -633,6 +640,7 @@ impl Timeline {
 
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item_id) {
+            let entry = Arc::make_mut(entry);
             match (&mut entry.content, kind) {
                 (EntryContent::Assistant { text: existing }, DeltaKind::AssistantText)
                 | (EntryContent::Reasoning { text: existing }, DeltaKind::ReasoningText) => {
@@ -657,12 +665,12 @@ impl Timeline {
             },
         };
         let turn = self.ensure_turn(ts);
-        self.entries.push(TimelineEntry {
+        self.entries.push(Arc::new(TimelineEntry {
             id: item_id.to_string(),
             content,
             ts,
             turn,
-        });
+        }));
     }
 }
 
@@ -799,6 +807,26 @@ mod tests {
             parent_item_id: None,
             content: ItemContent::UserMessage { text: text.into() },
         })
+    }
+
+    #[test]
+    fn cloned_timeline_entries_are_shared_until_updated() {
+        let mut timeline = Timeline::fold_events([user_msg("user-1", "before")]);
+        let snapshot = timeline.clone();
+
+        assert!(Arc::ptr_eq(&timeline.entries[0], &snapshot.entries[0]));
+
+        timeline.apply_at(None, &user_msg("user-1", "after"));
+
+        assert!(!Arc::ptr_eq(&timeline.entries[0], &snapshot.entries[0]));
+        assert!(matches!(
+            &snapshot.entries[0].content,
+            EntryContent::User { text, .. } if text == "before"
+        ));
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::User { text, .. } if text == "after"
+        ));
     }
 
     /// Modeled on crates/agent/tests/fixtures/claude/simple_trace.jsonl:
