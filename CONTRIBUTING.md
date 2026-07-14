@@ -86,7 +86,8 @@ without touching your real threads.
 `--open-latest`, `--open-diff`, `--open-settings`, `--open-palette`,
 `--open-draft <project>`; and for screenshots, `--debug-compose <text>`,
 `--debug-image <path>`, `--debug-live`, `--debug-send <text>`,
-`--debug-palette <query>`, `--debug-settings-section <general|providers|archived>`,
+`--debug-palette <query>`,
+`--debug-settings-section <general|providers|orchestrate|archived>`,
 `--debug-queue "msg1|msg2"`, `--debug-edit-open`.
 
 `--debug-edit-resend "<text>"` exercises **Edit & resend** end to end (rewind the

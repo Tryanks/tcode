@@ -165,11 +165,22 @@ add/remove row tints + left accent bars, "N unmodified lines" muted separator
 rows between hunks.
 
 ### Settings (full-page route)
-Left nav (sidebar width): General / Providers + "← Back" pinned bottom. Header:
-"Settings" + "Restore defaults" bordered button (confirm). Rows: bold 14px
-title + 13px muted description left, control right (dropdown / toggle / text
-input), hairline separators. General: Theme (System/Light/Dark, live), Word
-wrap in diffs, Delete confirmation. Providers: claude / codex binary paths.
+Left nav (sidebar width): General / Providers / Orchestrate + "← Back" pinned
+bottom. Header: "Settings" + "Restore defaults" bordered button (confirm).
+Rows: bold 14px title + 13px muted description left, control right (dropdown /
+toggle / text input), hairline separators. General: Theme
+(System/Light/Dark, live), Word wrap in diffs, Delete confirmation. Providers:
+claude / codex binary paths.
+
+Orchestrate begins with an explicit built-in `/orchestrate` explanation. Every
+main model is eligible: the page exposes one multiline generic identity plus
+optional per-model multiline identity overrides, and models without an override
+inherit the generic text. Each editor has a compact "Restore default" action.
+Allowed child models are retained as provider/model profiles with one multiline
+routing-definition editor, an independent dispatch switch, restore and delete
+actions. Built-in ratings and recommended effort live inside the default text,
+not separate controls. Add-model popovers keep provider tabs fixed above a
+300px scrollable model list so large catalogs never grow past the viewport.
 
 ### Command palette (⌘K)
 Centered top-anchored modal over a dim backdrop: search input; grouped results

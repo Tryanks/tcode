@@ -155,6 +155,169 @@ impl ProviderSettings {
     }
 }
 
+/// A model-specific identity override for an orchestrator. Models without an
+/// entry here remain fully eligible for `/orchestrate`; they inherit
+/// [`OrchestrateSettings::generic_identity`] instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrchestratorIdentity {
+    pub provider: ProviderKind,
+    pub model: String,
+    pub identity: String,
+}
+
+/// One model the orchestrator may dispatch work to. Profiles stay in this list
+/// while paused so their editable routing definition is preserved; `enabled`
+/// is the actual allow-list decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrchestrateChildModel {
+    pub provider: ProviderKind,
+    pub model: String,
+    /// Disabled profiles retain all routing preferences but cannot receive a
+    /// dispatch and are omitted from the lead model's available-fleet table.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Effort used when a dispatch omits one. Callers may still explicitly pick
+    /// another effort supported by the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+const DEFAULT_ORCHESTRATOR_IDENTITY: &str = "You are the primary decision model and technical lead for this session. Your leverage is judgment: understand the problem, frame it well, decompose it, define done, route work to the cheapest adequate child model, and verify the result independently. Keep architecture, ambiguous tradeoffs, and final acceptance for yourself; delegate execution when a child can complete it from a precise brief.";
+
+const DEFAULT_FABLE_IDENTITY: &str = "You are Fable 5, the scarcest judgment resource in this fleet: a wise owl—thoughtful, discerning, and exceptionally strong at framing, architecture, taste, and clear communication. Spend that judgment on understanding, delegation, review, and final acceptance rather than routine typing. Use high effort by default; deeper tiers usually consume more of the fleet's bottleneck without improving your decisions.";
+
+const DEFAULT_GPT_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 9, intelligence 8, taste 6. Recommended effort: medium. Default execution model for bulk implementation, closed-form debugging, reviews, migrations, computer use, and token-heavy sweeps. Escalate effort only after a concrete miss.";
+const DEFAULT_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 5, intelligence 5, taste 7. Recommended effort: high. Cheap glue work, wrappers, chores, and context gathering that does not require top-tier judgment.";
+const DEFAULT_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 4, intelligence 7, taste 8. Recommended effort: high. Best for taste-critical UI, copy, API design, and implementation review where judgment matters more than grinding depth.";
+const DEFAULT_FABLE_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 2, intelligence 9, taste 9. Recommended effort: high. Highest-judgment escalation for framing, architecture, ambiguous tradeoffs, and final review.";
+
+/// Settings for tcode's built-in orchestration layer.
+///
+/// There is deliberately no main-model allow list. Every model may orchestrate;
+/// only its identity text changes through the generic fallback and optional
+/// per-model overrides. Child models, by contrast, are an explicit allow list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrchestrateSettings {
+    #[serde(default = "default_orchestrator_identity")]
+    pub generic_identity: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_identities: Vec<OrchestratorIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_models: Vec<OrchestrateChildModel>,
+}
+
+fn default_orchestrator_identity() -> String {
+    DEFAULT_ORCHESTRATOR_IDENTITY.to_string()
+}
+
+impl Default for OrchestrateSettings {
+    fn default() -> Self {
+        Self {
+            generic_identity: default_orchestrator_identity(),
+            model_identities: vec![OrchestratorIdentity {
+                provider: ProviderKind::ClaudeCode,
+                model: "claude-fable-5".into(),
+                identity: DEFAULT_FABLE_IDENTITY.into(),
+            }],
+            child_models: vec![
+                OrchestrateChildModel {
+                    provider: ProviderKind::Codex,
+                    model: "gpt-5.6-sol".into(),
+                    enabled: true,
+                    default_effort: Some("medium".into()),
+                    description: DEFAULT_GPT_CHILD_DEFINITION.into(),
+                },
+                OrchestrateChildModel {
+                    provider: ProviderKind::ClaudeCode,
+                    model: "claude-sonnet-5".into(),
+                    enabled: false,
+                    default_effort: Some("high".into()),
+                    description: DEFAULT_SONNET_CHILD_DEFINITION.into(),
+                },
+                OrchestrateChildModel {
+                    provider: ProviderKind::ClaudeCode,
+                    model: "claude-opus-4-8".into(),
+                    enabled: false,
+                    default_effort: Some("high".into()),
+                    description: DEFAULT_OPUS_CHILD_DEFINITION.into(),
+                },
+                OrchestrateChildModel {
+                    provider: ProviderKind::ClaudeCode,
+                    model: "claude-fable-5".into(),
+                    enabled: false,
+                    default_effort: Some("high".into()),
+                    description: DEFAULT_FABLE_CHILD_DEFINITION.into(),
+                },
+            ],
+        }
+    }
+}
+
+impl OrchestrateSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Resolve a model's dedicated identity, falling back to the generic one.
+    /// `None` (the provider's default model) also uses the generic identity.
+    pub fn identity_for(&self, provider: ProviderKind, model: Option<&str>) -> &str {
+        model
+            .and_then(|model| {
+                self.model_identities
+                    .iter()
+                    .find(|entry| entry.provider == provider && entry.model == model)
+            })
+            .map(|entry| entry.identity.as_str())
+            .unwrap_or(&self.generic_identity)
+    }
+
+    pub fn builtin_generic_identity() -> &'static str {
+        DEFAULT_ORCHESTRATOR_IDENTITY
+    }
+
+    /// Factory text for a dedicated identity editor. Models without a bundled
+    /// specialization reset to the factory generic identity.
+    pub fn builtin_identity_for(provider: ProviderKind, model: &str) -> &'static str {
+        match (provider, model) {
+            (ProviderKind::ClaudeCode, "claude-fable-5") => DEFAULT_FABLE_IDENTITY,
+            _ => DEFAULT_ORCHESTRATOR_IDENTITY,
+        }
+    }
+
+    /// Factory definition for a bundled child-model preset. Custom models have
+    /// no product-authored definition and therefore reset to an empty editor.
+    pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
+        match (provider, model) {
+            (ProviderKind::Codex, "gpt-5.6-sol") => Some(DEFAULT_GPT_CHILD_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-sonnet-5") => Some(DEFAULT_SONNET_CHILD_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-opus-4-8") => Some(DEFAULT_OPUS_CHILD_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-fable-5") => Some(DEFAULT_FABLE_CHILD_DEFINITION),
+            _ => None,
+        }
+    }
+
+    pub fn child_model(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+    ) -> Option<&OrchestrateChildModel> {
+        self.child_models
+            .iter()
+            .find(|entry| entry.provider == provider && entry.model == model)
+    }
+
+    pub fn enabled_child_model(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+    ) -> Option<&OrchestrateChildModel> {
+        self.child_model(provider, model)
+            .filter(|entry| entry.enabled)
+    }
+}
+
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -196,6 +359,9 @@ pub struct Settings {
     /// on) even for legacy settings files that lack the field.
     #[serde(default)]
     pub provider_update_checks_disabled: bool,
+    /// Built-in orchestration identities and child-model routing table.
+    #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
+    pub orchestrate: OrchestrateSettings,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -335,6 +501,64 @@ mod tests {
         };
         assert_eq!(settings.effective_home(), Some(PathBuf::from("/b")));
     }
+
+    #[test]
+    fn orchestrator_identity_uses_model_override_then_generic_fallback() {
+        let settings = OrchestrateSettings::default();
+        assert!(
+            settings
+                .identity_for(ProviderKind::ClaudeCode, Some("claude-fable-5"))
+                .contains("wise owl")
+        );
+        assert_eq!(
+            settings.identity_for(ProviderKind::ClaudeCode, Some("claude-opus-4-8")),
+            settings.generic_identity
+        );
+        assert_eq!(
+            settings.identity_for(ProviderKind::Codex, Some("claude-fable-5")),
+            settings.generic_identity,
+            "the provider is part of a model's identity key"
+        );
+        assert_eq!(
+            settings.identity_for(ProviderKind::Acp, None),
+            settings.generic_identity,
+            "provider-default and ACP models remain eligible through the fallback"
+        );
+    }
+
+    #[test]
+    fn orchestrate_defaults_round_trip_and_legacy_files_get_defaults() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert_eq!(legacy.orchestrate, OrchestrateSettings::default());
+        assert!(
+            legacy
+                .orchestrate
+                .enabled_child_model(ProviderKind::Codex, "gpt-5.6-sol")
+                .is_some()
+        );
+        assert!(
+            legacy
+                .orchestrate
+                .child_model(ProviderKind::ClaudeCode, "claude-opus-4-8")
+                .is_some(),
+            "disabled presets retain their preferences"
+        );
+        assert!(
+            legacy
+                .orchestrate
+                .enabled_child_model(ProviderKind::ClaudeCode, "claude-opus-4-8")
+                .is_none(),
+            "the default dispatch fleet is GPT-only"
+        );
+
+        let mut settings = Settings::default();
+        settings.orchestrate.generic_identity = "Custom lead identity".into();
+        settings.orchestrate.model_identities.clear();
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.orchestrate, settings.orchestrate);
+    }
+
     #[test]
     fn sidebar_collapsed_round_trips_and_defaults_to_expanded() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
