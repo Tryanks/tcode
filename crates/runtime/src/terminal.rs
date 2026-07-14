@@ -1,6 +1,14 @@
 //! Live terminal workspace state.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 pub const MAX_TERMINALS_PER_SESSION: usize = 6;
+
+/// `TerminalDrawer` is a shared UI entity that swaps between conversations.
+/// Globally unique tab ids prevent its geometry, selection, bell, and event
+/// caches from aliasing two conversations whose first local tab would both be
+/// `1`.
+static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSplitDirection {
@@ -36,7 +44,6 @@ pub struct TerminalWorkspace {
     pub active_id: Option<u64>,
     pub splits: Vec<TerminalSplit>,
     pub contexts: Vec<TerminalContext>,
-    next_id: u64,
     next_context_id: u64,
 }
 
@@ -49,7 +56,6 @@ impl Default for TerminalWorkspace {
             active_id: None,
             splits: Vec::new(),
             contexts: Vec::new(),
-            next_id: 1,
             next_context_id: 1,
         }
     }
@@ -67,8 +73,7 @@ impl TerminalWorkspace {
 
     /// Add a terminal from the temporary app compatibility consumer.
     pub fn push(&mut self, terminal: term::Terminal) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
         self.terminals.push(TerminalEntry { id, terminal });
         self.active_id = Some(id);
         id

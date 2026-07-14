@@ -28,6 +28,7 @@ use tcode_runtime::app::AppState;
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::provider_card::ProviderCard;
+use crate::provider_model_picker::ProviderModelPicker;
 use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
 use crate::time::now_secs;
 use crate::window_drag_area;
@@ -69,6 +70,8 @@ pub struct SettingsPage {
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
+    /// Shared provider/model picker configured for background thread titles.
+    title_model_picker: Entity<ProviderModelPicker>,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     debug_acp_dialog_pending: bool,
@@ -78,7 +81,36 @@ pub struct SettingsPage {
 
 impl SettingsPage {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        let title_generation = app_state.read(cx).settings.title_generation.clone();
+        let title_model_picker = cx.new(|cx| {
+            ProviderModelPicker::selection(
+                app_state.clone(),
+                "title-model-popover",
+                "title-model-dropdown",
+                title_generation.provider,
+                title_generation.model,
+                cx,
+            )
+        });
+        let subscriptions = vec![
+            cx.observe(&app_state, |this, _, cx| {
+                let selection = this.app_state.read(cx).settings.title_generation.clone();
+                this.title_model_picker.update(cx, |picker, cx| {
+                    picker.set_selected(selection.provider, selection.model, cx);
+                });
+                cx.notify();
+            }),
+            cx.subscribe(&title_model_picker, |this, _, event, cx| {
+                let selected = event.0.clone();
+                this.update_settings(
+                    move |settings| {
+                        settings.title_generation.provider = selected.provider;
+                        settings.title_generation.model = selected.id;
+                    },
+                    cx,
+                );
+            }),
+        ];
 
         // Screenshot-only: `--debug-settings-section` opens a specific section.
         let section = match app_state.read(cx).debug_settings_section.as_deref() {
@@ -96,6 +128,7 @@ impl SettingsPage {
             provider_cards: Vec::new(),
             acp_panel,
             orchestrate_panel,
+            title_model_picker,
             acp_cards: Vec::new(),
             debug_acp_dialog_pending,
             section,
@@ -405,6 +438,7 @@ impl SettingsPage {
             .child(self.section_label(tcode_i18n::tr!("settings.general_section"), cx))
             .child(self.language_row(settings.language.as_deref(), cx))
             .child(self.theme_row(settings.theme_mode, cx))
+            .child(self.title_generation_row(cx))
             .child(self.toggle_row(
                 "word-wrap",
                 tcode_i18n::tr!("settings.word_wrap.title"),
@@ -438,6 +472,17 @@ impl SettingsPage {
                 cx,
                 |s, checked| s.provider_update_checks_disabled = !checked,
             ))
+    }
+
+    fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.row_frame(cx)
+            .child(self.row_labels(
+                tcode_i18n::tr!("settings.title_generation.title"),
+                tcode_i18n::tr!("settings.title_generation.description"),
+                cx,
+            ))
+            .child(self.title_model_picker.clone())
+            .into_any_element()
     }
 
     /// Settings → Providers: native providers and installed ACP agents share one

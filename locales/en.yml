@@ -130,7 +130,7 @@ settings:
   back: "Back"
   restore: "Restore defaults"
   restore_title: "Restore default settings?"
-  restore_description: "Reset language, theme, diff, provider, and orchestrate settings to their defaults. Your projects and conversations will not be changed."
+  restore_description: "Reset language, theme, thread-title model, diff, provider, and orchestrate settings to their defaults. Your projects and conversations will not be changed."
   cancel: "Cancel"
   general_section: "GENERAL"
   providers_section: "PROVIDERS"
@@ -159,6 +159,11 @@ settings:
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer provider CLI versions on launch."
+  title_generation:
+    title: "Thread title model"
+    description: "Choose the provider and model used to name new threads. Title requests always use low reasoning effort."
+model_picker:
+  no_models: "No models available for this provider."
 orchestrate:
   restore_default: "Restore default"
   all_models:

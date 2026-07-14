@@ -318,6 +318,42 @@ impl OrchestrateSettings {
     }
 }
 
+/// Provider and model used for the isolated, background request that names a
+/// newly-started thread. Reasoning effort is intentionally fixed to `low` by
+/// the runtime: title generation is a small, latency-sensitive task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleGenerationSettings {
+    #[serde(default = "default_title_provider")]
+    pub provider: ProviderKind,
+    #[serde(default = "default_title_model")]
+    pub model: String,
+}
+
+pub const DEFAULT_TITLE_MODEL: &str = "gpt-5.6-luna";
+
+fn default_title_provider() -> ProviderKind {
+    ProviderKind::Codex
+}
+
+fn default_title_model() -> String {
+    DEFAULT_TITLE_MODEL.to_string()
+}
+
+impl Default for TitleGenerationSettings {
+    fn default() -> Self {
+        Self {
+            provider: default_title_provider(),
+            model: default_title_model(),
+        }
+    }
+}
+
+impl TitleGenerationSettings {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -362,6 +398,9 @@ pub struct Settings {
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
+    /// Provider/model used to generate a concise title for new threads.
+    #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
+    pub title_generation: TitleGenerationSettings,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -557,6 +596,31 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.orchestrate, settings.orchestrate);
+    }
+
+    #[test]
+    fn title_generation_defaults_and_round_trips() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert_eq!(
+            legacy.title_generation,
+            TitleGenerationSettings {
+                provider: ProviderKind::Codex,
+                model: "gpt-5.6-luna".into(),
+            }
+        );
+        let partial: TitleGenerationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(partial, TitleGenerationSettings::default());
+
+        let settings = Settings {
+            title_generation: TitleGenerationSettings {
+                provider: ProviderKind::ClaudeCode,
+                model: "claude-haiku-4-5".into(),
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.title_generation, settings.title_generation);
     }
 
     #[test]

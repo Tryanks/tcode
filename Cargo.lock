@@ -8095,6 +8095,7 @@ dependencies = [
  "tcode-core",
  "tcode-i18n",
  "tcode-runtime",
+ "tcode-services",
  "term",
 ]
 
