@@ -896,10 +896,16 @@ impl SessionsSidebar {
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         let row = if let Some(input) = renaming {
-            row.child(div().flex_1().min_w_0().child(Input::new(&input).small()))
-                .when(active_direct_children > 0, |row| {
-                    row.child(active_child_count_badge(active_direct_children, cx))
-                })
+            row.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
+                    .child(Input::new(&input).small()),
+            )
+            .when(active_direct_children > 0, |row| {
+                row.child(active_child_count_badge(active_direct_children, cx))
+            })
         } else {
             row.when(show_unread, |row| {
                 row.child(
@@ -1219,6 +1225,8 @@ mod tests {
     use agent::ProviderKind;
     use gpui::{TestAppContext, VisualTestContext, size};
     use std::path::PathBuf;
+    use tcode_core::project::Project;
+    use tcode_services::store::SessionStore;
 
     struct WorkingThreadRowProbe;
 
@@ -1289,6 +1297,44 @@ mod tests {
                 "title escaped the row horizontally at {width}px: row={row:?}, title={title:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-rename-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let app_state = cx.new(|_| AppState::new(store));
+        let project = Project::from_root(root.clone());
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.project_id = Some(project.id.clone());
+        meta.title = "Original title".into();
+        let session_id = meta.id.clone();
+        app_state.update(cx, |state, _| {
+            state.projects = vec![project];
+            state.sessions = vec![meta];
+        });
+
+        let sidebar = cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx));
+        let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.on_rename(&ThreadRename(session_id.clone()), window, cx);
+                let input = sidebar.renaming.as_ref().unwrap().input.clone();
+                input.update(cx, |input, cx| input.set_value("Unsaved title", window, cx));
+                sidebar.cancel_rename(cx);
+            });
+        });
+
+        cx.update(|_, cx| {
+            assert!(sidebar.read(cx).renaming.is_none());
+            assert_eq!(app_state.read(cx).sessions[0].title, "Original title");
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

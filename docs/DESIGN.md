@@ -67,7 +67,9 @@ Canonical values live in `themes/tcode.json` (embedded at build time).
    (native directory picker).
 4. Project groups: rotating chevron + folder icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
-   Thread rows: single-line truncated title + relative time (muted 11px); hover = accent bg
+   Thread rows: single-line truncated AI-generated title (first-message fallback
+   while naming) + relative time (muted 11px); hover = accent bg. Inline rename
+   commits on Enter and cancels on blur or any click outside the input.
    and time swaps to archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
