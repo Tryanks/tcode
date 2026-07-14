@@ -351,11 +351,10 @@ enum ChildOutput {
     Error(String),
 }
 
-#[derive(Clone, Copy)]
 enum PendingRequest {
     TurnStart,
     Interrupt,
-    Steer,
+    Steer(String),
 }
 
 struct Actor {
@@ -1182,7 +1181,11 @@ impl Actor {
                 log::debug!("codex: ignoring ACP-only SetOption {id}");
                 Ok(())
             }
-            SessionCommand::Steer { text, attachments } => {
+            SessionCommand::Steer {
+                request_id,
+                text,
+                attachments,
+            } => {
                 // Native same-turn steering: `turn/steer` injects the message
                 // into the ALREADY-RUNNING turn (the model picks it up at its
                 // next input checkpoint) and resolves with the *same* turnId —
@@ -1208,7 +1211,7 @@ impl Actor {
                         "expectedTurnId": turn_id,
                         "input": user_input(&text, &attachments),
                     }),
-                    PendingRequest::Steer,
+                    PendingRequest::Steer(request_id),
                 )
             }
             SessionCommand::Shutdown => Ok(()),
@@ -1233,24 +1236,40 @@ impl Actor {
             self.handle_notification(method, value.get("params").unwrap_or(&Value::Null))
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
+            let pending = self.pending_requests.remove(&id);
             if let Some(error) = value.get("error") {
-                let method = self.pending_requests.remove(&id);
                 self.emit(AgentEvent::Error {
                     message: format!(
                         "Codex request {} failed: {}",
-                        pending_name(method),
+                        pending_name(pending.as_ref()),
                         describe_rpc_error(error)
                     ),
                     fatal: false,
                 })
                 .await;
-            } else if matches!(
-                self.pending_requests.remove(&id),
-                Some(PendingRequest::TurnStart)
-            ) && let Some(turn_id) =
-                value.pointer("/result/turn/id").and_then(Value::as_str)
-            {
-                self.active_turn.get_or_insert_with(|| turn_id.to_owned());
+            } else if value.get("result").is_none() {
+                self.emit(AgentEvent::Error {
+                    message: format!(
+                        "Codex request {} returned no result",
+                        pending_name(pending.as_ref())
+                    ),
+                    fatal: false,
+                })
+                .await;
+            } else {
+                match pending {
+                    Some(PendingRequest::TurnStart) => {
+                        if let Some(turn_id) =
+                            value.pointer("/result/turn/id").and_then(Value::as_str)
+                        {
+                            self.active_turn.get_or_insert_with(|| turn_id.to_owned());
+                        }
+                    }
+                    Some(PendingRequest::Steer(request_id)) => {
+                        self.emit(AgentEvent::SteerAccepted { request_id }).await;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1653,11 +1672,11 @@ fn user_input(text: &str, attachments: &[Attachment]) -> Value {
     Value::Array(input)
 }
 
-fn pending_name(request: Option<PendingRequest>) -> &'static str {
+fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart) => "turn/start",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
-        Some(PendingRequest::Steer) => "turn/steer",
+        Some(PendingRequest::Steer(_)) => "turn/steer",
         None => "unknown",
     }
 }
@@ -2009,6 +2028,69 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[test]
+    fn steer_acceptance_waits_for_successful_correlated_rpc_response() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("turn-1".into());
+            actor
+                .handle_command(SessionCommand::Steer {
+                    request_id: "steer-ok".into(),
+                    text: "redirect".into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            assert!(
+                events.try_recv().is_err(),
+                "request write is not acceptance"
+            );
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let id = request["id"].as_i64().unwrap();
+            actor
+                .handle_line(&json!({"id": id, "result": {"turnId": "turn-1"}}).to_string())
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
+            ));
+
+            actor
+                .handle_command(SessionCommand::Steer {
+                    request_id: "steer-error".into(),
+                    text: "do not accept".into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let id = request["id"].as_i64().unwrap();
+            actor
+                .handle_line(
+                    &json!({"id": id, "error": {"code": -32000, "message": "rejected"}})
+                        .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::Error { .. }
+            ));
+            assert!(
+                events.try_recv().is_err(),
+                "RPC errors must not accept a steer"
+            );
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]

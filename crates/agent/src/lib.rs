@@ -547,6 +547,8 @@ pub enum SessionCommand {
     /// Only providers whose [`ProviderKind::supports_steering`] is true accept
     /// this; the others log and ignore it (the UI must not offer it there).
     Steer {
+        /// Stable id correlating the persisted request with provider acceptance.
+        request_id: String,
         text: String,
         attachments: Vec<Attachment>,
     },
@@ -617,6 +619,15 @@ pub enum AgentEvent {
     ItemStarted(ThreadItem),
     ItemUpdated(ThreadItem),
     ItemCompleted(ThreadItem),
+    /// A runtime-synthesized steering request, persisted before provider delivery.
+    SteerRequested {
+        request_id: String,
+        text: String,
+    },
+    /// Emitted only after the provider has accepted the correlated steer.
+    SteerAccepted {
+        request_id: String,
+    },
     /// Streaming text growth for an in-progress item. The item may not have
     /// been announced via `ItemStarted` yet (providers differ); the UI creates
     /// the item lazily on first delta.

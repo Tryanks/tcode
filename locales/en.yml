@@ -40,6 +40,7 @@ chat:
   scroll_end: "Scroll to end"
   copy: "Copy"
   copied: "Copied!"
+  steering: "Steering…"
   steered: "Steered"
   error_label: "Error"
   edit_message: "Edit"
