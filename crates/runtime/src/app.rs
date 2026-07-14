@@ -104,9 +104,9 @@ pub enum RightTab {
     Preview,
 }
 
-/// A message the user sent while a turn was already running. It is held (FIFO)
-/// and dispatched as an ordinary turn once the running turn completes — or
-/// converted into a steering message by the queue strip's steer button.
+/// A message waiting for an ordinary turn. Most are user-authored messages sent
+/// while another turn was running; orchestration callbacks also wait here while
+/// an idle provider is starting.
 ///
 /// Queueing is an APP-LEVEL concept and works for every provider, including the
 /// ones that cannot steer. The queue is per-session and in-memory only: it is
@@ -125,6 +125,16 @@ pub struct QueuedMessage {
     /// session, and is applied only to the text sent on the wire (the user
     /// message recorded in the transcript stays clean).
     ultrathink: bool,
+    /// Orchestration callbacks arriving during the same provider-start window
+    /// are folded into one wake-up turn. Once that turn is live, later callbacks
+    /// are steered into it instead of becoming more queued turns.
+    kind: QueuedMessageKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuedMessageKind {
+    User,
+    OrchestrateCallback,
 }
 
 impl QueuedMessage {
@@ -145,6 +155,7 @@ impl From<&str> for QueuedMessage {
             text: text.to_string(),
             attachments: Vec::new(),
             ultrathink: false,
+            kind: QueuedMessageKind::User,
         }
     }
 }
@@ -372,6 +383,33 @@ impl ActiveSession {
             text,
             attachments,
             ultrathink,
+            kind: QueuedMessageKind::User,
+        });
+        id
+    }
+
+    /// Keep callbacks that race while an idle provider is starting in the same
+    /// wake-up turn. Sending them as separate queued turns lets the first result
+    /// drive the orchestrator before the rest are visible, and the leftovers may
+    /// not run until much later.
+    fn push_or_merge_orchestrate_callback(&mut self, text: String) -> u64 {
+        if let Some(pending) = self
+            .queue
+            .iter_mut()
+            .find(|message| message.kind == QueuedMessageKind::OrchestrateCallback)
+        {
+            pending.text.push_str("\n\n");
+            pending.text.push_str(&text);
+            return pending.id;
+        }
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        self.queue.push(QueuedMessage {
+            id,
+            text,
+            attachments: Vec::new(),
+            ultrathink: false,
+            kind: QueuedMessageKind::OrchestrateCallback,
         });
         id
     }
@@ -3600,19 +3638,69 @@ impl AppState {
             status,
             &final_assistant_message(&timeline),
         );
-        if self.active_session_id() == Some(&parent_id) {
-            let running = self
+        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+    }
+
+    /// Deliver a child result into the orchestrator's current reasoning turn.
+    ///
+    /// A foreground parent already used `steer`, but a parked parent used to put
+    /// callbacks into its ordinary queue. Parallel children could therefore
+    /// leave results stranded while the orchestrator planned from only the first
+    /// completion. Steering is session lifecycle behavior, not UI focus behavior,
+    /// so foreground and parked parents follow the same routing here.
+    fn deliver_orchestrate_callback_to_parent(
+        &mut self,
+        parent_id: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let can_steer = self
+            .active
+            .as_ref()
+            .filter(|parent| parent.meta.id == parent_id)
+            .or_else(|| self.background.get(parent_id))
+            .is_some_and(|parent| parent.turn_in_flight && parent.supports_steering());
+        if can_steer {
+            // A steered callback is already part of this turn, so persist it just
+            // like a user-triggered steer before handing it to the provider.
+            self.record_user_message(parent_id, &text, cx);
+            let sent = self
                 .active
-                .as_ref()
-                .is_some_and(|parent| parent.turn_in_flight);
-            if running {
-                self.steer(text, Vec::new(), cx);
-            } else {
-                self.send_turn(text, Vec::new(), cx);
+                .as_mut()
+                .filter(|parent| parent.meta.id == parent_id)
+                .or_else(|| self.background.get_mut(parent_id))
+                .is_some_and(|parent| parent.steer_now(text, Vec::new()).is_ok());
+            if !sent {
+                self.report_error(RuntimeError::ProcessGone, cx);
             }
+            cx.notify();
             return;
         }
-        if !self.background.contains_key(&parent_id)
+
+        if self.active_session_id() == Some(parent_id) {
+            let parent = self.active.as_mut().unwrap();
+            parent.push_or_merge_orchestrate_callback(text);
+
+            // Match ordinary sends when a launch-time selection changed while
+            // the provider was live: restart before waking the orchestrator.
+            if parent.model_changed_while_live()
+                || parent.approval_mode_changed_while_live()
+                || parent.options_changed_while_live()
+            {
+                parent.shutdown_to_idle();
+            }
+            let should_start = matches!(parent.runtime, Runtime::Idle);
+            if self.dispatch_next_queued(cx).is_err() {
+                self.report_error(RuntimeError::ProcessGone, cx);
+            }
+            if should_start {
+                self.ensure_started(cx);
+            }
+            cx.notify();
+            return;
+        }
+
+        if !self.background.contains_key(parent_id)
             && let Some(parent) = self
                 .sessions
                 .iter()
@@ -3621,16 +3709,17 @@ impl AppState {
         {
             self.load_background_session(parent);
         }
-        if let Some(parent) = self.background.get_mut(&parent_id) {
-            parent.push_queued(text, Vec::new());
+        if let Some(parent) = self.background.get_mut(parent_id) {
+            parent.push_or_merge_orchestrate_callback(text);
             let idle_runtime = matches!(parent.runtime, Runtime::Idle);
-            let can_dispatch = !parent.turn_in_flight && !idle_runtime;
+            let can_dispatch = !parent.turn_in_flight && matches!(parent.runtime, Runtime::Live(_));
             if can_dispatch {
-                self.on_background_turn_completed(&parent_id, cx);
+                self.on_background_turn_completed(parent_id, cx);
             }
             if idle_runtime {
-                self.ensure_session_started(&parent_id, cx);
+                self.ensure_session_started(parent_id, cx);
             }
+            cx.notify();
         }
     }
 
@@ -4944,19 +5033,32 @@ fn build_child_meta(
 }
 
 fn final_assistant_message(timeline: &Timeline) -> String {
-    timeline
+    let Some((last_index, last)) = timeline
         .entries
         .iter()
+        .enumerate()
         .rev()
-        .find_map(|entry| match &entry.content {
-            EntryContent::Assistant { text } => Some(text.clone()),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
+        .find(|(_, entry)| matches!(&entry.content, EntryContent::Assistant { .. }))
+    else {
+        return String::new();
+    };
 
-fn truncate_chars(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
+    // One provider message may contain several adjacent text blocks. They are
+    // separate timeline entries, but together form the final assistant output.
+    // Stop at the first non-assistant item so tool preambles from earlier in the
+    // turn are not mistaken for part of the final answer.
+    let mut parts = Vec::new();
+    for entry in timeline.entries[..=last_index].iter().rev() {
+        if entry.turn != last.turn {
+            break;
+        }
+        match &entry.content {
+            EntryContent::Assistant { text } => parts.push(text.as_str()),
+            _ => break,
+        }
+    }
+    parts.reverse();
+    parts.concat()
 }
 
 fn tail_chars(text: &str, max: usize) -> String {
@@ -4976,7 +5078,7 @@ fn assemble_callback_text(
     };
     format!(
         "[orchestrate] thread {child_id} (\"{title}\") {state}.\n{}",
-        truncate_chars(final_message, 4000)
+        final_message
     )
 }
 
@@ -5519,11 +5621,11 @@ mod tests {
     }
 
     #[test]
-    fn callback_text_truncates_and_cap_stops_at_one_hundred() {
+    fn callback_text_keeps_the_full_result_and_cap_stops_at_one_hundred() {
         let text =
             assemble_callback_text("child", "Title", TurnStatus::Completed, &"x".repeat(5000));
         assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
-        assert_eq!(text.lines().nth(1).unwrap().chars().count(), 4000);
+        assert_eq!(text.lines().nth(1).unwrap().chars().count(), 5000);
         let failed = assemble_callback_text("child", "Title", TurnStatus::Interrupted, "done");
         assert!(failed.contains(") failed.\ndone"));
 
@@ -5533,6 +5635,130 @@ mod tests {
         }
         assert!(!take_callback_slot(&mut count));
         assert_eq!(count, ORCHESTRATE_CALLBACK_CAP + 1);
+    }
+
+    #[test]
+    fn final_assistant_message_joins_all_blocks_of_the_final_output() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "preamble".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "Earlier tool preamble.".into(),
+                },
+            }),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "reasoning".into(),
+                parent_item_id: None,
+                content: ItemContent::Reasoning {
+                    text: "private reasoning".into(),
+                },
+            }),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "final-1".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "Complete ".into(),
+                },
+            }),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "final-2".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "answer.".into(),
+                },
+            }),
+        ]);
+
+        assert_eq!(final_assistant_message(&timeline), "Complete answer.");
+    }
+
+    #[gpui::test]
+    fn parked_orchestrator_gets_parallel_callback_as_a_steer(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-steer-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut parent = live_session(ProviderKind::Codex, commands);
+            parent.meta.id = "parent".into();
+            parent.turn_in_flight = true;
+            state.background.insert(parent.meta.id.clone(), parent);
+
+            state.deliver_orchestrate_callback_to_parent(
+                "parent",
+                "[orchestrate] child-a completed.\nfull result".into(),
+                cx,
+            );
+
+            let parent = state.background.get("parent").unwrap();
+            assert!(parent.queue.is_empty(), "parallel result must not queue");
+            assert!(parent.turn_in_flight);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::Steer { text, .. }) if text.contains("full result")
+            ));
+            let timeline = Timeline::fold_events(state.store.read_events("parent"));
+            assert!(timeline.entries.iter().any(|entry| matches!(
+                &entry.content,
+                EntryContent::User { text, .. } if text.contains("child-a completed")
+            )));
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn callbacks_racing_provider_start_share_one_wakeup_turn(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-start-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut parent = live_session(ProviderKind::ClaudeCode, async_channel::unbounded().0);
+            parent.meta.id = "parent".into();
+            parent.runtime = Runtime::Starting { generation: 1 };
+            state.background.insert(parent.meta.id.clone(), parent);
+
+            state.deliver_orchestrate_callback_to_parent(
+                "parent",
+                "[orchestrate] child-a completed.\nresult a".into(),
+                cx,
+            );
+            state.deliver_orchestrate_callback_to_parent(
+                "parent",
+                "[orchestrate] child-b completed.\nresult b".into(),
+                cx,
+            );
+
+            let parent = state.background.get("parent").unwrap();
+            assert_eq!(parent.queue.len(), 1);
+            assert_eq!(parent.queue[0].kind, QueuedMessageKind::OrchestrateCallback);
+            assert!(parent.queue[0].text.contains("result a"));
+            assert!(parent.queue[0].text.contains("result b"));
+
+            let (commands, receiver) = async_channel::unbounded();
+            state.background.get_mut("parent").unwrap().runtime = Runtime::Live(commands);
+            state.on_background_turn_completed("parent", cx);
+
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::SendTurn { text, .. })
+                    if text.contains("result a") && text.contains("result b")
+            ));
+            let parent = state.background.get("parent").unwrap();
+            assert!(parent.queue.is_empty());
+            assert!(parent.turn_in_flight);
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
