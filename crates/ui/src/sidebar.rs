@@ -53,6 +53,71 @@ fn truncated_sidebar_label() -> gpui::Div {
     div().flex_1().min_w_0().truncate()
 }
 
+fn active_child_count_badge(count: usize, cx: &mut Context<SessionsSidebar>) -> gpui::Div {
+    div()
+        .flex_none()
+        .min_w(px(18.))
+        .px_1()
+        .py(px(1.))
+        .rounded_full()
+        .bg(cx.theme().muted)
+        .text_center()
+        .text_size(px(10.))
+        .font_semibold()
+        .text_color(cx.theme().success)
+        .child(count.to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ThreadRenderState {
+    is_child: bool,
+    show_unread: bool,
+    active_direct_children: usize,
+}
+
+fn derive_thread_render_state(
+    meta: &SessionMeta,
+    sessions: &[SessionMeta],
+    unread: bool,
+    working: bool,
+    mut is_working: impl FnMut(&str) -> bool,
+) -> ThreadRenderState {
+    let is_child = meta
+        .parent_session_id
+        .as_ref()
+        .is_some_and(|parent_id| sessions.iter().any(|session| session.id == *parent_id));
+    let active_direct_children = sessions
+        .iter()
+        .filter(|session| session.parent_session_id.as_deref() == Some(meta.id.as_str()))
+        .filter(|session| is_working(&session.id))
+        .count();
+
+    ThreadRenderState {
+        is_child,
+        // Orphaned child metadata is still child metadata and must not surface
+        // completion unread state as an ordinary-thread blue dot.
+        show_unread: meta.parent_session_id.is_none() && unread && !working,
+        active_direct_children,
+    }
+}
+
+fn thread_visible(meta: &SessionMeta, collapsed_parents: &HashSet<String>) -> bool {
+    meta.parent_session_id
+        .as_ref()
+        .is_none_or(|parent_id| !collapsed_parents.contains(parent_id))
+}
+
+fn toggle_parent_for_row_click(
+    collapsed_parents: &mut HashSet<String>,
+    parent_id: &str,
+    is_selected: bool,
+    has_direct_children: bool,
+) {
+    if is_selected && has_direct_children && !collapsed_parents.remove(parent_id) {
+        collapsed_parents.insert(parent_id.to_string());
+    }
+}
+
 // Thread-row context-menu actions (each carries the target session id, so a
 // single set of handlers on the sidebar root serves every row).
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -96,6 +161,8 @@ pub struct SessionsSidebar {
     app_state: Entity<AppState>,
     /// Project ids whose thread list is expanded past the collapsed limit.
     expanded_groups: HashSet<String>,
+    /// Parent session ids whose direct child rows are folded away.
+    collapsed_parents: HashSet<String>,
     /// The thread currently being renamed inline, if any.
     renaming: Option<RenameState>,
     _subscriptions: Vec<Subscription>,
@@ -107,6 +174,7 @@ impl SessionsSidebar {
         Self {
             app_state,
             expanded_groups: HashSet::new(),
+            collapsed_parents: HashSet::new(),
             renaming: None,
             _subscriptions: subscriptions,
         }
@@ -582,7 +650,10 @@ impl SessionsSidebar {
     ) -> impl IntoElement + use<> {
         let project_id = group.project.id.clone();
         let collapsed = self.app_state.read(cx).is_project_collapsed(&project_id);
-        let has_unread = self.app_state.read(cx).project_has_unread(&project_id);
+        let has_unread = group.sessions.iter().any(|meta| {
+            meta.parent_session_id.is_none()
+                && self.app_state.read(cx).session_unread(meta.id.as_str())
+        });
         let group_key = format!("group-{project_id}");
 
         let expanded = self.expanded_groups.contains(&project_id);
@@ -695,7 +766,12 @@ impl SessionsSidebar {
                 }));
 
         if !collapsed {
-            for meta in group.sessions.iter().take(visible) {
+            for meta in group
+                .sessions
+                .iter()
+                .take(visible)
+                .filter(|meta| thread_visible(meta, &self.collapsed_parents))
+            {
                 let is_active = active_id == Some(meta.id.as_str());
                 // "Working" covers parked sessions too — a thread that keeps
                 // running in the background keeps its green dot.
@@ -737,13 +813,21 @@ impl SessionsSidebar {
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
         let unread = self.app_state.read(cx).session_unread(&session_id);
         let is_worktree = meta.worktree.is_some();
-        let is_child = meta.parent_session_id.as_ref().is_some_and(|parent_id| {
-            self.app_state
-                .read(cx)
-                .sessions
-                .iter()
-                .any(|session| session.id == *parent_id)
-        });
+        let render_state = {
+            let state = self.app_state.read(cx);
+            derive_thread_render_state(meta, &state.sessions, unread, working, |id| {
+                state.turn_running_for(id)
+            })
+        };
+        let is_child = render_state.is_child;
+        let show_unread = render_state.show_unread;
+        let active_direct_children = render_state.active_direct_children;
+        let has_direct_children = self
+            .app_state
+            .read(cx)
+            .sessions
+            .iter()
+            .any(|session| session.parent_session_id.as_deref() == Some(session_id.as_str()));
 
         // Inline rename takes over the whole row's content area.
         let renaming = self
@@ -772,9 +856,16 @@ impl SessionsSidebar {
                 let session_id = session_id.clone();
                 move |this, _, _, cx| {
                     let session_id = session_id.clone();
+                    toggle_parent_for_row_click(
+                        &mut this.collapsed_parents,
+                        &session_id,
+                        is_active,
+                        has_direct_children,
+                    );
                     this.app_state.update(cx, |state, cx| {
                         state.select_session(&session_id, cx);
                     });
+                    cx.notify();
                 }
             }))
             .when(working, |row| {
@@ -806,8 +897,11 @@ impl SessionsSidebar {
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         let row = if let Some(input) = renaming {
             row.child(div().flex_1().min_w_0().child(Input::new(&input).small()))
+                .when(active_direct_children > 0, |row| {
+                    row.child(active_child_count_badge(active_direct_children, cx))
+                })
         } else {
-            row.when(unread && !working, |row| {
+            row.when(show_unread, |row| {
                 row.child(
                     div()
                         .flex_none()
@@ -830,6 +924,9 @@ impl SessionsSidebar {
                     .text_color(cx.theme().sidebar_foreground)
                     .child(meta.title.clone()),
             )
+            .when(active_direct_children > 0, |row| {
+                row.child(active_child_count_badge(active_direct_children, cx))
+            })
             .when(!working, |row| {
                 // Right slot: relative time, replaced by an archive button on hover.
                 let title = meta.title.clone();
@@ -1119,7 +1216,9 @@ fn humanize_ago(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent::ProviderKind;
     use gpui::{TestAppContext, VisualTestContext, size};
+    use std::path::PathBuf;
 
     struct WorkingThreadRowProbe;
 
@@ -1156,6 +1255,14 @@ mod tests {
         cx.update(|window, cx| {
             _ = window.draw(cx);
         });
+    }
+
+    fn session(id: &str, parent_id: Option<&str>) -> SessionMeta {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
+        meta.id = id.to_string();
+        meta.title = id.to_string();
+        meta.parent_session_id = parent_id.map(str::to_string);
+        meta
     }
 
     #[gpui::test]
@@ -1195,5 +1302,74 @@ mod tests {
             Some("显示更多")
         );
         assert_eq!(thread_list_toggle_label(7, true).as_deref(), Some("收起"));
+    }
+
+    #[test]
+    fn child_unread_is_suppressed_by_render_state_derivation() {
+        let parent = session("parent", None);
+        let child = session("child", Some("parent"));
+        let sessions = vec![parent, child.clone()];
+
+        let state = derive_thread_render_state(&child, &sessions, true, false, |_| false);
+
+        assert!(state.is_child);
+        assert!(!state.show_unread);
+
+        let orphan = session("orphan-child", Some("missing-parent"));
+        let state =
+            derive_thread_render_state(&orphan, std::slice::from_ref(&orphan), true, false, |_| {
+                false
+            });
+        assert!(!state.is_child);
+        assert!(!state.show_unread);
+    }
+
+    #[test]
+    fn repeat_click_on_selected_parent_toggles_direct_child_rows() {
+        let mut collapsed = HashSet::new();
+
+        toggle_parent_for_row_click(&mut collapsed, "parent", false, true);
+        assert!(!collapsed.contains("parent"), "first click only selects");
+
+        toggle_parent_for_row_click(&mut collapsed, "parent", true, true);
+        assert!(collapsed.contains("parent"));
+
+        toggle_parent_for_row_click(&mut collapsed, "parent", true, true);
+        assert!(!collapsed.contains("parent"), "repeat click restores rows");
+    }
+
+    #[test]
+    fn active_direct_child_count_excludes_grandchildren() {
+        let parent = session("parent", None);
+        let child_working = session("child-working", Some("parent"));
+        let child_idle = session("child-idle", Some("parent"));
+        let grandchild_working = session("grandchild-working", Some("child-working"));
+        let sessions = vec![
+            parent.clone(),
+            child_working,
+            child_idle,
+            grandchild_working,
+        ];
+
+        let state = derive_thread_render_state(&parent, &sessions, false, false, |id| {
+            matches!(id, "child-working" | "grandchild-working")
+        });
+
+        assert_eq!(state.active_direct_children, 1);
+    }
+
+    #[test]
+    fn collapsed_parent_hides_only_its_own_direct_children() {
+        let collapsed = HashSet::from(["parent-a".to_string()]);
+
+        assert!(!thread_visible(
+            &session("child-a", Some("parent-a")),
+            &collapsed
+        ));
+        assert!(thread_visible(
+            &session("child-b", Some("parent-b")),
+            &collapsed
+        ));
+        assert!(thread_visible(&session("parent-a", None), &collapsed));
     }
 }
