@@ -2,8 +2,9 @@
 //! WebView) with a chrome row, plus the bridge that lets the agent drive it
 //! through the preview MCP server.
 //!
-//! One WebView is created lazily per session and cached; switching sessions
-//! shows that session's view and hides the others. The chrome row offers
+//! One WebView is created lazily per conversation destination and cached;
+//! switching threads (or project drafts) shows that conversation's view and
+//! hides the others. The chrome row offers
 //! back/forward/reload (via raw `wry` `evaluate_script` / history), a URL entry,
 //! open-in-system-browser, and localhost dev-port quick-picks.
 //!
@@ -23,12 +24,27 @@
 //! A `gpui-wry` WebView is a **native child view drawn over** the gpui window,
 //! not composited into gpui's scene. It therefore covers any gpui popover /
 //! dialog that overlaps its bounds. We mitigate the common case by hiding the
-//! WebView whenever the command palette is open or we leave the chat route; a
-//! fully general fix (hiding on every popover) would need popover-layer state we
-//! don't currently track, so overlapping in-webview popovers are a known
-//! limitation (documented, not fixed).
+//! WebView whenever its owning Preview panel closes, another right-panel tab or
+//! conversation is selected, the command palette opens, or we leave the chat
+//! route. A fully general fix (hiding on every popover) would need popover-layer
+//! state we don't currently track, so overlapping in-webview popovers are a
+//! known limitation (documented, not fixed).
 
 use preview_mcp::PreviewReply;
+#[cfg(any(not(target_os = "linux"), test))]
+use tcode_runtime::app::Route;
+
+#[cfg(any(not(target_os = "linux"), test))]
+fn visible_preview_key(
+    active_key: Option<&str>,
+    route: Route,
+    palette_open: bool,
+    preview_panel_showing: bool,
+) -> Option<&str> {
+    (route == Route::Chat && !palette_open && preview_panel_showing)
+        .then_some(active_key)
+        .flatten()
+}
 
 /// The reply channel a broker request is answered on.
 type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
@@ -59,8 +75,8 @@ mod native {
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
     use raw_window_handle::HasWindowHandle as _;
 
-    use super::{ReplyTx, normalize_url, unavailable_message};
-    use tcode_runtime::app::{AppState, Route};
+    use super::{ReplyTx, normalize_url, unavailable_message, visible_preview_key};
+    use tcode_runtime::app::AppState;
 
     pub struct PreviewPanel {
         app_state: Entity<AppState>,
@@ -77,6 +93,11 @@ mod native {
         url_input: Entity<InputState>,
         /// Session id whose URL is currently mirrored into `url_input`.
         mirrored: Option<String>,
+        /// Last physical session id + stable conversation key. When an unsent
+        /// draft is committed its physical id stays the same but its key moves
+        /// from `draft:<project>` to the stored session id; this lets the live
+        /// WebView move with it instead of being replaced by a blank one.
+        active_identity: Option<(String, String)>,
         /// Discovered localhost dev-server ports (populated by the "Ports" button).
         dev_ports: Vec<u16>,
         /// Why the platform webview could not be created (Windows without the
@@ -96,7 +117,13 @@ mod native {
                 InputState::new(window, cx).placeholder(tcode_i18n::tr!("preview.url_placeholder"))
             });
             let subscriptions = vec![
-                cx.observe(&app_state, |_, _, cx| cx.notify()),
+                cx.observe(&app_state, |this, _, cx| {
+                    // Native child views outlive GPUI layout nodes. Visibility
+                    // therefore follows AppState directly, even while this
+                    // entity is no longer mounted in the right-panel tree.
+                    this.sync_visibility(cx);
+                    cx.notify();
+                }),
                 cx.subscribe_in(&url_input, window, Self::on_url_event),
             ];
             Self {
@@ -106,18 +133,91 @@ mod native {
                 urls: HashMap::new(),
                 url_input,
                 mirrored: None,
+                active_identity: None,
                 dev_ports: Vec::new(),
                 webview_error: None,
                 _subscriptions: subscriptions,
             }
         }
 
-        /// The active session id, if any.
-        fn active_id(&self, cx: &Context<Self>) -> Option<String> {
-            self.app_state
-                .read(cx)
-                .active_session_id()
+        /// Reconcile the stable conversation key with the physical session id.
+        /// Draft -> stored-thread commits retain the same session id, so move
+        /// all cached browser state across that one key transition.
+        fn active_key(&mut self, cx: &Context<Self>) -> Option<String> {
+            let current = {
+                let state = self.app_state.read(cx);
+                state.active_session_id().and_then(|session_id| {
+                    state
+                        .active_conversation_ui_key()
+                        .map(|key| (session_id.to_string(), key))
+                })
+            };
+
+            if let (Some((old_session, old_key)), Some((session, key))) =
+                (self.active_identity.as_ref(), current.as_ref())
+                && old_session == session
+                && old_key != key
+            {
+                if let Some(view) = self.webviews.remove(old_key) {
+                    if self.webviews.contains_key(key) {
+                        drop(view);
+                    } else {
+                        self.webviews.insert(key.clone(), view);
+                    }
+                }
+                if let Some(url) = self.urls.remove(old_key)
+                    && !self.urls.contains_key(key)
+                {
+                    self.urls.insert(key.clone(), url);
+                }
+                if self.warm.remove(old_key) {
+                    self.warm.insert(key.clone());
+                }
+                if self.mirrored.as_deref() == Some(old_key) {
+                    self.mirrored = Some(key.clone());
+                }
+            }
+
+            self.active_identity = current.clone();
+            current.map(|(_, key)| key)
+        }
+
+        /// Hide native children that no longer belong to the visible Preview
+        /// panel. This deliberately never shows a child: an opening transition
+        /// may still have stale bounds until `render` mounts its GPUI owner.
+        /// `AppShell` calls this before it removes Preview from the layout tree.
+        pub fn sync_visibility(&mut self, cx: &mut Context<Self>) {
+            self.update_visibility(false, cx);
+        }
+
+        /// Full show/hide synchronization, called only while `PreviewPanel` is
+        /// mounted and has laid out the WebView owner for this frame.
+        fn sync_mounted_visibility(&mut self, cx: &mut Context<Self>) {
+            self.update_visibility(true, cx);
+        }
+
+        fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
+            let active = self.active_key(cx);
+            let visible = {
+                let state = self.app_state.read(cx);
+                visible_preview_key(
+                    active.as_deref(),
+                    state.route,
+                    state.palette_open,
+                    state.preview_panel_showing(),
+                )
                 .map(str::to_string)
+            };
+            for (key, view) in &self.webviews {
+                let should_show = Some(key) == visible.as_ref();
+                view.update(cx, |view, _| {
+                    if should_show && allow_show {
+                        view.show();
+                    } else if !should_show {
+                        view.hide();
+                    }
+                });
+            }
         }
 
         /// Get or lazily create the WebView for `session_id`.
@@ -172,7 +272,7 @@ mod native {
 
         /// Navigate the active session's WebView to `url`, remembering it.
         fn navigate(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-            let Some(session_id) = self.active_id(cx) else {
+            let Some(session_id) = self.active_key(cx) else {
                 return;
             };
             let url = normalize_url(url);
@@ -180,14 +280,12 @@ mod native {
                 cx.notify();
                 return;
             };
-            webview.update(cx, |view, _| {
-                view.show();
-                view.load_url(&url);
-            });
+            webview.update(cx, |view, _| view.load_url(&url));
             // A navigation flushes lb-wry's pending-scripts buffer, so subsequent
             // evaluate callbacks will fire.
             self.warm.insert(session_id.clone());
             self.urls.insert(session_id, url);
+            self.sync_visibility(cx);
             cx.notify();
         }
 
@@ -216,7 +314,7 @@ mod native {
         // ---- chrome actions -------------------------------------------------
 
         fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-            if let Some(id) = self.active_id(cx)
+            if let Some(id) = self.active_key(cx)
                 && let Some(view) = self.ensure_webview(&id, window, cx)
             {
                 view.update(cx, |view, _| {
@@ -226,21 +324,21 @@ mod native {
         }
 
         fn go_forward(&mut self, cx: &Context<Self>) {
-            if let Some(id) = self.active_id(cx) {
+            if let Some(id) = self.active_key(cx) {
                 self.eval_fire(&id, "history.forward();", cx);
             }
         }
 
         fn reload(&mut self, cx: &Context<Self>) {
-            if let Some(id) = self.active_id(cx) {
+            if let Some(id) = self.active_key(cx) {
                 self.eval_fire(&id, "location.reload();", cx);
             }
         }
 
         /// Hand the current URL to the OS browser. `cx.open_url` is gpui's
         /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`).
-        fn open_in_system_browser(&self, cx: &Context<Self>) {
-            if let Some(id) = self.active_id(cx)
+        fn open_in_system_browser(&mut self, cx: &Context<Self>) {
+            if let Some(id) = self.active_key(cx)
                 && let Some(url) = self.urls.get(&id)
             {
                 cx.open_url(url);
@@ -264,7 +362,7 @@ mod native {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) {
-            let Some(session_id) = self.active_id(cx) else {
+            let Some(session_id) = self.active_key(cx) else {
                 let _ = reply.try_send(Err("no active session to preview".into()));
                 return;
             };
@@ -276,8 +374,9 @@ mod native {
                         .update(cx, |state, cx| state.open_preview_panel(cx));
                     if let Some(url) = url.as_deref() {
                         self.navigate(url, window, cx);
-                    } else if let Some(view) = self.ensure_webview(&session_id, window, cx) {
-                        view.update(cx, |v, _| v.show());
+                    } else {
+                        self.ensure_webview(&session_id, window, cx);
+                        self.sync_visibility(cx);
                     }
                     if let Some(err) = &self.webview_error {
                         let _ = reply.try_send(Err(unavailable_message(err)));
@@ -441,7 +540,7 @@ mod native {
 
     impl Render for PreviewPanel {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let active = self.active_id(cx);
+            let active = self.active_key(cx);
 
             // Honor a queued `--open-preview <url>` navigation once a session exists.
             if active.is_some()
@@ -462,23 +561,6 @@ mod native {
                 self.url_input
                     .update(cx, |state, cx| state.set_value(&value, window, cx));
                 self.mirrored = active.clone();
-            }
-
-            // Native overlay mitigation: hide the WebView while the palette is open
-            // or we're off the chat route (see module docs).
-            let obstruct = {
-                let state = self.app_state.read(cx);
-                state.palette_open || state.route != Route::Chat
-            };
-            for (id, view) in &self.webviews {
-                let should_show = Some(id) == active.as_ref() && !obstruct;
-                view.update(cx, |v, _| {
-                    if should_show {
-                        v.show();
-                    } else {
-                        v.hide();
-                    }
-                });
             }
 
             let body: AnyElement = match &active {
@@ -508,6 +590,10 @@ mod native {
                     .child(tcode_i18n::tr!("preview.no_session"))
                     .into_any_element(),
             };
+
+            // `ensure_webview` creates children hidden; make the owning
+            // conversation visible only after the current layout owns it.
+            self.sync_mounted_visibility(cx);
 
             v_flex()
                 .size_full()
@@ -642,6 +728,8 @@ mod placeholder {
                 tcode_i18n::tr!("preview.unsupported_linux").into_owned()
             ));
         }
+
+        pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
     }
 
     impl Render for PreviewPanel {
@@ -709,6 +797,30 @@ mod tests {
         assert_eq!(normalize_url("localhost:5173"), "http://localhost:5173");
         assert_eq!(normalize_url(" https://x.dev "), "https://x.dev");
         assert_eq!(normalize_url("about:blank"), "about:blank");
+    }
+
+    #[test]
+    fn native_overlay_is_visible_only_while_preview_owns_it() {
+        assert_eq!(
+            visible_preview_key(Some("thread-a"), Route::Chat, false, true),
+            Some("thread-a")
+        );
+        assert_eq!(
+            visible_preview_key(Some("thread-a"), Route::Chat, false, false),
+            None,
+            "closing Preview or selecting Diff/Plan must hide the native child"
+        );
+        assert_eq!(
+            visible_preview_key(Some("thread-b"), Route::Chat, true, true),
+            None,
+            "the command palette must cover the whole workspace"
+        );
+        assert_eq!(
+            visible_preview_key(Some("thread-b"), Route::Settings, false, true),
+            None,
+            "leaving Chat unmounts the preview layout"
+        );
+        assert_eq!(visible_preview_key(None, Route::Chat, false, true), None);
     }
 
     /// The capture region is the window origin plus the WebView's own bounds.

@@ -14,6 +14,7 @@ mod palette;
 mod plan_panel;
 mod preview_panel;
 pub mod provider_card;
+mod provider_model_picker;
 pub mod provider_models;
 pub mod provider_status;
 pub mod runtime_event;

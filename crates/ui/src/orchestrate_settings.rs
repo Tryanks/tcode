@@ -2,36 +2,26 @@
 //! allow list. Every main model is eligible; only child dispatch is gated.
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    popover::Popover,
-    scroll::ScrollableElement as _,
     switch::Switch,
     v_flex,
 };
 
-use agent::{OptionDescriptor, ProviderKind};
+use agent::ProviderKind;
 use tcode_runtime::app::AppState;
 
 use crate::provider_card::provider_glyph;
+use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{
     OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings, provider_label,
 };
-
-#[derive(Clone)]
-struct ModelOption {
-    provider: ProviderKind,
-    id: String,
-    name: String,
-    default_effort: Option<String>,
-}
 
 struct IdentityRowState {
     provider: ProviderKind,
@@ -45,19 +35,13 @@ struct ChildRowState {
     description: Entity<InputState>,
 }
 
-#[derive(Clone, Copy)]
-enum AddKind {
-    Identity,
-    Child,
-}
-
 pub struct OrchestrateSettingsPanel {
     app_state: Entity<AppState>,
     generic_identity: Entity<InputState>,
     identity_rows: Vec<IdentityRowState>,
     child_rows: Vec<ChildRowState>,
-    identity_picker_provider: ProviderKind,
-    child_picker_provider: ProviderKind,
+    identity_model_picker: Entity<ProviderModelPicker>,
+    child_model_picker: Entity<ProviderModelPicker>,
     _subscriptions: Vec<Subscription>,
     input_subscriptions: Vec<Subscription>,
 }
@@ -77,14 +61,44 @@ impl OrchestrateSettingsPanel {
                 .placeholder(tcode_i18n::tr!("orchestrate.generic_identity.placeholder"))
                 .default_value(generic_value)
         });
-        let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        let identity_model_picker = cx.new(|cx| {
+            ProviderModelPicker::add(
+                app_state.clone(),
+                "orchestrate-add-identity-popover",
+                "orchestrate-add-identity",
+                tcode_i18n::tr!("orchestrate.model_identity.add"),
+                cx,
+            )
+        });
+        let child_model_picker = cx.new(|cx| {
+            ProviderModelPicker::add(
+                app_state.clone(),
+                "orchestrate-add-child-popover",
+                "orchestrate-add-child",
+                tcode_i18n::tr!("orchestrate.children.add"),
+                cx,
+            )
+        });
+        let subscriptions = vec![
+            cx.observe(&app_state, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &identity_model_picker,
+                window,
+                |this, _, event, window, cx| {
+                    this.add_identity(&event.0, window, cx);
+                },
+            ),
+            cx.subscribe_in(&child_model_picker, window, |this, _, event, window, cx| {
+                this.add_child(&event.0, window, cx);
+            }),
+        ];
         let mut panel = Self {
             app_state,
             generic_identity,
             identity_rows: Vec::new(),
             child_rows: Vec::new(),
-            identity_picker_provider: ProviderKind::Codex,
-            child_picker_provider: ProviderKind::Codex,
+            identity_model_picker,
+            child_model_picker,
             _subscriptions: subscriptions,
             input_subscriptions: Vec::new(),
         };
@@ -170,6 +184,25 @@ impl OrchestrateSettingsPanel {
                 description,
             });
         }
+        self.sync_picker_exclusions(cx);
+    }
+
+    fn sync_picker_exclusions(&self, cx: &mut Context<Self>) {
+        let identities = self
+            .identity_rows
+            .iter()
+            .map(|row| (row.provider, row.model.clone()))
+            .collect();
+        self.identity_model_picker
+            .update(cx, |picker, cx| picker.set_excluded(identities, cx));
+
+        let children = self
+            .child_rows
+            .iter()
+            .map(|row| (row.provider, row.model.clone()))
+            .collect();
+        self.child_model_picker
+            .update(cx, |picker, cx| picker.set_excluded(children, cx));
     }
 
     fn commit_model_identity(&self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {
@@ -427,66 +460,10 @@ impl OrchestrateSettingsPanel {
         }
     }
 
-    fn model_options(&self, cx: &App) -> Vec<ModelOption> {
-        let state = self.app_state.read(cx);
-        let mut options = Vec::new();
-        for provider in [ProviderKind::Codex, ProviderKind::ClaudeCode] {
-            let catalog = state.models_for(provider);
-            for model in state.resolved_models(provider) {
-                let default_effort = catalog
-                    .iter()
-                    .find(|spec| spec.id == model.id)
-                    .and_then(default_reasoning_effort);
-                options.push(ModelOption {
-                    provider,
-                    id: model.id,
-                    name: model.name,
-                    default_effort,
-                });
-            }
-        }
-
-        // Keep configured rows manageable while offline or after a provider
-        // removes a model from its latest catalog.
-        for (provider, model) in state
-            .settings
-            .orchestrate
-            .model_identities
-            .iter()
-            .map(|entry| (entry.provider, entry.model.as_str()))
-            .chain(
-                state
-                    .settings
-                    .orchestrate
-                    .child_models
-                    .iter()
-                    .map(|entry| (entry.provider, entry.model.as_str())),
-            )
-        {
-            if matches!(provider, ProviderKind::Acp) || model.trim().is_empty() {
-                continue;
-            }
-            if !options
-                .iter()
-                .any(|option| option.provider == provider && option.id == model)
-            {
-                options.push(ModelOption {
-                    provider,
-                    id: model.to_string(),
-                    name: model.to_string(),
-                    default_effort: None,
-                });
-            }
-        }
-        options
-    }
-
     fn model_name(&self, provider: ProviderKind, model: &str, cx: &App) -> String {
-        self.model_options(cx)
-            .into_iter()
-            .find(|option| option.provider == provider && option.id == model)
-            .map(|option| option.name)
-            .unwrap_or_else(|| model.to_string())
+        self.identity_model_picker
+            .read(cx)
+            .display_name(provider, model, cx)
     }
 
     fn render_intro(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -548,163 +525,6 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    fn render_model_picker(&self, kind: AddKind, cx: &mut Context<Self>) -> AnyElement {
-        let options = self.model_options(cx);
-        let configured: Vec<(ProviderKind, String)> = match kind {
-            AddKind::Identity => self
-                .identity_rows
-                .iter()
-                .map(|row| (row.provider, row.model.clone()))
-                .collect(),
-            AddKind::Child => self
-                .child_rows
-                .iter()
-                .map(|row| (row.provider, row.model.clone()))
-                .collect(),
-        };
-        let panel = cx.entity();
-        let label = match kind {
-            AddKind::Identity => tcode_i18n::tr!("orchestrate.model_identity.add"),
-            AddKind::Child => tcode_i18n::tr!("orchestrate.children.add"),
-        };
-        let popover_id = match kind {
-            AddKind::Identity => "orchestrate-add-identity-popover",
-            AddKind::Child => "orchestrate-add-child-popover",
-        };
-        let trigger_id = match kind {
-            AddKind::Identity => "orchestrate-add-identity",
-            AddKind::Child => "orchestrate-add-child",
-        };
-        Popover::new(popover_id)
-            .trigger(
-                Button::new(trigger_id)
-                    .outline()
-                    .small()
-                    .icon(IconName::Plus)
-                    .label(label),
-            )
-            .content(move |_, _, cx| {
-                let panel = panel.clone();
-                let selected_provider = {
-                    let panel = panel.read(cx);
-                    match kind {
-                        AddKind::Identity => panel.identity_picker_provider,
-                        AddKind::Child => panel.child_picker_provider,
-                    }
-                };
-                let available: Vec<_> = options
-                    .iter()
-                    .filter(|option| {
-                        option.provider == selected_provider
-                            && !configured.iter().any(|(provider, model)| {
-                                *provider == option.provider && model == &option.id
-                            })
-                    })
-                    .cloned()
-                    .collect();
-                let mut rows = v_flex().w_full().p_1().gap_0p5();
-                if available.is_empty() {
-                    rows = rows.child(
-                        div()
-                            .p_4()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("orchestrate.no_more_models")),
-                    );
-                } else {
-                    for (index, option) in available.into_iter().enumerate() {
-                        let selected = option.clone();
-                        let panel = panel.clone();
-                        let popover = cx.entity();
-                        rows = rows.child(
-                            h_flex()
-                                .id(("orchestrate-model-option", index))
-                                .w_full()
-                                .px_2()
-                                .py_1p5()
-                                .gap_2()
-                                .items_center()
-                                .rounded(px(6.))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(cx.theme().accent))
-                                .child(provider_glyph(option.provider).small())
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(div().text_size(px(13.)).child(option.name))
-                                        .child(
-                                            div()
-                                                .font_family("monospace")
-                                                .text_size(px(11.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(option.id),
-                                        ),
-                                )
-                                .on_click(move |_, window, cx| {
-                                    panel.update(cx, |panel, cx| match kind {
-                                        AddKind::Identity => {
-                                            panel.add_identity(&selected, window, cx)
-                                        }
-                                        AddKind::Child => panel.add_child(&selected, window, cx),
-                                    });
-                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                }),
-                        );
-                    }
-                }
-                let mut tabs = h_flex()
-                    .w_full()
-                    .p_1()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border);
-                for (tab_index, provider) in [ProviderKind::Codex, ProviderKind::ClaudeCode]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let selected = provider == selected_provider;
-                    let panel = panel.clone();
-                    let popover = cx.entity();
-                    tabs = tabs.child(
-                        h_flex()
-                            .id(("orchestrate-provider-tab", tab_index))
-                            .flex_1()
-                            .h(px(30.))
-                            .items_center()
-                            .justify_center()
-                            .gap_1p5()
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .when(selected, |tab| tab.bg(cx.theme().accent).font_medium())
-                            .hover(|tab| tab.bg(cx.theme().accent))
-                            .child(provider_glyph(provider).xsmall())
-                            .child(div().text_size(px(12.)).child(provider_label(provider)))
-                            .on_click(move |_, _, cx| {
-                                panel.update(cx, |panel, cx| {
-                                    match kind {
-                                        AddKind::Identity => {
-                                            panel.identity_picker_provider = provider
-                                        }
-                                        AddKind::Child => panel.child_picker_provider = provider,
-                                    }
-                                    cx.notify();
-                                });
-                                popover.update(cx, |_, cx| cx.notify());
-                            }),
-                    );
-                }
-                v_flex().w(px(390.)).child(tabs).child(
-                    v_flex()
-                        .w_full()
-                        .h(px(300.))
-                        .overflow_y_scrollbar()
-                        .child(rows),
-                )
-            })
-            .into_any_element()
-    }
-
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut section =
             v_flex()
@@ -755,7 +575,7 @@ impl OrchestrateSettingsPanel {
                 .child(self.section_heading(
                     tcode_i18n::tr!("orchestrate.model_identity.title"),
                     tcode_i18n::tr!("orchestrate.model_identity.description"),
-                    Some(self.render_model_picker(AddKind::Identity, cx)),
+                    Some(self.identity_model_picker.clone().into_any_element()),
                     cx,
                 ));
 
@@ -847,7 +667,7 @@ impl OrchestrateSettingsPanel {
         let mut section = v_flex().w_full().gap_3().child(self.section_heading(
             tcode_i18n::tr!("orchestrate.children.title"),
             tcode_i18n::tr!("orchestrate.children.description"),
-            Some(self.render_model_picker(AddKind::Child, cx)),
+            Some(self.child_model_picker.clone().into_any_element()),
             cx,
         ));
         if self.child_rows.is_empty() {
@@ -1002,13 +822,4 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_identities(cx))
             .child(self.render_children(cx))
     }
-}
-
-fn default_reasoning_effort(spec: &agent::ModelSpec) -> Option<String> {
-    spec.options.iter().find_map(|option| match option {
-        OptionDescriptor::Select {
-            id, default_value, ..
-        } if id == "reasoningEffort" => default_value.clone(),
-        _ => None,
-    })
 }

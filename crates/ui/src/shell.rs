@@ -304,6 +304,12 @@ impl Render for AppShell {
         let diff_expanded =
             self.app_state.read(cx).diff_panel_expanded() && right_tab != RightTab::Preview;
 
+        // A native WebView is not composited into GPUI and survives removal of
+        // its layout node. Synchronize it before the settings early-return or a
+        // right-panel tab/close transition can unmount PreviewPanel.
+        self.preview
+            .update(cx, |preview, cx| preview.sync_visibility(cx));
+
         // The full-page settings route replaces the chat workspace entirely.
         if route == Route::Settings {
             return div()
