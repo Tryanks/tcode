@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 use std::path::{Path, PathBuf};
@@ -51,6 +52,19 @@ const ACTION_ROW_HEIGHT: f32 = 24.;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 44.;
+/// Pre-measure this many full-window heights on each side of the chat viewport.
+///
+/// GPUI's list performs the expensive first layout for items in this band, so a
+/// generous buffer keeps ordinary trackpad/wheel scrolling from discovering and
+/// laying out a turn on the same frame in which it becomes visible. The chat
+/// viewport is shorter than the full window, making this a conservative lower
+/// bound in practice while the list itself remains bounded for huge histories.
+const TIMELINE_OVERDRAW_VIEWPORTS: f32 = 4.;
+const TIMELINE_MIN_OVERDRAW: f32 = 3072.;
+
+fn timeline_overdraw(viewport_height: f32) -> f32 {
+    (viewport_height.max(0.) * TIMELINE_OVERDRAW_VIEWPORTS).max(TIMELINE_MIN_OVERDRAW)
+}
 
 /// Markdown state that grows with streaming deltas (stream_markdown pattern).
 ///
@@ -69,8 +83,9 @@ const TURN_GAP: f32 = 44.;
 /// calling `set_text`.
 struct MdState {
     state: Entity<TextViewState>,
-    /// The text currently mirrored into `state`.
-    synced: String,
+    /// The text currently mirrored into `state`. Sharing it lets every
+    /// re-render install a Copy handler without cloning a long response.
+    synced: Arc<str>,
     /// Whether `state`'s whole content arrived through `push_str` (i.e. it was
     /// seeded empty), which is what makes further `push_str` calls sound.
     can_push: bool,
@@ -121,7 +136,7 @@ fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
 
 /// Coalesce only adjacent activity entries, leaving messages and errors at
 /// their exact positions in the timeline.
-fn segment_entries<'a>(entries: &'a [TimelineEntry]) -> Vec<Segment<'a>> {
+fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>]) -> Vec<Segment<'a>> {
     let mut segments = Vec::new();
     let mut activities = Vec::new();
 
@@ -133,6 +148,7 @@ fn segment_entries<'a>(entries: &'a [TimelineEntry]) -> Vec<Segment<'a>> {
     };
 
     for entry in entries {
+        let entry = entry.as_ref();
         match &entry.content {
             EntryContent::Command { .. }
             | EntryContent::Tool { .. }
@@ -191,9 +207,9 @@ enum ListSync {
 /// ever exposes an entry before its corresponding `TurnMeta`.
 fn index_turns(
     turns: &[TurnMeta],
-    entries: &[TimelineEntry],
+    entries: &[Arc<TimelineEntry>],
     proposed_plan: Option<(usize, &str, &str)>,
-    children: &HashMap<String, Vec<TimelineEntry>>,
+    children: &HashMap<String, Vec<Arc<TimelineEntry>>>,
     expanded: &HashSet<String>,
 ) -> Vec<TurnListItem> {
     debug_assert!(entries.windows(2).all(|pair| pair[0].turn <= pair[1].turn));
@@ -366,7 +382,7 @@ impl MdState {
         };
         Self {
             state,
-            synced: text.to_string(),
+            synced: Arc::from(text),
             // An empty seed leaves the background task's document empty too, so
             // it stays safe to push into even outside streaming mode.
             can_push: streaming || text.is_empty(),
@@ -379,7 +395,7 @@ impl MdState {
             MdSync::Push(delta) => {
                 self.state
                     .update(cx, |state, cx| state.push_str(&delta, cx));
-                self.synced = text;
+                self.synced = Arc::from(text);
             }
             MdSync::Reset(text) => *self = Self::new(&text, streaming, cx),
         }
@@ -422,7 +438,8 @@ pub struct ChatView {
 impl ChatView {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| Composer::new(app_state.clone(), window, cx));
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(1024.));
+        let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
 
         let subscriptions = vec![
@@ -587,7 +604,7 @@ impl ChatView {
         index: usize,
         turn: &TurnMeta,
         cwd: &Path,
-        entries: &[TimelineEntry],
+        entries: &[Arc<TimelineEntry>],
         pinned: (Option<&str>, Option<&str>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -771,7 +788,7 @@ impl ChatView {
             .gap_1()
             .items_center()
             .justify_end()
-            .child(self.render_copy_button(&format!("user:{entry_id}"), text.to_string(), cx));
+            .child(self.render_copy_button(&format!("user:{entry_id}"), Arc::from(text), cx));
 
         if is_head {
             let edit_text = text.to_string();
@@ -876,10 +893,17 @@ impl ChatView {
         show_actions: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let content: AnyElement = if let Some(md) = self.md_states.get(id) {
-            TextView::new(&md.state).selectable(true).into_any_element()
+        let (content, copy_text): (AnyElement, Arc<str>) = if let Some(md) = self.md_states.get(id)
+        {
+            (
+                TextView::new(&md.state).selectable(true).into_any_element(),
+                md.synced.clone(),
+            )
         } else {
-            div().child(text.to_string()).into_any_element()
+            (
+                div().child(text.to_string()).into_any_element(),
+                Arc::from(text),
+            )
         };
         let message = v_flex().w_full().items_start().gap(px(2.)).child(
             div()
@@ -897,7 +921,7 @@ impl ChatView {
         let actions = h_flex()
             .gap_1()
             .items_center()
-            .child(self.render_copy_button(&format!("assistant:{id}"), text.to_string(), cx));
+            .child(self.render_copy_button(&format!("assistant:{id}"), copy_text, cx));
         message
             .group(group_key.clone())
             .child(self.reserve_action_row(actions, group_key, pinned))
@@ -936,11 +960,7 @@ impl ChatView {
                             .child(tcode_i18n::tr!("chat.error_label").to_uppercase()),
                     )
                     .child(div().flex_1())
-                    .child(self.render_copy_button(
-                        &format!("error:{id}"),
-                        message.to_string(),
-                        cx,
-                    )),
+                    .child(self.render_copy_button(&format!("error:{id}"), Arc::from(message), cx)),
             )
             .child(
                 div()
@@ -979,7 +999,7 @@ impl ChatView {
     fn render_copy_button(
         &self,
         key: &str,
-        text: String,
+        text: Arc<str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let copied = self.copied.as_deref() == Some(key);
@@ -998,7 +1018,7 @@ impl ChatView {
                 tcode_i18n::tr!("chat.copy")
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                cx.write_to_clipboard(copy_payload(&text));
+                cx.write_to_clipboard(copy_payload(text.as_ref()));
                 this.mark_copied(mark.clone(), cx);
             }))
     }
@@ -2717,22 +2737,23 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 mod tests {
     use super::{
         ListSync, MdState, MdSync, Segment, copy_payload, displayed_error_text, index_turns,
-        list_sync, md_sync, segment_entries,
+        list_sync, md_sync, segment_entries, timeline_overdraw,
     };
     use agent::ItemStatus;
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::text::TextViewState;
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
+    use std::sync::Arc;
     use tcode_core::session::{EntryContent, TimelineEntry, TurnMeta};
 
-    fn entry(id: &str, content: EntryContent) -> TimelineEntry {
-        TimelineEntry {
+    fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
+        Arc::new(TimelineEntry {
             id: id.to_string(),
             content,
             ts: None,
             turn: 0,
-        }
+        })
     }
 
     #[test]
@@ -2767,7 +2788,16 @@ mod tests {
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
     }
 
-    fn command(id: &str) -> TimelineEntry {
+    #[test]
+    fn timeline_overdraw_keeps_multiple_viewports_warm() {
+        // Headless/early construction still gets a useful buffer.
+        assert_eq!(timeline_overdraw(0.), 3072.);
+        // Normal windows retain four full window heights on both sides.
+        assert_eq!(timeline_overdraw(900.), 3600.);
+        assert_eq!(timeline_overdraw(1440.), 5760.);
+    }
+
+    fn command(id: &str) -> Arc<TimelineEntry> {
         entry(
             id,
             EntryContent::Command {
@@ -2779,8 +2809,8 @@ mod tests {
         )
     }
 
-    fn at_turn(mut entry: TimelineEntry, turn: usize) -> TimelineEntry {
-        entry.turn = turn;
+    fn at_turn(mut entry: Arc<TimelineEntry>, turn: usize) -> Arc<TimelineEntry> {
+        Arc::make_mut(&mut entry).turn = turn;
         entry
     }
 
@@ -3147,7 +3177,7 @@ mod tests {
             cx.run_until_parked();
         }
 
-        assert_eq!(md.synced, "QUEUED_ONE");
+        assert_eq!(md.synced.as_ref(), "QUEUED_ONE");
         assert_eq!(rendered(&md.state, cx), "QUEUED_ONE\n");
     }
 
