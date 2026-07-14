@@ -88,6 +88,34 @@ struct TerminalPreferences {
     count: usize,
 }
 
+/// Stable destination for conversation-owned UI. A stored thread uses its
+/// session id; an unsent draft uses its project id because opening the same
+/// project's New thread surface allocates a fresh transient session id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ConversationDestination {
+    Thread(String),
+    ProjectDraft(String),
+}
+
+impl ConversationDestination {
+    /// Backward-compatible key for `terminal-ui.json`: stored threads keep the
+    /// raw session-id keys used by older builds, while drafts get a namespace.
+    fn preference_key(&self) -> String {
+        match self {
+            Self::Thread(id) => id.clone(),
+            Self::ProjectDraft(id) => format!("draft:{id}"),
+        }
+    }
+
+    /// String key shared with UI-side caches such as the native WebView pool.
+    fn ui_key(&self) -> String {
+        match self {
+            Self::Thread(id) => id.clone(),
+            Self::ProjectDraft(id) => format!("draft:{id}"),
+        }
+    }
+}
+
 /// The top-level window route: the chat workspace or the full-page settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
@@ -97,13 +125,62 @@ pub enum Route {
 }
 
 /// Which tab the right-side panel shows (it hosts the diff view and the
-/// plan/task view). Persisted per active session, in memory only.
+/// plan/task view). Cached per conversation destination, in memory only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightTab {
     #[default]
     Diff,
     Plan,
     Preview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RightPanelState {
+    open: bool,
+    expanded: bool,
+    selected_turn: Option<usize>,
+    tab: RightTab,
+}
+
+impl RightPanelState {
+    fn capture(active: &ActiveSession) -> Self {
+        Self {
+            open: active.diff_open,
+            expanded: active.diff_expanded,
+            selected_turn: active.diff_selected_turn,
+            tab: active.right_tab,
+        }
+    }
+
+    fn restore_into(self, active: &mut ActiveSession) {
+        active.diff_open = self.open;
+        active.diff_expanded = self.expanded;
+        active.diff_selected_turn = self.selected_turn;
+        active.right_tab = self.tab;
+    }
+}
+
+/// UI resources that belong to a conversation but outlive the currently
+/// mounted `ActiveSession`. Moving the terminal workspace (rather than merely
+/// persisting its open flag) keeps its PTYs, scrollback, tabs, splits, and
+/// attached context with the conversation while another thread is selected.
+struct ConversationUiState {
+    right_panel: RightPanelState,
+    terminal_workspace: TerminalWorkspace,
+}
+
+impl ConversationUiState {
+    fn take_from(active: &mut ActiveSession) -> Self {
+        Self {
+            right_panel: RightPanelState::capture(active),
+            terminal_workspace: std::mem::take(&mut active.terminal_workspace),
+        }
+    }
+
+    fn restore_into(self, active: &mut ActiveSession) {
+        self.right_panel.restore_into(active);
+        active.terminal_workspace = self.terminal_workspace;
+    }
 }
 
 /// A message waiting for an ordinary turn. Most are user-authored messages sent
@@ -463,6 +540,20 @@ impl ActiveSession {
     }
 }
 
+fn conversation_destination(active: &ActiveSession) -> ConversationDestination {
+    if active.draft {
+        ConversationDestination::ProjectDraft(
+            active
+                .meta
+                .project_id
+                .clone()
+                .unwrap_or_else(|| active.meta.id.clone()),
+        )
+    } else {
+        ConversationDestination::Thread(active.meta.id.clone())
+    }
+}
+
 /// Smoke-mode behavior flags (used by the smoke-test harness).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SmokeMode {
@@ -515,6 +606,9 @@ pub struct AppState {
     /// timer, just "finish what you were given, then rest". (The parked
     /// `timeline` goes stale by design; re-adoption replays the JSONL.)
     background: HashMap<String, ActiveSession>,
+    /// Right/bottom workspace resources parked by conversation destination.
+    /// This mirrors the composer's per-thread/project-draft text cache.
+    conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
     pub settings: Settings,
     pub smoke: Option<SmokeMode>,
     /// Whether the sidebar is collapsed to an icon strip (ephemeral UI state).
@@ -664,6 +758,7 @@ impl AppState {
             projects,
             active: None,
             background: HashMap::new(),
+            conversation_ui: HashMap::new(),
             settings,
             smoke: None,
             sidebar_collapsed: settings_collapsed,
@@ -2113,20 +2208,40 @@ impl AppState {
         }
     }
 
-    // -- terminal drawer (per-session, in-memory) --------------------------
+    // -- conversation-owned right/bottom workspace -------------------------
 
-    fn persist_terminal_preferences(&mut self) {
-        if let Some(active) = self.active.as_ref() {
-            let workspace = &active.terminal_workspace;
-            self.terminal_preferences.insert(
-                active.meta.id.clone(),
-                TerminalPreferences {
-                    open: workspace.open,
-                    height: workspace.height,
-                    count: workspace.terminals.len(),
-                },
-            );
-        }
+    /// Stable key used by UI-side resources which live outside `AppState`
+    /// (notably native WebViews). Drafts follow their project just like the
+    /// composer's text cache; persisted threads follow their session id.
+    pub fn active_conversation_ui_key(&self) -> Option<String> {
+        self.active
+            .as_ref()
+            .map(conversation_destination)
+            .map(|destination| destination.ui_key())
+    }
+
+    fn restore_conversation_ui(&mut self, active: &mut ActiveSession) -> bool {
+        let destination = conversation_destination(active);
+        let Some(ui) = self.conversation_ui.remove(&destination) else {
+            return false;
+        };
+        ui.restore_into(active);
+        true
+    }
+
+    fn park_conversation_ui(&mut self, active: &mut ActiveSession) {
+        let destination = conversation_destination(active);
+        let ui = ConversationUiState::take_from(active);
+        self.conversation_ui.insert(destination, ui);
+    }
+
+    fn terminal_preferences_for(&self, active: &ActiveSession) -> Option<TerminalPreferences> {
+        self.terminal_preferences
+            .get(&conversation_destination(active).preference_key())
+            .copied()
+    }
+
+    fn write_terminal_preferences(&self) {
         match serde_json::to_vec_pretty(&self.terminal_preferences) {
             Ok(bytes) => {
                 if let Err(error) = std::fs::write(&self.terminal_preferences_path, bytes) {
@@ -2135,6 +2250,41 @@ impl AppState {
             }
             Err(error) => log::warn!("failed to encode terminal UI state: {error}"),
         }
+    }
+
+    fn reopen_persisted_terminals(
+        &mut self,
+        preferences: Option<TerminalPreferences>,
+        cx: &mut Context<Self>,
+    ) {
+        if !preferences.is_some_and(|preferences| preferences.open) {
+            return;
+        }
+        self.open_terminal_panel(cx);
+        let count = preferences
+            .map(|preferences| preferences.count.clamp(1, MAX_TERMINALS_PER_SESSION))
+            .unwrap_or(1);
+        for _ in 1..count {
+            self.new_terminal(cx);
+        }
+    }
+
+    // -- terminal drawer ---------------------------------------------------
+
+    fn persist_terminal_preferences(&mut self) {
+        if let Some(active) = self.active.as_ref() {
+            let workspace = &active.terminal_workspace;
+            let key = conversation_destination(active).preference_key();
+            self.terminal_preferences.insert(
+                key,
+                TerminalPreferences {
+                    open: workspace.open,
+                    height: workspace.height,
+                    count: workspace.terminals.len(),
+                },
+            );
+        }
+        self.write_terminal_preferences();
     }
 
     pub fn set_terminal_height(&mut self, height: f32) {
@@ -2675,6 +2825,9 @@ impl AppState {
         if self.active_session_id() == Some(session_id) {
             self.shutdown_active();
         }
+        // An archived conversation must not leave an off-screen PTY running.
+        self.conversation_ui
+            .remove(&ConversationDestination::Thread(session_id.to_string()));
         self.close_orchestrator_children(session_id);
         if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
             meta.archived_at = Some(now_secs());
@@ -2743,6 +2896,11 @@ impl AppState {
         }
         // Deleting a thread that is working in the background kills it for real.
         self.drop_background(session_id);
+        self.conversation_ui
+            .remove(&ConversationDestination::Thread(session_id.to_string()));
+        if self.terminal_preferences.remove(session_id).is_some() {
+            self.write_terminal_preferences();
+        }
         self.close_orchestrator_children(session_id);
         if let Some(meta) = &meta {
             // Best-effort checkpoint ref cleanup in the session cwd.
@@ -2793,6 +2951,15 @@ impl AppState {
             .is_some_and(|active| active.meta.project_id.as_deref() == Some(project_id))
         {
             self.shutdown_active();
+        }
+        let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
+        self.conversation_ui.remove(&draft_destination);
+        if self
+            .terminal_preferences
+            .remove(&draft_destination.preference_key())
+            .is_some()
+        {
+            self.write_terminal_preferences();
         }
         for session_id in session_ids {
             self.delete_session(&session_id, false, cx);
@@ -3356,7 +3523,15 @@ impl AppState {
             provider_commands,
         );
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
+        let terminal_preferences = self.terminal_preferences_for(&draft);
+        let restored_ui = self.restore_conversation_ui(&mut draft);
+        if !restored_ui && let Some(preferences) = terminal_preferences {
+            draft.terminal_workspace.height = preferences.height.clamp(120., 600.);
+        }
         self.active = Some(draft);
+        if !restored_ui {
+            self.reopen_persisted_terminals(terminal_preferences, cx);
+        }
         self.refresh_git_status(cx);
         cx.notify();
     }
@@ -3369,6 +3544,14 @@ impl AppState {
     /// Persist the active draft as a real session (no cx; caller notifies).
     /// The session id is preserved, so its already-recorded events line up.
     fn commit_draft(&mut self) -> std::io::Result<()> {
+        let preference_migration = self.active.as_ref().and_then(|active| {
+            active.draft.then(|| {
+                (
+                    conversation_destination(active).preference_key(),
+                    active.meta.id.clone(),
+                )
+            })
+        });
         if let Some(active) = self.active.as_mut()
             && active.draft
         {
@@ -3376,6 +3559,12 @@ impl AppState {
             let meta = active.meta.clone();
             self.store.upsert_meta(&meta)?;
             self.sessions = self.store.load_index();
+        }
+        if let Some((draft_key, session_key)) = preference_migration
+            && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
+        {
+            self.terminal_preferences.insert(session_key, preferences);
+            self.write_terminal_preferences();
         }
         Ok(())
     }
@@ -3405,8 +3594,23 @@ impl AppState {
             );
             parked.timeline = Timeline::fold_events(self.store.read_events(session_id));
             parked.git_branch = read_git_branch(&parked.meta.cwd);
+            // Background events may have auto-opened or otherwise changed the
+            // panel after it was parked; that live state wins over the snapshot
+            // captured when the user switched away.
+            let background_right_panel = RightPanelState::capture(&parked);
+            let terminal_preferences = self.terminal_preferences_for(&parked);
+            let restored_ui = self.restore_conversation_ui(&mut parked);
+            if restored_ui {
+                background_right_panel.restore_into(&mut parked);
+            }
+            if !restored_ui && let Some(preferences) = terminal_preferences {
+                parked.terminal_workspace.height = preferences.height.clamp(120., 600.);
+            }
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
             self.active = Some(parked);
+            if !restored_ui {
+                self.reopen_persisted_terminals(terminal_preferences, cx);
+            }
             // Anything still queued that can go now, goes now.
             if self.dispatch_next_queued(cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
@@ -3432,15 +3636,10 @@ impl AppState {
             timeline.entries.len(),
             meta.resume_cursor.is_some()
         );
-        let terminal_preferences = self.terminal_preferences.get(&meta.id).copied();
-        let mut terminal_workspace = TerminalWorkspace::default();
-        if let Some(preferences) = terminal_preferences {
-            terminal_workspace.height = preferences.height.clamp(120., 600.);
-        }
         let git_branch = read_git_branch(&meta.cwd);
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
-        self.active = Some(ActiveSession {
+        let mut active = ActiveSession {
             meta,
             timeline,
             git_branch,
@@ -3464,17 +3663,17 @@ impl AppState {
             diff_selected_turn: None,
             right_tab: RightTab::default(),
             auto_open_suppressed: false,
-            terminal_workspace,
+            terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
-        });
-        if terminal_preferences.is_some_and(|preferences| preferences.open) {
-            self.open_terminal_panel(cx);
-            let count = terminal_preferences
-                .map(|preferences| preferences.count.clamp(1, MAX_TERMINALS_PER_SESSION))
-                .unwrap_or(1);
-            for _ in 1..count {
-                self.new_terminal(cx);
-            }
+        };
+        let terminal_preferences = self.terminal_preferences_for(&active);
+        let restored_ui = self.restore_conversation_ui(&mut active);
+        if !restored_ui && let Some(preferences) = terminal_preferences {
+            active.terminal_workspace.height = preferences.height.clamp(120., 600.);
+        }
+        self.active = Some(active);
+        if !restored_ui {
+            self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
         cx.notify();
@@ -4967,7 +5166,7 @@ impl AppState {
             return;
         }
 
-        let Some(mut title_meta) = self.active.as_mut().and_then(|active| {
+        let Some(fallback_meta) = self.active.as_mut().and_then(|active| {
             active.meta.title.starts_with("New ").then(|| {
                 active.meta.title = fallback.clone();
                 active.meta.updated_at = now_secs();
@@ -4976,17 +5175,14 @@ impl AppState {
         }) else {
             return;
         };
-        self.persist_meta(&title_meta, cx);
+        self.persist_meta(&fallback_meta, cx);
 
         if !self.ai_title_generation_enabled {
             return;
         }
 
-        let session_id = title_meta.id.clone();
-        title_meta.resume_cursor = None;
-        title_meta.approval_mode = ApprovalMode::Supervised;
-        title_meta.interaction_mode = InteractionMode::Build;
-        title_meta.orchestrate_enabled = false;
+        let session_id = fallback_meta.id.clone();
+        let title_meta = title_session_meta(&self.settings, fallback_meta.cwd);
         let settings = self.settings.clone();
         let launch_env = self.session_launch_env(&title_meta);
         let options = session_options(&title_meta, &settings, launch_env, None, None);
@@ -5064,6 +5260,9 @@ impl AppState {
                 let _ = commands.try_send(SessionCommand::Shutdown);
             }
         }
+        // Drop every conversation-owned PTY, including those parked while an
+        // idle thread was off screen.
+        self.conversation_ui.clear();
     }
 
     /// Leave the active session without killing its work: a live session with a
@@ -5073,9 +5272,10 @@ impl AppState {
     /// paths (archive, delete) use `shutdown_active` directly.
     fn park_active(&mut self) {
         self.persist_terminal_preferences();
-        let Some(active) = self.active.take() else {
+        let Some(mut active) = self.active.take() else {
             return;
         };
+        self.park_conversation_ui(&mut active);
         let has_work = active.turn_in_flight || !active.queue.is_empty();
         // Live with work, or still Starting with messages waiting (the start
         // attempt finds and adopts the parked entry when it completes) — both
@@ -5463,6 +5663,29 @@ fn session_options(
     }
 }
 
+const AI_TITLE_REASONING_EFFORT: &str = "low";
+
+fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMeta {
+    let title = &settings.title_generation;
+    let model = (!title.model.trim().is_empty()).then(|| title.model.trim().to_string());
+    let mut meta = SessionMeta::new(title.provider, cwd, model);
+    meta.approval_mode = ApprovalMode::Supervised;
+    meta.interaction_mode = InteractionMode::Build;
+    meta.orchestrate_enabled = false;
+    meta.option_selections.push(OptionSelection {
+        id: "reasoningEffort".into(),
+        value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
+    });
+    meta
+}
+
+fn title_turn_options() -> TurnOptions {
+    TurnOptions {
+        effort: Some(AI_TITLE_REASONING_EFFORT.into()),
+        interaction_mode: Some(InteractionMode::Build),
+    }
+}
+
 async fn generate_ai_title(
     provider: ProviderKind,
     mut options: SessionOptions,
@@ -5503,10 +5726,7 @@ async fn generate_ai_title_inner(
         .commands
         .send(SessionCommand::SendTurn {
             text: prompt,
-            options: Some(TurnOptions {
-                effort: None,
-                interaction_mode: Some(InteractionMode::Build),
-            }),
+            options: Some(title_turn_options()),
             attachments,
         })
         .await
@@ -5710,6 +5930,34 @@ mod tests {
         assert!(prompt.contains("untrusted source text"));
         assert!(!prompt.contains(&"界".repeat(TITLE_SOURCE_MAX_CHARS + 1)));
         assert!(prompt.contains(&format!("{}…", "界".repeat(TITLE_SOURCE_MAX_CHARS))));
+    }
+
+    #[test]
+    fn title_session_uses_configured_model_with_low_effort() {
+        let defaults = title_session_meta(&Settings::default(), PathBuf::from("/tmp/project"));
+        assert_eq!(defaults.provider, ProviderKind::Codex);
+        assert_eq!(defaults.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(
+            defaults.option_selections,
+            vec![OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("low"),
+            }]
+        );
+
+        let mut settings = Settings::default();
+        settings.title_generation.provider = ProviderKind::ClaudeCode;
+        settings.title_generation.model = "claude-haiku-4-5".into();
+        let custom = title_session_meta(&settings, PathBuf::from("/tmp/project"));
+        assert_eq!(custom.provider, ProviderKind::ClaudeCode);
+        assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(custom.approval_mode, ApprovalMode::Supervised);
+        assert_eq!(custom.interaction_mode, InteractionMode::Build);
+        assert!(!custom.orchestrate_enabled);
+        assert_eq!(
+            title_turn_options().effort.as_deref(),
+            Some(AI_TITLE_REASONING_EFFORT)
+        );
     }
 
     #[gpui::test]
@@ -5952,6 +6200,127 @@ mod tests {
                 .unwrap_err()
                 .contains("no orchestrate child model")
         );
+    }
+
+    #[gpui::test]
+    fn right_and_bottom_workspaces_follow_their_thread(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-conversation-ui-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut first = SessionMeta::new(
+            ProviderKind::Codex,
+            PathBuf::from("/tmp/conversation-a"),
+            Some("gpt-5.6-luna".into()),
+        );
+        first.title = "Conversation A".into();
+        let mut second = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/conversation-b"),
+            Some("claude-fable-5".into()),
+        );
+        second.title = "Conversation B".into();
+        store.upsert_meta(&first).unwrap();
+        store.upsert_meta(&second).unwrap();
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&first_id, cx);
+            let first = state.active.as_mut().unwrap();
+            first.diff_open = true;
+            first.diff_expanded = true;
+            first.diff_selected_turn = Some(3);
+            first.right_tab = RightTab::Preview;
+            first.terminal_workspace.open = true;
+            first.terminal_workspace.height = 318.;
+
+            state.select_session(&second_id, cx);
+            let second = state.active.as_ref().unwrap();
+            assert!(
+                !second.diff_open,
+                "another thread must start with its own right panel"
+            );
+            assert!(!second.terminal_workspace.open);
+            assert_eq!(second.terminal_workspace.height, 240.);
+
+            let second = state.active.as_mut().unwrap();
+            second.diff_open = true;
+            second.right_tab = RightTab::Plan;
+            second.terminal_workspace.height = 402.;
+
+            state.select_session(&first_id, cx);
+            let first = state.active.as_ref().unwrap();
+            assert!(first.diff_open);
+            assert!(first.diff_expanded);
+            assert_eq!(first.diff_selected_turn, Some(3));
+            assert_eq!(first.right_tab, RightTab::Preview);
+            assert!(first.terminal_workspace.open);
+            assert_eq!(first.terminal_workspace.height, 318.);
+
+            state.select_session(&second_id, cx);
+            let second = state.active.as_ref().unwrap();
+            assert!(second.diff_open);
+            assert_eq!(second.right_tab, RightTab::Plan);
+            assert_eq!(second.terminal_workspace.height, 402.);
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn draft_workspace_uses_the_same_project_key_as_composer_text(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-conversation-ui-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.start_draft(
+                "project-stable".into(),
+                PathBuf::from("/tmp/project-stable"),
+                cx,
+            );
+            let first_id = state.active_session_id().unwrap().to_string();
+            assert_eq!(
+                state.active_conversation_ui_key().as_deref(),
+                Some("draft:project-stable")
+            );
+            let draft = state.active.as_mut().unwrap();
+            draft.diff_open = true;
+            draft.right_tab = RightTab::Preview;
+            draft.terminal_workspace.open = true;
+            draft.terminal_workspace.height = 355.;
+
+            // Opening New thread again allocates a new transient session id,
+            // but it represents the same composer/UI destination.
+            state.start_draft(
+                "project-stable".into(),
+                PathBuf::from("/tmp/project-stable"),
+                cx,
+            );
+            let second_id = state.active_session_id().unwrap().to_string();
+            assert_ne!(first_id, second_id);
+            let draft = state.active.as_ref().unwrap();
+            assert!(draft.diff_open);
+            assert_eq!(draft.right_tab, RightTab::Preview);
+            assert!(draft.terminal_workspace.open);
+            assert_eq!(draft.terminal_workspace.height, 355.);
+
+            // Committing keeps the active resources but moves external caches
+            // (such as PreviewPanel's WebView pool) to the real thread key.
+            state.commit_draft().unwrap();
+            assert_eq!(
+                state.active_conversation_ui_key().as_deref(),
+                Some(second_id.as_str())
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

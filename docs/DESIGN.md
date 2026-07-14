@@ -166,13 +166,26 @@ gutters (11px mono muted), 12px mono content, syntax highlighting by extension,
 add/remove row tints + left accent bars, "N unmodified lines" muted separator
 rows between hunks.
 
+Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
+turn), each Preview WebView, and the bottom terminal workspace all belong to the
+conversation destination rather than the shared window. Stored threads key by
+session id; an unsent New thread surface keys by project, matching the composer
+draft cache despite its transient session ids. Switching conversations moves
+the live terminal workspace with its PTYs, scrollback, tabs, splits and attached
+context. Because WebViews are native child overlays rather than GPUI scene
+nodes, their visibility is synchronized directly from app state: closing
+Preview, selecting Diff/Plan, switching conversations, opening the command
+palette, or leaving Chat hides every WebView that no longer owns the panel.
+
 ### Settings (full-page route)
 Left nav (sidebar width): General / Providers / Orchestrate + "← Back" pinned
 bottom. Header: "Settings" + "Restore defaults" bordered button (confirm).
 Rows: bold 14px title + 13px muted description left, control right (dropdown /
-toggle / text input), hairline separators. General: Theme
-(System/Light/Dark, live), Word wrap in diffs, Delete confirmation. Providers:
-claude / codex binary paths.
+toggle / text input), hairline separators. General: Language, Theme
+(System/Light/Dark, live), thread-title provider/model, Word wrap in diffs,
+Delete confirmation, task-panel behavior, and provider update checks. The title
+model defaults to Codex `gpt-5.6-luna`; its isolated background request always
+uses `low` reasoning effort. Providers: Claude / Codex configuration.
 
 Orchestrate begins with an explicit built-in `/orchestrate` explanation. Every
 main model is eligible: the page exposes one multiline generic identity plus
@@ -183,6 +196,9 @@ routing-definition editor, an independent dispatch switch, restore and delete
 actions. Built-in ratings and recommended effort live inside the default text,
 not separate controls. Add-model popovers keep provider tabs fixed above a
 300px scrollable model list so large catalogs never grow past the viewport.
+That provider/model picker is one shared component also used by the General
+page's thread-title setting, so catalog resolution and provider switching stay
+identical across both settings surfaces.
 
 ### Command palette (⌘K)
 Centered top-anchored modal over a dim backdrop: search input; grouped results
