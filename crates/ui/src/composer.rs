@@ -3,6 +3,7 @@
 //! the pending-approval panel (see docs/DESIGN.md "Composer").
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use std::path::PathBuf;
@@ -245,6 +246,72 @@ fn slash_command(text: &str) -> Option<SlashCommand> {
     }
 }
 
+/// The stable destination for unsent composer text. Draft session ids are
+/// deliberately excluded: opening a project's New thread page allocates a new
+/// transient session id each time.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ComposerDestination {
+    Thread(String),
+    ProjectDraft(String),
+}
+
+fn composer_destination(
+    is_draft: bool,
+    session_id: &str,
+    project_id: Option<&str>,
+) -> Option<ComposerDestination> {
+    if is_draft {
+        project_id.map(|id| ComposerDestination::ProjectDraft(id.to_string()))
+    } else {
+        Some(ComposerDestination::Thread(session_id.to_string()))
+    }
+}
+
+/// In-memory text drafts plus the destination currently represented by the
+/// shared [`InputState`]. Keeping switching in this small state machine makes
+/// it explicit that the outgoing value is saved before the incoming one is
+/// restored.
+#[derive(Default)]
+struct ComposerTextCache {
+    current: Option<ComposerDestination>,
+    drafts: HashMap<ComposerDestination, String>,
+}
+
+impl ComposerTextCache {
+    /// Change destinations, returning the text that should replace the shared
+    /// input. `None` means the input already represents this destination.
+    fn switch_to(
+        &mut self,
+        incoming: Option<ComposerDestination>,
+        outgoing_text: &str,
+    ) -> Option<String> {
+        if self.current == incoming {
+            return None;
+        }
+
+        if let Some(outgoing) = self.current.take() {
+            if outgoing_text.is_empty() {
+                self.drafts.remove(&outgoing);
+            } else {
+                self.drafts.insert(outgoing, outgoing_text.to_string());
+            }
+        }
+
+        self.current = incoming.clone();
+        Some(
+            incoming
+                .and_then(|key| self.drafts.get(&key).cloned())
+                .unwrap_or_default(),
+        )
+    }
+
+    fn clear_current(&mut self) {
+        if let Some(current) = self.current.as_ref() {
+            self.drafts.remove(current);
+        }
+    }
+}
+
 /// A pending image attachment: validated, persisted to the session attachments
 /// dir, and shown in the composer thumbnail strip. Kept per active session.
 #[derive(Clone)]
@@ -375,6 +442,8 @@ fn mime_from_path(path: &std::path::Path) -> String {
 pub struct Composer {
     app_state: Entity<AppState>,
     input: Entity<InputState>,
+    /// Unsent text is isolated by persisted thread or project New thread page.
+    text_cache: ComposerTextCache,
     model_search: Entity<InputState>,
     /// `None` = follow the active session's provider (set on first open).
     picker_rail: Option<PickerRail>,
@@ -489,6 +558,7 @@ impl Composer {
         Self {
             app_state,
             input,
+            text_cache: ComposerTextCache::default(),
             model_search,
             picker_rail: None,
             approval_expanded: false,
@@ -512,6 +582,30 @@ impl Composer {
             debug_applied: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Save the outgoing destination's text before replacing the shared input
+    /// with the incoming destination's cached text. The cache's `current` key
+    /// is updated before `set_value`, so the resulting recursive Change event
+    /// cannot be attributed to the destination being left.
+    fn sync_text_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let destination = self.app_state.read(cx).active.as_ref().and_then(|active| {
+            composer_destination(
+                active.draft,
+                &active.meta.id,
+                active.meta.project_id.as_deref(),
+            )
+        });
+        let outgoing_text = self.input.read(cx).value().to_string();
+        let Some(incoming_text) = self.text_cache.switch_to(destination, &outgoing_text) else {
+            return;
+        };
+        let cursor = incoming_text.len();
+        self.input.update(cx, |state, cx| {
+            state.set_value(incoming_text, window, cx);
+            state.set_selected_range(cursor..cursor, cx);
+        });
+        self.recompute_trigger(cx);
     }
 
     /// Apply the one-shot screenshot debug seed (`--debug-compose` / `--debug-image`).
@@ -594,6 +688,7 @@ impl Composer {
         if terminal_contexts.is_empty()
             && let Some(command) = slash_command(&text)
         {
+            self.text_cache.clear_current();
             input.update(cx, |state, cx| state.set_value("", window, cx));
             match command {
                 SlashCommand::Plan => self.app_state.update(cx, |state, cx| {
@@ -613,6 +708,7 @@ impl Composer {
         let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
         let text = append_terminal_contexts_to_prompt(prompt_text, &terminal_contexts);
         let text = append_review_comments_to_prompt(&text, &review_comments);
+        self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
         // Image-only messages get T3's exact synthetic text. Attachments are
         // persisted on disk (see `add_image_*`); read + base64-encode each one
@@ -2751,6 +2847,7 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_user_input_state(cx);
         self.sync_images_session(cx);
+        self.sync_text_destination(window, cx);
         self.apply_debug_seed(window, cx);
         let (turn_running, approval, approval_count) = {
             let state = self.app_state.read(cx);
@@ -3970,6 +4067,103 @@ fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thread(id: &str) -> ComposerDestination {
+        ComposerDestination::Thread(id.to_string())
+    }
+
+    fn project_draft(id: &str) -> ComposerDestination {
+        ComposerDestination::ProjectDraft(id.to_string())
+    }
+
+    #[test]
+    fn composer_destination_uses_thread_id_or_stable_project_draft_key() {
+        assert_eq!(
+            composer_destination(false, "thread-a", Some("project-a")),
+            Some(thread("thread-a"))
+        );
+        assert_eq!(
+            composer_destination(true, "transient-draft-uuid-1", Some("project-a")),
+            Some(project_draft("project-a"))
+        );
+        assert_eq!(
+            composer_destination(true, "transient-draft-uuid-2", Some("project-a")),
+            Some(project_draft("project-a"))
+        );
+    }
+
+    #[test]
+    fn composer_text_cache_restores_a_after_switching_a_to_b_to_a() {
+        let mut cache = ComposerTextCache::default();
+
+        assert_eq!(cache.switch_to(Some(thread("a")), ""), Some(String::new()));
+        assert_eq!(
+            cache.switch_to(Some(thread("b")), "text for a"),
+            Some(String::new())
+        );
+        assert_eq!(
+            cache.switch_to(Some(thread("a")), "text for b"),
+            Some("text for a".to_string())
+        );
+        assert_eq!(cache.drafts.get(&thread("b")).unwrap(), "text for b");
+    }
+
+    #[test]
+    fn composer_text_cache_isolates_two_project_new_thread_pages() {
+        let mut cache = ComposerTextCache::default();
+
+        assert_eq!(
+            cache.switch_to(Some(project_draft("project-a")), ""),
+            Some(String::new())
+        );
+        assert_eq!(
+            cache.switch_to(Some(project_draft("project-b")), "draft for project a"),
+            Some(String::new())
+        );
+        assert_eq!(
+            cache.switch_to(Some(project_draft("project-a")), "draft for project b"),
+            Some("draft for project a".to_string())
+        );
+        assert_eq!(
+            cache.switch_to(Some(project_draft("project-b")), "draft for project a"),
+            Some("draft for project b".to_string())
+        );
+    }
+
+    #[test]
+    fn composer_text_cache_first_visit_is_empty() {
+        let mut cache = ComposerTextCache::default();
+
+        assert_eq!(
+            cache.switch_to(Some(thread("never-visited")), ""),
+            Some(String::new())
+        );
+        assert_eq!(
+            cache.switch_to(Some(thread("never-visited")), "typed"),
+            None
+        );
+    }
+
+    #[test]
+    fn composer_text_cache_clears_only_the_submitted_destination() {
+        let mut cache = ComposerTextCache::default();
+
+        cache.switch_to(Some(thread("a")), "");
+        cache.switch_to(Some(thread("b")), "text for a");
+        cache.switch_to(Some(thread("a")), "text for b");
+        cache.clear_current();
+
+        assert!(!cache.drafts.contains_key(&thread("a")));
+        assert_eq!(cache.drafts.get(&thread("b")).unwrap(), "text for b");
+        assert_eq!(
+            cache.switch_to(Some(thread("b")), ""),
+            Some("text for b".to_string())
+        );
+        assert_eq!(
+            cache.switch_to(Some(thread("a")), "text for b"),
+            Some(String::new())
+        );
+    }
 
     #[test]
     fn orchestrate_prefix_requires_a_complete_command_token() {
