@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use futures_lite::io::AsyncWrite;
 use futures_lite::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 use serde_json::{Value, json};
 use smol::io::BufReader;
@@ -708,18 +709,7 @@ async fn handle_command(
                 text
             };
             let msg = user_message(&text, &attachments);
-            if write_line(stdin, &msg).await.is_err() {
-                let _ = event_tx
-                    .send(AgentEvent::Error {
-                        message: "failed to write steering message to provider stdin".into(),
-                        fatal: true,
-                    })
-                    .await;
-            } else {
-                let _ = event_tx
-                    .send(AgentEvent::SteerAccepted { request_id })
-                    .await;
-            }
+            write_steering_message(stdin, &msg, request_id, event_tx).await;
             Flow::Continue
         }
         SessionCommand::Shutdown => {
@@ -741,7 +731,27 @@ async fn handle_command(
     }
 }
 
-async fn write_line(stdin: &mut smol::process::ChildStdin, value: &Value) -> std::io::Result<()> {
+async fn write_steering_message<W: AsyncWrite + Unpin>(
+    stdin: &mut W,
+    message: &Value,
+    request_id: String,
+    event_tx: &async_channel::Sender<AgentEvent>,
+) {
+    if write_line(stdin, message).await.is_err() {
+        let _ = event_tx
+            .send(AgentEvent::Error {
+                message: "failed to write steering message to provider stdin".into(),
+                fatal: true,
+            })
+            .await;
+    } else {
+        let _ = event_tx
+            .send(AgentEvent::SteerAccepted { request_id })
+            .await;
+    }
+}
+
+async fn write_line<W: AsyncWrite + Unpin>(stdin: &mut W, value: &Value) -> std::io::Result<()> {
     let mut line = serde_json::to_string(value).unwrap_or_default();
     line.push('\n');
     stdin.write_all(line.as_bytes()).await?;
@@ -3501,65 +3511,103 @@ mod tests {
     }
 
     #[test]
-    fn steer_acceptance_requires_successful_stdin_write() {
+    fn steer_acceptance_requires_successful_write_and_flush() {
         smol::block_on(async {
+            use std::io;
+            use std::pin::Pin;
+            use std::task::{Context, Poll};
+
+            #[derive(Clone, Copy, PartialEq, Eq)]
+            enum FailurePoint {
+                Write,
+                Flush,
+            }
+
+            #[derive(Default)]
+            struct DeterministicWriter {
+                failure: Option<FailurePoint>,
+                bytes: Vec<u8>,
+            }
+
+            impl AsyncWrite for DeterministicWriter {
+                fn poll_write(
+                    mut self: Pin<&mut Self>,
+                    _cx: &mut Context<'_>,
+                    bytes: &[u8],
+                ) -> Poll<io::Result<usize>> {
+                    if self.failure == Some(FailurePoint::Write) {
+                        Poll::Ready(Err(io::Error::other("deterministic write failure")))
+                    } else {
+                        self.bytes.extend_from_slice(bytes);
+                        Poll::Ready(Ok(bytes.len()))
+                    }
+                }
+
+                fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                    if self.failure == Some(FailurePoint::Flush) {
+                        Poll::Ready(Err(io::Error::other("deterministic flush failure")))
+                    } else {
+                        Poll::Ready(Ok(()))
+                    }
+                }
+
+                fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                    Poll::Ready(Ok(()))
+                }
+            }
+
             let (event_tx, event_rx) = async_channel::unbounded();
-            let mut child = crate::process::async_command("cat")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            let mut stdin = child.stdin.take().unwrap();
-            let mut mapper = Mapper::new();
-            handle_command(
-                SessionCommand::Steer {
-                    request_id: "steer-ok".into(),
-                    text: "redirect".into(),
-                    attachments: Vec::new(),
-                },
-                &mut mapper,
-                &mut stdin,
-                &event_tx,
-                &mut child,
-            )
-            .await;
+            let mut writer = DeterministicWriter::default();
+            let message = user_message("redirect", &[]);
+            write_steering_message(&mut writer, &message, "steer-ok".into(), &event_tx).await;
             assert!(matches!(
                 event_rx.recv().await.unwrap(),
                 AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
             ));
-            let _ = child.kill();
-            let _ = child.status().await;
+            assert_eq!(writer.bytes.last(), Some(&b'\n'));
 
             let (event_tx, event_rx) = async_channel::unbounded();
-            let mut child = crate::process::async_command("true")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            let mut stdin = child.stdin.take().unwrap();
-            let _ = child.status().await;
-            let mut mapper = Mapper::new();
-            handle_command(
-                SessionCommand::Steer {
-                    request_id: "steer-failed".into(),
-                    text: "redirect".into(),
-                    attachments: Vec::new(),
-                },
-                &mut mapper,
-                &mut stdin,
+            let mut writer = DeterministicWriter {
+                failure: Some(FailurePoint::Write),
+                ..Default::default()
+            };
+            write_steering_message(
+                &mut writer,
+                &message,
+                "steer-write-failed".into(),
                 &event_tx,
-                &mut child,
             )
             .await;
             assert!(matches!(
                 event_rx.recv().await.unwrap(),
-                AgentEvent::Error { fatal: true, .. }
+                AgentEvent::Error { ref message, fatal: true }
+                    if message == "failed to write steering message to provider stdin"
             ));
             assert!(
                 event_rx.try_recv().is_err(),
                 "stdin write failures must not accept a steer"
+            );
+
+            let (event_tx, event_rx) = async_channel::unbounded();
+            let mut writer = DeterministicWriter {
+                failure: Some(FailurePoint::Flush),
+                ..Default::default()
+            };
+            write_steering_message(
+                &mut writer,
+                &message,
+                "steer-flush-failed".into(),
+                &event_tx,
+            )
+            .await;
+            assert!(matches!(
+                event_rx.recv().await.unwrap(),
+                AgentEvent::Error { ref message, fatal: true }
+                    if message == "failed to write steering message to provider stdin"
+            ));
+            assert!(
+                event_rx.try_recv().is_err(),
+                "stdin flush failures must not accept a steer"
             );
         });
     }
