@@ -79,9 +79,14 @@ pub async fn list_models(
     let (mut child, mut stdin, lines, mut stderr_tail) =
         spawn_server(binary_path.as_deref(), &[], &launch_env)?;
     let result = collect_models(&mut stdin, &lines).await;
-    // Status is read before `stop_child` so a self-exited child's code is not
-    // masked by our kill.
-    let status = child.try_wait().ok().flatten();
+    // The stdout reader can observe EOF a few milliseconds before the process
+    // becomes waitable. Give a self-exiting child time to publish its real
+    // status so `stop_child` does not replace it with a kill status.
+    let status = result
+        .is_err()
+        .then(|| settle_child_exit(&mut child))
+        .flatten()
+        .or_else(|| child.try_wait().ok().flatten());
     stop_child(&mut child, stdin);
     result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
 }
@@ -413,9 +418,9 @@ async fn run_actor(
     let (thread_id, model, next_id, provider_commands) = match startup {
         Ok(value) => value,
         Err(err) => {
-            // Status is read before `stop_child` so a self-exited child's code
-            // is not masked by our kill.
-            let status = child.try_wait().ok().flatten();
+            // As in model discovery, stdout EOF may beat process termination
+            // by a scheduling tick. Preserve the provider's natural status.
+            let status = settle_child_exit(&mut child);
             stop_child(&mut child, stdin);
             let err = enrich_startup_error(err, status, &mut stderr_tail);
             let _ = ready.send(Err(err)).await;
@@ -988,6 +993,20 @@ fn stop_child(child: &mut Child, stdin: BufWriter<ChildStdin>) {
         let _ = child.kill();
     }
     let _ = child.wait();
+}
+
+/// Wait briefly for a child that has already closed stdout to become waitable.
+/// Startup failures are rare, and preserving the real exit code is worth this
+/// bounded delay. A child that remains alive is still killed by `stop_child`.
+fn settle_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 impl Actor {

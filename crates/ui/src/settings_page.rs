@@ -26,6 +26,7 @@ use agent::ProviderKind;
 use tcode_runtime::app::AppState;
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
+use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::provider_card::ProviderCard;
 use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
 use crate::time::now_secs;
@@ -46,6 +47,7 @@ const CONTENT_MAX_WIDTH: f32 = 720.;
 enum Section {
     General,
     Providers,
+    Orchestrate,
     Archived,
 }
 
@@ -65,6 +67,8 @@ pub struct SettingsPage {
     provider_cards: Vec<(ProviderKind, Entity<ProviderCard>)>,
     /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
+    /// Editable main-model identities and child-model routing matrix.
+    orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     debug_acp_dialog_pending: bool,
@@ -79,15 +83,19 @@ impl SettingsPage {
         // Screenshot-only: `--debug-settings-section` opens a specific section.
         let section = match app_state.read(cx).debug_settings_section.as_deref() {
             Some("providers") => Section::Providers,
+            Some("orchestrate") => Section::Orchestrate,
             Some("archived") => Section::Archived,
             _ => Section::General,
         };
         let acp_panel = cx.new(|cx| AcpPanel::new(app_state.clone(), window, cx));
+        let orchestrate_panel =
+            cx.new(|cx| OrchestrateSettingsPanel::new(app_state.clone(), window, cx));
         let debug_acp_dialog_pending = app_state.read(cx).debug_acp_dialog;
         let mut page = Self {
             app_state,
             provider_cards: Vec::new(),
             acp_panel,
+            orchestrate_panel,
             acp_cards: Vec::new(),
             debug_acp_dialog_pending,
             section,
@@ -260,6 +268,14 @@ impl SettingsPage {
                     ))
                     .child(nav_item(
                         self,
+                        "settings-nav-orchestrate",
+                        IconName::Map,
+                        tcode_i18n::tr!("settings.orchestrate").into_owned().into(),
+                        Section::Orchestrate,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        self,
                         "settings-nav-archived",
                         IconName::Inbox,
                         tcode_i18n::tr!("settings.archived").into_owned().into(),
@@ -349,6 +365,11 @@ impl SettingsPage {
                     app_state.update(cx, |state, cx| state.reset_settings(cx));
                     // Every provider card's inputs now hold stale overrides.
                     page.update(cx, |page, cx| page.build_provider_cards(window, cx));
+                    page.update(cx, |page, cx| {
+                        let app_state = page.app_state.clone();
+                        page.orchestrate_panel =
+                            cx.new(|cx| OrchestrateSettingsPanel::new(app_state, window, cx));
+                    });
                     apply_theme(ThemeMode::System, window, cx);
                     true
                 })
@@ -359,6 +380,7 @@ impl SettingsPage {
         let column = match self.section {
             Section::General => self.render_general(cx),
             Section::Providers => self.render_providers(window, cx),
+            Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
         div()
