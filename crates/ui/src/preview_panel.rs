@@ -31,8 +31,10 @@
 //! known limitation (documented, not fixed).
 
 use preview_mcp::PreviewReply;
+#[cfg(any(not(target_os = "linux"), test))]
 use tcode_runtime::app::Route;
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn visible_preview_key(
     active_key: Option<&str>,
     route: Route,
