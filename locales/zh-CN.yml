@@ -118,6 +118,7 @@ settings:
   title: "设置"
   general: "通用"
   providers: "提供商"
+  orchestrate: "Orchestrate"
   archived: "已归档对话"
   archived_section: "已归档对话"
   archived_empty: "没有已归档的对话"
@@ -129,10 +130,11 @@ settings:
   back: "返回"
   restore: "恢复默认设置"
   restore_title: "恢复默认设置？"
-  restore_description: "将语言、主题、diff 和提供商设置恢复为默认值。项目和对话不会受到影响。"
+  restore_description: "将语言、主题、diff、提供商和 Orchestrate 设置恢复为默认值。项目和对话不会受到影响。"
   cancel: "取消"
   general_section: "通用"
   providers_section: "提供商"
+  orchestrate_section: "ORCHESTRATE"
   language:
     title: "语言"
     description: "选择 tcode 的界面语言。"
@@ -157,6 +159,38 @@ settings:
   provider_updates:
     title: "提供方更新检查"
     description: "启动时检查更新的提供方 CLI 版本。"
+orchestrate:
+  restore_default: "恢复默认"
+  all_models:
+    title: "内建 /orchestrate 命令"
+    description: "这里控制发送 /orchestrate 时 tcode 注入的内容：当前模型如何理解自己的主决策角色，以及编排 MCP 可以把任务派发给哪些子模型。所有主模型都能使用该命令；没有专属覆盖时会继承通用自我认知。"
+  identity:
+    title: "主决策模型的自我认知"
+    description: "这些文本会在下一条 /orchestrate 消息中成为主决策模型对自身角色的理解。"
+  generic_identity:
+    title: "通用自我认知"
+    description: "所有没有专属覆盖的模型都会使用这段回退指令。修改会在下一条 /orchestrate 消息中注入。"
+    placeholder: "描述主决策模型的角色、优势和工作方式…"
+  model_identity:
+    title: "模型专属覆盖"
+    description: "可选的夸赞、自我定位或模型专属指引；删除覆盖后会重新继承通用自我认知。"
+    placeholder: "描述这个模型独特的优势，以及它应当如何领导工作…"
+    add: "添加专属覆盖"
+    empty: "目前没有专属覆盖，所有模型都继承通用自我认知。"
+    use_generic: "删除专属覆盖并使用通用自我认知"
+  children:
+    title: "允许派发的子模型"
+    description: "为每个子模型保留一段路由定义，只在允许 /orchestrate 派发给它时打开开关。内置定义已用可编辑文本写入默认评分和推荐 effort。"
+    add: "添加子模型"
+    empty: "目前没有配置任何子模型。/orchestrate 仍然可用，但在添加子模型前，派发调用会被拒绝。"
+    none_enabled: "所有子模型配置都已关闭。/orchestrate 仍可进行规划，但所有派发调用都会被拒绝。"
+    enabled: "已启用"
+    disabled: "已暂停"
+    enable: "允许 /orchestrate 向这个模型派发任务"
+    disable: "暂停派发，但保留这个模型的定义"
+    description_placeholder: "定义该模型的评分、优势、适合任务、注意事项、推荐 effort 和升级定位…"
+    remove: "删除这个子模型配置"
+  no_more_models: "所有可用的提供商模型都已配置。可先在“提供商”中添加自定义模型标识。"
 providers:
   checked: "已于%{when}检查"
   refresh: "刷新提供方状态"
@@ -334,7 +368,6 @@ composer:
   cmd_default_desc: "将此会话切换回普通构建模式"
   cmd_orchestrate_label: "orchestrate"
   cmd_orchestrate_desc: "通过 tcode 子会话协调工作"
-  orchestrate_acp_unsupported: "编排模式暂不支持 ACP 会话。"
   group_builtin: "内置"
   group_provider: "提供方"
   group_skills: "技能"

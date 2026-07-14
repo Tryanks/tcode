@@ -28,7 +28,7 @@ use tcode_core::session::{
 };
 #[cfg(test)]
 use tcode_core::settings::EnvVar;
-use tcode_core::settings::{ProjectSort, ProviderSettings, Settings};
+use tcode_core::settings::{OrchestrateSettings, ProjectSort, ProviderSettings, Settings};
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
@@ -808,12 +808,16 @@ impl AppState {
             return;
         };
         let provider = active.meta.provider;
+        let model = active.meta.model.clone();
         let enabling = !active.meta.orchestrate_enabled;
         let session_id = active.meta.id.clone();
-        let Some(text) = compose_orchestrate_text(provider, enabling, &text) else {
-            self.report_error(RuntimeError::OrchestrateUnsupported, cx);
-            return;
-        };
+        let text = compose_orchestrate_text(
+            provider,
+            model.as_deref(),
+            enabling,
+            &self.settings.orchestrate,
+            &text,
+        );
 
         if enabling {
             if let Err(message) = self.enable_orchestrate(&session_id, cx) {
@@ -936,15 +940,16 @@ impl AppState {
                 brief,
                 cwd,
             } => {
-                let provider = match provider.as_str() {
-                    "claude" => ProviderKind::ClaudeCode,
-                    "codex" => ProviderKind::Codex,
-                    _ => return Err(format!("unknown provider: {provider}")),
-                };
+                let (provider, model, effort) = resolve_orchestrate_dispatch(
+                    &self.settings.orchestrate,
+                    &provider,
+                    model.as_deref(),
+                    effort.as_deref(),
+                )?;
                 let id = self.create_child_session(
                     &parent_id,
                     provider,
-                    model,
+                    Some(model),
                     effort,
                     title,
                     cwd.map(PathBuf::from),
@@ -5061,29 +5066,129 @@ impl AppState {
 
 const CLAUDE_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/claude.md");
 const CODEX_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/codex.md");
+const GENERIC_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/generic.md");
 
 fn compose_orchestrate_text(
     provider: ProviderKind,
+    model: Option<&str>,
     enabling: bool,
+    settings: &OrchestrateSettings,
     user_text: &str,
-) -> Option<String> {
-    if !enabling {
-        return (provider != ProviderKind::Acp).then(|| user_text.to_string());
-    }
-    let guidance = match provider {
+) -> String {
+    let base_guidance = match provider {
         ProviderKind::ClaudeCode => CLAUDE_ORCHESTRATE_GUIDANCE,
         ProviderKind::Codex => CODEX_ORCHESTRATE_GUIDANCE,
-        ProviderKind::Acp => return None,
+        ProviderKind::Acp => GENERIC_ORCHESTRATE_GUIDANCE,
     };
-    if user_text.is_empty() {
-        Some(guidance.to_string())
+    let configuration = render_orchestrate_configuration(settings, provider, model);
+    let mut sections = Vec::with_capacity(3);
+    if enabling {
+        sections.push(base_guidance.trim());
+    }
+    sections.push(configuration.trim());
+    if !user_text.is_empty() {
+        sections.push(user_text);
+    }
+    sections.join("\n\n")
+}
+
+fn render_orchestrate_configuration(
+    settings: &OrchestrateSettings,
+    provider: ProviderKind,
+    model: Option<&str>,
+) -> String {
+    let identity = settings.identity_for(provider, model).trim();
+    let mut text = String::from("## Current orchestrator configuration\n\n### Your role\n\n");
+    if identity.is_empty() {
+        text.push_str("No additional model-specific identity is configured.");
     } else {
-        let separator = if guidance.ends_with('\n') {
-            "\n"
-        } else {
-            "\n\n"
+        text.push_str(identity);
+    }
+    text.push_str(
+        "\n\n### Allowed child models\n\nOnly dispatch to models listed below. Their definitions are configured by the user and may include ratings, strengths, caveats, and routing preferences. If a dispatch omits `model`, tcode selects the first enabled model for that provider. If it omits `effort`, tcode applies the model's stored default.\n",
+    );
+    if !settings.child_models.iter().any(|child| child.enabled) {
+        text.push_str("No child models are enabled. Work without dispatching until the user enables one in Settings → Orchestrate.");
+        return text;
+    }
+    for child in settings.child_models.iter().filter(|child| child.enabled) {
+        let provider = match child.provider {
+            ProviderKind::Codex => "codex",
+            ProviderKind::ClaudeCode => "claude",
+            ProviderKind::Acp => "acp",
         };
-        Some(format!("{guidance}{separator}{user_text}"))
+        let effort = child
+            .default_effort
+            .as_deref()
+            .unwrap_or("provider default");
+        text.push_str(&format!(
+            "\n#### `{}` / `{}`\n\nDefault dispatch effort: `{}`.\n\n{}\n",
+            escape_markdown_inline(provider),
+            escape_markdown_inline(&child.model),
+            escape_markdown_inline(effort),
+            child.description.trim(),
+        ));
+    }
+    text
+}
+
+fn escape_markdown_inline(value: &str) -> String {
+    value.replace('`', "\\`").replace(['\r', '\n'], " ")
+}
+
+/// Validate an MCP dispatch against the configured child-model allow list and
+/// fill in its model/default effort. The main model is unrestricted; this gate
+/// applies only to newly-created child sessions.
+fn resolve_orchestrate_dispatch(
+    settings: &OrchestrateSettings,
+    provider: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(ProviderKind, String, Option<String>), String> {
+    let provider = match provider.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
+        "codex" => ProviderKind::Codex,
+        "acp" => {
+            return Err(
+                "ACP child dispatch is not available yet; configure a Codex or Claude child model"
+                    .into(),
+            );
+        }
+        other => return Err(format!("unknown provider: {other}")),
+    };
+    let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
+    let profile = match requested_model {
+        Some(model) => settings.enabled_child_model(provider, model),
+        None => settings
+            .child_models
+            .iter()
+            .find(|entry| {
+                entry.enabled && entry.provider == provider && !entry.model.trim().is_empty()
+            }),
+    }
+    .ok_or_else(|| match requested_model {
+        Some(model) => format!(
+            "model {model} is not enabled for orchestrate child dispatch under {}",
+            provider_name(provider)
+        ),
+        None => format!(
+            "no orchestrate child model is enabled for {}; choose an enabled provider or update Settings → Orchestrate",
+            provider_name(provider)
+        ),
+    })?;
+    let effort = effort
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(str::to_string)
+        .or_else(|| profile.default_effort.clone());
+    Ok((provider, profile.model.clone(), effort))
+}
+
+fn provider_name(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Codex => "codex",
+        ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Acp => "acp",
     }
 }
 
@@ -5424,25 +5529,109 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_guidance_is_prepended_only_when_enabling() {
-        let first = compose_orchestrate_text(ProviderKind::ClaudeCode, true, "Ship it").unwrap();
-        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE));
+    fn orchestrate_guidance_and_current_configuration_are_composed() {
+        let settings = OrchestrateSettings {
+            generic_identity: "Generic lead".into(),
+            ..Default::default()
+        };
+        let first = compose_orchestrate_text(
+            ProviderKind::ClaudeCode,
+            Some("claude-fable-5"),
+            true,
+            &settings,
+            "Ship it",
+        );
+        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE.trim()));
+        assert!(first.contains("wise owl"));
+        assert!(first.contains("#### `codex` / `gpt-5.6-sol`"));
+        assert!(first.contains("cost efficiency 9, intelligence 8, taste 6"));
+        assert!(
+            !first.contains("#### `claude` / `claude-opus-4-8`"),
+            "disabled presets must not be advertised to the lead model"
+        );
         assert!(first.ends_with("\n\nShip it"));
-        assert_eq!(
-            compose_orchestrate_text(ProviderKind::ClaudeCode, false, "Follow up"),
-            Some("Follow up".into())
+        let follow_up = compose_orchestrate_text(
+            ProviderKind::ClaudeCode,
+            Some("claude-opus-4-8"),
+            false,
+            &settings,
+            "Follow up",
         );
+        assert!(!follow_up.contains(CLAUDE_ORCHESTRATE_GUIDANCE));
+        assert!(follow_up.starts_with("## Current orchestrator configuration"));
+        assert!(follow_up.contains("Generic lead"));
+        assert!(follow_up.ends_with("\n\nFollow up"));
 
-        let codex = compose_orchestrate_text(ProviderKind::Codex, true, "Implement").unwrap();
-        assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE));
+        let codex =
+            compose_orchestrate_text(ProviderKind::Codex, None, true, &settings, "Implement");
+        assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE.trim()));
         assert!(codex.ends_with("\n\nImplement"));
-        assert_eq!(
-            compose_orchestrate_text(ProviderKind::Acp, true, "No"),
-            None
+        assert!(codex.contains("Generic lead"));
+
+        let acp = compose_orchestrate_text(
+            ProviderKind::Acp,
+            Some("gemini-3-pro"),
+            true,
+            &settings,
+            "Coordinate",
         );
+        assert!(acp.starts_with(GENERIC_ORCHESTRATE_GUIDANCE.trim()));
+        assert!(acp.contains("Generic lead"));
+    }
+
+    #[test]
+    fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
+        let mut settings = OrchestrateSettings::default();
         assert_eq!(
-            compose_orchestrate_text(ProviderKind::Acp, false, "No"),
-            None
+            resolve_orchestrate_dispatch(&settings, "codex", None, None).unwrap(),
+            (
+                ProviderKind::Codex,
+                "gpt-5.6-sol".into(),
+                Some("medium".into())
+            )
+        );
+        assert!(
+            resolve_orchestrate_dispatch(
+                &settings,
+                "claude_code",
+                Some("claude-opus-4-8"),
+                Some("max")
+            )
+            .unwrap_err()
+            .contains("not enabled"),
+            "disabled profiles must retain preferences without allowing dispatch"
+        );
+        settings
+            .child_models
+            .iter_mut()
+            .find(|entry| entry.model == "claude-opus-4-8")
+            .unwrap()
+            .enabled = true;
+        assert_eq!(
+            resolve_orchestrate_dispatch(
+                &settings,
+                "claude_code",
+                Some("claude-opus-4-8"),
+                Some("max")
+            )
+            .unwrap(),
+            (
+                ProviderKind::ClaudeCode,
+                "claude-opus-4-8".into(),
+                Some("max".into())
+            )
+        );
+        let denied =
+            resolve_orchestrate_dispatch(&settings, "claude", Some("claude-haiku-4-5"), None)
+                .unwrap_err();
+        assert!(denied.contains("not enabled"));
+
+        let mut empty = settings;
+        empty.child_models.clear();
+        assert!(
+            resolve_orchestrate_dispatch(&empty, "codex", None, None)
+                .unwrap_err()
+                .contains("no orchestrate child model")
         );
     }
 

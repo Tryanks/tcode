@@ -118,6 +118,7 @@ settings:
   title: "Settings"
   general: "General"
   providers: "Providers"
+  orchestrate: "Orchestrate"
   archived: "Archived Threads"
   archived_section: "ARCHIVED THREADS"
   archived_empty: "No archived threads"
@@ -129,10 +130,11 @@ settings:
   back: "Back"
   restore: "Restore defaults"
   restore_title: "Restore default settings?"
-  restore_description: "Reset language, theme, diff, and provider settings to their defaults. Your projects and conversations will not be changed."
+  restore_description: "Reset language, theme, diff, provider, and orchestrate settings to their defaults. Your projects and conversations will not be changed."
   cancel: "Cancel"
   general_section: "GENERAL"
   providers_section: "PROVIDERS"
+  orchestrate_section: "ORCHESTRATE"
   language:
     title: "Language"
     description: "Choose the language used across tcode."
@@ -157,6 +159,38 @@ settings:
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer provider CLI versions on launch."
+orchestrate:
+  restore_default: "Restore default"
+  all_models:
+    title: "Built-in /orchestrate command"
+    description: "These settings control what tcode injects when you send /orchestrate: how the current model understands its lead role, and which configured child models the orchestration MCP may dispatch work to. Every main model can use the command; models without an override inherit the generic identity."
+  identity:
+    title: "Lead-model identity"
+    description: "This text becomes the primary decision model's self-concept on the next /orchestrate message."
+  generic_identity:
+    title: "Generic identity"
+    description: "Fallback instructions used by every model that has no dedicated override. Changes are injected on the next /orchestrate message."
+    placeholder: "Describe the lead model's role, strengths, and operating posture…"
+  model_identity:
+    title: "Model-specific overrides"
+    description: "Optional praise, self-concept, or model-specific guidance. Removing an override restores generic inheritance."
+    placeholder: "Describe this model's distinctive strengths and how it should lead…"
+    add: "Add override"
+    empty: "No dedicated overrides. Every model currently inherits the generic identity."
+    use_generic: "Remove override and use the generic identity"
+  children:
+    title: "Allowed child models"
+    description: "Keep a routing definition for each child model and switch it on only when /orchestrate may dispatch work to it. Built-in definitions include the default ratings and recommended effort as editable text."
+    add: "Add child model"
+    empty: "No child-model profiles are configured. /orchestrate remains available, but dispatch calls will be rejected until a child model is added."
+    none_enabled: "Every child-model profile is switched off. /orchestrate can still plan, but all dispatch calls will be rejected."
+    enabled: "Enabled"
+    disabled: "Paused"
+    enable: "Allow /orchestrate to dispatch to this model"
+    disable: "Pause dispatch while keeping this model's definition"
+    description_placeholder: "Define this model's ratings, strengths, best-fit tasks, caveats, recommended effort, and escalation role…"
+    remove: "Delete this child-model profile"
+  no_more_models: "All available provider models are already configured. Add custom model slugs under Providers to expose more choices."
 providers:
   # Section header (T3 §1)
   checked: "Checked %{when}"
@@ -341,7 +375,6 @@ composer:
   cmd_default_desc: "Switch this thread back to normal build mode"
   cmd_orchestrate_label: "orchestrate"
   cmd_orchestrate_desc: "Coordinate work through child tcode threads"
-  orchestrate_acp_unsupported: "Orchestrate mode is not available for ACP sessions yet."
   group_builtin: "Built-in"
   group_provider: "Provider"
   group_skills: "Skills"

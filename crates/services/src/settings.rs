@@ -171,6 +171,7 @@ mod tests {
             skip_delete_confirmation: true,
             auto_open_task_panel: true,
             provider_update_checks_disabled: true,
+            orchestrate: Default::default(),
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,

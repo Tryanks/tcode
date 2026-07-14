@@ -68,7 +68,6 @@ pub enum RuntimeToast {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeError {
     External(String),
-    OrchestrateUnsupported,
     PersistSettings { error: String },
     UpdateUnknown { provider: ProviderKind },
     UpdateFailed { provider: ProviderKind },

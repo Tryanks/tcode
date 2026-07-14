@@ -33,9 +33,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::External(message) | RuntimeError::ProviderMessage(message) => {
                     message.clone()
                 }
-                RuntimeError::OrchestrateUnsupported => {
-                    tcode_i18n::tr!("composer.orchestrate_acp_unsupported").into_owned()
-                }
                 RuntimeError::PersistSettings { error } => {
                     tcode_i18n::tr!("errors.persist_settings", error = error).into_owned()
                 }
@@ -297,7 +294,6 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let errors = vec![
             RuntimeError::External("external\0diagnostic".into()),
-            RuntimeError::OrchestrateUnsupported,
             RuntimeError::PersistSettings { error: "x".into() },
             RuntimeError::UpdateUnknown {
                 provider: ProviderKind::Codex,
