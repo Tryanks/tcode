@@ -267,6 +267,17 @@ fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
     (!clauses.is_empty()).then(|| clauses.join(" · "))
 }
 
+fn finished_work_log_label(
+    is_last_activity: bool,
+    turn_counts: &WorkLogCounts,
+) -> Option<Cow<'static, str>> {
+    if is_last_activity {
+        work_log_summary(turn_counts).map(Cow::Owned)
+    } else {
+        Some(tcode_i18n::tr!("chat.work_log"))
+    }
+}
+
 /// Cached indexing and cheap height-affecting identity for one virtualized turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TurnListItem {
@@ -700,6 +711,8 @@ impl ChatView {
         let mut column = v_flex().w_full().gap_4();
 
         let segments = segment_entries(entries, turn.running);
+        let turn_entries: Vec<&TimelineEntry> = entries.iter().map(AsRef::as_ref).collect();
+        let turn_counts = work_log_counts(&turn_entries);
         let last_assistant_id = entries.iter().rev().find_map(|entry| {
             matches!(entry.content, EntryContent::Assistant { .. }).then_some(entry.id.as_str())
         });
@@ -726,6 +739,7 @@ impl ChatView {
                         segment_id,
                         turn,
                         activities,
+                        &turn_counts,
                         last_activity_segment == Some(segment_index),
                         cx,
                     ));
@@ -772,7 +786,15 @@ impl ChatView {
                 .last()
                 .map(|entry| format!("tail-{}", entry.id))
                 .unwrap_or_else(|| "tail".to_string());
-            column = column.child(self.render_work_log(index, &segment_id, turn, &[], true, cx));
+            column = column.child(self.render_work_log(
+                index,
+                &segment_id,
+                turn,
+                &[],
+                &turn_counts,
+                true,
+                cx,
+            ));
         }
 
         // Proposed-plan card (the captured plan for this turn).
@@ -1250,6 +1272,7 @@ impl ChatView {
         segment_id: &str,
         turn: &TurnMeta,
         activities: &[&TimelineEntry],
+        turn_counts: &WorkLogCounts,
         is_last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1259,8 +1282,10 @@ impl ChatView {
         // Only the final segment can be live; finished segments collapse by default.
         let expanded = running || self.expanded.contains(&section_key);
         let muted = cx.theme().muted_foreground;
-        let counts = work_log_counts(activities);
-        let subagent_count = counts.subagents;
+        let subagent_count = activities
+            .iter()
+            .filter(|entry| matches!(entry.content, EntryContent::Subagent { .. }))
+            .count();
 
         let mut section = v_flex().w_full().gap_2();
 
@@ -1355,7 +1380,7 @@ impl ChatView {
                         duration = format_duration(secs)
                     )),
             );
-        } else if let Some(label) = work_log_summary(&counts) {
+        } else if let Some(label) = finished_work_log_label(is_last, turn_counts) {
             section = section.child(
                 h_flex()
                     .id(SharedString::from(format!(
@@ -1371,7 +1396,7 @@ impl ChatView {
                         this.toggle_expanded(index, &section_key, cx);
                     }))
                     .child(label)
-                    .when(subagent_count > 0 && !expanded, |row| {
+                    .when(subagent_count > 0 && !expanded && !is_last, |row| {
                         row.child(
                             div()
                                 .px_2()
@@ -2817,8 +2842,8 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 mod tests {
     use super::{
         ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload, displayed_error_text,
-        index_turns, list_sync, md_sync, previous_logs_toggle_label, segment_entries,
-        timeline_overdraw, work_log_counts, work_log_summary,
+        finished_work_log_label, index_turns, list_sync, md_sync, previous_logs_toggle_label,
+        segment_entries, timeline_overdraw, work_log_counts, work_log_summary,
     };
     use agent::{FileChange, FileChangeKind, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
@@ -3224,12 +3249,16 @@ mod tests {
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
         assert_eq!(
             work_log_summary(&counts).as_deref(),
-            Some("2 commands · 3 files edited · 1 tool call · 2 subagents · 1 context compaction")
+            Some(
+                "Ran 2 commands · Edited 3 files · Made 1 tool call · Started 2 subagents · Compacted context 1 time"
+            )
         );
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             work_log_summary(&counts).as_deref(),
-            Some("2 个命令 · 编辑了 3 个文件 · 1 次工具调用 · 2 个子代理 · 1 次上下文压缩")
+            Some(
+                "已执行 2 条命令 · 编辑 3 个文件 · 调用 1 次工具 · 启动 2 个子代理 · 压缩 1 次上下文"
+            )
         );
     }
 
@@ -3244,13 +3273,17 @@ mod tests {
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
         assert_eq!(
             work_log_summary(&tools_only).as_deref(),
-            Some("2 tool calls")
+            Some("Made 2 tool calls")
         );
         assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
+        assert_eq!(
+            finished_work_log_label(true, &WorkLogCounts::default()),
+            None
+        );
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             work_log_summary(&tools_only).as_deref(),
-            Some("2 次工具调用")
+            Some("调用 2 次工具")
         );
         assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
     }
@@ -3263,6 +3296,59 @@ mod tests {
         ];
 
         assert_eq!(work_log_counts(&refs(&entries)).files, 2);
+    }
+
+    #[test]
+    fn finished_turn_has_one_turn_wide_summary_across_activity_runs() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let entries = [
+            command("command-1"),
+            file_change("files-1", &["src/shared.rs"]),
+            entry(
+                "assistant",
+                EntryContent::Assistant {
+                    text: "intermediate output".into(),
+                },
+            ),
+            command("command-2"),
+            file_change("files-2", &["src/shared.rs"]),
+        ];
+        let segments = segment_entries(&entries, false);
+        let activity_indexes: Vec<usize> = segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                matches!(segment, Segment::ActivityRun(_)).then_some(index)
+            })
+            .collect();
+        assert_eq!(activity_indexes.len(), 2);
+
+        let counts = work_log_counts(&refs(&entries));
+        assert_eq!(counts.commands, 2);
+        assert_eq!(counts.files, 1);
+
+        let labels = |last_activity, counts: &WorkLogCounts| {
+            activity_indexes
+                .iter()
+                .map(|index| {
+                    finished_work_log_label(*index == last_activity, counts)
+                        .expect("each real activity run has a footer affordance")
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        let last_activity = *activity_indexes.last().unwrap();
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(
+            labels(last_activity, &counts),
+            ["Work Log", "Ran 2 commands · Edited 1 file"]
+        );
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(
+            labels(last_activity, &counts),
+            ["工作日志", "已执行 2 条命令 · 编辑 1 个文件"]
+        );
     }
 
     /// A message's Copy action puts the RAW text on the clipboard — the markdown
