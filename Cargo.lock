@@ -7999,35 +7999,103 @@ name = "tcode"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "env_logger",
+ "gpui",
+ "gpui-component",
+ "gpui_platform",
+ "log",
+ "orchestrate-mcp",
+ "preview-mcp",
+ "tcode-i18n",
+ "tcode-runtime",
+ "tcode-services",
+ "tcode-ui",
+]
+
+[[package]]
+name = "tcode-core"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "log",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "tcode-i18n"
+version = "0.1.0"
+dependencies = [
+ "rust-i18n",
+ "sys-locale",
+]
+
+[[package]]
+name = "tcode-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent",
  "async-channel",
+ "gpui",
+ "log",
+ "orchestrate-mcp",
+ "preview-mcp",
+ "serde",
+ "serde_json",
+ "smol",
+ "tcode-core",
+ "tcode-services",
+ "term",
+ "uuid",
+]
+
+[[package]]
+name = "tcode-services"
+version = "0.1.0"
+dependencies = [
+ "agent",
  "base64",
  "bzip2 0.4.4",
  "chrono",
  "dirs 5.0.1",
- "env_logger",
  "flate2",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui-wry",
- "gpui_platform",
- "lb-wry",
  "log",
- "orchestrate-mcp",
- "preview-mcp",
- "raw-window-handle",
- "rust-i18n",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "smol",
- "sys-locale",
  "tar",
- "term",
+ "tcode-core",
  "thiserror 2.0.18",
  "ureq",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "tcode-ui"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "async-channel",
+ "base64",
+ "chrono",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui-wry",
+ "lb-wry",
+ "log",
+ "preview-mcp",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "smol",
+ "tcode-core",
+ "tcode-i18n",
+ "tcode-runtime",
+ "term",
 ]
 
 [[package]]
