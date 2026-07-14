@@ -101,6 +101,7 @@ fn main() {
             eprintln!("steer_probe: STEERING (mid-turn) -> {steer:?}");
             let _ = steer_commands
                 .send(SessionCommand::Steer {
+                    request_id: "steer-probe-1".into(),
                     text: steer,
                     attachments: Vec::new(),
                 })

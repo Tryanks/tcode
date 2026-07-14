@@ -363,12 +363,21 @@ impl ActiveSession {
     /// resolves with the same `turnId`), so `turn_in_flight` stays true and the
     /// queue is untouched. Opening a turn here would leave a phantom that never
     /// completes.
-    fn steer_now(&mut self, text: String, attachments: Vec<Attachment>) -> Result<(), ()> {
+    fn steer_now(
+        &mut self,
+        request_id: String,
+        text: String,
+        attachments: Vec<Attachment>,
+    ) -> Result<(), ()> {
         let Runtime::Live(commands) = &self.runtime else {
             return Err(());
         };
         commands
-            .try_send(SessionCommand::Steer { text, attachments })
+            .try_send(SessionCommand::Steer {
+                request_id,
+                text,
+                attachments,
+            })
             .map_err(|_| ())
     }
 
@@ -3707,13 +3716,13 @@ impl AppState {
         if can_steer {
             // A steered callback is already part of this turn, so persist it just
             // like a user-triggered steer before handing it to the provider.
-            self.record_user_message(parent_id, &text, cx);
+            let request_id = self.record_steer_request(parent_id, &text, cx);
             let sent = self
                 .active
                 .as_mut()
                 .filter(|parent| parent.meta.id == parent_id)
                 .or_else(|| self.background.get_mut(parent_id))
-                .is_some_and(|parent| parent.steer_now(text, Vec::new()).is_ok());
+                .is_some_and(|parent| parent.steer_now(request_id, text, Vec::new()).is_ok());
             if !sent {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
@@ -3781,6 +3790,26 @@ impl AppState {
         self.record_event(session_id, &user_event, cx);
     }
 
+    /// Persist a pending steering bubble and return the exact id providers must
+    /// echo in `SteerAccepted` after real delivery succeeds.
+    fn record_steer_request(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let request_id = format!("local-steer-{}", uuid::Uuid::new_v4());
+        self.record_event(
+            session_id,
+            &AgentEvent::SteerRequested {
+                request_id: request_id.clone(),
+                text: text.to_owned(),
+            },
+            cx,
+        );
+        request_id
+    }
+
     /// Cmd+Enter: inject `text` into the turn that is ALREADY running, so the
     /// model picks it up at its next opportunity (typically its next tool call).
     ///
@@ -3818,13 +3847,16 @@ impl AppState {
                 // The steered message joins the running turn, so it belongs in
                 // the transcript exactly like any other user message. (A merely
                 // *queued* message does not — see `dispatch_next_queued`.)
-                self.record_user_message(&session_id, &text, cx);
+                let request_id = self.record_steer_request(&session_id, &text, cx);
 
                 let Some(active) = self.active.as_mut() else {
                     return;
                 };
                 active.pending_ultrathink = false;
-                if active.steer_now(wire_text, attachments).is_err() {
+                if active
+                    .steer_now(request_id, wire_text, attachments)
+                    .is_err()
+                {
                     self.report_error(RuntimeError::ProcessGone, cx);
                 }
                 cx.notify();
@@ -5964,7 +5996,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn parked_orchestrator_gets_parallel_callback_as_a_steer(cx: &mut gpui::TestAppContext) {
+    fn steering_parked_orchestrator_callback_uses_recorded_id(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-steer-test-{}",
             uuid::Uuid::new_v4()
@@ -5988,14 +6020,81 @@ mod tests {
             let parent = state.background.get("parent").unwrap();
             assert!(parent.queue.is_empty(), "parallel result must not queue");
             assert!(parent.turn_in_flight);
-            assert!(matches!(
-                receiver.try_recv(),
-                Ok(SessionCommand::Steer { text, .. }) if text.contains("full result")
-            ));
+            let command = receiver.try_recv().unwrap();
+            let SessionCommand::Steer {
+                request_id, text, ..
+            } = command
+            else {
+                panic!("callback did not steer")
+            };
+            assert!(text.contains("full result"));
             let timeline = Timeline::fold_events(state.store.read_events("parent"));
             assert!(timeline.entries.iter().any(|entry| matches!(
                 &entry.content,
-                EntryContent::User { text, .. } if text.contains("child-a completed")
+                EntryContent::User {
+                    text,
+                    steering: Some(tcode_core::session::SteeringStatus::Pending),
+                } if entry.id == request_id && text.contains("child-a completed")
+            )));
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn steering_user_and_queue_paths_send_the_same_id_they_record(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-user-steer-id-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "active".into();
+            active.turn_in_flight = true;
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "opening".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "start".into(),
+                    },
+                }),
+            );
+            state.active = Some(active);
+
+            state.steer("redirect".into(), Vec::new(), cx);
+            let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
+                panic!("user steer command missing")
+            };
+            let active = state.active.as_ref().unwrap();
+            assert!(active.timeline.entries.iter().any(|entry| matches!(
+                &entry.content,
+                EntryContent::User {
+                    text,
+                    steering: Some(tcode_core::session::SteeringStatus::Pending),
+                } if entry.id == request_id && text == "redirect"
+            )));
+
+            let queued_id = state
+                .active
+                .as_mut()
+                .unwrap()
+                .push_queued("queued redirect".into(), Vec::new());
+            state.steer_queued(queued_id, cx);
+            let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
+                panic!("queue-to-steer command missing")
+            };
+            let active = state.active.as_ref().unwrap();
+            assert!(active.queue.is_empty());
+            assert!(active.timeline.entries.iter().any(|entry| matches!(
+                &entry.content,
+                EntryContent::User {
+                    text,
+                    steering: Some(tcode_core::session::SteeringStatus::Pending),
+                } if entry.id == request_id && text == "queued redirect"
             )));
         });
 
@@ -6280,11 +6379,15 @@ mod tests {
         active.turn_in_flight = true;
         active.push_queued("queued".into(), Vec::new());
 
-        assert_eq!(active.steer_now("steer me".into(), Vec::new()), Ok(()));
+        assert_eq!(
+            active.steer_now("steer-1".into(), "steer me".into(), Vec::new()),
+            Ok(())
+        );
 
         assert!(matches!(
             receiver.try_recv(),
-            Ok(SessionCommand::Steer { text, .. }) if text == "steer me"
+            Ok(SessionCommand::Steer { request_id, text, .. })
+                if request_id == "steer-1" && text == "steer me"
         ));
         // Still exactly one turn in flight, and the queue is untouched.
         assert!(active.turn_in_flight);

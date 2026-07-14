@@ -687,7 +687,11 @@ async fn handle_command(
             log::debug!("claude: ignoring ACP-only SetOption {id}");
             Flow::Continue
         }
-        SessionCommand::Steer { text, attachments } => {
+        SessionCommand::Steer {
+            request_id,
+            text,
+            attachments,
+        } => {
             // Steering writes the *same* stream-json user-message line as
             // `SendTurn`, but deliberately skips the turn bookkeeping: no
             // `start_turn()`, no `TurnStarted`. The CLI folds the message into
@@ -710,6 +714,10 @@ async fn handle_command(
                         message: "failed to write steering message to provider stdin".into(),
                         fatal: true,
                     })
+                    .await;
+            } else {
+                let _ = event_tx
+                    .send(AgentEvent::SteerAccepted { request_id })
                     .await;
             }
             Flow::Continue
@@ -3490,5 +3498,69 @@ mod tests {
             }
             _ => true,
         }));
+    }
+
+    #[test]
+    fn steer_acceptance_requires_successful_stdin_write() {
+        smol::block_on(async {
+            let (event_tx, event_rx) = async_channel::unbounded();
+            let mut child = crate::process::async_command("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let mut mapper = Mapper::new();
+            handle_command(
+                SessionCommand::Steer {
+                    request_id: "steer-ok".into(),
+                    text: "redirect".into(),
+                    attachments: Vec::new(),
+                },
+                &mut mapper,
+                &mut stdin,
+                &event_tx,
+                &mut child,
+            )
+            .await;
+            assert!(matches!(
+                event_rx.recv().await.unwrap(),
+                AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
+            ));
+            let _ = child.kill();
+            let _ = child.status().await;
+
+            let (event_tx, event_rx) = async_channel::unbounded();
+            let mut child = crate::process::async_command("true")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let _ = child.status().await;
+            let mut mapper = Mapper::new();
+            handle_command(
+                SessionCommand::Steer {
+                    request_id: "steer-failed".into(),
+                    text: "redirect".into(),
+                    attachments: Vec::new(),
+                },
+                &mut mapper,
+                &mut stdin,
+                &event_tx,
+                &mut child,
+            )
+            .await;
+            assert!(matches!(
+                event_rx.recv().await.unwrap(),
+                AgentEvent::Error { fatal: true, .. }
+            ));
+            assert!(
+                event_rx.try_recv().is_err(),
+                "stdin write failures must not accept a steer"
+            );
+        });
     }
 }
