@@ -33,6 +33,13 @@ const TRAFFIC_LIGHT_INSET: f32 = 8.;
 /// Max threads shown per project group before the "Show more" row.
 const THREADS_COLLAPSED_LIMIT: usize = 6;
 
+/// A sidebar label that owns the remaining row width and always truncates on
+/// one line. `text_ellipsis` alone still leaves GPUI's default wrapping on,
+/// which lets a glyph move onto a second line at resize boundaries.
+fn truncated_sidebar_label() -> gpui::Div {
+    div().flex_1().min_w_0().truncate()
+}
+
 // Thread-row context-menu actions (each carries the target session id, so a
 // single set of handlers on the sidebar root serves every row).
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
@@ -614,10 +621,7 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
+                truncated_sidebar_label()
                     .text_sm()
                     .font_medium()
                     .text_color(cx.theme().sidebar_foreground)
@@ -808,10 +812,7 @@ impl SessionsSidebar {
                 )
             })
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
+                truncated_sidebar_label()
                     .text_size(px(13.))
                     .text_color(cx.theme().sidebar_foreground)
                     .child(meta.title.clone()),
@@ -1099,5 +1100,74 @@ fn humanize_ago(secs: u64) -> String {
         tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
     } else {
         tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, size};
+
+    struct WorkingThreadRowProbe;
+
+    impl Render for WorkingThreadRowProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            h_flex()
+                .w_full()
+                .h(px(30.))
+                .items_center()
+                .gap_2()
+                .pl(px(42.))
+                .pr_2()
+                .debug_selector(|| "thread-row".into())
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .child(div().size(px(6.)))
+                        .child(div().whitespace_nowrap().text_size(px(11.)).child("工作中")),
+                )
+                .child(div().flex_none().text_size(px(13.)).child("↳"))
+                .child(
+                    truncated_sidebar_label()
+                        .debug_selector(|| "thread-title".into())
+                        .text_size(px(13.))
+                        .child("Phase 0 修复架构约束测试"),
+                )
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn working_thread_title_stays_inside_row_at_every_sidebar_width(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
+        let cx: &mut VisualTestContext = cx;
+
+        // The resizable sidebar is constrained to 220..=380px. Half-pixel
+        // increments cover Retina resize boundaries where glyph rounding used
+        // to push the final character onto a second line.
+        for half_pixel_width in 440..=760 {
+            let width = half_pixel_width as f32 / 2.;
+            cx.simulate_resize(size(px(width), px(60.)));
+            draw(cx);
+
+            let row = cx.debug_bounds("thread-row").expect("row bounds");
+            let title = cx.debug_bounds("thread-title").expect("title bounds");
+            assert!(
+                title.top() >= row.top() && title.bottom() <= row.bottom(),
+                "title escaped the row vertically at {width}px: row={row:?}, title={title:?}"
+            );
+            assert!(
+                title.left() >= row.left() && title.right() <= row.right(),
+                "title escaped the row horizontally at {width}px: row={row:?}, title={title:?}"
+            );
+        }
     }
 }
