@@ -42,10 +42,16 @@ pub enum InstallSource {
     Unknown,
 }
 
-/// Guess the install source from a resolved binary path.
+/// Guess the install source from a binary path.
 ///
-/// Order matters: Bun and pnpm both keep global bins in their own directories,
-/// so they are matched before the generic npm/node patterns.
+/// Existing paths are canonicalized first so a package-manager binary linked
+/// from another prefix is classified by its target. If resolution fails (for
+/// example, for a broken symlink or a path on another platform), the supplied
+/// path is used unchanged.
+///
+/// Order matters: package-manager-specific paths are matched before broad
+/// Homebrew prefixes, since a Homebrew `bin` symlink can target a global npm
+/// installation under `/opt/homebrew/lib/node_modules`.
 ///
 /// Backslashes are normalized to `/` first, so the Windows shapes
 /// (`C:\Users\x\AppData\Roaming\npm\claude.cmd`,
@@ -54,6 +60,8 @@ pub enum InstallSource {
 /// which matters because a Windows user directory can legitimately contain
 /// "homebrew" (e.g. a checkout) and must not be misdetected.
 pub fn detect_install_source(path: &Path) -> InstallSource {
+    let canonical = path.canonicalize();
+    let path = canonical.as_deref().unwrap_or(path);
     let raw = path.to_string_lossy();
     let p = raw.replace('\\', "/");
     let brew = cfg!(not(windows))
@@ -61,9 +69,7 @@ pub fn detect_install_source(path: &Path) -> InstallSource {
             || p.contains("/opt/homebrew/")
             || p.contains("/homebrew/")
             || p.contains("/usr/local/Cellar/"));
-    if brew {
-        InstallSource::Brew
-    } else if p.contains("/.bun/") || p.contains("/bun/install/") {
+    if p.contains("/.bun/") || p.contains("/bun/install/") {
         InstallSource::Bun
     } else if p.contains("/.pnpm")
         || p.contains("/pnpm/")
@@ -84,6 +90,8 @@ pub fn detect_install_source(path: &Path) -> InstallSource {
         || p.contains("/AppData/Roaming/npm")
     {
         InstallSource::Npm
+    } else if brew {
+        InstallSource::Brew
     } else if p.contains("/.local/") {
         InstallSource::Native
     } else {
@@ -210,7 +218,7 @@ mod tests {
         // command), so this expectation is unix-only.
         #[cfg(not(windows))]
         assert_eq!(
-            detect_install_source(&PathBuf::from("/opt/homebrew/bin/codex")),
+            detect_install_source(&PathBuf::from("/test/opt/homebrew/bin/codex")),
             InstallSource::Brew
         );
         assert_eq!(
@@ -268,13 +276,106 @@ mod tests {
     /// Unix the very same string is a real Homebrew install.
     #[test]
     fn brew_is_unreachable_on_windows() {
-        let path = PathBuf::from("/opt/homebrew/bin/codex");
+        let path = PathBuf::from("/test/opt/homebrew/bin/codex");
         let expected = if cfg!(windows) {
             InstallSource::Unknown
         } else {
             InstallSource::Brew
         };
         assert_eq!(detect_install_source(&path), expected);
+    }
+
+    #[cfg(unix)]
+    fn temp_install_root() -> PathBuf {
+        std::env::temp_dir().join(format!("tcode-version-check-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[cfg(unix)]
+    fn create_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(path.parent().expect("executable has a parent")).unwrap();
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_npm_target_behind_homebrew_prefix_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_install_root();
+        let prefix = root.join("opt/homebrew");
+        let target = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+        let launcher = prefix.join("bin/codex");
+        create_executable(&target);
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        symlink("../lib/node_modules/@openai/codex/bin/codex.js", &launcher).unwrap();
+
+        let source = detect_install_source(&launcher);
+        assert_eq!(source, InstallSource::Npm);
+        assert_eq!(
+            update_command(ProviderKind::Codex, source),
+            Some(vec![
+                "npm".into(),
+                "install".into(),
+                "-g".into(),
+                "@openai/codex@latest".into(),
+            ])
+        );
+        assert_eq!(
+            update_command_string(ProviderKind::Codex, source).as_deref(),
+            Some("npm install -g @openai/codex@latest")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn genuine_homebrew_symlink_remains_brew() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_install_root();
+        let prefix = root.join("opt/homebrew");
+        let target = prefix.join("Cellar/codex/1.0.0/bin/codex");
+        let launcher = prefix.join("bin/codex");
+        create_executable(&target);
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        symlink("../Cellar/codex/1.0.0/bin/codex", &launcher).unwrap();
+
+        assert_eq!(detect_install_source(&launcher), InstallSource::Brew);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_falls_back_to_supplied_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_install_root();
+        let launcher = root.join("opt/homebrew/bin/codex");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        symlink("../missing/codex", &launcher).unwrap();
+
+        assert_eq!(detect_install_source(&launcher), InstallSource::Brew);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_non_symlink_uses_its_own_path() {
+        let root = temp_install_root();
+        let executable = root.join("home/user/.local/bin/claude");
+        create_executable(&executable);
+
+        assert_eq!(detect_install_source(&executable), InstallSource::Native);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The exact command table from the T3 Providers spec (§3), for every
