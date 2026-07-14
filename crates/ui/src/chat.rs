@@ -126,8 +126,8 @@ fn md_sync(synced: &str, text: &str, can_push: bool) -> MdSync {
     }
 }
 
-/// A chronological block in a turn. File-change entries are intentionally
-/// omitted: they continue to feed the turn-level CHANGED FILES aggregate.
+/// A chronological block in a turn. File-change entries stay in activity runs
+/// for summary counting, but are rendered by the turn-level CHANGED FILES card.
 #[derive(Debug)]
 enum Segment<'a> {
     ActivityRun(Vec<&'a TimelineEntry>),
@@ -148,9 +148,13 @@ fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
 
 /// Coalesce only adjacent activity entries, leaving messages and errors at
 /// their exact positions in the timeline.
-fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>]) -> Vec<Segment<'a>> {
+fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>], turn_running: bool) -> Vec<Segment<'a>> {
     let mut segments = Vec::new();
     let mut activities = Vec::new();
+    let live_reasoning_index = turn_running
+        .then(|| entries.len().checked_sub(1))
+        .flatten()
+        .filter(|index| matches!(entries[*index].content, EntryContent::Reasoning { .. }));
 
     let flush_activities = |segments: &mut Vec<Segment<'a>>,
                             activities: &mut Vec<&'a TimelineEntry>| {
@@ -159,14 +163,19 @@ fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>]) -> Vec<Segment<'a>> {
         }
     };
 
-    for entry in entries {
+    for (entry_index, entry) in entries.iter().enumerate() {
         let entry = entry.as_ref();
         match &entry.content {
             EntryContent::Command { .. }
             | EntryContent::Tool { .. }
             | EntryContent::Subagent { .. }
-            | EntryContent::Reasoning { .. }
-            | EntryContent::ContextCompacted => activities.push(entry),
+            | EntryContent::ContextCompacted
+            | EntryContent::FileChange { .. } => activities.push(entry),
+            EntryContent::Reasoning { .. } => {
+                if live_reasoning_index == Some(entry_index) {
+                    activities.push(entry);
+                }
+            }
             EntryContent::User { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::User(entry));
@@ -179,15 +188,83 @@ fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>]) -> Vec<Segment<'a>> {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::Error(entry));
             }
-            // Aggregate-only: file changes render in the CHANGED FILES card,
-            // not in place. They must not split an activity run either — a
-            // command → edit → command sequence is one continuous work log,
-            // not three stacked sections.
-            EntryContent::FileChange { .. } => {}
         }
     }
     flush_activities(&mut segments, &mut activities);
     segments
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WorkLogCounts {
+    commands: usize,
+    files: usize,
+    tools: usize,
+    subagents: usize,
+    compactions: usize,
+}
+
+fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
+    let mut counts = WorkLogCounts::default();
+    let mut files = HashSet::new();
+
+    for entry in entries {
+        match &entry.content {
+            EntryContent::Command { .. } => counts.commands += 1,
+            EntryContent::FileChange { changes } => {
+                files.extend(changes.iter().map(|change| change.path.as_str()));
+            }
+            EntryContent::Tool { .. } => counts.tools += 1,
+            EntryContent::Subagent { .. } => counts.subagents += 1,
+            EntryContent::ContextCompacted => counts.compactions += 1,
+            EntryContent::User { .. }
+            | EntryContent::Assistant { .. }
+            | EntryContent::Reasoning { .. }
+            | EntryContent::Error { .. }
+            | EntryContent::ProviderStartError { .. } => {}
+        }
+    }
+    counts.files = files.len();
+    counts
+}
+
+fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
+    let mut clauses = Vec::new();
+    if counts.commands > 0 {
+        clauses.push(if counts.commands == 1 {
+            tcode_i18n::tr!("chat.summary_command_one").into_owned()
+        } else {
+            tcode_i18n::tr!("chat.summary_commands", count = counts.commands).into_owned()
+        });
+    }
+    if counts.files > 0 {
+        clauses.push(if counts.files == 1 {
+            tcode_i18n::tr!("chat.summary_file_one").into_owned()
+        } else {
+            tcode_i18n::tr!("chat.summary_files", count = counts.files).into_owned()
+        });
+    }
+    if counts.tools > 0 {
+        clauses.push(if counts.tools == 1 {
+            tcode_i18n::tr!("chat.summary_tool_one").into_owned()
+        } else {
+            tcode_i18n::tr!("chat.summary_tools", count = counts.tools).into_owned()
+        });
+    }
+    if counts.subagents > 0 {
+        clauses.push(if counts.subagents == 1 {
+            tcode_i18n::tr!("chat.summary_subagent_one").into_owned()
+        } else {
+            tcode_i18n::tr!("chat.summary_subagents", count = counts.subagents).into_owned()
+        });
+    }
+    if counts.compactions > 0 {
+        clauses.push(if counts.compactions == 1 {
+            tcode_i18n::tr!("chat.summary_compaction_one").into_owned()
+        } else {
+            tcode_i18n::tr!("chat.summary_compactions", count = counts.compactions).into_owned()
+        });
+    }
+    (!clauses.is_empty()).then(|| clauses.join(" · "))
 }
 
 /// Cached indexing and cheap height-affecting identity for one virtualized turn.
@@ -622,20 +699,12 @@ impl ChatView {
     ) -> AnyElement {
         let mut column = v_flex().w_full().gap_4();
 
-        let segments = segment_entries(entries);
+        let segments = segment_entries(entries, turn.running);
         let last_assistant_id = entries.iter().rev().find_map(|entry| {
             matches!(entry.content, EntryContent::Assistant { .. }).then_some(entry.id.as_str())
         });
-        let subagent_count = entries
-            .iter()
-            .filter(|entry| matches!(&entry.content, EntryContent::Subagent { .. }))
-            .count();
         let last_segment_is_activity = matches!(segments.last(), Some(Segment::ActivityRun(_)));
-        let append_tail_work_log = (turn.running && !last_segment_is_activity)
-            || (segments
-                .iter()
-                .all(|segment| !matches!(segment, Segment::ActivityRun(_)))
-                && turn.duration_secs().is_some());
+        let append_tail_work_log = turn.running && !last_segment_is_activity;
         let last_activity_segment = (!append_tail_work_log)
             .then(|| {
                 segments
@@ -657,7 +726,6 @@ impl ChatView {
                         segment_id,
                         turn,
                         activities,
-                        subagent_count,
                         last_activity_segment == Some(segment_index),
                         cx,
                     ));
@@ -704,15 +772,7 @@ impl ChatView {
                 .last()
                 .map(|entry| format!("tail-{}", entry.id))
                 .unwrap_or_else(|| "tail".to_string());
-            column = column.child(self.render_work_log(
-                index,
-                &segment_id,
-                turn,
-                &[],
-                subagent_count,
-                true,
-                cx,
-            ));
+            column = column.child(self.render_work_log(index, &segment_id, turn, &[], true, cx));
         }
 
         // Proposed-plan card (the captured plan for this turn).
@@ -1176,8 +1236,8 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The Work Log section: activity rows (collapsible) and a "Worked for XmYYs"
-    /// footer (or a live "Working for Ns" indicator).
+    /// The Work Log section: activity rows (collapsible) and an event-count
+    /// summary footer (or a live "Working for Ns" indicator).
     ///
     /// It used to hang off a hairline that ran right under the user bubble; the
     /// rule is gone. Turns read as separate because of the space around them
@@ -1190,7 +1250,6 @@ impl ChatView {
         segment_id: &str,
         turn: &TurnMeta,
         activities: &[&TimelineEntry],
-        subagent_count: usize,
         is_last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1200,6 +1259,8 @@ impl ChatView {
         // Only the final segment can be live; finished segments collapse by default.
         let expanded = running || self.expanded.contains(&section_key);
         let muted = cx.theme().muted_foreground;
+        let counts = work_log_counts(activities);
+        let subagent_count = counts.subagents;
 
         let mut section = v_flex().w_full().gap_2();
 
@@ -1229,13 +1290,18 @@ impl ChatView {
                 );
             }
 
-            let total = activities.len();
+            let display_activities: Vec<&TimelineEntry> = activities
+                .iter()
+                .copied()
+                .filter(|entry| !matches!(entry.content, EntryContent::FileChange { .. }))
+                .collect();
+            let total = display_activities.len();
             let rows_expanded = self.expanded.contains(&rows_key);
             let hidden = total.saturating_sub(WORKLOG_VISIBLE_ROWS);
             let visible: Vec<&TimelineEntry> = if rows_expanded || hidden == 0 {
-                activities.to_vec()
+                display_activities
             } else {
-                activities[total - WORKLOG_VISIBLE_ROWS..].to_vec()
+                display_activities[total - WORKLOG_VISIBLE_ROWS..].to_vec()
             };
 
             for entry in &visible {
@@ -1271,7 +1337,7 @@ impl ChatView {
             }
         }
 
-        // Footer: live "Working" indicator, or the toggleable "Worked for" row.
+        // Footer: live "Working" indicator, or a toggleable nonzero event summary.
         if running {
             let secs = turn
                 .start_ts
@@ -1289,12 +1355,7 @@ impl ChatView {
                         duration = format_duration(secs)
                     )),
             );
-        } else {
-            let label = match is_last.then(|| turn.duration_secs()).flatten() {
-                Some(secs) => tcode_i18n::tr!("chat.worked_for", duration = format_duration(secs))
-                    .into_owned(),
-                None => tcode_i18n::tr!("chat.worked").into_owned(),
-            };
+        } else if let Some(label) = work_log_summary(&counts) {
             section = section.child(
                 h_flex()
                     .id(SharedString::from(format!(
@@ -2755,10 +2816,11 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListSync, MdState, MdSync, Segment, copy_payload, displayed_error_text, index_turns,
-        list_sync, md_sync, previous_logs_toggle_label, segment_entries, timeline_overdraw,
+        ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload, displayed_error_text,
+        index_turns, list_sync, md_sync, previous_logs_toggle_label, segment_entries,
+        timeline_overdraw, work_log_counts, work_log_summary,
     };
-    use agent::ItemStatus;
+    use agent::{FileChange, FileChangeKind, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::text::TextViewState;
     use std::collections::{HashMap, HashSet};
@@ -2998,7 +3060,7 @@ mod tests {
                 },
             ),
         ];
-        let segments = segment_entries(&entries);
+        let segments = segment_entries(&entries, false);
 
         assert_eq!(segments.len(), 6);
         assert!(matches!(segments[0], Segment::User(entry) if entry.id == "user"));
@@ -3021,7 +3083,7 @@ mod tests {
     #[test]
     fn segment_entries_coalesces_an_all_activity_turn() {
         let entries = [command("cmd-1"), command("cmd-2")];
-        let segments = segment_entries(&entries);
+        let segments = segment_entries(&entries, false);
 
         assert!(matches!(
             segments.as_slice(),
@@ -3031,12 +3093,11 @@ mod tests {
 
     #[test]
     fn segment_entries_handles_an_empty_turn() {
-        assert!(segment_entries(&[]).is_empty());
+        assert!(segment_entries(&[], false).is_empty());
     }
 
-    /// A file edit between two commands is one continuous work log — FileChange
-    /// entries are aggregate-only (CHANGED FILES card) and must be transparent
-    /// to activity adjacency, not split the run into stacked sections.
+    /// A file edit between two commands is one continuous work log. FileChange
+    /// entries count toward its summary but render in the CHANGED FILES card.
     #[test]
     fn segment_entries_keeps_activity_runs_continuous_across_file_changes() {
         let entries = [
@@ -3044,14 +3105,164 @@ mod tests {
             entry("edit", EntryContent::FileChange { changes: vec![] }),
             command("cmd-2"),
         ];
-        let segments = segment_entries(&entries);
+        let segments = segment_entries(&entries, false);
 
         assert!(matches!(
             segments.as_slice(),
             [Segment::ActivityRun(run)]
                 if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["cmd-1", "cmd-2"]
+                    == ["cmd-1", "edit", "cmd-2"]
         ));
+    }
+
+    #[test]
+    fn only_latest_live_reasoning_is_visible() {
+        let entries = [
+            entry(
+                "reason-1",
+                EntryContent::Reasoning {
+                    text: "first".into(),
+                },
+            ),
+            entry(
+                "reason-2",
+                EntryContent::Reasoning {
+                    text: "latest".into(),
+                },
+            ),
+        ];
+
+        let segments = segment_entries(&entries, true);
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "reason-2"
+        ));
+    }
+
+    #[test]
+    fn later_activity_removes_live_reasoning() {
+        let entries = [
+            entry(
+                "reason",
+                EntryContent::Reasoning {
+                    text: "thinking".into(),
+                },
+            ),
+            command("later-command"),
+        ];
+
+        let segments = segment_entries(&entries, true);
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "later-command"
+        ));
+
+        let entries = [
+            entry(
+                "reason",
+                EntryContent::Reasoning {
+                    text: "thinking".into(),
+                },
+            ),
+            entry(
+                "assistant",
+                EntryContent::Assistant {
+                    text: "answer".into(),
+                },
+            ),
+        ];
+        let segments = segment_entries(&entries, true);
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::Assistant(entry)] if entry.id == "assistant"
+        ));
+    }
+
+    #[test]
+    fn completion_removes_reasoning_from_history() {
+        let entries = [entry(
+            "reason",
+            EntryContent::Reasoning {
+                text: "finished thinking".into(),
+            },
+        )];
+
+        assert!(segment_entries(&entries, false).is_empty());
+    }
+
+    fn file_change(id: &str, paths: &[&str]) -> Arc<TimelineEntry> {
+        entry(
+            id,
+            EntryContent::FileChange {
+                changes: paths
+                    .iter()
+                    .map(|path| FileChange {
+                        path: (*path).to_string(),
+                        kind: FileChangeKind::Modify,
+                        diff: None,
+                    })
+                    .collect(),
+            },
+        )
+    }
+
+    fn refs(entries: &[Arc<TimelineEntry>]) -> Vec<&TimelineEntry> {
+        entries.iter().map(AsRef::as_ref).collect()
+    }
+
+    #[test]
+    fn work_log_summary_localizes_mixed_nonzero_counts_exactly() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let counts = WorkLogCounts {
+            commands: 2,
+            files: 3,
+            tools: 1,
+            subagents: 2,
+            compactions: 1,
+        };
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(
+            work_log_summary(&counts).as_deref(),
+            Some("2 commands · 3 files edited · 1 tool call · 2 subagents · 1 context compaction")
+        );
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(
+            work_log_summary(&counts).as_deref(),
+            Some("2 个命令 · 编辑了 3 个文件 · 1 次工具调用 · 2 个子代理 · 1 次上下文压缩")
+        );
+    }
+
+    #[test]
+    fn work_log_summary_omits_zero_counts_and_empty_rows() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let tools_only = WorkLogCounts {
+            tools: 2,
+            ..WorkLogCounts::default()
+        };
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(
+            work_log_summary(&tools_only).as_deref(),
+            Some("2 tool calls")
+        );
+        assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(
+            work_log_summary(&tools_only).as_deref(),
+            Some("2 次工具调用")
+        );
+        assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
+    }
+
+    #[test]
+    fn work_log_counts_unique_file_paths_across_snapshots() {
+        let entries = [
+            file_change("files-1", &["src/a.rs", "src/b.rs"]),
+            file_change("files-2", &["src/a.rs", "src/a.rs"]),
+        ];
+
+        assert_eq!(work_log_counts(&refs(&entries)).files, 2);
     }
 
     /// A message's Copy action puts the RAW text on the clipboard — the markdown
