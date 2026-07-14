@@ -3267,11 +3267,47 @@ impl AppState {
     }
 
     /// The provider + model a new draft should start with: the most recently
-    /// used session's, else the Claude default.
-    fn draft_defaults(&self) -> (ProviderKind, Option<String>, Option<String>) {
+    /// updated, non-archived session in this project. Only reasoning effort is
+    /// inherited from its model options. Projects without history retain the
+    /// previous global-session fallback (or the Claude default).
+    fn draft_defaults(
+        &self,
+        project_id: &str,
+    ) -> (
+        ProviderKind,
+        Option<String>,
+        Option<String>,
+        Option<OptionSelection>,
+    ) {
+        if let Some(meta) = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.archived_at.is_none() && meta.project_id.as_deref() == Some(project_id)
+            })
+            .max_by_key(|meta| meta.updated_at)
+        {
+            let reasoning_effort = meta
+                .option_selections
+                .iter()
+                .find(|selection| selection.id == "reasoningEffort")
+                .cloned();
+            return (
+                meta.provider,
+                meta.model.clone(),
+                meta.acp_agent_id.clone(),
+                reasoning_effort,
+            );
+        }
+
         match self.sessions.first() {
-            Some(meta) => (meta.provider, meta.model.clone(), meta.acp_agent_id.clone()),
-            None => (ProviderKind::ClaudeCode, None, None),
+            Some(meta) => (
+                meta.provider,
+                meta.model.clone(),
+                meta.acp_agent_id.clone(),
+                None,
+            ),
+            None => (ProviderKind::ClaudeCode, None, None, None),
         }
     }
 
@@ -3280,16 +3316,18 @@ impl AppState {
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.park_active();
-        let (provider, model, acp_agent_id) = self.draft_defaults();
+        let (provider, model, acp_agent_id, reasoning_effort) = self.draft_defaults(&project_id);
         let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());
-        self.active = Some(Self::build_draft_session(
+        let mut draft = Self::build_draft_session(
             project_id,
             cwd,
             provider,
             model,
             acp_agent_id,
             provider_commands,
-        ));
+        );
+        draft.meta.option_selections = reasoning_effort.into_iter().collect();
+        self.active = Some(draft);
         self.refresh_git_status(cx);
         cx.notify();
     }
@@ -5403,6 +5441,167 @@ mod tests {
         let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
         assert_eq!(created.cwd, project.root);
         assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn draft_inherits_newest_unarchived_session_from_same_project(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-project-defaults-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut other_project = SessionMeta::new(
+                ProviderKind::ClaudeCode,
+                PathBuf::from("/tmp/other"),
+                Some("opus".into()),
+            );
+            other_project.project_id = Some("project-other".into());
+            other_project.updated_at = 900;
+            other_project.option_selections.push(OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("minimal"),
+            });
+
+            let mut target_older = SessionMeta::new(
+                ProviderKind::ClaudeCode,
+                PathBuf::from("/tmp/target-old"),
+                Some("sonnet".into()),
+            );
+            target_older.project_id = Some("project-target".into());
+            target_older.updated_at = 100;
+            target_older.option_selections.push(OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("medium"),
+            });
+
+            let mut target_newest = SessionMeta::new(
+                ProviderKind::Codex,
+                PathBuf::from("/tmp/target-new"),
+                Some("gpt-5.2-codex".into()),
+            );
+            target_newest.project_id = Some("project-target".into());
+            target_newest.updated_at = 500;
+            target_newest.option_selections = vec![
+                OptionSelection {
+                    id: "serviceTier".into(),
+                    value: serde_json::json!("fast"),
+                },
+                OptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: serde_json::json!("high"),
+                },
+            ];
+
+            let mut target_archived = SessionMeta::new(
+                ProviderKind::ClaudeCode,
+                PathBuf::from("/tmp/target-archived"),
+                Some("haiku".into()),
+            );
+            target_archived.project_id = Some("project-target".into());
+            target_archived.updated_at = 800;
+            target_archived.archived_at = Some(801);
+            target_archived.option_selections.push(OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("low"),
+            });
+
+            // Deliberately interleaved and not timestamp-sorted: selection must
+            // be project-scoped and based on updated_at, not vector position.
+            state.sessions = vec![other_project, target_older, target_archived, target_newest];
+            state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
+
+            let draft = state.active.as_ref().unwrap();
+            assert!(draft.draft);
+            assert_eq!(draft.meta.provider, ProviderKind::Codex);
+            assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.2-codex"));
+            assert_eq!(draft.meta.acp_agent_id, None);
+            assert_eq!(draft.meta.option_selections.len(), 1);
+            assert_eq!(draft.meta.option_selections[0].id, "reasoningEffort");
+            assert_eq!(
+                draft.meta.option_selections[0].value,
+                serde_json::json!("high")
+            );
+            assert!(state.store.load_index().is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_inherits_acp_agent_id_from_project_history() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-acp-defaults-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        let mut acp = SessionMeta::new(
+            ProviderKind::Acp,
+            PathBuf::from("/tmp/acp"),
+            Some("agent-model".into()),
+        );
+        acp.project_id = Some("project-acp".into());
+        acp.acp_agent_id = Some("agent.example".into());
+        acp.updated_at = 40;
+        state.sessions = vec![acp];
+
+        let (provider, model, acp_agent_id, effort) = state.draft_defaults("project-acp");
+        assert_eq!(provider, ProviderKind::Acp);
+        assert_eq!(model.as_deref(), Some("agent-model"));
+        assert_eq!(acp_agent_id.as_deref(), Some("agent.example"));
+        assert!(effort.is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-fallback-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut global = SessionMeta::new(
+                ProviderKind::Acp,
+                PathBuf::from("/tmp/existing"),
+                Some("fallback-model".into()),
+            );
+            global.project_id = Some("project-existing".into());
+            global.acp_agent_id = Some("fallback-agent".into());
+            global.updated_at = 200;
+            global.option_selections.push(OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("low"),
+            });
+            state.sessions = vec![global];
+
+            state.start_draft("project-empty".into(), PathBuf::from("/tmp/empty"), cx);
+
+            let draft = state.active.as_ref().unwrap();
+            let draft_id = draft.meta.id.clone();
+            assert!(draft.draft);
+            assert_eq!(draft.meta.provider, ProviderKind::Acp);
+            assert_eq!(draft.meta.model.as_deref(), Some("fallback-model"));
+            assert_eq!(draft.meta.acp_agent_id.as_deref(), Some("fallback-agent"));
+            assert!(draft.meta.option_selections.is_empty());
+            assert!(
+                !state
+                    .store
+                    .load_index()
+                    .iter()
+                    .any(|meta| meta.id == draft_id)
+            );
+        });
 
         let _ = std::fs::remove_dir_all(root);
     }
