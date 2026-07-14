@@ -4,6 +4,14 @@ use std::borrow::Cow;
 
 rust_i18n::i18n!("../../locales", fallback = "en");
 
+// `rust_i18n::i18n!` loads the locale directory during macro expansion, but
+// changes inside that directory are not reliably tracked by Cargo for normal
+// (non-test) incremental builds. These anonymous includes make both locale
+// files explicit compiler inputs, so adding a key always rebuilds the embedded
+// translation table used by the application.
+const _: &str = include_str!("../../../locales/en.yml");
+const _: &str = include_str!("../../../locales/zh-CN.yml");
+
 pub const LANGUAGE_ENGLISH: &str = "en";
 pub const LANGUAGE_SIMPLIFIED_CHINESE: &str = "zh-CN";
 

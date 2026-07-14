@@ -46,6 +46,18 @@ const CONTENT_MAX_WIDTH: f32 = 768.;
 const CONTENT_MIN_PADDING: f32 = 24.;
 /// How many activity rows to show before the "+N previous log entrys" expander.
 const WORKLOG_VISIBLE_ROWS: usize = 2;
+
+/// Localized previous-log toggle. The label remains available while rows are
+/// expanded so the same control can collapse them again.
+fn previous_logs_toggle_label(hidden: usize, expanded: bool) -> Option<Cow<'static, str>> {
+    (hidden > 0).then(|| {
+        if expanded {
+            tcode_i18n::tr!("chat.hide_previous_logs", count = hidden)
+        } else {
+            tcode_i18n::tr!("chat.previous_logs", count = hidden)
+        }
+    })
+}
 /// Height reserved under every message for its (hover-revealed) action row, so
 /// revealing it never shifts the timeline.
 const ACTION_ROW_HEIGHT: f32 = 24.;
@@ -1230,7 +1242,7 @@ impl ChatView {
                 section = section.child(self.render_activity_row(entry, false, cx));
             }
 
-            if !rows_expanded && hidden > 0 {
+            if let Some(toggle_label) = previous_logs_toggle_label(hidden, rows_expanded) {
                 section = section.child(
                     h_flex()
                         .id(SharedString::from(format!(
@@ -1246,8 +1258,15 @@ impl ChatView {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_expanded(index, &rows_key, cx);
                         }))
-                        .child(Icon::new(IconName::ChevronDown).xsmall())
-                        .child(tcode_i18n::tr!("chat.previous_logs", count = hidden)),
+                        .child(
+                            Icon::new(if rows_expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .xsmall(),
+                        )
+                        .child(toggle_label),
                 );
             }
         }
@@ -2737,7 +2756,7 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 mod tests {
     use super::{
         ListSync, MdState, MdSync, Segment, copy_payload, displayed_error_text, index_turns,
-        list_sync, md_sync, segment_entries, timeline_overdraw,
+        list_sync, md_sync, previous_logs_toggle_label, segment_entries, timeline_overdraw,
     };
     use agent::ItemStatus;
     use gpui::{AppContext as _, Entity, TestAppContext};
@@ -2795,6 +2814,22 @@ mod tests {
         // Normal windows retain four full window heights on both sides.
         assert_eq!(timeline_overdraw(900.), 3600.);
         assert_eq!(timeline_overdraw(1440.), 5760.);
+    }
+
+    #[test]
+    fn previous_log_rows_keep_their_toggle_after_expanding() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+
+        assert_eq!(previous_logs_toggle_label(0, false), None);
+        assert_eq!(
+            previous_logs_toggle_label(3, false).as_deref(),
+            Some("前面还有 3 条日志")
+        );
+        assert_eq!(
+            previous_logs_toggle_label(3, true).as_deref(),
+            Some("收起前面的 3 条日志")
+        );
     }
 
     fn command(id: &str) -> Arc<TimelineEntry> {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use gpui::{
     Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -32,6 +32,19 @@ const TRAFFIC_LIGHT_INSET: f32 = 8.;
 
 /// Max threads shown per project group before the "Show more" row.
 const THREADS_COLLAPSED_LIMIT: usize = 6;
+
+/// Localized thread-list toggle, when the project has enough threads to need
+/// one. Keeping the toggle present in both states is what lets an expanded list
+/// be collapsed again.
+fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static, str>> {
+    (total > THREADS_COLLAPSED_LIMIT).then(|| {
+        if expanded {
+            tcode_i18n::tr!("sidebar.show_less")
+        } else {
+            tcode_i18n::tr!("sidebar.show_more")
+        }
+    })
+}
 
 /// A sidebar label that owns the remaining row width and always truncates on
 /// one line. `text_ellipsis` alone still leaves GPUI's default wrapping on,
@@ -690,7 +703,7 @@ impl SessionsSidebar {
                     || (!is_active && self.app_state.read(cx).turn_running_for(&meta.id));
                 container = container.child(self.render_thread(meta, is_active, working, cx));
             }
-            if total > THREADS_COLLAPSED_LIMIT && !expanded {
+            if let Some(toggle_label) = thread_list_toggle_label(total, expanded) {
                 let toggle_id = project_id.clone();
                 container = container.child(
                     div()
@@ -704,7 +717,7 @@ impl SessionsSidebar {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_group(&toggle_id, cx);
                         }))
-                        .child(tcode_i18n::tr!("sidebar.show_more")),
+                        .child(toggle_label),
                 );
             }
         }
@@ -1169,5 +1182,18 @@ mod tests {
                 "title escaped the row horizontally at {width}px: row={row:?}, title={title:?}"
             );
         }
+    }
+
+    #[test]
+    fn oversized_thread_list_keeps_its_toggle_after_expanding() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+
+        assert_eq!(thread_list_toggle_label(6, false), None);
+        assert_eq!(
+            thread_list_toggle_label(7, false).as_deref(),
+            Some("显示更多")
+        );
+        assert_eq!(thread_list_toggle_label(7, true).as_deref(), Some("收起"));
     }
 }
