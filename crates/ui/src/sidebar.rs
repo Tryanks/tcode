@@ -617,8 +617,7 @@ impl SessionsSidebar {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_sm()
                     .font_medium()
                     .text_color(cx.theme().sidebar_foreground)
@@ -770,6 +769,7 @@ impl SessionsSidebar {
                         .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
                         .child(
                             div()
+                                .whitespace_nowrap()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().success)
                                 .child(tcode_i18n::tr!("sidebar.working")),
@@ -811,8 +811,7 @@ impl SessionsSidebar {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
+                    .truncate()
                     .text_size(px(13.))
                     .text_color(cx.theme().sidebar_foreground)
                     .child(meta.title.clone()),
