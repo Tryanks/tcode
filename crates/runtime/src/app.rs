@@ -5541,7 +5541,7 @@ mod tests {
             &settings,
             "Ship it",
         );
-        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE));
+        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE.trim()));
         assert!(first.contains("wise owl"));
         assert!(first.contains("#### `codex` / `gpt-5.6-sol`"));
         assert!(first.contains("cost efficiency 9, intelligence 8, taste 6"));
@@ -5564,7 +5564,7 @@ mod tests {
 
         let codex =
             compose_orchestrate_text(ProviderKind::Codex, None, true, &settings, "Implement");
-        assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE));
+        assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE.trim()));
         assert!(codex.ends_with("\n\nImplement"));
         assert!(codex.contains("Generic lead"));
 
@@ -5575,7 +5575,7 @@ mod tests {
             &settings,
             "Coordinate",
         );
-        assert!(acp.starts_with(GENERIC_ORCHESTRATE_GUIDANCE));
+        assert!(acp.starts_with(GENERIC_ORCHESTRATE_GUIDANCE.trim()));
         assert!(acp.contains("Generic lead"));
     }
 
