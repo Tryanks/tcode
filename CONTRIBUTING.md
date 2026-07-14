@@ -104,11 +104,25 @@ cargo run -- --debug-edit-resend "Create edited.txt containing bye."
 ## Code layout
 
 ```
-crates/agent         provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
-crates/term          terminal drawer (PTY)
-crates/preview-mcp   MCP server exposing the preview browser to the agent
-src/                 the app — session store, timeline fold, GPUI surfaces
+crates/core              pure domain types and semantics
+crates/services          persistence, filesystem, process, git, import, and probes
+crates/runtime           session and provider lifecycle, queues, orchestration,
+                         terminals, and semantic events
+crates/i18n              the sole translation backend
+crates/ui                GPUI views, assets, presentation, and localized rendering
+crates/app/src/main.rs   the sole binary and composition root
+crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
+crates/term              terminal implementation (PTY)
+crates/preview-mcp       MCP server exposing the preview browser to the agent
+crates/orchestrate-mcp   MCP server for orchestration tools
 ```
+
+The dependency direction is strictly downward: `app -> ui/runtime/services/i18n`;
+`ui -> runtime/core/i18n`; `runtime -> services/core` and lower adapters such as
+`agent` and `term`; and `services -> core`. No lower layer depends upward.
+Runtime emits semantic events; UI owns their localization and presentation.
+`crates/app/src/main.rs` is the sole binary and composition root, so the normal
+workspace command remains `cargo run`.
 
 `crates/agent/src/lib.rs` is the contract between the two halves: every provider
 normalizes into one `AgentEvent` stream and accepts one `SessionCommand` enum, so
@@ -117,13 +131,13 @@ client — do it deliberately, and never land it without a full-workspace build.
 
 **Adding a provider** usually means writing one client in `crates/agent` that
 translates its wire protocol into `AgentEvent`, and nothing else. If you find
-yourself special-casing a provider inside `src/ui`, that's a sign the contract is
-missing something — say so in the PR.
+yourself special-casing a provider inside `crates/ui/src`, that's a sign the
+contract is missing something — say so in the PR.
 
 Never spawn a child process with `std::process::Command::new` directly: use the
-helpers in `src/process.rs` / `crates/agent/src/process.rs`, which suppress the
-console window on Windows and resolve binaries against `PATH`/`PATHEXT`. A test
-enforces this.
+process helpers in `crates/services/src/process.rs` and `crates/agent/src/process.rs`,
+which suppress the console window on Windows and resolve binaries
+against `PATH`/`PATHEXT`. A guard rejects direct `Command::new` usage.
 
 ## Review
 
