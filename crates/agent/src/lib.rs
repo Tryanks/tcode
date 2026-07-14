@@ -671,6 +671,9 @@ pub enum AgentEvent {
         markdown: String,
     },
     Warning(String),
+    /// A runtime-synthesized fatal provider startup failure persisted for replay.
+    #[rustfmt::skip]
+    ProviderStartFailed { error: String },
     Error {
         message: String,
         fatal: bool,
@@ -1198,6 +1201,32 @@ mod pathext_logic_tests {
             .unwrap()
             .as_nanos()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_start_failed_event_round_trips() {
+    let event = AgentEvent::ProviderStartFailed {
+        error: "spawn failed".into(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"provider_start_failed","error":"spawn failed"}"#
+    );
+    let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        decoded,
+        AgentEvent::ProviderStartFailed { error } if error == "spawn failed"
+    ));
+
+    let legacy = r#"{"type":"error","message":"boom","fatal":true}"#;
+    let decoded: AgentEvent = serde_json::from_str(legacy).unwrap();
+    assert!(matches!(
+        &decoded,
+        AgentEvent::Error { message, fatal: true } if message == "boom"
+    ));
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
 }
 
 #[cfg(test)]

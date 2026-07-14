@@ -136,18 +136,25 @@ Platform prerequisites, tests, headless smoke runs and provider probes are all i
 ## How it works
 
 ```
-crates/agent         provider layer — one canonical event model, three clients:
-                       claude.rs  bidirectional stream-json
-                       codex.rs   app-server JSON-RPC v2
-                       acp.rs     Agent Client Protocol
-crates/term          terminal drawer (PTY, alacritty)
-crates/preview-mcp   MCP server exposing the preview browser to the agent
-src/                 the app — session store, timeline fold, GPUI surfaces
+crates/core              pure domain types and semantics
+crates/services          persistence, filesystem, process, git, import, and probes
+crates/runtime           sessions, providers, queues, orchestration, terminals,
+                         and semantic events
+crates/i18n              the sole translation backend
+crates/ui                GPUI views, assets, presentation, and localized rendering
+crates/app/src/main.rs   the sole binary and composition root
+crates/agent             provider clients and their canonical event model
+crates/term              terminal implementation (PTY, alacritty)
+crates/preview-mcp       MCP server exposing the preview browser to the agent
+crates/orchestrate-mcp   MCP server for orchestration tools
 ```
 
-Every provider normalizes into a single event stream, so the UI never learns
-anything provider-shaped. Adding an agent means writing one client, not touching
-the app. [`docs/DESIGN.md`](docs/DESIGN.md) is the visual contract.
+The app composes these crates into the desktop application. Providers normalize
+their protocols into shared events; the runtime turns activity into semantic
+events, and the UI localizes and presents them without learning provider-shaped
+details. The normal source command remains `cargo run` because `crates/app` is
+the workspace's sole default binary package. [`docs/DESIGN.md`](docs/DESIGN.md)
+is the visual contract.
 
 ## Contributing
 

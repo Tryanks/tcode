@@ -1,0 +1,22 @@
+[package]
+name = "tcode-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agent = { path = "../agent" }
+async-channel = "2"
+gpui = { git = "https://github.com/zed-industries/zed" }
+log = "0.4"
+orchestrate-mcp = { path = "../orchestrate-mcp" }
+preview-mcp = { path = "../preview-mcp" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smol = "2"
+tcode-core = { path = "../core" }
+tcode-services = { path = "../services" }
+term = { path = "../term" }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
