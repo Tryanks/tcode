@@ -70,7 +70,8 @@ Canonical values live in `themes/tcode.json` (embedded at build time).
    Thread rows: single-line truncated title + relative time (muted 11px); hover = accent bg
    and time swaps to archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
-   "Show more" row.
+   "Show more" / "Show less" toggle row (the row remains available after
+   expansion so the list can be collapsed again).
 5. Footer: gear + "Settings" → settings route.
 
 ### Chat header
@@ -84,9 +85,11 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   typographic step down from the 15px bubble to the 11px uppercase "WORK LOG"
   label that opens the turn's activity.
 - Turn = "Work Log" section: 11px uppercase muted label; activity rows (muted ✓
-  + one-line summary; command/file/tool/reasoning); >3 rows → last 2 +
-  "+N previous log entrys" expander; footer "Worked for XmYYs ›" (collapsed by
-  default when finished, expanded live with "••• Working for Ns" ticking).
+  + one-line summary; command/file/tool/reasoning); >2 rows → last 2 +
+  "+N previous log entries" expander. Once expanded, that row becomes "Hide N
+  previous log entries" with an upward chevron so the rows can be collapsed
+  again. Footer "Worked for XmYYs ›" is collapsed by default when finished and
+  expanded live with "••• Working for Ns" ticking.
 - Assistant markdown 15px, relaxed line-height, inline code chips (mono 13,
   muted bg, 4px radius). Streaming appends via push_str with
   follow-when-near-bottom.
