@@ -3314,8 +3314,14 @@ fn render_model_pane(
                 && n >= 1
                 && n <= key_rows.len()
             {
-                let id = key_rows[n - 1].id.clone();
-                app_key.update(cx, |s, cx| s.set_active_model(Some(id), cx));
+                let row = key_rows[n - 1].clone();
+                app_key.update(cx, |s, cx| {
+                    if row.acp {
+                        s.set_active_acp_agent(&row.id, cx);
+                    } else {
+                        s.set_active_model(row.provider, Some(row.id), cx);
+                    }
+                });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
         })
@@ -3338,6 +3344,7 @@ fn render_model_row(
     let is_fav = !is_acp && app_entity.read(cx).is_favorite_model(&row.id);
     let name = row.name.clone();
     let id = row.id.clone();
+    let provider = row.provider;
     let fav_id = row.id.clone();
 
     let app_select = app_entity.clone();
@@ -3360,7 +3367,9 @@ fn render_model_row(
             if is_acp {
                 app_select.update(cx, |s, cx| s.set_active_acp_agent(&id, cx));
             } else {
-                app_select.update(cx, |s, cx| s.set_active_model(Some(id.clone()), cx));
+                app_select.update(cx, |s, cx| {
+                    s.set_active_model(provider, Some(id.clone()), cx)
+                });
             }
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })

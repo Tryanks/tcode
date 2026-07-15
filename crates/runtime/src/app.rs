@@ -4153,25 +4153,30 @@ impl AppState {
         cx.notify();
     }
 
-    /// Select `model` (None = provider default) for the active session and
-    /// persist it. Takes effect on the next provider (re)start; if a provider
-    /// is currently live, the next `send_turn` restarts it (see `send_turn`).
-    pub fn set_active_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+    /// Select a provider-owned `model` (None = provider default) for the active
+    /// session and persist it. On an unsent draft the model picker also selects
+    /// its provider; an established session remains bound to its provider.
+    /// Takes effect on the next provider (re)start; if a provider is currently
+    /// live, the next `send_turn` restarts it (see `send_turn`).
+    pub fn set_active_model(
+        &mut self,
+        provider: ProviderKind,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let store = self.store.clone();
         let Some(active) = self.active.as_mut() else {
             return;
         };
-        // In a draft the model picker also selects the provider (the picker is
-        // the provider selection): infer it from the chosen model. The draft is
-        // in-memory only, so update it without persisting to the index.
+        // In a draft the model picker is also the provider picker. The selected
+        // row carries its provider explicitly: model ids are provider-defined
+        // and custom ids cannot be classified safely from their spelling.
         if active.draft {
-            if active.meta.model == model {
+            if active.meta.provider == provider && active.meta.model == model {
                 return;
             }
-            if let Some(provider) = provider_for_model(model.as_deref()) {
-                active.meta.provider = provider;
-                active.meta.acp_agent_id = None;
-            }
+            active.meta.provider = provider;
+            active.meta.acp_agent_id = None;
             active.meta.model = model;
             // A different model has different option descriptors: drop stale
             // selections so each resolves to the new model's defaults.
@@ -4179,6 +4184,12 @@ impl AppState {
             active.provider_commands = store.load_commands(active.meta.provider, None);
             active.pending_ultrathink = false;
             cx.notify();
+            return;
+        }
+        // Native provider sessions have provider-specific resume cursors. The
+        // cross-provider rails are useful while composing a new draft, but must
+        // never assign (for example) a Claude model id to a live Codex thread.
+        if active.meta.provider != provider {
             return;
         }
         if active.meta.model == model {
@@ -5544,9 +5555,6 @@ fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
     Some(gpui::rgb(value))
 }
 
-/// Map a model id to its provider, for the draft model-picker → provider link.
-/// `None` (the "Default" row, a Claude entry) and the Claude model ids map to
-/// Claude; the `gpt-*` ids to Codex. Unknown custom ids leave it unchanged.
 /// A stable settings key for a user-defined ACP agent, derived from its name.
 fn custom_acp_id(name: &str) -> String {
     let slug: String = name
@@ -5560,15 +5568,6 @@ fn custom_acp_id(name: &str) -> String {
         })
         .collect();
     format!("custom:{}", slug.trim_matches('-'))
-}
-
-fn provider_for_model(model: Option<&str>) -> Option<ProviderKind> {
-    match model {
-        None => Some(ProviderKind::ClaudeCode),
-        Some("opus" | "sonnet" | "haiku") => Some(ProviderKind::ClaudeCode),
-        Some(m) if m.starts_with("gpt") => Some(ProviderKind::Codex),
-        Some(_) => None,
-    }
 }
 
 /// A filesystem-safe filename fragment: replace path separators and control
@@ -6441,6 +6440,48 @@ mod tests {
                 draft.meta.option_selections[0].value,
                 serde_json::json!("high")
             );
+            assert!(state.store.load_index().is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn draft_model_selection_switches_to_the_rows_explicit_provider(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-draft-provider-selection-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut previous = SessionMeta::new(
+                ProviderKind::Codex,
+                PathBuf::from("/tmp/previous"),
+                Some("gpt-5.6-sol".into()),
+            );
+            previous.project_id = Some("project-target".into());
+            previous.option_selections.push(OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("high"),
+            });
+            state.sessions = vec![previous];
+            state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
+
+            let draft = state.active.as_ref().unwrap();
+            assert_eq!(draft.meta.provider, ProviderKind::Codex);
+            assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
+
+            // `claude-fable-5` cannot be reliably classified by a hard-coded
+            // model-name heuristic. The provider comes from its picker row.
+            state.set_active_model(ProviderKind::ClaudeCode, Some("claude-fable-5".into()), cx);
+
+            let draft = state.active.as_ref().unwrap();
+            assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
+            assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5"));
+            assert!(draft.meta.acp_agent_id.is_none());
+            assert!(draft.meta.option_selections.is_empty());
             assert!(state.store.load_index().is_empty());
         });
 
