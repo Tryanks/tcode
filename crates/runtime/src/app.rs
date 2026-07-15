@@ -5339,7 +5339,10 @@ impl AppState {
     }
 }
 
-const CLAUDE_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/claude.md");
+// Named fable.md: on case-insensitive filesystems a claude.md here collides
+// with the CLAUDE.md project-memory convention and gets auto-ingested by
+// Claude Code sessions working on this repo.
+const FABLE_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/fable.md");
 const CODEX_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/codex.md");
 const GENERIC_ORCHESTRATE_GUIDANCE: &str = include_str!("../../../assets/orchestrate/generic.md");
 
@@ -5351,7 +5354,7 @@ fn compose_orchestrate_text(
     user_text: &str,
 ) -> String {
     let base_guidance = match provider {
-        ProviderKind::ClaudeCode => CLAUDE_ORCHESTRATE_GUIDANCE,
+        ProviderKind::ClaudeCode => FABLE_ORCHESTRATE_GUIDANCE,
         ProviderKind::Codex => CODEX_ORCHESTRATE_GUIDANCE,
         ProviderKind::Acp => GENERIC_ORCHESTRATE_GUIDANCE,
     };
@@ -6172,7 +6175,7 @@ mod tests {
             &settings,
             "Ship it",
         );
-        assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE.trim()));
+        assert!(first.starts_with(FABLE_ORCHESTRATE_GUIDANCE.trim()));
         assert!(first.contains("wise owl"));
         assert!(first.contains("#### `codex` / `gpt-5.6-sol` — effort `medium`"));
         assert!(first.contains("cost efficiency 9, intelligence 8, taste 6"));
@@ -6185,7 +6188,7 @@ mod tests {
             &settings,
             "Follow up",
         );
-        assert!(!follow_up.contains(CLAUDE_ORCHESTRATE_GUIDANCE));
+        assert!(!follow_up.contains(FABLE_ORCHESTRATE_GUIDANCE));
         assert!(follow_up.starts_with("## Current orchestrator configuration"));
         assert!(follow_up.contains("Generic lead"));
         assert!(follow_up.ends_with("\n\nFollow up"));
