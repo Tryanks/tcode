@@ -205,6 +205,7 @@ impl Render for ProviderModelPicker {
                 if available.is_empty() {
                     rows = rows.child(
                         div()
+                            .flex_none()
                             .p_4()
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
@@ -220,6 +221,7 @@ impl Render for ProviderModelPicker {
                         rows = rows.child(
                             h_flex()
                                 .id(("settings-model-option", index))
+                                .flex_none()
                                 .w_full()
                                 .px_2()
                                 .py_1p5()
@@ -299,11 +301,11 @@ impl Render for ProviderModelPicker {
                 }
 
                 v_flex().w(px(390.)).child(tabs).child(
-                    v_flex()
+                    div()
                         .w_full()
                         .h(px(300.))
                         .overflow_y_scrollbar()
-                        .child(rows),
+                        .child(div().size_full().child(rows)),
                 )
             })
     }

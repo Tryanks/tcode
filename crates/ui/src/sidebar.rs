@@ -1156,16 +1156,10 @@ impl Render for SessionsSidebar {
             (state.grouped_sessions(), active_id, turn_running)
         };
 
-        let mut list = v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .px_2()
-            .pb_2()
-            .gap(px(2.));
+        let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
 
         if groups.is_empty() {
-            list = list.child(
+            list_content = list_content.child(
                 div()
                     .px_2()
                     .py_3()
@@ -1175,9 +1169,21 @@ impl Render for SessionsSidebar {
             );
         } else {
             for group in &groups {
-                list = list.child(self.render_group(group, active_id.as_deref(), turn_running, cx));
+                list_content = list_content.child(self.render_group(
+                    group,
+                    active_id.as_deref(),
+                    turn_running,
+                    cx,
+                ));
             }
         }
+
+        let list = div()
+            .id("sidebar-project-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(div().size_full().child(list_content));
 
         v_flex()
             .size_full()
