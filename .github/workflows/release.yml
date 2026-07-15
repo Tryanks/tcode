@@ -83,6 +83,7 @@ jobs:
       CARGO_PROFILE_RELEASE_STRIP: symbols
       VERSION: ${{ needs.setup.outputs.version }}
       RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+      PRERELEASE: ${{ needs.setup.outputs.prerelease }}
 
     steps:
       - uses: actions/checkout@v7
@@ -215,6 +216,56 @@ jobs:
         shell: bash
         run: ls -lh dist
 
+      - name: Create release if needed and publish package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          notes_file="$(mktemp)"
+          cat > "$notes_file" <<'NOTES'
+          ## Platform notes
+
+          - **macOS 12+**: these test builds are not signed or notarized. After moving the app to Applications, clear Gatekeeper quarantine with:
+
+            `xattr -dr com.apple.quarantine /Applications/Tcode.app`
+
+          - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
+          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
+
+          Packages are uploaded as soon as each platform build completes. macOS artifacts are
+          architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently
+          produced. `SHA256SUMS.txt` is added after every platform package has finished.
+          NOTES
+
+          prerelease_args=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            prerelease_args+=(--prerelease)
+          fi
+
+          if ! gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            if ! gh release create "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --verify-tag \
+              --title "$RELEASE_TAG" \
+              --generate-notes \
+              --notes-file "$notes_file" \
+              "${prerelease_args[@]}"; then
+              # Another matrix job may have won the create race. Give the API a
+              # moment to expose that release, but fail if it never appears.
+              for _ in {1..6}; do
+                gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1 && break
+                sleep 2
+              done
+              gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null
+            fi
+          fi
+
+          gh release upload "$RELEASE_TAG" dist/* \
+            --repo "$REPOSITORY" \
+            --clobber
+
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
         with:
@@ -226,8 +277,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Publish GitHub Release
+  finalize:
+    name: Publish release checksums
     needs: [setup, package]
     runs-on: ubuntu-24.04
     steps:
@@ -245,24 +296,19 @@ jobs:
         working-directory: dist
         run: sha256sum * > SHA256SUMS.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.setup.outputs.tag }}
-          prerelease: ${{ needs.setup.outputs.prerelease }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: dist/*
-          body: |
-            ## Platform notes
+      - name: Upload aggregate checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release upload "$RELEASE_TAG" dist/SHA256SUMS.txt \
+            --repo "$REPOSITORY" \
+            --clobber
 
-            - **macOS 12+**: these test builds are not signed or notarized. After moving the app to Applications, clear Gatekeeper quarantine with:
-
-              `xattr -dr com.apple.quarantine /Applications/Tcode.app`
-
-            - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
-            - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
-
-            All packages include the native Tcode application icon. macOS artifacts are
-            architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not
-            currently produced. Verify downloads with `SHA256SUMS.txt`.
+      - name: Show published release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.setup.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name'
