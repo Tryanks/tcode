@@ -29,6 +29,9 @@ use crate::provider_models::{
 use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
 use crate::settings::{ACCENT_PRESETS, EnvVar, ProviderSettings};
 
+/// Claude's official Clay brand color from Anthropic's media resources.
+pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
+
 /// One environment-variable row's live inputs.
 struct EnvRowState {
     name: Entity<InputState>,
@@ -467,15 +470,16 @@ impl ProviderCard {
             StatusDot::Amber => rgb(0xf59e0b).into(),
         };
 
+        let provider_icon = provider_glyph(provider).small();
+        let provider_icon = match accent {
+            Some(accent) => provider_icon.text_color(accent),
+            None => provider_icon,
+        };
         let glyph = div()
             .relative()
             .flex_none()
             .size(px(20.))
-            .child(
-                provider_glyph(provider)
-                    .small()
-                    .text_color(accent.map(Into::into).unwrap_or(cx.theme().foreground)),
-            )
+            .child(provider_icon)
             .child(
                 div()
                     .absolute()
@@ -1158,7 +1162,9 @@ fn tag(label: String, cx: &Context<ProviderCard>) -> AnyElement {
 /// The provider's glyph (the same asset the composer's picker rail uses).
 pub fn provider_glyph(provider: ProviderKind) -> Icon {
     match provider {
-        ProviderKind::ClaudeCode => Icon::empty().path("icons/claude.svg"),
+        ProviderKind::ClaudeCode => Icon::empty()
+            .path("icons/claude.svg")
+            .text_color(rgb(CLAUDE_BRAND_COLOR)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
         ProviderKind::Acp => Icon::empty(),
     }

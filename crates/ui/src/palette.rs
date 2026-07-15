@@ -14,7 +14,7 @@ use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
@@ -24,6 +24,7 @@ use gpui_component::{
 
 use tcode_runtime::app::AppState;
 
+use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
 use crate::time::now_secs;
@@ -55,9 +56,6 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     (qi == q.len()).then_some(score)
 }
 
-/// Claude's warm brand tint for its glyph.
-const CLAUDE_TINT: u32 = 0xD97757;
-
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
@@ -74,19 +72,6 @@ enum Action {
     OpenThread {
         session_id: String,
     },
-}
-
-/// The provider glyph (Claude starburst / Codex OpenAI mark) for a result row.
-fn provider_glyph(provider: ProviderKind) -> Icon {
-    match provider {
-        ProviderKind::ClaudeCode => Icon::empty()
-            .path("icons/claude.svg")
-            .text_color(rgb(CLAUDE_TINT)),
-        ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
-        ProviderKind::Acp => Icon::empty(),
-        // Installed ACP agents render the registry's own icon where we have
-        // it; the rail falls back to this generic mark.
-    }
 }
 
 /// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
