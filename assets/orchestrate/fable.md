@@ -20,7 +20,7 @@ The fleet table below is the authoritative allow list — user-configured profil
 
 - `dispatch {provider, model?, effort?, access?, title, brief, cwd?}` → creates a child thread, sends `brief` as its first message, returns `thread_id`. The child appears in the user's sidebar; they can watch it live. `model` + `effort` must name an enabled profile exactly as listed in the fleet table (omit both to get the provider's first enabled profile). `access` gates what the child may do: `read_only` for reviews and investigation (the child cannot change files; anything beyond that pauses for user approval), `workspace_write` for implementation with edits auto-approved inside the workspace, `full` (default) for no prompts.
 - `status {thread_id?}` → running/completed/failed, an output tail, and token usage. Omit `thread_id` for all your children.
-- `send {thread_id, message}` → follow-up message to a child (feedback, one focused retry). Prefer this over dispatching a fresh child when the child's context is useful.
+- `send {thread_id, message}` → follow-up message to a child (feedback, a mid-course correction, one focused retry). Steered into the child's live turn immediately when one is running, otherwise sent as its next turn — the response says which. Prefer this over dispatching a fresh child when the child's context is useful.
 - `result {thread_id}` → the completed child's full final message plus token usage.
 - `cancel {thread_id}` → stop a child.
 

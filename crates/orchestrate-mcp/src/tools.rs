@@ -98,7 +98,9 @@ impl OrchestrateTools {
             .await)
     }
 
-    #[tool(description = "Send a follow-up message to one of this session's child threads.")]
+    #[tool(
+        description = "Send a follow-up message to one of this session's child threads. If the child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response reports which (delivery: steered | queued)."
+    )]
     async fn send(
         &self,
         Parameters(p): Parameters<SendParams>,

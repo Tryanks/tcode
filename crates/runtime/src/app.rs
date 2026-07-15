@@ -1084,6 +1084,35 @@ impl AppState {
                 message,
             } => {
                 self.require_child(&parent_id, &thread_id)?;
+                // A live turn accepts the message right away — same routing as
+                // parent callbacks. Queueing a mid-turn correction until the
+                // turn ends would deliver it after the work it was meant to
+                // redirect (and never, if the turn hangs).
+                let can_steer = self
+                    .active
+                    .as_ref()
+                    .filter(|child| child.meta.id == thread_id)
+                    .or_else(|| self.background.get(&thread_id))
+                    .is_some_and(|child| child.turn_in_flight && child.supports_steering());
+                if can_steer {
+                    let request_id = self.record_steer_request(&thread_id, &message, cx);
+                    let sent = self
+                        .active
+                        .as_mut()
+                        .filter(|child| child.meta.id == thread_id)
+                        .or_else(|| self.background.get_mut(&thread_id))
+                        .is_some_and(|child| {
+                            child
+                                .steer_now(request_id, message.clone(), Vec::new())
+                                .is_ok()
+                        });
+                    if sent {
+                        cx.notify();
+                        return Ok(serde_json::json!({ "ok": true, "delivery": "steered" }));
+                    }
+                    // Provider channel gone: fall through so the text survives
+                    // in the queue for the wake-up path.
+                }
                 if self.active_session_id() == Some(&thread_id) {
                     let child = self.active.as_mut().unwrap();
                     child.push_queued(message, Vec::new());
@@ -1094,7 +1123,7 @@ impl AppState {
                     if idle {
                         self.ensure_started(cx);
                     }
-                    return Ok(serde_json::json!({ "ok": true }));
+                    return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                 }
                 self.ensure_child_loaded(&thread_id)?;
                 let child = self.background.get_mut(&thread_id).unwrap();
@@ -1106,7 +1135,7 @@ impl AppState {
                 if idle {
                     self.ensure_session_started(&thread_id, cx);
                 }
-                Ok(serde_json::json!({ "ok": true }))
+                Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
             }
             OrchestrateOp::Result {
                 parent_id,
