@@ -37,6 +37,7 @@ use crate::composer_trigger::{
 };
 use crate::context_meter;
 use crate::palette::fuzzy_score;
+use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{image_only_message, validate_attachment};
 use tcode_core::session::append_review_comments_to_prompt;
@@ -94,8 +95,6 @@ pub(crate) fn append_terminal_contexts_to_prompt(
     }
 }
 
-/// Claude's warm brand tint for the starburst glyph.
-const CLAUDE_TINT: u32 = 0xD97757;
 /// T3's circular stop button red-orange.
 const STOP_TINT: u32 = 0xF4562E;
 /// Below this measured control-row width the row collapses its context /
@@ -144,19 +143,6 @@ fn provider_short(provider: ProviderKind) -> &'static str {
         ProviderKind::ClaudeCode => "Claude",
         ProviderKind::Codex => "Codex",
         ProviderKind::Acp => "ACP",
-    }
-}
-
-/// The provider glyph (Claude starburst / Codex OpenAI mark).
-fn provider_glyph(provider: ProviderKind) -> Icon {
-    match provider {
-        ProviderKind::ClaudeCode => Icon::empty()
-            .path("icons/claude.svg")
-            .text_color(rgb(CLAUDE_TINT)),
-        ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
-        ProviderKind::Acp => Icon::empty(),
-        // Installed ACP agents render the registry's own icon where we have
-        // it; the rail falls back to this generic mark.
     }
 }
 
@@ -3314,8 +3300,14 @@ fn render_model_pane(
                 && n >= 1
                 && n <= key_rows.len()
             {
-                let id = key_rows[n - 1].id.clone();
-                app_key.update(cx, |s, cx| s.set_active_model(Some(id), cx));
+                let row = key_rows[n - 1].clone();
+                app_key.update(cx, |s, cx| {
+                    if row.acp {
+                        s.set_active_acp_agent(&row.id, cx);
+                    } else {
+                        s.set_active_model(row.provider, Some(row.id), cx);
+                    }
+                });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
         })
@@ -3338,6 +3330,7 @@ fn render_model_row(
     let is_fav = !is_acp && app_entity.read(cx).is_favorite_model(&row.id);
     let name = row.name.clone();
     let id = row.id.clone();
+    let provider = row.provider;
     let fav_id = row.id.clone();
 
     let app_select = app_entity.clone();
@@ -3360,7 +3353,9 @@ fn render_model_row(
             if is_acp {
                 app_select.update(cx, |s, cx| s.set_active_acp_agent(&id, cx));
             } else {
-                app_select.update(cx, |s, cx| s.set_active_model(Some(id.clone()), cx));
+                app_select.update(cx, |s, cx| {
+                    s.set_active_model(provider, Some(id.clone()), cx)
+                });
             }
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })
@@ -3422,7 +3417,7 @@ fn render_model_row(
                     })
                     .xsmall()
                     .text_color(if is_fav {
-                        rgb(CLAUDE_TINT).into()
+                        rgb(CLAUDE_BRAND_COLOR).into()
                     } else {
                         muted
                     }),
