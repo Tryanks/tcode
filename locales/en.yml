@@ -188,7 +188,7 @@ orchestrate:
     use_generic: "Remove override and use the generic identity"
   children:
     title: "Allowed child models"
-    description: "Keep a routing definition for each child model and switch it on only when /orchestrate may dispatch work to it. Built-in definitions include the default ratings and recommended effort as editable text."
+    description: "Keep one routing profile per child model and effort tier; the same model may appear once per tier, and each profile pins the effort it dispatches at. Switch a profile on only when /orchestrate may use it."
     add: "Add child model"
     empty: "No child-model profiles are configured. /orchestrate remains available, but dispatch calls will be rejected until a child model is added."
     none_enabled: "Every child-model profile is switched off. /orchestrate can still plan, but all dispatch calls will be rejected."
@@ -196,6 +196,9 @@ orchestrate:
     disabled: "Paused"
     enable: "Allow /orchestrate to dispatch to this model"
     disable: "Pause dispatch while keeping this model's definition"
+    effort_label: "Dispatch effort"
+    effort_placeholder: "provider default"
+    effort_default: "provider default"
     description_placeholder: "Define this model's ratings, strengths, best-fit tasks, caveats, recommended effort, and escalation role…"
     remove: "Delete this child-model profile"
   no_more_models: "All available provider models are already configured. Add custom model slugs under Providers to expose more choices."

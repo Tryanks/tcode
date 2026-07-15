@@ -91,9 +91,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::PersistSessionIndex { error } => {
                     tcode_i18n::tr!("errors.persist_session_index", error = error).into_owned()
                 }
-                RuntimeError::OrchestrateCallbackLimit { parent_id, cap } => format!(
-                    "Orchestrate callback limit ({cap}) reached for thread {parent_id}; automatic callbacks stopped."
-                ),
             };
             (RuntimeEventSeverity::Error, message)
         }
@@ -322,10 +319,6 @@ mod tests {
             },
             RuntimeError::ProviderClosed { reason: None },
             RuntimeError::PersistSessionIndex { error: "x".into() },
-            RuntimeError::OrchestrateCallbackLimit {
-                parent_id: "parent".into(),
-                cap: 100,
-            },
             RuntimeError::ProviderMessage("provider-error\0diagnostic".into()),
         ];
         let notices = vec![
