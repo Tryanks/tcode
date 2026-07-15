@@ -1017,6 +1017,7 @@ impl DiffPanel {
                         let session = session_for.clone();
                         h_flex()
                             .id(id)
+                            .flex_none()
                             .w_full()
                             .px_2()
                             .py_1()
@@ -1046,8 +1047,8 @@ impl DiffPanel {
                             })
                     };
                 let mut list = v_flex()
+                    .w_full()
                     .p_1()
-                    .min_w(px(190.))
                     .gap_0p5()
                     .child(scope_row(
                         "diff-scope-working",
@@ -1063,6 +1064,7 @@ impl DiffPanel {
                     ))
                     .child(
                         div()
+                            .flex_none()
                             .px_2()
                             .pt_2()
                             .pb_1()
@@ -1079,6 +1081,7 @@ impl DiffPanel {
                     list = list.child(
                         h_flex()
                             .id(("diff-turn-item", turn))
+                            .flex_none()
                             .w_full()
                             .px_2()
                             .py_1()
@@ -1111,7 +1114,12 @@ impl DiffPanel {
                             }),
                     );
                 }
-                list
+                div()
+                    .id("diff-turn-list")
+                    .min_w(px(190.))
+                    .max_h(px(320.))
+                    .overflow_y_scroll()
+                    .child(list)
             });
 
         let wrap_on = self.wrap;
@@ -1203,7 +1211,7 @@ impl DiffPanel {
                 .icon(IconName::ChevronDown);
             toolbar = toolbar.child(Popover::new("diff-base-popover").trigger(trigger).content(
                 move |_, _, cx| {
-                    let mut list = v_flex().p_1().min_w(px(180.)).gap_0p5();
+                    let mut list = v_flex().w_full().p_1().gap_0p5();
                     for (branch_index, branch) in branches.clone().into_iter().enumerate() {
                         let panel = panel.clone();
                         let session = session_base.clone();
@@ -1212,6 +1220,7 @@ impl DiffPanel {
                         list = list.child(
                             h_flex()
                                 .id(("diff-base-item", branch_index))
+                                .flex_none()
                                 .w_full()
                                 .px_2()
                                 .py_1()
@@ -1237,7 +1246,12 @@ impl DiffPanel {
                                 }),
                         );
                     }
-                    list
+                    div()
+                        .id("diff-base-list")
+                        .min_w(px(180.))
+                        .max_h(px(280.))
+                        .overflow_y_scroll()
+                        .child(list)
                 },
             ));
         }

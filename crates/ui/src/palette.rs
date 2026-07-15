@@ -399,18 +399,12 @@ impl Render for CommandPalette {
         let muted = cx.theme().muted_foreground;
 
         // Build the result list, tracking a running flat index for highlight.
-        let mut list = v_flex()
-            .id("palette-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px_2()
-            .py_2()
-            .gap_1();
+        let mut list_content = v_flex().w_full().px_2().py_2().gap_1();
         let mut flat = 0usize;
         for group in &groups {
-            list = list.child(
+            list_content = list_content.child(
                 div()
+                    .flex_none()
                     .px_2()
                     .pt_1()
                     .text_size(px(11.))
@@ -423,9 +417,10 @@ impl Render for CommandPalette {
                 flat += 1;
                 let is_sel = index == self.selected;
                 let action = item.action.clone();
-                list = list.child(
+                list_content = list_content.child(
                     h_flex()
                         .id(("palette-row", index))
+                        .flex_none()
                         .w_full()
                         .h(px(38.))
                         .px_2()
@@ -481,8 +476,9 @@ impl Render for CommandPalette {
             }
         }
         if total == 0 {
-            list = list.child(
+            list_content = list_content.child(
                 div()
+                    .flex_none()
                     .px_2()
                     .py_4()
                     .text_size(px(13.))
@@ -490,6 +486,12 @@ impl Render for CommandPalette {
                     .child(tcode_i18n::tr!("palette.no_matches")),
             );
         }
+        let list = div()
+            .id("palette-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(list_content);
 
         // Centered modal card, anchored ~15% from the top over a dim backdrop.
         let card = v_flex()
