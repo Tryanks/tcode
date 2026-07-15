@@ -211,6 +211,8 @@ const DEFAULT_ORCHESTRATOR_IDENTITY: &str = "You are the primary decision model 
 
 const DEFAULT_FABLE_IDENTITY: &str = "You are Fable 5, the scarcest judgment resource in this fleet: a wise owl—thoughtful, discerning, and exceptionally strong at framing, architecture, taste, and clear communication. Spend that judgment on understanding, delegation, review, and final acceptance rather than routine typing. Use high effort by default; deeper tiers usually consume more of the fleet's bottleneck without improving your decisions.";
 
+const DEFAULT_SOL_IDENTITY: &str = "You are gpt-5.6-sol, the fleet's relentless closer: a rottweiler with an articulate report—tenacious, disciplined, and exceptional on hard, well-defined problems. As the lead, run at max effort: decision quality, not tokens, is the bottleneck in this seat. Point that tenacity at understanding, decomposition, acceptance criteria, and verification rather than typing; and since taste is not your strongest suit, route taste-critical surfaces (UI, copy, API design) to a high-taste child or flag them to the user instead of powering through.";
+
 const DEFAULT_GPT_MEDIUM_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 9, intelligence 8, taste 6. The default profile for everything dispatched: bulk or mechanical implementation against a written brief, closed-form debugging with a repro, migrations, data analysis, reviews, sweeps, computer use and eyes-on-screen verification, and token-heavy log or codebase crawls. Extremely steerable and disciplined: respects scope fences, does not weaken tests, reports accurately. Measured equal to its higher efforts on spec-driven work — escalate only after this profile demonstrably misses on a specific piece and the gap looks like depth, not a bad brief.";
 const DEFAULT_GPT_MAX_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 6, intelligence 9, taste 7. Exception tier — near the top judgment model's raw problem-solving at a fraction of the token cost, with a rottweiler temperament: grabs the problem by the throat and doesn't let go. Route it hard, well-defined problems that reward tenacity or depth: gnarly bugs with a repro, long autonomous grinds, brute-force search of a solution space, open-ended polish passes. Two measured caveats: wall-clock latency is 5–6x the medium profile, so keep it off any pipeline's critical path; and on closed-form bug fixes it produces the same fix as medium at 1.5–3x the cost. Taste 7 clears the bar for internal tools and dashboards; keep brand- or copy-critical surfaces on a taste-8+ model.";
 const DEFAULT_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 5, intelligence 5, taste 7. Cheap glue — wrappers, chores, and context gathering that does not require top-tier judgment.";
@@ -240,11 +242,18 @@ impl Default for OrchestrateSettings {
     fn default() -> Self {
         Self {
             generic_identity: default_orchestrator_identity(),
-            model_identities: vec![OrchestratorIdentity {
-                provider: ProviderKind::ClaudeCode,
-                model: "claude-fable-5".into(),
-                identity: DEFAULT_FABLE_IDENTITY.into(),
-            }],
+            model_identities: vec![
+                OrchestratorIdentity {
+                    provider: ProviderKind::ClaudeCode,
+                    model: "claude-fable-5".into(),
+                    identity: DEFAULT_FABLE_IDENTITY.into(),
+                },
+                OrchestratorIdentity {
+                    provider: ProviderKind::Codex,
+                    model: "gpt-5.6-sol".into(),
+                    identity: DEFAULT_SOL_IDENTITY.into(),
+                },
+            ],
             child_models: vec![
                 OrchestrateChildModel {
                     provider: ProviderKind::Codex,
@@ -313,6 +322,7 @@ impl OrchestrateSettings {
     pub fn builtin_identity_for(provider: ProviderKind, model: &str) -> &'static str {
         match (provider, model) {
             (ProviderKind::ClaudeCode, "claude-fable-5") => DEFAULT_FABLE_IDENTITY,
+            (ProviderKind::Codex, "gpt-5.6-sol") => DEFAULT_SOL_IDENTITY,
             _ => DEFAULT_ORCHESTRATOR_IDENTITY,
         }
     }
@@ -594,6 +604,12 @@ mod tests {
             settings
                 .identity_for(ProviderKind::ClaudeCode, Some("claude-fable-5"))
                 .contains("wise owl")
+        );
+        assert!(
+            settings
+                .identity_for(ProviderKind::Codex, Some("gpt-5.6-sol"))
+                .contains("rottweiler"),
+            "gpt-5.6-sol is the other model bundled with a dedicated lead identity"
         );
         assert_eq!(
             settings.identity_for(ProviderKind::ClaudeCode, Some("claude-opus-4-8")),
