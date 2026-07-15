@@ -7999,6 +7999,7 @@ name = "tcode"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "embed-resource",
  "env_logger",
  "gpui",
  "gpui-component",

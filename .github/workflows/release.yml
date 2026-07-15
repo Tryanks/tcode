@@ -125,7 +125,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="dist/tcode.app"
+          app="dist/Tcode.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dmg-root
           cp "target/${{ matrix.target }}/release/tcode" "$app/Contents/MacOS/tcode"
           cp assets/icons/app/tcode.icns "$app/Contents/Resources/tcode.icns"
@@ -135,13 +135,15 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
             <key>CFBundleExecutable</key><string>tcode</string>
-            <key>CFBundleIconFile</key><string>tcode</string>
+            <key>CFBundleIconFile</key><string>tcode.icns</string>
             <key>CFBundleIdentifier</key><string>com.tryanks.tcode</string>
-            <key>CFBundleName</key><string>tcode</string>
-            <key>CFBundleDisplayName</key><string>tcode</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>Tcode</string>
+            <key>CFBundleDisplayName</key><string>Tcode</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
@@ -151,10 +153,10 @@ jobs:
             "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
           cp -R "$app" dmg-root/
           ln -s /Applications dmg-root/Applications
-          hdiutil create -volname tcode -srcfolder "$PWD/dmg-root" -ov \
+          hdiutil create -volname Tcode -srcfolder "$PWD/dmg-root" -ov \
             -fs HFS+ -format UDZO \
             "$PWD/dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
-          rm -rf "dist/tcode.app" dmg-root
+          rm -rf "dist/Tcode.app" dmg-root
 
       - name: Package Windows zip
         if: matrix.platform == 'windows'
@@ -164,7 +166,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\tcode.exe" "$stage\tcode.exe"
           @"
-          tcode $env:VERSION
+          Tcode $env:VERSION
 
           Microsoft Edge WebView2 Runtime is required (included with Windows 11).
           "@ | Set-Content "$stage\README.txt"
@@ -177,22 +179,30 @@ jobs:
         run: |
           set -euo pipefail
           stage="dist/tcode-${VERSION}-linux-${{ matrix.arch }}"
-          mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/tcode" "$stage/tcode"
-          cp assets/icons/app/tcode.png "$stage/tcode.png"
-          chmod +x "$stage/tcode"
-          cat > "$stage/com.tryanks.tcode.desktop" <<DESKTOP
+          mkdir -p \
+            "$stage/bin" \
+            "$stage/share/applications" \
+            "$stage/share/icons/hicolor/1024x1024/apps"
+          cp "target/${{ matrix.target }}/release/tcode" "$stage/bin/tcode"
+          cp assets/icons/app/tcode.png \
+            "$stage/share/icons/hicolor/1024x1024/apps/com.tryanks.tcode.png"
+          chmod +x "$stage/bin/tcode"
+          cat > "$stage/share/applications/com.tryanks.tcode.desktop" <<DESKTOP
           [Desktop Entry]
           Type=Application
-          Name=tcode
+          Name=Tcode
           Comment=Desktop coding agent client
           Exec=tcode
-          Icon=tcode
+          Icon=com.tryanks.tcode
           Terminal=false
           Categories=Development;
+          StartupWMClass=tcode
           DESKTOP
           cat > "$stage/README.txt" <<README
-          tcode ${VERSION}
+          Tcode ${VERSION}
+
+          Install for all users with:
+            sudo cp -R bin share /usr/local/
 
           Runtime requirements include ALSA, Fontconfig, Wayland/X11 libraries,
           libgbm, and a Vulkan loader plus a working Vulkan ICD/graphics driver.
@@ -231,6 +241,10 @@ jobs:
       - name: Show release files
         run: ls -lh dist
 
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -244,9 +258,11 @@ jobs:
 
             - **macOS 12+**: these test builds are not signed or notarized. After moving the app to Applications, clear Gatekeeper quarantine with:
 
-              `xattr -dr com.apple.quarantine /Applications/tcode.app`
+              `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
             - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
             - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
 
-            macOS artifacts are architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently produced.
+            All packages include the native Tcode application icon. macOS artifacts are
+            architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not
+            currently produced. Verify downloads with `SHA256SUMS.txt`.
