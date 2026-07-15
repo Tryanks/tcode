@@ -12,6 +12,7 @@ pub enum OrchestrateOp {
         provider: String,
         model: Option<String>,
         effort: Option<String>,
+        access: Option<String>,
         title: String,
         brief: String,
         cwd: Option<String>,

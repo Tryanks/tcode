@@ -25,7 +25,7 @@ pub(crate) struct ModelOption {
     pub provider: ProviderKind,
     pub id: String,
     pub name: String,
-    pub default_effort: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,7 +120,7 @@ impl ProviderModelPicker {
         for provider in [ProviderKind::Codex, ProviderKind::ClaudeCode] {
             let catalog = state.models_for(provider);
             for model in state.resolved_models(provider) {
-                let default_effort = catalog
+                let effort = catalog
                     .iter()
                     .find(|spec| spec.id == model.id)
                     .and_then(default_reasoning_effort);
@@ -128,7 +128,7 @@ impl ProviderModelPicker {
                     provider,
                     id: model.id,
                     name: model.name,
-                    default_effort,
+                    effort,
                 });
             }
         }

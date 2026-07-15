@@ -165,9 +165,12 @@ pub struct OrchestratorIdentity {
     pub identity: String,
 }
 
-/// One model the orchestrator may dispatch work to. Profiles stay in this list
-/// while paused so their editable routing definition is preserved; `enabled`
-/// is the actual allow-list decision.
+/// One (model, effort) profile the orchestrator may dispatch work to. The same
+/// model may appear several times at different efforts (e.g. `gpt-5.6-sol` at
+/// medium as the bulk tier and at max as the exception tier), each with its own
+/// routing definition. Profiles stay in this list while paused so their
+/// editable routing definition is preserved; `enabled` is the actual allow-list
+/// decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrchestrateChildModel {
     pub provider: ProviderKind,
@@ -176,22 +179,43 @@ pub struct OrchestrateChildModel {
     /// dispatch and are omitted from the lead model's available-fleet table.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Effort used when a dispatch omits one. Callers may still explicitly pick
-    /// another effort supported by the model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_effort: Option<String>,
+    /// The reasoning effort this profile dispatches at; `None` = provider
+    /// default. Part of the allow-list key: a dispatch naming an effort must
+    /// match an enabled profile with that effort.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "default_effort"
+    )]
+    pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+}
+
+impl OrchestrateChildModel {
+    /// Whether a dispatch-supplied effort selects this profile. `None` selects
+    /// any profile for the model; a named effort must match exactly
+    /// (case-insensitive).
+    pub fn matches_effort(&self, effort: Option<&str>) -> bool {
+        match effort {
+            None => true,
+            Some(effort) => self
+                .effort
+                .as_deref()
+                .is_some_and(|own| own.eq_ignore_ascii_case(effort.trim())),
+        }
+    }
 }
 
 const DEFAULT_ORCHESTRATOR_IDENTITY: &str = "You are the primary decision model and technical lead for this session. Your leverage is judgment: understand the problem, frame it well, decompose it, define done, route work to the cheapest adequate child model, and verify the result independently. Keep architecture, ambiguous tradeoffs, and final acceptance for yourself; delegate execution when a child can complete it from a precise brief.";
 
 const DEFAULT_FABLE_IDENTITY: &str = "You are Fable 5, the scarcest judgment resource in this fleet: a wise owl—thoughtful, discerning, and exceptionally strong at framing, architecture, taste, and clear communication. Spend that judgment on understanding, delegation, review, and final acceptance rather than routine typing. Use high effort by default; deeper tiers usually consume more of the fleet's bottleneck without improving your decisions.";
 
-const DEFAULT_GPT_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 9, intelligence 8, taste 6. Recommended effort: medium. Default execution model for bulk implementation, closed-form debugging, reviews, migrations, computer use, and token-heavy sweeps. Escalate effort only after a concrete miss.";
-const DEFAULT_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 5, intelligence 5, taste 7. Recommended effort: high. Cheap glue work, wrappers, chores, and context gathering that does not require top-tier judgment.";
-const DEFAULT_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 4, intelligence 7, taste 8. Recommended effort: high. Best for taste-critical UI, copy, API design, and implementation review where judgment matters more than grinding depth.";
-const DEFAULT_FABLE_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 2, intelligence 9, taste 9. Recommended effort: high. Highest-judgment escalation for framing, architecture, ambiguous tradeoffs, and final review.";
+const DEFAULT_GPT_MEDIUM_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 9, intelligence 8, taste 6. The default profile for everything dispatched: bulk or mechanical implementation against a written brief, closed-form debugging with a repro, migrations, data analysis, reviews, sweeps, computer use and eyes-on-screen verification, and token-heavy log or codebase crawls. Extremely steerable and disciplined: respects scope fences, does not weaken tests, reports accurately. Measured equal to its higher efforts on spec-driven work — escalate only after this profile demonstrably misses on a specific piece and the gap looks like depth, not a bad brief.";
+const DEFAULT_GPT_MAX_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 6, intelligence 9, taste 7. Exception tier — near the top judgment model's raw problem-solving at a fraction of the token cost, with a rottweiler temperament: grabs the problem by the throat and doesn't let go. Route it hard, well-defined problems that reward tenacity or depth: gnarly bugs with a repro, long autonomous grinds, brute-force search of a solution space, open-ended polish passes. Two measured caveats: wall-clock latency is 5–6x the medium profile, so keep it off any pipeline's critical path; and on closed-form bug fixes it produces the same fix as medium at 1.5–3x the cost. Taste 7 clears the bar for internal tools and dashboards; keep brand- or copy-critical surfaces on a taste-8+ model.";
+const DEFAULT_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 5, intelligence 5, taste 7. Cheap glue — wrappers, chores, and context gathering that does not require top-tier judgment.";
+const DEFAULT_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 4, intelligence 7, taste 8. First choice for user-facing work: UI, copy, API design, and anything where taste matters more than grinding depth. Also a strong independent reviewer of plans and implementations.";
+const DEFAULT_FABLE_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 2, intelligence 9, taste 9. Highest-judgment escalation for framing, architecture, ambiguous tradeoffs, taste-critical surfaces, and final review. The scarcest resource in the fleet: dispatch to it only when nothing cheaper is adequate.";
 
 /// Settings for tcode's built-in orchestration layer.
 ///
@@ -226,28 +250,35 @@ impl Default for OrchestrateSettings {
                     provider: ProviderKind::Codex,
                     model: "gpt-5.6-sol".into(),
                     enabled: true,
-                    default_effort: Some("medium".into()),
-                    description: DEFAULT_GPT_CHILD_DEFINITION.into(),
+                    effort: Some("medium".into()),
+                    description: DEFAULT_GPT_MEDIUM_CHILD_DEFINITION.into(),
+                },
+                OrchestrateChildModel {
+                    provider: ProviderKind::Codex,
+                    model: "gpt-5.6-sol".into(),
+                    enabled: true,
+                    effort: Some("max".into()),
+                    description: DEFAULT_GPT_MAX_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
                     provider: ProviderKind::ClaudeCode,
                     model: "claude-sonnet-5".into(),
-                    enabled: false,
-                    default_effort: Some("high".into()),
+                    enabled: true,
+                    effort: Some("high".into()),
                     description: DEFAULT_SONNET_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
                     provider: ProviderKind::ClaudeCode,
                     model: "claude-opus-4-8".into(),
-                    enabled: false,
-                    default_effort: Some("high".into()),
+                    enabled: true,
+                    effort: Some("high".into()),
                     description: DEFAULT_OPUS_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
                     provider: ProviderKind::ClaudeCode,
                     model: "claude-fable-5".into(),
-                    enabled: false,
-                    default_effort: Some("high".into()),
+                    enabled: true,
+                    effort: Some("high".into()),
                     description: DEFAULT_FABLE_CHILD_DEFINITION.into(),
                 },
             ],
@@ -288,9 +319,18 @@ impl OrchestrateSettings {
 
     /// Factory definition for a bundled child-model preset. Custom models have
     /// no product-authored definition and therefore reset to an empty editor.
-    pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
+    pub fn builtin_child_definition(
+        provider: ProviderKind,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Option<&'static str> {
         match (provider, model) {
-            (ProviderKind::Codex, "gpt-5.6-sol") => Some(DEFAULT_GPT_CHILD_DEFINITION),
+            (ProviderKind::Codex, "gpt-5.6-sol")
+                if effort.is_some_and(|effort| effort.eq_ignore_ascii_case("max")) =>
+            {
+                Some(DEFAULT_GPT_MAX_CHILD_DEFINITION)
+            }
+            (ProviderKind::Codex, "gpt-5.6-sol") => Some(DEFAULT_GPT_MEDIUM_CHILD_DEFINITION),
             (ProviderKind::ClaudeCode, "claude-sonnet-5") => Some(DEFAULT_SONNET_CHILD_DEFINITION),
             (ProviderKind::ClaudeCode, "claude-opus-4-8") => Some(DEFAULT_OPUS_CHILD_DEFINITION),
             (ProviderKind::ClaudeCode, "claude-fable-5") => Some(DEFAULT_FABLE_CHILD_DEFINITION),
@@ -298,23 +338,29 @@ impl OrchestrateSettings {
         }
     }
 
-    pub fn child_model(
+    pub fn child_profile(
         &self,
         provider: ProviderKind,
         model: &str,
+        effort: Option<&str>,
     ) -> Option<&OrchestrateChildModel> {
-        self.child_models
-            .iter()
-            .find(|entry| entry.provider == provider && entry.model == model)
+        self.child_models.iter().find(|entry| {
+            entry.provider == provider && entry.model == model && entry.matches_effort(effort)
+        })
     }
 
-    pub fn enabled_child_model(
+    pub fn enabled_child_profile(
         &self,
         provider: ProviderKind,
         model: &str,
+        effort: Option<&str>,
     ) -> Option<&OrchestrateChildModel> {
-        self.child_model(provider, model)
-            .filter(|entry| entry.enabled)
+        self.child_models.iter().find(|entry| {
+            entry.enabled
+                && entry.provider == provider
+                && entry.model == model
+                && entry.matches_effort(effort)
+        })
     }
 }
 
@@ -569,26 +615,23 @@ mod tests {
     fn orchestrate_defaults_round_trip_and_legacy_files_get_defaults() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert_eq!(legacy.orchestrate, OrchestrateSettings::default());
+        assert_eq!(legacy.orchestrate.child_models.len(), 5);
         assert!(
             legacy
                 .orchestrate
-                .enabled_child_model(ProviderKind::Codex, "gpt-5.6-sol")
-                .is_some()
+                .child_models
+                .iter()
+                .all(|entry| entry.enabled)
         );
-        assert!(
-            legacy
-                .orchestrate
-                .child_model(ProviderKind::ClaudeCode, "claude-opus-4-8")
-                .is_some(),
-            "disabled presets retain their preferences"
-        );
-        assert!(
-            legacy
-                .orchestrate
-                .enabled_child_model(ProviderKind::ClaudeCode, "claude-opus-4-8")
-                .is_none(),
-            "the default dispatch fleet is GPT-only"
-        );
+        let medium = legacy
+            .orchestrate
+            .enabled_child_profile(ProviderKind::Codex, "gpt-5.6-sol", Some("medium"))
+            .unwrap();
+        let max = legacy
+            .orchestrate
+            .enabled_child_profile(ProviderKind::Codex, "gpt-5.6-sol", Some("max"))
+            .unwrap();
+        assert_ne!(medium.description, max.description);
 
         let mut settings = Settings::default();
         settings.orchestrate.generic_identity = "Custom lead identity".into();
@@ -596,6 +639,35 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.orchestrate, settings.orchestrate);
+    }
+
+    #[test]
+    fn orchestrate_child_legacy_default_effort_alias_parses() {
+        let settings: OrchestrateSettings = serde_json::from_str(
+            r#"{"child_models":[{"provider":"codex","model":"m","default_effort":"high"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.child_models[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn orchestrate_child_effort_matching_is_exact_case_insensitive() {
+        let profile = OrchestrateChildModel {
+            provider: ProviderKind::Codex,
+            model: "m".into(),
+            enabled: true,
+            effort: Some("High".into()),
+            description: String::new(),
+        };
+        assert!(profile.matches_effort(Some("high")));
+        assert!(!profile.matches_effort(Some("medium")));
+        assert!(profile.matches_effort(None));
+
+        let provider_default = OrchestrateChildModel {
+            effort: None,
+            ..profile
+        };
+        assert!(!provider_default.matches_effort(Some("high")));
     }
 
     #[test]

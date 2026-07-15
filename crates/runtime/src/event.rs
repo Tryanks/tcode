@@ -87,7 +87,6 @@ pub enum RuntimeError {
     ProviderStart { error: String },
     ProviderClosed { reason: Option<String> },
     PersistSessionIndex { error: String },
-    OrchestrateCallbackLimit { parent_id: String, cap: usize },
     ProviderMessage(String),
 }
 

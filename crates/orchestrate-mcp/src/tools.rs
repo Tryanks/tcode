@@ -25,6 +25,8 @@ struct DispatchParams {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    #[serde(default)]
+    access: Option<String>,
     title: String,
     brief: String,
     #[serde(default)]
@@ -62,7 +64,9 @@ impl OrchestrateTools {
         }
     }
 
-    #[tool(description = "Dispatch a brief to a new child tcode thread and return its thread id.")]
+    #[tool(
+        description = "Dispatch a brief to a new child tcode thread and return its thread id. access is one of read_only (review/investigation: the child cannot change files; actions beyond that pause for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts)."
+    )]
     async fn dispatch(
         &self,
         Parameters(p): Parameters<DispatchParams>,
@@ -73,6 +77,7 @@ impl OrchestrateTools {
                 provider: p.provider,
                 model: p.model,
                 effort: p.effort,
+                access: p.access,
                 title: p.title,
                 brief: p.brief,
                 cwd: p.cwd,
