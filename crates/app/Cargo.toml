@@ -7,6 +7,11 @@ edition = "2024"
 name = "tcode"
 path = "src/main.rs"
 
+[package.metadata.bundle]
+name = "Tcode"
+identifier = "com.tryanks.tcode"
+icon = ["../../assets/icons/app/tcode.icns"]
+
 [dependencies]
 agent = { path = "../agent" }
 tcode-i18n = { path = "../i18n" }
@@ -24,3 +29,6 @@ log = "0.4"
 [features]
 default = ["runtime-shaders"]
 runtime-shaders = ["gpui_platform/runtime_shaders"]
+
+[build-dependencies]
+embed-resource = "3.0.11"

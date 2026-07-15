@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/icons/app/tcode.png" width="88" alt="">
+<img src="assets/icons/app/tcode.png" width="88" alt="Tcode app icon">
 
-# tcode
+# Tcode
 
 **A native desktop app for the coding agents you already use.**
 
@@ -15,7 +15,7 @@ Claude Code, Codex, and any agent that speaks ACP — one window, one workflow.
 [![CI](https://github.com/Tryanks/tcode/actions/workflows/ci.yml/badge.svg)](https://github.com/Tryanks/tcode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-<img src="docs/images/chat-light.png" width="840" alt="tcode chat view">
+<img src="docs/images/chat-light.png" width="840" alt="Tcode chat view">
 
 </div>
 
@@ -26,14 +26,14 @@ for a long one: the conversation dies with the tab, seeing what the agent
 actually changed means running `git diff` yourself, and approving a command means
 squinting at scrollback.
 
-tcode is a desktop layer over the agent CLIs already installed on your machine.
+Tcode is a desktop layer over the agent CLIs already installed on your machine.
 It spawns them, speaks their native protocols, and adds the things a terminal
 can't: threads that persist, rendered diffs, a readable approval panel, and a
 rewind button for when the agent goes the wrong way.
 
 It does **not** replace your agent, proxy your API keys, or run a server. Your
 accounts, subscriptions, models and tooling keep working exactly as they do
-today — tcode just drives them.
+today — Tcode just drives them.
 
 ## What you get
 
@@ -41,7 +41,7 @@ today — tcode just drives them.
 project. Close the app, reopen it, keep talking — the agent resumes where it left
 off.
 
-**Rewind.** Before every turn, tcode snapshots your working tree into a hidden
+**Rewind.** Before every turn, Tcode snapshots your working tree into a hidden
 git ref. Agent went sideways? Revert to any earlier message and the files come
 back with it. Or edit that message and resend: the transcript *and* the working
 tree rewind to that point, and the new turn runs from there.
@@ -77,46 +77,51 @@ and a live plan/task panel.
 | [Claude Code](https://claude.com/claude-code) | `claude` on your `PATH` |
 | [Codex](https://developers.openai.com/codex/cli) | `codex` on your `PATH` |
 
-**Everything else, over [ACP](https://agentclientprotocol.com).** tcode ships a
+**Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
 marketplace backed by the official Agent Client Protocol registry — Gemini CLI,
 Cursor, GitHub Copilot, goose, OpenCode, Qwen Code, Cline and dozens more.
-Install one from **Settings → Providers**, or point tcode at any command that
+Install one from **Settings → Providers**, or point Tcode at any command that
 speaks ACP.
 
 <div align="center">
 <img src="docs/images/acp-marketplace.png" width="720" alt="ACP agent marketplace in Settings → Providers">
 </div>
 
-> Claude Code and Codex also have ACP adapters, and tcode deliberately hides them
+> Claude Code and Codex also have ACP adapters, and Tcode deliberately hides them
 > from the marketplace: the native integrations do strictly more (steering,
 > interactive questions, richer tool rendering), so there is no reason to route
 > them through ACP.
 
 ## Getting started
 
-**1. Install tcode.** Download a build for your platform from
+**1. Install Tcode.** Download a build for your platform from
 [Releases](https://github.com/Tryanks/tcode/releases) — macOS (Apple Silicon /
 Intel), Windows (x64 / ARM64), Linux (x64 / ARM64) — and run it. It is a single
 self-contained binary: no runtime to install, no libraries to hunt down, nothing
 to uninstall but the file itself.
 
 macOS builds aren't code-signed yet, so the first launch needs
-`xattr -dr com.apple.quarantine /Applications/tcode.app`. The embedded preview
+`xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
 browser is not available on Linux yet; everything else is.
 
-**2. Have an agent installed.** tcode drives the CLIs, it doesn't bundle them.
-Make sure `claude` or `codex` is on your `PATH` — or install an ACP agent from
-the marketplace once tcode is running.
+Each release uses the native application icon format for its platform: `.icns`
+inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
+executable, and an XDG desktop entry plus themed PNG on Linux. Release downloads
+also include a `SHA256SUMS.txt` file.
 
-**3. Add a project and start a thread.** Point tcode at a directory, type, send.
+**2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
+Make sure `claude` or `codex` is on your `PATH` — or install an ACP agent from
+the marketplace once Tcode is running.
+
+**3. Add a project and start a thread.** Point Tcode at a directory, type, send.
 No API keys, no config file.
 
 The interface is localized and follows your system language; you can override it
-in Settings. Everything tcode stores — sessions, settings, installed ACP agents —
+in Settings. Everything Tcode stores — sessions, settings, installed ACP agents —
 lives under your platform's app-data directory.
 
 <div align="center">
-<img src="docs/images/chat-dark.png" width="840" alt="tcode in dark mode">
+<img src="docs/images/chat-dark.png" width="840" alt="Tcode in dark mode">
 </div>
 
 ## Building from source
@@ -132,6 +137,12 @@ cargo run
 
 Platform prerequisites, tests, headless smoke runs and provider probes are all in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+The editable macOS 26 source is
+[`assets/icons/app/tcode.icon`](assets/icons/app/tcode.icon). Icon Composer's
+official 16-bit Display P3 render is committed as
+[`assets/icons/app/tcode.png`](assets/icons/app/tcode.png), then converted into
+the native macOS and Windows icon formats used by releases.
 
 ## How it works
 
@@ -167,7 +178,7 @@ that doesn't render well.
 
 ## Acknowledgements
 
-tcode's design and interaction model are closely modeled on
+Tcode's design and interaction model are closely modeled on
 **[T3 Code](https://t3.gg)** by T3 Tools — think of it as a native,
 reduced-feature homage. All credit for the original UX goes to them.
 
