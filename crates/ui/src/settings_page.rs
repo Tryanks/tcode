@@ -427,7 +427,10 @@ impl SettingsPage {
                     .justify_center()
                     .px_6()
                     .py_6()
-                    .child(column.w_full().max_w(px(CONTENT_MAX_WIDTH))),
+                    // Keep this width definite before capping it. Reversing
+                    // these constraints makes nested multiline inputs resolve
+                    // their percentage width to zero when the cap applies.
+                    .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full()),
             )
             .into_any_element()
     }
