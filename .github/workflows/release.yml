@@ -103,13 +103,14 @@ jobs:
       - name: Install Linux system dependencies
         if: matrix.platform == 'linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt_get=(sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3)
+          "${apt_get[@]}" update
+          "${apt_get[@]}" install -y --no-install-recommends \
             build-essential clang cmake pkg-config libssl-dev libzstd-dev mold \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
           if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends \
+            "${apt_get[@]}" install -y --no-install-recommends \
               libgtk-3-dev libwebkit2gtk-4.1-dev
           fi
 
@@ -239,19 +240,20 @@ jobs:
           produced. `SHA256SUMS.txt` is added after every platform package has finished.
           NOTES
 
-          prerelease_args=()
+          release_args=(
+            "$RELEASE_TAG"
+            --repo "$REPOSITORY"
+            --verify-tag
+            --title "$RELEASE_TAG"
+            --generate-notes
+            --notes-file "$notes_file"
+          )
           if [[ "$PRERELEASE" == "true" ]]; then
-            prerelease_args+=(--prerelease)
+            release_args+=(--prerelease)
           fi
 
           if ! gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
-            if ! gh release create "$RELEASE_TAG" \
-              --repo "$REPOSITORY" \
-              --verify-tag \
-              --title "$RELEASE_TAG" \
-              --generate-notes \
-              --notes-file "$notes_file" \
-              "${prerelease_args[@]}"; then
+            if ! gh release create "${release_args[@]}"; then
               # Another matrix job may have won the create race. Give the API a
               # moment to expose that release, but fail if it never appears.
               for _ in {1..6}; do
