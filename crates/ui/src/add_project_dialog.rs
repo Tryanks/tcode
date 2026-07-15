@@ -24,6 +24,8 @@ use tcode_runtime::ui_facade::{
 };
 
 const RECENT_LIMIT: usize = 15;
+const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
+const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
 
 enum RecentState {
     Loading,
@@ -182,20 +184,20 @@ impl AddProjectDialog {
                 .child(tcode_i18n::tr!("sidebar.recent_empty"))
                 .into_any_element(),
             RecentState::Ready(recent) => {
-                let mut list = v_flex()
-                    .id("recent-directory-list")
-                    .max_h(px(390.))
-                    .gap_1()
-                    .overflow_y_scrollbar();
+                // Keep the viewport and the flex column separate. Putting the
+                // max height on the column itself lets flexbox shrink every row
+                // until there is no overflow left for the wheel to scroll.
+                let mut rows = v_flex().w_full().gap_1();
                 for (index, recent) in recent.iter().take(RECENT_LIMIT).enumerate() {
                     let selected = recent.clone();
                     let name = directory_name(&recent.path);
                     let path = middle_truncate(&recent.path, 76);
                     let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
                     let counts = tool_counts(&recent.threads);
-                    list = list.child(
+                    rows = rows.child(
                         v_flex()
                             .id(format!("recent-directory-{index}"))
+                            .flex_none()
                             .gap_1()
                             .px_3()
                             .py_2()
@@ -233,7 +235,16 @@ impl AddProjectDialog {
                             ),
                     );
                 }
-                list.into_any_element()
+                let visible_rows = recent.len().min(RECENT_LIMIT) as f32;
+                let viewport_height =
+                    px((visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT));
+                div()
+                    .id("recent-directory-list")
+                    .w_full()
+                    .h(viewport_height)
+                    .overflow_y_scrollbar()
+                    .child(div().size_full().child(rows))
+                    .into_any_element()
             }
         }
     }
@@ -468,5 +479,110 @@ fn humanize_ago(secs: u64) -> String {
         tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
     } else {
         tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, size};
+
+    struct RecentListScrollProbe;
+
+    struct MaxHeightRawScrollProbe;
+
+    impl Render for RecentListScrollProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut rows = v_flex().w_full().gap_1();
+
+            for index in 0..5 {
+                rows = rows.child(
+                    v_flex()
+                        .h(px(40.))
+                        .flex_none()
+                        .when(index == 4, |row| {
+                            row.debug_selector(|| "recent-last-row".into())
+                        })
+                        .child("project")
+                        .child("/path/to/project"),
+                );
+            }
+            div()
+                .w(px(240.))
+                .h(px(100.))
+                .debug_selector(|| "recent-scroll-viewport".into())
+                .overflow_y_scrollbar()
+                .child(div().size_full().child(rows))
+        }
+    }
+
+    impl Render for MaxHeightRawScrollProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let mut rows = v_flex().w_full().gap_1();
+            for index in 0..5 {
+                rows = rows.child(div().h(px(40.)).flex_none().when(index == 4, |row| {
+                    row.debug_selector(|| "raw-max-last-row".into())
+                }));
+            }
+            div()
+                .id("raw-max-scroll")
+                .w(px(240.))
+                .max_h(px(100.))
+                .overflow_y_scroll()
+                .child(rows)
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn recent_list_scrolls_when_its_content_exceeds_the_viewport(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| RecentListScrollProbe);
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(320.), px(240.)));
+        draw(cx);
+
+        let viewport = cx.debug_bounds("recent-scroll-viewport").unwrap();
+        let initial = cx.debug_bounds("recent-last-row").unwrap();
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-60.))),
+            ..Default::default()
+        });
+        draw(cx);
+
+        let scrolled = cx.debug_bounds("recent-last-row").unwrap();
+        assert!(
+            scrolled.origin.y < initial.origin.y,
+            "recent list did not move after scrolling: viewport={viewport:?}, initial={initial:?}, scrolled={scrolled:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn max_height_raw_viewport_scrolls_dynamic_content(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| MaxHeightRawScrollProbe);
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(320.), px(240.)));
+        draw(cx);
+
+        let initial_y = cx.debug_bounds("raw-max-last-row").unwrap().origin.y;
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-60.))),
+            ..Default::default()
+        });
+        draw(cx);
+
+        let scrolled_y = cx.debug_bounds("raw-max-last-row").unwrap().origin.y;
+        assert!(
+            scrolled_y < initial_y,
+            "max-height raw viewport did not move after scrolling"
+        );
     }
 }

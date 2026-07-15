@@ -321,8 +321,9 @@ impl ToastCenter {
                     .when(expanded, |this| {
                         this.child(
                             div()
+                                .id(("toast-detail-scroll", id as usize))
                                 .max_h(px(160.))
-                                .overflow_hidden()
+                                .overflow_y_scroll()
                                 .p_2()
                                 .rounded(px(6.))
                                 .bg(cx.theme().muted)

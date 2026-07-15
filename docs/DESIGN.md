@@ -58,6 +58,18 @@ Canonical values live in `themes/tcode.json` (embedded at build time).
   row ≈44px.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 
+## Scrolling contract
+
+Potentially unbounded content always has its own resolved-height viewport and a
+separate, non-shrinking content column. Headers, search fields, footers and
+actions stay outside that viewport. This applies to the sidebar project list,
+Settings content, command-palette results, Add Project recents (capped at
+390px), ACP/model catalogs, model traits, branch and diff-scope selectors,
+queued messages, user-input options, approval details and expanded toast
+details. A bounded flex column with `overflow` on the same node is not an
+acceptable substitute: flexbox can shrink its rows until no scrollable overflow
+remains.
+
 ## Surface anatomy
 
 ### Sidebar

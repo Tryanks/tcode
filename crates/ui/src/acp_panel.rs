@@ -395,6 +395,7 @@ impl AcpPanel {
         if let Some(error) = error.filter(|_| empty) {
             rows = rows.child(
                 div()
+                    .flex_none()
                     .p_3()
                     .text_size(px(12.))
                     .text_color(cx.theme().danger)
@@ -403,6 +404,7 @@ impl AcpPanel {
         } else if empty && loading {
             rows = rows.child(
                 div()
+                    .flex_none()
                     .p_3()
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
@@ -413,6 +415,7 @@ impl AcpPanel {
             rows = rows.child(
                 v_flex()
                     .w_full()
+                    .flex_none()
                     .when(index > 0, |row| row.border_t_1().border_color(border))
                     .child(self.render_market_row(agent, cx)),
             );
@@ -422,14 +425,14 @@ impl AcpPanel {
             .gap_3()
             .child(Input::new(&self.search).small())
             .child(
-                v_flex()
+                div()
                     .w_full()
-                    .max_h(px(360.))
+                    .h(px(360.))
                     .overflow_y_scrollbar()
                     .rounded(cx.theme().radius)
                     .border_1()
                     .border_color(border)
-                    .child(rows),
+                    .child(div().size_full().child(rows)),
             )
             .child(
                 h_flex()

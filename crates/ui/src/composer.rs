@@ -1457,6 +1457,7 @@ impl Composer {
         if rows.is_empty() {
             list = list.child(
                 div()
+                    .flex_none()
                     .px_3()
                     .py_2p5()
                     .text_size(px(12.))
@@ -1480,6 +1481,7 @@ impl Composer {
                     last_group = Some(group);
                     list = list.child(
                         div()
+                            .flex_none()
                             .px_2()
                             .pt_1p5()
                             .pb_0p5()
@@ -1499,6 +1501,7 @@ impl Composer {
                 list = list.child(
                     h_flex()
                         .id(("menu-row", index))
+                        .flex_none()
                         .w_full()
                         .px_2()
                         .py_1p5()
@@ -1578,24 +1581,18 @@ impl Composer {
         }
 
         let muted = cx.theme().muted_foreground;
-        let mut strip = v_flex()
-            .w_full()
-            .gap_1()
-            .p_2()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary.opacity(0.5))
-            .child(
-                div()
-                    .px_1()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(tcode_i18n::tr!(
-                        "composer.queued_count",
-                        count = queued.len()
-                    )),
-            );
+        let mut strip =
+            v_flex()
+                .w_full()
+                .gap_1()
+                .p_2()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary.opacity(0.5))
+                .child(div().flex_none().px_1().text_xs().text_color(muted).child(
+                    tcode_i18n::tr!("composer.queued_count", count = queued.len()),
+                ));
 
         for message in queued {
             let id = message.id;
@@ -1606,6 +1603,7 @@ impl Composer {
             };
             strip = strip.child(
                 h_flex()
+                    .flex_none()
                     .w_full()
                     .gap_1()
                     .items_center()
@@ -1646,7 +1644,15 @@ impl Composer {
                     ),
             );
         }
-        Some(strip.into_any_element())
+        Some(
+            div()
+                .id("queued-messages-scroll")
+                .w_full()
+                .max_h(px(180.))
+                .overflow_y_scroll()
+                .child(strip)
+                .into_any_element(),
+        )
     }
 
     fn render_image_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2065,7 +2071,7 @@ impl Composer {
             });
 
         // Option rows.
-        let mut options = v_flex().w_full().gap_1();
+        let mut options_content = v_flex().w_full().gap_1();
         for (opt_index, option) in question.options.iter().enumerate() {
             let is_selected = selected.iter().any(|l| l == &option.label);
             let label = option.label.clone();
@@ -2093,9 +2099,10 @@ impl Composer {
             } else {
                 div().size(px(14.)).into_any_element()
             };
-            options = options.child(
+            options_content = options_content.child(
                 h_flex()
                     .id(("ui-opt", opt_index))
+                    .flex_none()
                     .w_full()
                     .px_2()
                     .py_1p5()
@@ -2142,6 +2149,12 @@ impl Composer {
                     })),
             );
         }
+        let options = div()
+            .id("user-input-options-scroll")
+            .w_full()
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .child(options_content);
 
         // Actions row.
         let is_last = index + 1 >= total;
@@ -2381,15 +2394,11 @@ impl Composer {
                     let current = current.clone();
                     let popover = cx.entity();
                     let muted = cx.theme().muted_foreground;
-                    let mut col = v_flex()
-                        .w(px(220.))
-                        .max_h(px(280.))
-                        .overflow_hidden()
-                        .p_1()
-                        .gap_0p5();
+                    let mut col = v_flex().w_full().p_1().gap_0p5();
                     if worktree_mode {
                         col = col.child(
                             div()
+                                .flex_none()
                                 .px_2()
                                 .py_1()
                                 .text_size(px(11.))
@@ -2401,6 +2410,7 @@ impl Composer {
                     if branches.is_empty() {
                         col = col.child(
                             div()
+                                .flex_none()
                                 .px_2()
                                 .py_1p5()
                                 .text_size(px(13.))
@@ -2416,6 +2426,7 @@ impl Composer {
                             col = col.child(
                                 h_flex()
                                     .id(("branch-row", index))
+                                    .flex_none()
                                     .w_full()
                                     .px_2()
                                     .py_1p5()
@@ -2459,7 +2470,13 @@ impl Composer {
                             );
                         }
                     }
-                    col.into_any_element()
+                    div()
+                        .id("branch-list")
+                        .w(px(220.))
+                        .max_h(px(280.))
+                        .overflow_y_scroll()
+                        .child(col)
+                        .into_any_element()
                 })
                 .into_any_element()
         };
@@ -2724,7 +2741,10 @@ impl Composer {
             .when(expanded, |this| {
                 this.child(
                     div()
+                        .id("approval-detail-scroll")
                         .w_full()
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
                         .p_2()
                         .rounded(px(8.))
                         .bg(cx.theme().muted)
@@ -3149,6 +3169,7 @@ fn render_model_pane(
         let composer = composer.clone();
         div()
             .id(id)
+            .flex_none()
             .size(px(28.))
             .flex()
             .items_center()
@@ -3172,12 +3193,10 @@ fn render_model_pane(
     };
 
     let mut rail_col = v_flex()
-        .flex_none()
+        .w_full()
         .py_2()
         .px_1p5()
         .gap_1()
-        .border_r_1()
-        .border_color(cx.theme().border)
         .child(rail_icon(
             "rail-fav".into(),
             Icon::new(IconName::Star),
@@ -3209,6 +3228,15 @@ fn render_model_pane(
             cx,
         ));
     }
+    let rail = div()
+        .id("model-provider-rail")
+        .flex_none()
+        .w(px(44.))
+        .h_full()
+        .border_r_1()
+        .border_color(cx.theme().border)
+        .overflow_y_scroll()
+        .child(rail_col);
 
     // Main pane: search + rows.
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
@@ -3220,6 +3248,7 @@ fn render_model_pane(
     if rows.is_empty() {
         list = list.child(
             div()
+                .flex_none()
                 .px_3()
                 .py_4()
                 .text_size(px(13.))
@@ -3235,6 +3264,7 @@ fn render_model_pane(
     let mut pane = v_flex()
         .flex_1()
         .min_w_0()
+        .min_h_0()
         .child(
             div()
                 .px_3()
@@ -3244,7 +3274,14 @@ fn render_model_pane(
                 .border_color(cx.theme().border)
                 .child(Input::new(model_search).appearance(false)),
         )
-        .child(list);
+        .child(
+            div()
+                .id("model-picker-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(list),
+        );
     if pending_restart {
         pane = pane.child(
             div()
@@ -3265,6 +3302,7 @@ fn render_model_pane(
 
     h_flex()
         .w(px(360.))
+        .h(px(360.))
         .items_stretch()
         .rounded(px(12.))
         .overflow_hidden()
@@ -3281,7 +3319,7 @@ fn render_model_pane(
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
         })
-        .child(rail_col)
+        .child(rail)
         .child(pane)
         .into_any_element()
 }
@@ -3309,6 +3347,7 @@ fn render_model_row(
 
     h_flex()
         .id(("model-row", index))
+        .flex_none()
         .w_full()
         .px_2()
         .py_1p5()
@@ -3501,6 +3540,7 @@ fn render_traits_pane(
 
     let section_header = |label: &str, cx: &mut Context<PopoverState>| -> AnyElement {
         div()
+            .flex_none()
             .px_2()
             .pt_2()
             .pb_1()
@@ -3511,7 +3551,7 @@ fn render_traits_pane(
             .into_any_element()
     };
 
-    let mut pane = v_flex().w(px(280.)).p_1().gap_0p5();
+    let mut pane = v_flex().w_full().p_1().gap_0p5();
 
     for descriptor in &spec.options {
         match descriptor {
@@ -3526,6 +3566,7 @@ fn render_traits_pane(
                 if is_reasoning && locked {
                     pane = pane.child(
                         div()
+                            .flex_none()
                             .px_2()
                             .py_1p5()
                             .text_size(px(12.))
@@ -3556,6 +3597,7 @@ fn render_traits_pane(
                     pane = pane.child(
                         h_flex()
                             .id(("trait-opt", index * 31 + descriptor_hash(id)))
+                            .flex_none()
                             .w_full()
                             .px_2()
                             .py_1p5()
@@ -3607,6 +3649,7 @@ fn render_traits_pane(
                     pane = pane.child(
                         h_flex()
                             .id(("trait-bool", index * 61 + descriptor_hash(id)))
+                            .flex_none()
                             .w_full()
                             .px_2()
                             .py_1p5()
@@ -3639,6 +3682,7 @@ fn render_traits_pane(
     if pending_restart {
         pane = pane.child(
             div()
+                .flex_none()
                 .px_2()
                 .py_1p5()
                 .border_t_1()
@@ -3648,7 +3692,13 @@ fn render_traits_pane(
                 .child(tcode_i18n::tr!("composer.restart_note")),
         );
     }
-    pane.into_any_element()
+    div()
+        .id("traits-options-scroll")
+        .w(px(280.))
+        .max_h(px(360.))
+        .overflow_y_scroll()
+        .child(pane)
+        .into_any_element()
 }
 
 /// A tiny stable hash of a descriptor id, to keep row element ids unique across
