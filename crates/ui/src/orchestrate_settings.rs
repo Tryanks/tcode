@@ -32,6 +32,7 @@ struct IdentityRowState {
 struct ChildRowState {
     provider: ProviderKind,
     model: String,
+    effort: Entity<InputState>,
     description: Entity<InputState>,
 }
 
@@ -160,7 +161,12 @@ impl OrchestrateSettingsPanel {
             });
         }
 
-        for entry in orchestrate.child_models {
+        for (index, entry) in orchestrate.child_models.into_iter().enumerate() {
+            let effort = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(tcode_i18n::tr!("orchestrate.children.effort_placeholder"))
+                    .default_value(entry.effort.clone().unwrap_or_default())
+            });
             let description = cx.new(|cx| {
                 InputState::new(window, cx)
                     .multi_line(true)
@@ -170,17 +176,22 @@ impl OrchestrateSettingsPanel {
                     ))
                     .default_value(entry.description)
             });
-            let provider = entry.provider;
-            let model = entry.model.clone();
+            self.input_subscriptions
+                .push(cx.subscribe(&effort, move |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.commit_child_effort(index, cx);
+                    }
+                }));
             self.input_subscriptions
                 .push(cx.subscribe(&description, move |this, _, event, cx| {
                     if matches!(event, InputEvent::Change) {
-                        this.commit_child_definition(provider, &model, cx);
+                        this.commit_child_definition(index, cx);
                     }
                 }));
             self.child_rows.push(ChildRowState {
                 provider: entry.provider,
                 model: entry.model,
+                effort,
                 description,
             });
         }
@@ -196,13 +207,8 @@ impl OrchestrateSettingsPanel {
         self.identity_model_picker
             .update(cx, |picker, cx| picker.set_excluded(identities, cx));
 
-        let children = self
-            .child_rows
-            .iter()
-            .map(|row| (row.provider, row.model.clone()))
-            .collect();
         self.child_model_picker
-            .update(cx, |picker, cx| picker.set_excluded(children, cx));
+            .update(cx, |picker, cx| picker.set_excluded(Vec::new(), cx));
     }
 
     fn commit_model_identity(&self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {
@@ -230,25 +236,41 @@ impl OrchestrateSettingsPanel {
         );
     }
 
-    fn commit_child_definition(&self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {
-        let Some(row) = self
-            .child_rows
-            .iter()
-            .find(|row| row.provider == provider && row.model == model)
-        else {
+    fn commit_child_definition(&self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.child_rows.get(index) else {
             return;
         };
         let description = row.description.read(cx).value().to_string();
-        let model = model.to_string();
+        let provider = row.provider;
+        let model = row.model.clone();
         self.update_settings(
             move |settings| {
-                if let Some(entry) = settings
-                    .orchestrate
-                    .child_models
-                    .iter_mut()
-                    .find(|entry| entry.provider == provider && entry.model == model)
+                if let Some(entry) = settings.orchestrate.child_models.get_mut(index)
+                    && entry.provider == provider
+                    && entry.model == model
                 {
                     entry.description = description;
+                }
+            },
+            cx,
+        );
+    }
+
+    fn commit_child_effort(&self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.child_rows.get(index) else {
+            return;
+        };
+        let effort = row.effort.read(cx).value().trim().to_string();
+        let effort = (!effort.is_empty()).then_some(effort);
+        let provider = row.provider;
+        let model = row.model.clone();
+        self.update_settings(
+            move |settings| {
+                if let Some(entry) = settings.orchestrate.child_models.get_mut(index)
+                    && entry.provider == provider
+                    && entry.model == model
+                {
+                    entry.effort = effort;
                 }
             },
             cx,
@@ -315,19 +337,22 @@ impl OrchestrateSettingsPanel {
             provider: option.provider,
             model: option.id.clone(),
             enabled: true,
-            default_effort: option.default_effort.clone(),
-            description: OrchestrateSettings::builtin_child_definition(option.provider, &option.id)
-                .unwrap_or_default()
-                .to_string(),
+            effort: option.effort.clone(),
+            description: OrchestrateSettings::builtin_child_definition(
+                option.provider,
+                &option.id,
+                option.effort.as_deref(),
+            )
+            .unwrap_or_default()
+            .to_string(),
         };
         self.update_settings(
             move |settings| {
-                if !settings
-                    .orchestrate
-                    .child_models
-                    .iter()
-                    .any(|entry| entry.provider == profile.provider && entry.model == profile.model)
-                {
+                if !settings.orchestrate.child_models.iter().any(|entry| {
+                    entry.provider == profile.provider
+                        && entry.model == profile.model
+                        && entry.effort == profile.effort
+                }) {
                     settings.orchestrate.child_models.push(profile);
                 }
             },
@@ -337,20 +362,12 @@ impl OrchestrateSettingsPanel {
         cx.notify();
     }
 
-    fn remove_child(
-        &mut self,
-        provider: ProviderKind,
-        model: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let model = model.to_string();
+    fn remove_child(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.update_settings(
             move |settings| {
-                settings
-                    .orchestrate
-                    .child_models
-                    .retain(|entry| !(entry.provider == provider && entry.model == model));
+                if index < settings.orchestrate.child_models.len() {
+                    settings.orchestrate.child_models.remove(index);
+                }
             },
             cx,
         );
@@ -358,22 +375,10 @@ impl OrchestrateSettingsPanel {
         cx.notify();
     }
 
-    fn set_child_enabled(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let model = model.to_string();
+    fn set_child_enabled(&self, index: usize, enabled: bool, cx: &mut Context<Self>) {
         self.update_settings(
             move |settings| {
-                if let Some(entry) = settings
-                    .orchestrate
-                    .child_models
-                    .iter_mut()
-                    .find(|entry| entry.provider == provider && entry.model == model)
-                {
+                if let Some(entry) = settings.orchestrate.child_models.get_mut(index) {
                     entry.enabled = enabled;
                 }
             },
@@ -425,36 +430,39 @@ impl OrchestrateSettingsPanel {
         }
     }
 
-    fn reset_child_definition(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let value = OrchestrateSettings::builtin_child_definition(provider, model)
-            .unwrap_or_default()
-            .to_string();
+    fn reset_child_definition(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self
+            .app_state
+            .read(cx)
+            .settings
+            .orchestrate
+            .child_models
+            .get(index)
+        else {
+            return;
+        };
+        let provider = entry.provider;
+        let model = entry.model.clone();
+        let value = OrchestrateSettings::builtin_child_definition(
+            provider,
+            &model,
+            entry.effort.as_deref(),
+        )
+        .unwrap_or_default()
+        .to_string();
         let persisted = value.clone();
-        let model_key = model.to_string();
         self.update_settings(
             move |settings| {
-                if let Some(entry) = settings
-                    .orchestrate
-                    .child_models
-                    .iter_mut()
-                    .find(|entry| entry.provider == provider && entry.model == model_key)
+                if let Some(entry) = settings.orchestrate.child_models.get_mut(index)
+                    && entry.provider == provider
+                    && entry.model == model
                 {
                     entry.description = persisted;
                 }
             },
             cx,
         );
-        if let Some(row) = self
-            .child_rows
-            .iter()
-            .find(|row| row.provider == provider && row.model == model)
-        {
+        if let Some(row) = self.child_rows.get(index) {
             row.description
                 .update(cx, |input, cx| input.set_value(value, window, cx));
         }
@@ -707,14 +715,14 @@ impl OrchestrateSettingsPanel {
             .border_color(cx.theme().border)
             .overflow_hidden();
         for (index, row) in self.child_rows.iter().enumerate() {
-            let Some(profile) = settings.child_model(row.provider, &row.model) else {
+            let Some(profile) = settings.child_models.get(index) else {
                 continue;
             };
             let provider = row.provider;
-            let model = row.model.clone();
-            let toggle_model = row.model.clone();
-            let reset_model = row.model.clone();
             let name = self.model_name(provider, &row.model, cx);
+            let effort = profile.effort.clone().unwrap_or_else(|| {
+                tcode_i18n::tr!("orchestrate.children.effort_default").into_owned()
+            });
             list = list.child(
                 v_flex()
                     .w_full()
@@ -740,9 +748,10 @@ impl OrchestrateSettingsPanel {
                                             .text_size(px(11.))
                                             .text_color(cx.theme().muted_foreground)
                                             .child(format!(
-                                                "{} · {}",
+                                                "{} · {} · {}",
                                                 provider_label(provider),
-                                                row.model
+                                                row.model,
+                                                effort,
                                             )),
                                     ),
                             )
@@ -765,12 +774,7 @@ impl OrchestrateSettingsPanel {
                                         tcode_i18n::tr!("orchestrate.children.enable")
                                     })
                                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                        this.set_child_enabled(
-                                            provider,
-                                            &toggle_model,
-                                            *checked,
-                                            cx,
-                                        );
+                                        this.set_child_enabled(index, *checked, cx);
                                     })),
                             )
                             .child(
@@ -780,12 +784,7 @@ impl OrchestrateSettingsPanel {
                                     .icon(IconName::Undo)
                                     .label(tcode_i18n::tr!("orchestrate.restore_default"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.reset_child_definition(
-                                            provider,
-                                            &reset_model,
-                                            window,
-                                            cx,
-                                        );
+                                        this.reset_child_definition(index, window, cx);
                                     })),
                             )
                             .child(
@@ -795,9 +794,21 @@ impl OrchestrateSettingsPanel {
                                     .icon(IconName::Delete)
                                     .tooltip(tcode_i18n::tr!("orchestrate.children.remove"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.remove_child(provider, &model, window, cx);
+                                        this.remove_child(index, window, cx);
                                     })),
                             ),
+                    )
+                    .child(
+                        v_flex()
+                            .w(px(160.))
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(tcode_i18n::tr!("orchestrate.children.effort_label")),
+                            )
+                            .child(Input::new(&row.effort).small()),
                     )
                     .child(Input::new(&row.description).small()),
             );

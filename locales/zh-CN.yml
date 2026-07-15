@@ -188,7 +188,7 @@ orchestrate:
     use_generic: "删除专属覆盖并使用通用自我认知"
   children:
     title: "允许派发的子模型"
-    description: "为每个子模型保留一段路由定义，只在允许 /orchestrate 派发给它时打开开关。内置定义已用可编辑文本写入默认评分和推荐 effort。"
+    description: "为每个子模型及其推理强度保留一份路由配置；同一模型可在每个强度档位各出现一次，每份配置都会固定派发时使用的强度。仅在允许 /orchestrate 使用时启用该配置。"
     add: "添加子模型"
     empty: "目前没有配置任何子模型。/orchestrate 仍然可用，但在添加子模型前，派发调用会被拒绝。"
     none_enabled: "所有子模型配置都已关闭。/orchestrate 仍可进行规划，但所有派发调用都会被拒绝。"
@@ -196,6 +196,9 @@ orchestrate:
     disabled: "已暂停"
     enable: "允许 /orchestrate 向这个模型派发任务"
     disable: "暂停派发，但保留这个模型的定义"
+    effort_label: "派发推理强度"
+    effort_placeholder: "模型默认"
+    effort_default: "模型默认"
     description_placeholder: "定义该模型的评分、优势、适合任务、注意事项、推荐 effort 和升级定位…"
     remove: "删除这个子模型配置"
   no_more_models: "所有可用的提供商模型都已配置。可先在“提供商”中添加自定义模型标识。"

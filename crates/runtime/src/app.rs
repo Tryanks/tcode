@@ -79,7 +79,6 @@ pub use crate::terminal::{
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
 const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
-const ORCHESTRATE_CALLBACK_CAP: usize = 100;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
@@ -678,7 +677,6 @@ pub struct AppState {
     orchestrate_registrations: HashMap<String, agent::McpRegistration>,
     /// Requests from the orchestrate MCP runtime, pumped on the gpui thread.
     pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
-    callback_counts: HashMap<String, usize>,
     callback_last_turn: HashMap<String, usize>,
     /// A URL the preview panel should navigate to on its next render (set by the
     /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
@@ -788,7 +786,6 @@ impl AppState {
             orchestrate_tokens: None,
             orchestrate_registrations: HashMap::new(),
             orchestrate_requests: None,
-            callback_counts: HashMap::new(),
             callback_last_turn: HashMap::new(),
             pending_preview_url: None,
             git_status: None,
@@ -964,6 +961,7 @@ impl AppState {
         provider: ProviderKind,
         model: Option<String>,
         effort: Option<String>,
+        approval_mode: ApprovalMode,
         title: String,
         cwd: Option<PathBuf>,
         brief: String,
@@ -999,7 +997,7 @@ impl AppState {
             }
             None => parent.cwd.clone(),
         };
-        let meta = build_child_meta(&parent, provider, model, effort, title, cwd);
+        let meta = build_child_meta(&parent, provider, model, effort, approval_mode, title, cwd);
         self.store
             .upsert_meta(&meta)
             .map_err(|err| format!("failed to persist child session: {err}"))?;
@@ -1037,6 +1035,7 @@ impl AppState {
                 provider,
                 model,
                 effort,
+                access,
                 title,
                 brief,
                 cwd,
@@ -1047,11 +1046,13 @@ impl AppState {
                     model.as_deref(),
                     effort.as_deref(),
                 )?;
+                let approval_mode = resolve_dispatch_access(access.as_deref())?;
                 let id = self.create_child_session(
                     &parent_id,
                     provider,
                     Some(model),
                     effort,
+                    approval_mode,
                     title,
                     cwd.map(PathBuf::from),
                     brief,
@@ -1112,11 +1113,18 @@ impl AppState {
                 thread_id,
             } => {
                 let meta = self.require_child(&parent_id, &thread_id)?;
-                let (state, final_message) = self.child_result(meta);
+                let (state, final_message, usage) = self.child_result(meta);
                 if state == "running" {
                     return Err("thread is still running".into());
                 }
-                Ok(serde_json::json!({ "state": state, "final_message": final_message }))
+                let mut result = serde_json::json!({
+                    "state": state,
+                    "final_message": final_message,
+                });
+                if let Some(usage) = usage.as_ref() {
+                    result["tokens"] = token_usage_json(usage);
+                }
+                Ok(result)
             }
             OrchestrateOp::Cancel {
                 parent_id,
@@ -1180,7 +1188,10 @@ impl AppState {
         self.background.insert(thread_id, child);
     }
 
-    fn child_result(&self, meta: &SessionMeta) -> (&'static str, String) {
+    fn child_result(
+        &self,
+        meta: &SessionMeta,
+    ) -> (&'static str, String, Option<agent::TokenUsage>) {
         let timeline = Timeline::fold_events(self.store.read_events(&meta.id));
         let running = self
             .active
@@ -1201,19 +1212,23 @@ impl AppState {
                 None => "idle",
             }
         };
-        (state, final_assistant_message(&timeline))
+        (state, final_assistant_message(&timeline), timeline.usage)
     }
 
     fn child_status_json(&self, meta: &SessionMeta) -> serde_json::Value {
-        let (state, final_message) = self.child_result(meta);
-        serde_json::json!({
+        let (state, final_message, usage) = self.child_result(meta);
+        let mut status = serde_json::json!({
             "thread_id": meta.id,
             "title": meta.title,
             "provider": match meta.provider { ProviderKind::ClaudeCode => "claude", ProviderKind::Codex => "codex", ProviderKind::Acp => "acp" },
             "state": state,
             "last_output_tail": tail_chars(&final_message, 600),
             "updated_at": meta.updated_at,
-        })
+        });
+        if let Some(usage) = usage.as_ref() {
+            status["tokens"] = token_usage_json(usage);
+        }
+        status
     }
 
     /// Kick off a background refresh of every provider's model catalog (called
@@ -3883,26 +3898,13 @@ impl AppState {
             return;
         }
         let parent_id = child.parent_session_id.clone().unwrap();
-        let count = self.callback_counts.entry(parent_id.clone()).or_default();
-        let first_breach = *count == ORCHESTRATE_CALLBACK_CAP;
-        if !take_callback_slot(count) {
-            if first_breach {
-                self.report_error(
-                    RuntimeError::OrchestrateCallbackLimit {
-                        parent_id: parent_id.to_string(),
-                        cap: ORCHESTRATE_CALLBACK_CAP,
-                    },
-                    cx,
-                );
-            }
-            return;
-        }
         self.callback_last_turn.insert(child_id.to_string(), turn);
         let text = assemble_callback_text(
             child_id,
             &child.title,
             status,
             &final_assistant_message(&timeline),
+            timeline.usage.as_ref(),
         );
         self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
     }
@@ -5378,7 +5380,7 @@ fn render_orchestrate_configuration(
         text.push_str(identity);
     }
     text.push_str(
-        "\n\n### Allowed child models\n\nOnly dispatch to models listed below. Their definitions are configured by the user and may include ratings, strengths, caveats, and routing preferences. If a dispatch omits `model`, tcode selects the first enabled model for that provider. If it omits `effort`, tcode applies the model's stored default.\n",
+        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. The definitions below are user-configured routing guidance.\n",
     );
     if !settings.child_models.iter().any(|child| child.enabled) {
         text.push_str("No child models are enabled. Work without dispatching until the user enables one in Settings → Orchestrate.");
@@ -5390,12 +5392,9 @@ fn render_orchestrate_configuration(
             ProviderKind::ClaudeCode => "claude",
             ProviderKind::Acp => "acp",
         };
-        let effort = child
-            .default_effort
-            .as_deref()
-            .unwrap_or("provider default");
+        let effort = child.effort.as_deref().unwrap_or("provider default");
         text.push_str(&format!(
-            "\n#### `{}` / `{}`\n\nDefault dispatch effort: `{}`.\n\n{}\n",
+            "\n#### `{}` / `{}` — effort `{}`\n\n{}\n",
             escape_markdown_inline(provider),
             escape_markdown_inline(&child.model),
             escape_markdown_inline(effort),
@@ -5430,31 +5429,55 @@ fn resolve_orchestrate_dispatch(
         other => return Err(format!("unknown provider: {other}")),
     };
     let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
+    let requested_effort = effort.map(str::trim).filter(|effort| !effort.is_empty());
     let profile = match requested_model {
-        Some(model) => settings.enabled_child_model(provider, model),
-        None => settings
+        Some(model) => settings.enabled_child_profile(provider, model, requested_effort),
+        None => settings.child_models.iter().find(|entry| {
+            entry.enabled
+                && entry.provider == provider
+                && !entry.model.trim().is_empty()
+                && entry.matches_effort(requested_effort)
+        }),
+    }
+    .ok_or_else(|| {
+        let enabled = settings
             .child_models
             .iter()
-            .find(|entry| {
-                entry.enabled && entry.provider == provider && !entry.model.trim().is_empty()
-            }),
-    }
-    .ok_or_else(|| match requested_model {
-        Some(model) => format!(
-            "model {model} is not enabled for orchestrate child dispatch under {}",
-            provider_name(provider)
-        ),
-        None => format!(
-            "no orchestrate child model is enabled for {}; choose an enabled provider or update Settings → Orchestrate",
-            provider_name(provider)
-        ),
+            .filter(|entry| entry.enabled && entry.provider == provider)
+            .map(|entry| {
+                format!(
+                    "{} (effort {})",
+                    entry.model,
+                    entry.effort.as_deref().unwrap_or("provider default")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let requested = requested_model.unwrap_or("provider default model");
+        let effort = requested_effort
+            .map(|effort| format!(" (effort {effort})"))
+            .unwrap_or_default();
+        format!(
+            "no enabled child profile matches {requested}{effort} under {}; enabled profiles: {}",
+            provider_name(provider),
+            if enabled.is_empty() { "none" } else { &enabled }
+        )
     })?;
-    let effort = effort
-        .map(str::trim)
-        .filter(|effort| !effort.is_empty())
-        .map(str::to_string)
-        .or_else(|| profile.default_effort.clone());
-    Ok((provider, profile.model.clone(), effort))
+    Ok((provider, profile.model.clone(), profile.effort.clone()))
+}
+
+fn resolve_dispatch_access(access: Option<&str>) -> Result<ApprovalMode, String> {
+    let Some(access) = access.map(str::trim).filter(|access| !access.is_empty()) else {
+        return Ok(ApprovalMode::FullAccess);
+    };
+    match access.to_ascii_lowercase().as_str() {
+        "full" => Ok(ApprovalMode::FullAccess),
+        "read_only" => Ok(ApprovalMode::Supervised),
+        "workspace_write" => Ok(ApprovalMode::AutoAcceptEdits),
+        _ => Err(format!(
+            "unknown access: {access}; expected read_only, workspace_write, or full"
+        )),
+    }
 }
 
 fn provider_name(provider: ProviderKind) -> &'static str {
@@ -5470,6 +5493,7 @@ fn build_child_meta(
     provider: ProviderKind,
     model: Option<String>,
     effort: Option<String>,
+    approval_mode: ApprovalMode,
     title: String,
     cwd: PathBuf,
 ) -> SessionMeta {
@@ -5477,6 +5501,7 @@ fn build_child_meta(
     meta.title = title;
     meta.project_id = parent.project_id.clone();
     meta.parent_session_id = Some(parent.id.clone());
+    meta.approval_mode = approval_mode;
     if let Some(effort) = effort {
         meta.option_selections.push(OptionSelection {
             id: "reasoningEffort".into(),
@@ -5520,29 +5545,69 @@ fn tail_chars(text: &str, max: usize) -> String {
     text.chars().skip(count.saturating_sub(max)).collect()
 }
 
+fn token_usage_json(usage: &agent::TokenUsage) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    for (key, count) in [
+        ("input_tokens", usage.input_tokens),
+        ("cached_input_tokens", usage.cached_input_tokens),
+        ("output_tokens", usage.output_tokens),
+        ("used_tokens", usage.used_tokens),
+        ("total_processed_tokens", usage.total_processed_tokens),
+    ] {
+        if let Some(count) = count {
+            value.insert(key.into(), count.into());
+        }
+    }
+    serde_json::Value::Object(value)
+}
+
 fn assemble_callback_text(
     child_id: &str,
     title: &str,
     status: TurnStatus,
     final_message: &str,
+    usage: Option<&agent::TokenUsage>,
 ) -> String {
     let state = match status {
         TurnStatus::Completed => "completed",
         TurnStatus::Failed | TurnStatus::Interrupted => "failed",
     };
-    format!(
-        "[orchestrate] thread {child_id} (\"{title}\") {state}.\n{}",
-        final_message
-    )
-}
-
-fn take_callback_slot(count: &mut usize) -> bool {
-    if *count >= ORCHESTRATE_CALLBACK_CAP {
-        *count = count.saturating_add(1);
-        return false;
+    let mut token_parts = Vec::new();
+    if let Some(usage) = usage {
+        if let Some(input) = usage.input_tokens {
+            let cached = usage
+                .cached_input_tokens
+                .filter(|cached| *cached > 0)
+                .map(|cached| format!(" (+{cached} cached)"))
+                .unwrap_or_default();
+            token_parts.push(format!("input {input}{cached}"));
+        }
+        if let Some(output) = usage.output_tokens {
+            token_parts.push(format!("output {output}"));
+        }
+        if let Some(total) = usage.total_processed_tokens.or(usage.used_tokens) {
+            token_parts.push(format!("total {total}"));
+        }
     }
-    *count += 1;
-    true
+    let token_segment = if token_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" tokens: {}.", token_parts.join(", "))
+    };
+    let body = if final_message.is_empty() {
+        "(no assistant output)".to_string()
+    } else {
+        let count = final_message.chars().count();
+        if count <= 1200 {
+            final_message.to_string()
+        } else {
+            format!(
+                "Final output tail ({count} chars total — call result {child_id} for the full report):\n{}",
+                tail_chars(final_message, 600)
+            )
+        }
+    };
+    format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
 }
 
 /// Parse a `#rrggbb` accent color into a gpui color; `None` when malformed.
@@ -6109,12 +6174,9 @@ mod tests {
         );
         assert!(first.starts_with(CLAUDE_ORCHESTRATE_GUIDANCE.trim()));
         assert!(first.contains("wise owl"));
-        assert!(first.contains("#### `codex` / `gpt-5.6-sol`"));
+        assert!(first.contains("#### `codex` / `gpt-5.6-sol` — effort `medium`"));
         assert!(first.contains("cost efficiency 9, intelligence 8, taste 6"));
-        assert!(
-            !first.contains("#### `claude` / `claude-opus-4-8`"),
-            "disabled presets must not be advertised to the lead model"
-        );
+        assert!(first.contains("#### `claude` / `claude-opus-4-8` — effort `high`"));
         assert!(first.ends_with("\n\nShip it"));
         let follow_up = compose_orchestrate_text(
             ProviderKind::ClaudeCode,
@@ -6147,7 +6209,7 @@ mod tests {
 
     #[test]
     fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
-        let mut settings = OrchestrateSettings::default();
+        let settings = OrchestrateSettings::default();
         assert_eq!(
             resolve_orchestrate_dispatch(&settings, "codex", None, None).unwrap(),
             (
@@ -6156,48 +6218,62 @@ mod tests {
                 Some("medium".into())
             )
         );
-        assert!(
-            resolve_orchestrate_dispatch(
-                &settings,
-                "claude_code",
-                Some("claude-opus-4-8"),
-                Some("max")
-            )
-            .unwrap_err()
-            .contains("not enabled"),
-            "disabled profiles must retain preferences without allowing dispatch"
-        );
-        settings
-            .child_models
-            .iter_mut()
-            .find(|entry| entry.model == "claude-opus-4-8")
-            .unwrap()
-            .enabled = true;
         assert_eq!(
             resolve_orchestrate_dispatch(
                 &settings,
                 "claude_code",
                 Some("claude-opus-4-8"),
-                Some("max")
+                Some(" HIGH ")
             )
             .unwrap(),
             (
                 ProviderKind::ClaudeCode,
                 "claude-opus-4-8".into(),
-                Some("max".into())
+                Some("high".into())
             )
         );
+        let wrong_effort =
+            resolve_orchestrate_dispatch(&settings, "codex", Some("gpt-5.6-sol"), Some("xhigh"))
+                .unwrap_err();
+        assert!(
+            wrong_effort.contains(
+                "no enabled child profile matches gpt-5.6-sol (effort xhigh) under codex"
+            )
+        );
+        assert!(wrong_effort.contains("gpt-5.6-sol (effort medium)"));
+        assert!(wrong_effort.contains("gpt-5.6-sol (effort max)"));
         let denied =
             resolve_orchestrate_dispatch(&settings, "claude", Some("claude-haiku-4-5"), None)
                 .unwrap_err();
-        assert!(denied.contains("not enabled"));
+        assert!(denied.contains("no enabled child profile matches"));
 
         let mut empty = settings;
         empty.child_models.clear();
         assert!(
             resolve_orchestrate_dispatch(&empty, "codex", None, None)
                 .unwrap_err()
-                .contains("no orchestrate child model")
+                .contains("enabled profiles: none")
+        );
+    }
+
+    #[test]
+    fn orchestrate_dispatch_access_maps_known_values() {
+        assert_eq!(resolve_dispatch_access(None), Ok(ApprovalMode::FullAccess));
+        assert_eq!(
+            resolve_dispatch_access(Some(" FULL ")),
+            Ok(ApprovalMode::FullAccess)
+        );
+        assert_eq!(
+            resolve_dispatch_access(Some("read_only")),
+            Ok(ApprovalMode::Supervised)
+        );
+        assert_eq!(
+            resolve_dispatch_access(Some("WORKSPACE_WRITE")),
+            Ok(ApprovalMode::AutoAcceptEdits)
+        );
+        assert_eq!(
+            resolve_dispatch_access(Some("admin")),
+            Err("unknown access: admin; expected read_only, workspace_write, or full".into())
         );
     }
 
@@ -6848,6 +6924,7 @@ mod tests {
             ProviderKind::Codex,
             Some("gpt-test".into()),
             Some("high".into()),
+            ApprovalMode::AutoAcceptEdits,
             "Research".into(),
             PathBuf::from("/p/sub"),
         );
@@ -6855,26 +6932,52 @@ mod tests {
         assert_eq!(child.project_id.as_deref(), Some("project"));
         assert_eq!(child.model.as_deref(), Some("gpt-test"));
         assert_eq!(child.title, "Research");
+        assert_eq!(child.approval_mode, ApprovalMode::AutoAcceptEdits);
         assert_eq!(child.option_selections.len(), 1);
         assert_eq!(child.option_selections[0].id, "reasoningEffort");
         assert_eq!(child.option_selections[0].value, serde_json::json!("high"));
     }
 
     #[test]
-    fn callback_text_keeps_the_full_result_and_cap_stops_at_one_hundred() {
-        let text =
-            assemble_callback_text("child", "Title", TurnStatus::Completed, &"x".repeat(5000));
+    fn callback_text_is_a_compact_digest_with_usage() {
+        let text = assemble_callback_text("child", "Title", TurnStatus::Completed, "done", None);
         assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
-        assert_eq!(text.lines().nth(1).unwrap().chars().count(), 5000);
-        let failed = assemble_callback_text("child", "Title", TurnStatus::Interrupted, "done");
-        assert!(failed.contains(") failed.\ndone"));
+        assert!(text.ends_with("\ndone"));
+        assert!(!text.contains("tokens:"));
+        assert!(
+            assemble_callback_text("child", "Title", TurnStatus::Completed, "", None,)
+                .ends_with("\n(no assistant output)")
+        );
 
-        let mut count = 0;
-        for _ in 0..ORCHESTRATE_CALLBACK_CAP {
-            assert!(take_callback_slot(&mut count));
-        }
-        assert!(!take_callback_slot(&mut count));
-        assert_eq!(count, ORCHESTRATE_CALLBACK_CAP + 1);
+        let long = assemble_callback_text(
+            "child",
+            "Title",
+            TurnStatus::Completed,
+            &"x".repeat(5000),
+            None,
+        );
+        assert!(long.contains(
+            "Final output tail (5000 chars total — call result child for the full report):"
+        ));
+        assert_eq!(long.lines().last().unwrap().chars().count(), 600);
+
+        let usage = agent::TokenUsage {
+            input_tokens: Some(100),
+            cached_input_tokens: Some(25),
+            output_tokens: Some(40),
+            total_processed_tokens: Some(165),
+            ..Default::default()
+        };
+        let failed = assemble_callback_text(
+            "child",
+            "Title",
+            TurnStatus::Interrupted,
+            "done",
+            Some(&usage),
+        );
+        assert!(failed.starts_with("[orchestrate] thread child (\"Title\") failed. tokens:"));
+        assert!(failed.ends_with("\ndone"));
+        assert!(failed.contains("tokens: input 100 (+25 cached), output 40, total 165."));
     }
 
     #[test]
