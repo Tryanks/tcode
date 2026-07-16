@@ -13,6 +13,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     menu::ContextMenuExt as _,
     scroll::ScrollableElement as _,
+    tooltip::Tooltip,
     v_flex,
 };
 use serde::Deserialize;
@@ -812,6 +813,11 @@ impl SessionsSidebar {
         let row_key = format!("thread-{session_id}");
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
         let unread = self.app_state.read(cx).session_unread(&session_id);
+        let waiting_for_approval = self
+            .app_state
+            .read(cx)
+            .pending_approval_for(&session_id)
+            .is_some();
         let is_worktree = meta.worktree.is_some();
         let render_state = {
             let state = self.app_state.read(cx);
@@ -868,7 +874,29 @@ impl SessionsSidebar {
                     cx.notify();
                 }
             }))
-            .when(working, |row| {
+            .when(waiting_for_approval, |row| {
+                row.tooltip(|window, cx| {
+                    Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
+                        .build(window, cx)
+                })
+            })
+            .when(waiting_for_approval, |row| {
+                row.child(
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
+                        .child(
+                            div()
+                                .whitespace_nowrap()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().warning)
+                                .child(tcode_i18n::tr!("sidebar.waiting_approval")),
+                        ),
+                )
+            })
+            .when(working && !waiting_for_approval, |row| {
                 row.child(
                     h_flex()
                         .flex_none()

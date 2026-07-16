@@ -180,6 +180,12 @@ const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
 ];
 
 fn approval_mode_meta(mode: ApprovalMode) -> (String, String, &'static str) {
+    // ReadOnly is dispatch-only for now. A selected child still needs a stable
+    // chip, but it must not add a fourth choice to the user-facing picker.
+    let mode = match mode {
+        ApprovalMode::ReadOnly => ApprovalMode::Supervised,
+        mode => mode,
+    };
     let (_, label_key, description_key, icon) = APPROVAL_MODES
         .iter()
         .find(|(m, ..)| *m == mode)

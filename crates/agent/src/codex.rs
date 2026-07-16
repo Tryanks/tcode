@@ -36,12 +36,15 @@ const DEFAULT_MODEL: &str = "gpt-5-codex";
 /// T3's `CodexSessionRuntime.runtimeModeToThreadConfig`:
 /// - Supervised (approval-required): everything outside a read-only sandbox is
 ///   confirmed → asks before commands and file changes.
+/// - ReadOnly: reads proceed inside the read-only sandbox; an attempted
+///   escalation to mutate requests approval.
 /// - AutoAcceptEdits: edits inside the workspace-write sandbox proceed;
 ///   escalations (e.g. commands needing more access) still request approval.
 /// - FullAccess: no prompts, unsandboxed.
 fn approval_knobs(mode: ApprovalMode) -> (&'static str, &'static str) {
     match mode {
         ApprovalMode::Supervised => ("untrusted", "read-only"),
+        ApprovalMode::ReadOnly => ("on-request", "read-only"),
         ApprovalMode::AutoAcceptEdits => ("on-request", "workspace-write"),
         ApprovalMode::FullAccess => ("never", "danger-full-access"),
     }
@@ -2547,6 +2550,10 @@ mod tests {
         assert_eq!(
             approval_knobs(ApprovalMode::Supervised),
             ("untrusted", "read-only")
+        );
+        assert_eq!(
+            approval_knobs(ApprovalMode::ReadOnly),
+            ("on-request", "read-only")
         );
         assert_eq!(
             approval_knobs(ApprovalMode::AutoAcceptEdits),
