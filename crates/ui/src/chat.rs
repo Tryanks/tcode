@@ -139,6 +139,65 @@ fn md_sync(synced: &str, text: &str, can_push: bool) -> MdSync {
     }
 }
 
+/// Return the part of a user entry that belongs in its message bubble.
+fn user_visible_text(text: &str, context_len: Option<usize>) -> &str {
+    context_len
+        .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
+        .map_or(text, |len| &text[len..])
+}
+
+/// Encode plain text as markdown whose rendered text is still literal input.
+fn plain_text_as_markdown(text: &str) -> String {
+    let mut markdown = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut at_line_start = true;
+    let mut line_is_empty = true;
+
+    while let Some(ch) = chars.next() {
+        if ch == '\n' {
+            let mut newline_count = 1;
+            while chars.next_if_eq(&'\n').is_some() {
+                newline_count += 1;
+            }
+
+            if newline_count == 1 && !line_is_empty && chars.peek().is_some() {
+                // gpui-component currently drops markdown Break nodes while
+                // building paragraph text. An inline HTML break is converted
+                // to an InlineNode containing "\n", so both display and mouse
+                // selection preserve the original newline.
+                markdown.push_str("<br>");
+            } else {
+                markdown.extend(std::iter::repeat_n('\n', newline_count));
+            }
+            at_line_start = true;
+            line_is_empty = true;
+            continue;
+        }
+
+        line_is_empty = false;
+        if at_line_start {
+            match ch {
+                ' ' => {
+                    markdown.push_str("&#32;");
+                    continue;
+                }
+                '\t' => {
+                    markdown.push_str("&#9;");
+                    continue;
+                }
+                _ => at_line_start = false,
+            }
+        }
+
+        if ch.is_ascii_punctuation() {
+            markdown.push('\\');
+        }
+        markdown.push(ch);
+    }
+
+    markdown
+}
+
 /// A chronological block in a turn. File-change entries stay in activity runs
 /// for summary counting, but are rendered by the turn-level CHANGED FILES card.
 #[derive(Debug)]
@@ -698,6 +757,13 @@ impl ChatView {
                         EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
                             texts.push((entry.id.clone(), text.clone(), turn_running(entry.turn)));
                         }
+                        EntryContent::User {
+                            text, context_len, ..
+                        } => texts.push((
+                            entry.id.clone(),
+                            plain_text_as_markdown(user_visible_text(text, *context_len)),
+                            false,
+                        )),
                         _ => {}
                     }
                 }
@@ -1018,7 +1084,7 @@ impl ChatView {
         let context = context_len
             .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
             .map(|len| &text[..len]);
-        let visible = context.map_or(text, |prefix| &text[prefix.len()..]);
+        let visible = user_visible_text(text, context_len);
 
         let group_key = SharedString::from(format!("user-{entry_id}"));
         let turn_running = self
@@ -1097,6 +1163,10 @@ impl ChatView {
             );
         }
 
+        let content = self.md_states.get(entry_id).map_or_else(
+            || div().child(visible.to_string()).into_any_element(),
+            |md| TextView::new(&md.state).selectable(true).into_any_element(),
+        );
         let bubble = v_flex()
             .group(group_key.clone())
             .w_full()
@@ -1133,7 +1203,7 @@ impl ChatView {
                     .when(!pending, |bubble| bubble.bg(cx.theme().muted))
                     .text_color(cx.theme().foreground)
                     .text_size(px(15.))
-                    .child(visible.to_string())
+                    .child(content)
             })
             .child(self.reserve_action_row(actions, group_key, pinned));
 
@@ -3166,9 +3236,9 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 mod tests {
     use super::{
         ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload, displayed_error_text,
-        finished_work_log_label, index_turns, list_sync, md_sync, previous_logs_toggle_label,
-        segment_entries, timeline_overdraw, turn_work_log_summary, work_log_counts,
-        work_log_summary,
+        finished_work_log_label, index_turns, list_sync, md_sync, plain_text_as_markdown,
+        previous_logs_toggle_label, segment_entries, timeline_overdraw, turn_work_log_summary,
+        work_log_counts, work_log_summary,
     };
     use agent::{FileChange, FileChangeKind, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
@@ -3906,6 +3976,53 @@ mod tests {
             state.select_all(cx);
             state.selected_text()
         })
+    }
+
+    #[gpui::test]
+    fn plain_text_markdown_escapes_inline_and_block_syntax(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let cases = [
+            "*not italic* _nor this_ **nor bold**",
+            "# not a heading",
+            "- not a list",
+            "1. not a list",
+            "`not code`",
+            "before\n``` not a fence\n``` still not a fence",
+            "[not a link](https://example.com)",
+            "你好，世界！（测试）",
+            "&#32; literal entity",
+            "<div>not html</div>",
+        ];
+
+        for input in cases {
+            let markdown = plain_text_as_markdown(input);
+            let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(&markdown, cx)));
+            assert_eq!(
+                rendered(&state, cx),
+                format!("{input}\n"),
+                "input: {input:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn plain_text_markdown_preserves_lines_and_indentation(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let cases = [
+            ("line one\nline two", "line one\nline two\n"),
+            ("para one\n\npara two", "para one\npara two\n"),
+            (
+                "    let x = 1;\n        nested();",
+                "    let x = 1;\n        nested();\n",
+            ),
+            ("\tindented with a tab", "\tindented with a tab\n"),
+        ];
+
+        for (input, expected) in cases {
+            let markdown = plain_text_as_markdown(input);
+            let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(&markdown, cx)));
+            assert_eq!(rendered(&state, cx), expected, "input: {input:?}");
+        }
     }
 
     /// Pins the upstream constraint this mirror is built around: a
