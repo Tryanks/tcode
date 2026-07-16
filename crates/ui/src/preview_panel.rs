@@ -49,6 +49,7 @@ fn visible_preview_key(
 /// Resolve an MCP request's physical session id to the stable WebView key.
 /// Only the active surface can be an unsent project draft; every background
 /// request therefore keys directly by its stored session id.
+#[cfg(any(not(target_os = "linux"), test))]
 fn preview_key_for_session(
     requested_session_id: &str,
     active_session_id: Option<&str>,
