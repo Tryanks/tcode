@@ -74,7 +74,7 @@ fn claude_converter_maps_items_and_excludes_noise() {
     let converted = claude::convert(&file, "claude:claude-1").unwrap().unwrap();
     let contents = item_contents(&converted);
     assert_eq!(contents.len(), 4);
-    assert!(matches!(contents[0], ItemContent::UserMessage { text } if text == "Hello Claude"));
+    assert!(matches!(contents[0], ItemContent::UserMessage { text, .. } if text == "Hello Claude"));
     assert!(matches!(contents[1], ItemContent::AssistantMessage { text } if text == "Hello human"));
     assert!(
         matches!(contents[2], ItemContent::Reasoning { text } if text == "Consider the request")
@@ -104,7 +104,7 @@ fn codex_converter_maps_items_and_skips_harness_noise() {
     let converted = codex::convert(&file, "codex:codex-1").unwrap().unwrap();
     let contents = item_contents(&converted);
     assert_eq!(contents.len(), 4);
-    assert!(matches!(contents[0], ItemContent::UserMessage { text } if text == "Build it"));
+    assert!(matches!(contents[0], ItemContent::UserMessage { text, .. } if text == "Build it"));
     assert!(
         matches!(contents[1], ItemContent::AssistantMessage { text } if text == "Working on it")
     );

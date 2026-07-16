@@ -52,7 +52,10 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 item: ThreadItem {
                                     id: format!("imported-user-{next_id}"),
                                     parent_item_id: None,
-                                    content: ItemContent::UserMessage { text },
+                                    content: ItemContent::UserMessage {
+                                        text,
+                                        context_len: None,
+                                    },
                                 },
                             });
                         }

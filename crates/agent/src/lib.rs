@@ -748,6 +748,15 @@ pub struct ThreadItem {
 pub enum ItemContent {
     UserMessage {
         text: String,
+        /// Byte length of an injected context prefix folded into `text` — the
+        /// orchestrate guidance + configuration that `/orchestrate` composes
+        /// ahead of the user's own words. The provider still receives the whole
+        /// `text`; the UI uses this offset to render the prefix as a collapsed
+        /// disclosure row and keep the bubble to `text[context_len..]`. Absent on
+        /// ordinary messages and on every log written before this field existed,
+        /// which therefore render as a plain bubble exactly as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_len: Option<usize>,
     },
     AssistantMessage {
         text: String,

@@ -3498,7 +3498,7 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert!(matches!(
             &children[0].content,
-            ItemContent::UserMessage { text } if text.contains("Reply with pong")
+            ItemContent::UserMessage { text, .. } if text.contains("Reply with pong")
         ));
         assert!(events.iter().all(|event| match event {
             AgentEvent::ItemStarted(item)

@@ -183,6 +183,12 @@ pub enum EntryContent {
         text: String,
         /// Delivery state for a message injected into an already-open turn.
         steering: Option<SteeringStatus>,
+        /// Byte length of an injected context prefix folded into `text` (the
+        /// orchestrate guidance + configuration composed ahead of the user's own
+        /// words). When present, the UI renders `text[..context_len]` as a
+        /// collapsed disclosure row and keeps the bubble to `text[context_len..]`.
+        /// `None` for ordinary messages and for logs predating the annotation.
+        context_len: Option<usize>,
     },
     Assistant {
         text: String,
@@ -598,6 +604,7 @@ impl Timeline {
             content: EntryContent::User {
                 text: text.to_owned(),
                 steering: Some(SteeringStatus::Pending),
+                context_len: None,
             },
             ts,
             turn,
@@ -619,9 +626,10 @@ impl Timeline {
 
     fn content_from_item(content: &ItemContent) -> EntryContent {
         match content {
-            ItemContent::UserMessage { text } => EntryContent::User {
+            ItemContent::UserMessage { text, context_len } => EntryContent::User {
                 text: text.clone(),
                 steering: None,
+                context_len: *context_len,
             },
             ItemContent::AssistantMessage { text } => {
                 EntryContent::Assistant { text: text.clone() }
@@ -762,13 +770,70 @@ pub fn implement_prompt(markdown: &str) -> String {
     format!("PLEASE IMPLEMENT THIS PLAN:\n{}", markdown.trim())
 }
 
+/// The prefix every orchestrate child-thread callback user message opens with.
+/// Callbacks are injected verbatim (see the runtime's `assemble_callback_text`);
+/// the UI reparses that shape to render a disclosure row instead of a bubble.
+pub const ORCHESTRATE_CALLBACK_PREFIX: &str = "[orchestrate] thread ";
+
+/// The parts of an orchestrate child-thread callback user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrchestrateCallback {
+    /// The child session id the callback reports on.
+    pub child_id: String,
+    /// The child thread's title (may itself contain quotes).
+    pub title: String,
+    /// The reported state word (`completed` / `failed` / …).
+    pub state: String,
+    /// Everything after the first line — the digest body (empty when absent).
+    pub body: String,
+}
+
+/// Parse a user-message text that a child-thread callback injected, mirroring
+/// the runtime's `[orchestrate] thread {id} ("{title}") {state}.{tokens}\n{body}`
+/// wire format. Returns `None` for any text that is not a callback, so callers
+/// fall back to the plain bubble. Works on historical logs too: it reads the
+/// stored text and never depends on any stored annotation.
+pub fn parse_orchestrate_callback(text: &str) -> Option<OrchestrateCallback> {
+    let (first_line, body) = match text.split_once('\n') {
+        Some((line, body)) => (line, body),
+        None => (text, ""),
+    };
+    let rest = first_line.strip_prefix(ORCHESTRATE_CALLBACK_PREFIX)?;
+    // `{child_id} ("{title}") {state}.…` — the id has no spaces, so the first
+    // ` ("` opens the title and the last `") ` closes it (titles may contain
+    // quotes, but the trailing state word never does).
+    let open = rest.find(" (\"")?;
+    let child_id = rest[..open].to_string();
+    let after = &rest[open + 3..];
+    let close = after.rfind("\") ")?;
+    let title = after[..close].to_string();
+    let tail = &after[close + 3..];
+    let state = tail.split('.').next().unwrap_or("").trim().to_string();
+    if child_id.is_empty() || state.is_empty() {
+        return None;
+    }
+    Some(OrchestrateCallback {
+        child_id,
+        title,
+        state,
+        body: body.to_string(),
+    })
+}
+
 /// Merge an authoritative item snapshot over an existing entry, keeping
 /// delta-accumulated text when the snapshot's text field is empty.
 fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
-        (EntryContent::User { steering, .. }, EntryContent::User { text, .. }) => {
-            EntryContent::User { text, steering }
-        }
+        (
+            EntryContent::User { steering, .. },
+            EntryContent::User {
+                text, context_len, ..
+            },
+        ) => EntryContent::User {
+            text,
+            steering,
+            context_len,
+        },
         (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
             EntryContent::Assistant {
                 text: merge_text(old, new),
@@ -848,7 +913,10 @@ mod tests {
         AgentEvent::ItemCompleted(ThreadItem {
             id: id.into(),
             parent_item_id: None,
-            content: ItemContent::UserMessage { text: text.into() },
+            content: ItemContent::UserMessage {
+                text: text.into(),
+                context_len: None,
+            },
         })
     }
 
@@ -962,7 +1030,7 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::User { text, steering } => Some((text.as_str(), *steering)),
+                EntryContent::User { text, steering, .. } => Some((text.as_str(), *steering)),
                 _ => None,
             })
             .collect();
@@ -998,6 +1066,7 @@ mod tests {
             EntryContent::User {
                 text,
                 steering: Some(SteeringStatus::Pending),
+                ..
             } if text == "change direction"
         ));
 
@@ -1563,6 +1632,7 @@ mod tests {
             parent_item_id: Some("spawn".into()),
             content: ItemContent::UserMessage {
                 text: "ping".into(),
+                context_len: None,
             },
         };
         let completed = ThreadItem {
@@ -1631,5 +1701,79 @@ mod tests {
             append_review_comments_to_prompt("Fix this", &[comment]),
             "Fix this\n\n<review_comment sectionId=\"turn:3\" sectionTitle=\"Turn 4\" filePath=\"src/lib.rs\" startIndex=\"12\" endIndex=\"13\" rangeLabel=\"+7 to +8\">\nPlease avoid the unwrap.\n```diff\n@@ -7,1 +7,2 @@\n old\n+new\n```\n</review_comment>"
         );
+    }
+
+    #[test]
+    fn parse_orchestrate_callback_reads_the_wire_format() {
+        // Normal callback: id, quoted title, state word, and a multi-line body.
+        let normal = parse_orchestrate_callback(
+            "[orchestrate] thread child-7 (\"Investigate zed terminal\") completed. tokens: input 5, output 3, total 8.\nHere is the report.\nSecond line.",
+        )
+        .expect("normal callback parses");
+        assert_eq!(normal.child_id, "child-7");
+        assert_eq!(normal.title, "Investigate zed terminal");
+        assert_eq!(normal.state, "completed");
+        assert_eq!(normal.body, "Here is the report.\nSecond line.");
+
+        // A title that itself contains quotes survives (the last `") ` closes it).
+        let quoted = parse_orchestrate_callback(
+            "[orchestrate] thread abc (\"He said \"hi\" twice\") failed.\nbody",
+        )
+        .expect("quoted-title callback parses");
+        assert_eq!(quoted.title, "He said \"hi\" twice");
+        assert_eq!(quoted.state, "failed");
+        assert_eq!(quoted.body, "body");
+
+        // Missing body (no newline) → empty body, still parses.
+        let no_body = parse_orchestrate_callback("[orchestrate] thread c (\"Title\") completed.")
+            .expect("bodyless callback parses");
+        assert_eq!(no_body.body, "");
+        assert_eq!(no_body.state, "completed");
+
+        // Non-matching text (an ordinary user message) is not a callback.
+        assert!(parse_orchestrate_callback("Please run the tests").is_none());
+        assert!(parse_orchestrate_callback("[orchestrate] thread only-a-header").is_none());
+    }
+
+    #[test]
+    fn user_message_context_len_survives_a_serde_roundtrip() {
+        let event = user_msg_with_context("u1", "PREFIX\n\nvisible", Some(8));
+        let encoded = serde_json::to_string(&event).unwrap();
+        // The annotation is present in the wire form when set…
+        assert!(encoded.contains("\"context_len\":8"));
+        let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
+        let timeline = Timeline::fold_events([decoded]);
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::User { text, context_len: Some(8), .. } if text == "PREFIX\n\nvisible"
+        ));
+
+        // …and omitted entirely when absent (skip_serializing_if).
+        let plain = user_msg_with_context("u2", "hello", None);
+        let plain_encoded = serde_json::to_string(&plain).unwrap();
+        assert!(!plain_encoded.contains("context_len"));
+    }
+
+    #[test]
+    fn old_format_user_message_without_the_field_folds_to_a_plain_bubble() {
+        // A JSONL line written before the annotation existed carries no field.
+        let legacy = r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"just words"}}"#;
+        let event: AgentEvent = serde_json::from_str(legacy).unwrap();
+        let timeline = Timeline::fold_events([event]);
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::User { text, context_len: None, .. } if text == "just words"
+        ));
+    }
+
+    fn user_msg_with_context(id: &str, text: &str, context_len: Option<usize>) -> AgentEvent {
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::UserMessage {
+                text: text.into(),
+                context_len,
+            },
+        })
     }
 }
