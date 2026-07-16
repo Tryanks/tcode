@@ -142,10 +142,14 @@ impl AppShell {
             let preview = preview.clone();
             cx.spawn_in(window, async move |_, cx| {
                 while let Ok(request) = requests.recv().await {
-                    let preview_mcp::BrokerRequest { op, reply } = request;
+                    let preview_mcp::BrokerRequest {
+                        session_id,
+                        op,
+                        reply,
+                    } = request;
                     if preview
                         .update_in(cx, |panel, window, cx| {
-                            panel.handle_op(op, reply, window, cx)
+                            panel.handle_op(session_id, op, reply, window, cx)
                         })
                         .is_err()
                     {
