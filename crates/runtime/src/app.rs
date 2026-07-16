@@ -212,6 +212,11 @@ pub struct QueuedMessage {
     /// session, and is applied only to the text sent on the wire (the user
     /// message recorded in the transcript stays clean).
     ultrathink: bool,
+    /// Byte length of an injected context prefix folded into `text` (set only for
+    /// an `/orchestrate` send). Threaded into the recorded user-message event so
+    /// the timeline can split the prefix from the user's own words; `None` for
+    /// every ordinary send.
+    context_len: Option<usize>,
     /// Orchestration callbacks arriving during the same provider-start window
     /// are folded into one wake-up turn. Once that turn is live, later callbacks
     /// are steered into it instead of becoming more queued turns.
@@ -242,6 +247,7 @@ impl From<&str> for QueuedMessage {
             text: text.to_string(),
             attachments: Vec::new(),
             ultrathink: false,
+            context_len: None,
             kind: QueuedMessageKind::User,
         }
     }
@@ -305,6 +311,12 @@ pub struct ActiveSession {
     /// (T3: Ultrathink is a prompt-prefix mode, not an option) and is cleared
     /// after one send.
     pending_ultrathink: bool,
+    /// A transient "the next queued send carries an injected context prefix of
+    /// this many bytes" flag, set by [`AppState::orchestrate_turn`] right before
+    /// it hands the composed text to `steer`. Like `pending_ultrathink` it is a
+    /// per-send annotation, consumed by the next `push_queued`, and never
+    /// persisted on the session.
+    pending_context_len: Option<usize>,
     /// Whether the current proposed plan has been accepted for implementation
     /// (drives the composer back out of its plan-ready state).
     plan_implemented: bool,
@@ -474,11 +486,13 @@ impl ActiveSession {
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let ultrathink = std::mem::take(&mut self.pending_ultrathink);
+        let context_len = std::mem::take(&mut self.pending_context_len);
         self.queue.push(QueuedMessage {
             id,
             text,
             attachments,
             ultrathink,
+            context_len,
             kind: QueuedMessageKind::User,
         });
         id
@@ -505,6 +519,7 @@ impl ActiveSession {
             text,
             attachments: Vec::new(),
             ultrathink: false,
+            context_len: None,
             kind: QueuedMessageKind::OrchestrateCallback,
         });
         id
@@ -918,6 +933,12 @@ impl AppState {
         let model = active.meta.model.clone();
         let enabling = !active.meta.orchestrate_enabled;
         let session_id = active.meta.id.clone();
+        // The composed text is [guidance?] + [configuration] + [user text] joined
+        // by "\n\n", with the user's words last. `context_len` is the byte length
+        // of everything before them (prefix + its trailing "\n\n") — the split the
+        // timeline records so it can show the prefix as a disclosure and the
+        // bubble only the user's words. The provider still receives all of `text`.
+        let user_len = text.len();
         let text = compose_orchestrate_text(
             provider,
             model.as_deref(),
@@ -925,6 +946,7 @@ impl AppState {
             &self.settings.orchestrate,
             &text,
         );
+        let context_len = text.len().saturating_sub(user_len);
 
         if enabling {
             if let Err(message) = self.enable_orchestrate(&session_id, cx) {
@@ -934,6 +956,13 @@ impl AppState {
             if let Some(active) = self.active.as_mut() {
                 active.shutdown_to_idle();
             }
+        }
+
+        // Stage the split so the next `push_queued` records it on the user
+        // message. (A mid-turn steer clears it instead — see `steer` — so the
+        // annotation never leaks onto an unrelated later message.)
+        if let Some(active) = self.active.as_mut() {
+            active.pending_context_len = Some(context_len);
         }
 
         // `steer` sends ordinarily when idle and injects into a live turn. On
@@ -3277,13 +3306,40 @@ impl AppState {
         if text.is_empty() {
             return;
         }
+        // An `/orchestrate` turn stored only the user's own words in the bubble
+        // (the injected prefix rode in a `context_len`-annotated message). Resend
+        // it through `orchestrate_turn` so the guidance + configuration prefix is
+        // re-composed from current settings, rather than the plain send path that
+        // would drop it. The edited text is exactly those user words.
+        let was_orchestrate = self.active.as_ref().is_some_and(|active| {
+            active
+                .timeline
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.turn == turn && matches!(entry.content, EntryContent::User { .. })
+                })
+                .is_some_and(|entry| {
+                    matches!(
+                        entry.content,
+                        EntryContent::User {
+                            context_len: Some(_),
+                            ..
+                        }
+                    )
+                })
+        });
         let Some(restored) = self.rewind_to_turn(turn, cx) else {
             return;
         };
         if !restored {
             cx.emit(AppEvent::Notice(RuntimeNotice::EditWithoutCheckpoint));
         }
-        self.send_turn(text, Vec::new(), cx);
+        if was_orchestrate {
+            self.orchestrate_turn(text, Vec::new(), cx);
+        } else {
+            self.send_turn(text, Vec::new(), cx);
+        }
     }
 
     /// The last turn in the active timeline that has a user message (the target
@@ -3457,6 +3513,7 @@ impl AppState {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -3506,6 +3563,7 @@ impl AppState {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -3718,6 +3776,7 @@ impl AppState {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -3855,7 +3914,7 @@ impl AppState {
         // Group B: the JSONL length before this turn's user message — the revert
         // truncation boundary — captured before the message is appended.
         let checkpoint_offset = self.store.event_count(&session_id);
-        self.record_user_message(&session_id, &next.text, cx);
+        self.record_user_message(&session_id, &next.text, next.context_len, cx);
         // Group B: snapshot the pre-turn working tree for this turn's revert.
         self.capture_checkpoint(&session_id, checkpoint_offset, cx);
         self.maybe_generate_title(&next.text, &next.attachments, cx);
@@ -3910,8 +3969,8 @@ impl AppState {
             cx.notify();
             return;
         }
-        let next_text = parked.queue.first().map(|m| m.text.clone()).unwrap();
-        self.record_user_message(session_id, &next_text, cx);
+        let next = parked.queue.first().cloned().unwrap();
+        self.record_user_message(session_id, &next.text, next.context_len, cx);
         if let Some(parked) = self.background.get_mut(session_id)
             && parked.dispatch_next_pending().is_err()
         {
@@ -4047,12 +4106,19 @@ impl AppState {
     /// Append a user message to the session transcript. Providers don't echo
     /// user input, so we record it as a synthetic canonical event and replay
     /// renders it identically.
-    fn record_user_message(&mut self, session_id: &str, text: &str, cx: &mut Context<Self>) {
+    fn record_user_message(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        context_len: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
             id: format!("local-user-{}", uuid::Uuid::new_v4()),
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
+                context_len,
             },
         });
         self.record_event(session_id, &user_event, cx);
@@ -4121,6 +4187,11 @@ impl AppState {
                     return;
                 };
                 active.pending_ultrathink = false;
+                // A steered orchestrate turn joins a turn already in flight and is
+                // logged via `record_steer_request`, which carries no split, so it
+                // renders as a plain bubble. Drop any staged split rather than let
+                // it attach to a later queued message.
+                active.pending_context_len = None;
                 if active
                     .steer_now(request_id, wire_text, attachments)
                     .is_err()
@@ -4449,6 +4520,7 @@ impl AppState {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -6317,6 +6389,77 @@ mod tests {
         assert!(acp.contains("Generic lead"));
     }
 
+    #[gpui::test]
+    fn orchestrate_turn_records_the_context_split_on_the_user_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-split-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, _receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            // A live, idle, already-enabled orchestrator: the turn is an ordinary
+            // send (no restart, nothing in flight), so it flows through
+            // record_user_message where the split is stored.
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "orchestrator".into();
+            active.meta.orchestrate_enabled = true;
+            // Match the live launch state so the send is an ordinary turn rather
+            // than a restart (which would flush through a different path).
+            active.live_model = active.meta.model.clone();
+            active.live_approval_mode = Some(active.meta.approval_mode);
+            state.active = Some(active);
+
+            state.orchestrate_turn("执行某某任务".into(), Vec::new(), cx);
+
+            // What the provider actually receives is the whole composed text.
+            let expected_full = compose_orchestrate_text(
+                ProviderKind::Codex,
+                None,
+                false,
+                &state.settings.orchestrate,
+                "执行某某任务",
+            );
+            let expected_context = expected_full.len() - "执行某某任务".len();
+
+            let events = state.store.read_events("orchestrator");
+            let recorded = events
+                .iter()
+                .find_map(|stored| match &stored.event {
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { text, context_len },
+                        ..
+                    }) => Some((text.clone(), *context_len)),
+                    _ => None,
+                })
+                .expect("orchestrate turn recorded a user message");
+            assert_eq!(recorded.0, expected_full);
+            assert_eq!(recorded.1, Some(expected_context));
+
+            // Folded, the timeline splits the prefix from the user's own words.
+            let timeline = Timeline::fold_events(events);
+            let user = timeline
+                .entries
+                .iter()
+                .find_map(|entry| match &entry.content {
+                    EntryContent::User {
+                        text,
+                        context_len: Some(len),
+                        ..
+                    } => Some((text.clone(), *len)),
+                    _ => None,
+                })
+                .expect("folded user entry carries the split");
+            assert_eq!(&user.0[user.1..], "执行某某任务");
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         let settings = OrchestrateSettings::default();
@@ -6496,10 +6639,8 @@ mod tests {
 
     #[gpui::test]
     fn updates_on_the_viewed_thread_do_not_mark_it_unread(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-viewed-unread-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tcode-viewed-unread-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
         let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
@@ -7250,6 +7391,7 @@ mod tests {
                 EntryContent::User {
                     text,
                     steering: Some(tcode_core::session::SteeringStatus::Pending),
+                    ..
                 } if entry.id == request_id && text.contains("child-a completed")
             )));
         });
@@ -7276,6 +7418,7 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::UserMessage {
                         text: "start".into(),
+                        context_len: None,
                     },
                 }),
             );
@@ -7291,6 +7434,7 @@ mod tests {
                 EntryContent::User {
                     text,
                     steering: Some(tcode_core::session::SteeringStatus::Pending),
+                    ..
                 } if entry.id == request_id && text == "redirect"
             )));
 
@@ -7310,6 +7454,7 @@ mod tests {
                 EntryContent::User {
                     text,
                     steering: Some(tcode_core::session::SteeringStatus::Pending),
+                    ..
                 } if entry.id == request_id && text == "queued redirect"
             )));
         });
@@ -7383,6 +7528,7 @@ mod tests {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -7421,6 +7567,7 @@ mod tests {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -7473,6 +7620,7 @@ mod tests {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -7679,6 +7827,7 @@ mod tests {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -7723,6 +7872,7 @@ mod tests {
             live_approval_mode: None,
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
+            pending_context_len: None,
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
@@ -7879,7 +8029,7 @@ mod tests {
     ) -> usize {
         let id = state.active.as_ref().unwrap().meta.id.clone();
         let offset = state.store.event_count(&id);
-        state.record_user_message(&id, text, cx);
+        state.record_user_message(&id, text, None, cx);
         state.capture_checkpoint(&id, offset, cx);
         let turn = state.last_user_turn().unwrap();
         state.record_event(

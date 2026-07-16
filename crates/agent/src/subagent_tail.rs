@@ -123,7 +123,10 @@ impl TranscriptMapper {
                 self.next_user_id += 1;
                 events.push(AgentEvent::ItemCompleted(self.item(
                     format!("user-{}", self.next_user_id),
-                    ItemContent::UserMessage { text: text.into() },
+                    ItemContent::UserMessage {
+                        text: text.into(),
+                        context_len: None,
+                    },
                 )));
                 continue;
             }
@@ -329,7 +332,7 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert!(matches!(
             &first[0],
-            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), content: ItemContent::UserMessage { text }, .. })
+            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), content: ItemContent::UserMessage { text, .. }, .. })
                 if parent == "spawn-1" && text == "do it"
         ));
 

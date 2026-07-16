@@ -112,6 +112,26 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   muted bg, 4px radius). Streaming appends via push_str with
   follow-when-near-bottom.
 - User messages: right-aligned bubble, muted bg, radius 12, max-width ~70%.
+- **Disclosure rows** fold injected, non-conversational context out of the
+  bubbles into a reusable centered control: a collapsed-by-default row of 12px
+  muted `label ›` whose chevron rotates and whose background lifts to accent on
+  hover. Clicking toggles a per-entry expansion (state lives on the chat view,
+  keyed by entry id — not global), revealing the injected text verbatim as 13px
+  muted preformatted prompt source inside a bordered muted card. Because that
+  text can be long (orchestrate guidance), the card is a resolved-height,
+  capped-at-320px scroll viewport of its own rather than growing the turn. Two
+  things render as disclosure rows today: an `/orchestrate` turn shows an
+  "Orchestrate Skill ›" row above a bubble that now holds only the user's own
+  words (the injected guidance + configuration prefix is the disclosure; the
+  provider still receives the whole composed text); and a child-thread callback
+  renders as a single "`{title, ≤24 chars…} {state} ›`" row **instead of** a
+  bubble. A disclosure row sits where the turn's user bubble would start and
+  keeps the 44px/16px turn rhythm. Message actions follow the split: the
+  orchestrate bubble's Copy copies only the visible user text and Edit seeds only
+  it (resending re-routes through `orchestrate_turn`, which re-composes the
+  prefix); callback rows are not bubbles and carry **no** action row (no Copy,
+  Edit, or Revert). Messages logged before the split annotation existed lack it
+  and render as an ordinary full bubble, exactly as before.
 - **Message actions.** Every message reserves a 24px action row under it (the
   height is always taken, so revealing it never shifts the timeline). It is
   hidden until the message is hovered — except on the newest user and newest
