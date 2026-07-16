@@ -18,12 +18,12 @@ use alacritty_terminal::{
     event::{Event, EventListener, Notify as _, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
     grid::{Dimensions, Scroll},
-    index::{Column, Line, Point, Side},
+    index::{Column, Line, Point, Side as AlacrittySide},
     selection::{Selection, SelectionType},
     sync::FairMutex,
     term::{Config, TermMode, cell::Flags},
     tty,
-    vte::ansi::{Color as AlacrittyColor, NamedColor, Rgb},
+    vte::ansi::{ClearMode, Color as AlacrittyColor, Handler as _, NamedColor, Rgb},
 };
 
 mod hyperlinks;
@@ -136,6 +136,21 @@ pub enum SelectionKind {
     Simple,
     Semantic,
     Lines,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionSide {
+    Left,
+    Right,
+}
+
+impl From<SelectionSide> for AlacrittySide {
+    fn from(side: SelectionSide) -> Self {
+        match side {
+            SelectionSide::Left => Self::Left,
+            SelectionSide::Right => Self::Right,
+        }
+    }
 }
 
 impl TermState {
@@ -474,13 +489,23 @@ impl Terminal {
 
     pub fn write_input(&self, bytes: impl Into<Vec<u8>>) {
         let bytes = bytes.into();
+        let display_changed = {
+            let mut term = self.term.lock();
+            let display_offset = term.grid().display_offset();
+            let had_selection = term.selection.take().is_some();
+            term.scroll_display(Scroll::Bottom);
+            had_selection || term.grid().display_offset() != display_offset
+        };
         let label_changed = {
             let mut shared = self.shared.lock().unwrap();
             let previous_label = shared.command_label.clone();
             track_command_input(&mut shared, &bytes);
             shared.command_label != previous_label
         };
-        let _ = self.notifier.0.send(Msg::Input(bytes.into()));
+        self.write_raw(bytes);
+        if display_changed {
+            let _ = self.events_tx.try_send(TermEvent::Wakeup);
+        }
         schedule_process_refresh(
             self._pty_info.clone(),
             self.shared.clone(),
@@ -490,6 +515,12 @@ impl Terminal {
         if label_changed {
             let _ = self.events_tx.try_send(TermEvent::Wakeup);
         }
+    }
+
+    /// Send terminal protocol bytes to the PTY without changing viewport or selection state.
+    pub fn write_raw(&self, bytes: impl Into<Vec<u8>>) {
+        let bytes = bytes.into();
+        let _ = self.notifier.0.send(Msg::Input(bytes.into()));
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
@@ -540,9 +571,42 @@ impl Terminal {
             SelectionKind::Semantic => SelectionType::Semantic,
             SelectionKind::Lines => SelectionType::Lines,
         };
-        let mut selection = Selection::new(selection_type, point(start), Side::Left);
-        selection.update(point(end), Side::Right);
+        let mut selection = Selection::new(selection_type, point(start), AlacrittySide::Left);
+        selection.update(point(end), AlacrittySide::Right);
         term.selection = Some(selection);
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
+    }
+
+    /// Start an interactive selection at an empty anchor in visible grid coordinates.
+    pub fn start_selection(&self, kind: SelectionKind, point: (usize, usize), side: SelectionSide) {
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = Point::new(
+            Line(point.0 as i32 - offset),
+            Column(point.1.min(term.columns() - 1)),
+        );
+        let selection_type = match kind {
+            SelectionKind::Simple => SelectionType::Simple,
+            SelectionKind::Semantic => SelectionType::Semantic,
+            SelectionKind::Lines => SelectionType::Lines,
+        };
+        term.selection = Some(Selection::new(selection_type, point, side.into()));
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
+    }
+
+    /// Update the existing interactive selection using visible grid coordinates.
+    pub fn update_selection(&self, point: (usize, usize), side: SelectionSide) {
+        let mut term = self.term.lock();
+        let offset = term.grid().display_offset() as i32;
+        let point = Point::new(
+            Line(point.0 as i32 - offset),
+            Column(point.1.min(term.columns() - 1)),
+        );
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, side.into());
+        }
         drop(term);
         let _ = self.events_tx.try_send(TermEvent::Wakeup);
     }
@@ -555,7 +619,7 @@ impl Terminal {
             Column(end.1.min(term.columns() - 1)),
         );
         if let Some(selection) = term.selection.as_mut() {
-            selection.update(point, Side::Right);
+            selection.update(point, AlacrittySide::Right);
         }
         drop(term);
         let _ = self.events_tx.try_send(TermEvent::Wakeup);
@@ -568,6 +632,46 @@ impl Terminal {
         if changed {
             let _ = self.events_tx.try_send(TermEvent::Wakeup);
         }
+    }
+
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            Point::new(Line(-(term.history_size() as i32)), Column(0)),
+            AlacrittySide::Left,
+        );
+        selection.update(
+            Point::new(term.bottommost_line(), term.last_column()),
+            AlacrittySide::Right,
+        );
+        term.selection = Some(selection);
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
+    }
+
+    pub fn clear(&self) {
+        let mut term = self.term.lock();
+        term.clear_screen(ClearMode::Saved);
+
+        let cursor = term.grid().cursor.point;
+        term.grid_mut().reset_region(..cursor.line);
+
+        let line = term.grid()[cursor.line][..Column(term.columns())]
+            .iter()
+            .cloned()
+            .enumerate()
+            .collect::<Vec<_>>();
+        for (index, cell) in line {
+            term.grid_mut()[Line(0)][Column(index)] = cell;
+        }
+
+        term.grid_mut().cursor.point = Point::new(Line(0), cursor.column);
+        if term.screen_lines() > 1 {
+            term.grid_mut().reset_region(Line(1)..);
+        }
+        drop(term);
+        let _ = self.events_tx.try_send(TermEvent::Wakeup);
     }
 
     pub fn selected_text(&self) -> Option<SelectedText> {
@@ -1238,5 +1342,56 @@ mod tests {
         assert_eq!(selected.text, "alpha\nbeta");
         assert_eq!(selected.line_end, selected.line_start + 1);
         assert!(term.snapshot().cells.iter().any(|cell| cell.selected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_simple_selection_starts_empty_then_selects_dragged_text() {
+        require_live_pty!();
+        let term = command("printf 'alpha\\n'; sleep 1");
+        let state = wait_until(&term, |state| state.text().contains("alpha"));
+        let alpha_row = state
+            .text()
+            .lines()
+            .position(|line| line.contains("alpha"))
+            .unwrap();
+
+        term.start_selection(SelectionKind::Simple, (alpha_row, 0), SelectionSide::Left);
+        assert_eq!(term.selected_text(), None);
+        assert!(!term.snapshot().cells.iter().any(|cell| cell.selected));
+
+        term.update_selection((alpha_row, 4), SelectionSide::Right);
+        assert_eq!(term.selected_text().unwrap().text, "alpha");
+        assert!(term.snapshot().cells.iter().any(|cell| cell.selected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_saved_screen_then_select_all() {
+        require_live_pty!();
+        let term = Terminal::spawn_command(
+            std::env::temp_dir(),
+            "/bin/sh".to_string(),
+            vec!["-i".to_string()],
+            "sh".to_string(),
+        )
+        .unwrap();
+        term.write_input(b"PS1='ready> '; seq 1 200; sleep 1\r".to_vec());
+        wait_until(&term, |state| {
+            state.text().contains("200") && state.text().contains("ready>")
+        });
+
+        term.clear();
+        let cleared = term.snapshot();
+        assert_eq!(cleared.history_size, 0);
+        assert!(!cleared.text().contains("199"));
+
+        term.select_all();
+        let selected = term.selected_text().unwrap();
+        assert!(!selected.text.is_empty());
+        assert_eq!(selected.line_start, 1);
+
+        term.write_input(b"exit\r".to_vec());
+        wait_until(&term, |state| state.exited);
     }
 }

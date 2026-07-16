@@ -7,22 +7,24 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, FocusHandle, Focusable,
-    FontFeatures, FontStyle, FontWeight, Hsla, InputHandler, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
-    prelude::FluentBuilder as _, px, rgb, size,
+    Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
+    FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
+    StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, canvas, div, fill, font, point, prelude::FluentBuilder as _, px, rgb,
+    size,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::ContextMenuExt as _,
     resizable::{h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
 use term::{
-    Cell, Color, CursorShape, HyperlinkMatch, SelectionKind, TermEvent, TermState,
+    Cell, Color, CursorShape, HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermState,
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
 };
 
@@ -38,6 +40,23 @@ const TERMINAL_FONT_FAMILY: &str = "DejaVu Sans Mono";
 const PANE_PADDING_X: f32 = 8.;
 const PANE_PADDING_Y: f32 = 5.;
 const PANE_BORDER: f32 = 1.;
+const SELECTION_DRAG_THRESHOLD: f32 = 2.;
+
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+struct TerminalCopy(u64);
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+struct TerminalPaste(u64);
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+struct TerminalSelectAll(u64);
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+struct TerminalClear(u64);
+#[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+struct TerminalAddContext(u64);
 
 #[derive(Clone, Copy)]
 struct GridGeometry {
@@ -121,7 +140,8 @@ pub struct TerminalDrawer {
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
-    selection_anchor: Option<(u64, (usize, usize), SelectionKind)>,
+    selecting: Option<u64>,
+    mouse_down_position: Option<(u64, Point<Pixels>)>,
     last_mouse_point: HashMap<u64, (usize, usize)>,
     focus_subscriptions: Vec<gpui::Subscription>,
     event_subscriptions: HashMap<u64, TerminalEventSubscription>,
@@ -147,7 +167,8 @@ impl TerminalDrawer {
             cell_width: 7.83,
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
-            selection_anchor: None,
+            selecting: None,
+            mouse_down_position: None,
             last_mouse_point: HashMap::new(),
             focus_subscriptions: Vec::new(),
             event_subscriptions: HashMap::new(),
@@ -197,6 +218,77 @@ impl TerminalDrawer {
         {
             f(&terminal.terminal);
         }
+    }
+
+    fn paste_to_terminal(&self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
+        self.with_terminal_id(terminal_id, cx, |terminal| {
+            let mode = terminal.snapshot().mode;
+            let text = if mode.bracketed_paste {
+                format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
+            } else {
+                text.replace("\r\n", "\r").replace('\n', "\r")
+            };
+            terminal.write_input(text.into_bytes());
+        });
+    }
+
+    fn on_terminal_copy(
+        &mut self,
+        action: &TerminalCopy,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|active| active.terminal_workspace.terminal(action.0))
+            .and_then(|entry| entry.terminal.selected_text())
+            .map(|selection| selection.text)
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn on_terminal_paste(
+        &mut self,
+        action: &TerminalPaste,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.paste_to_terminal(action.0, &text, cx);
+        }
+    }
+
+    fn on_terminal_select_all(
+        &mut self,
+        action: &TerminalSelectAll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_terminal_id(action.0, cx, term::Terminal::select_all);
+    }
+
+    fn on_terminal_clear(
+        &mut self,
+        action: &TerminalClear,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_terminal_id(action.0, cx, term::Terminal::clear);
+    }
+
+    fn on_terminal_add_context(
+        &mut self,
+        action: &TerminalAddContext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_state.update(cx, |state, cx| {
+            state.capture_terminal_selection(action.0, cx)
+        });
     }
 
     /// Keep one gpui-side drain task per live PTY. Terminal restarts retain the
@@ -328,15 +420,15 @@ impl TerminalDrawer {
             if keystroke.key.eq_ignore_ascii_case("v")
                 && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
             {
-                self.with_terminal(cx, |terminal| {
-                    let mode = terminal.snapshot().mode;
-                    let text = if mode.bracketed_paste {
-                        format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
-                    } else {
-                        text.replace("\r\n", "\r").replace('\n', "\r")
-                    };
-                    terminal.write_input(text.into_bytes());
-                });
+                if let Some(terminal_id) = self
+                    .app_state
+                    .read(cx)
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.terminal_workspace.active_id)
+                {
+                    self.paste_to_terminal(terminal_id, &text, cx);
+                }
                 cx.stop_propagation();
             }
             return;
@@ -396,8 +488,8 @@ impl TerminalDrawer {
             {
                 let snapshot = entry.terminal.snapshot();
                 let point = self
-                    .grid_point(terminal_id, event.position)
-                    .map(|(row, column)| GridPoint { row, column })
+                    .grid_point_and_side(terminal_id, event.position)
+                    .map(|((row, column), _)| GridPoint { row, column })
                     .unwrap_or(GridPoint { row: 0, column: 0 });
                 if snapshot.mode.routes_mouse(event.modifiers.shift) {
                     if let Some(bytes) = mappings::scroll_report(
@@ -406,13 +498,13 @@ impl TerminalDrawer {
                         term_modifiers(event.modifiers),
                         snapshot.mode,
                     ) {
-                        entry.terminal.write_input(bytes);
+                        entry.terminal.write_raw(bytes);
                     }
                 } else if snapshot.mode.alt_screen
                     && snapshot.mode.alternate_scroll
                     && !event.modifiers.shift
                 {
-                    entry.terminal.write_input(mappings::alt_scroll(lines));
+                    entry.terminal.write_raw(mappings::alt_scroll(lines));
                 } else {
                     entry.terminal.scroll(lines);
                 }
@@ -454,9 +546,11 @@ impl TerminalDrawer {
         );
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
+        let cols = state.cols;
         let rows = state.rows;
         let focus_handle = self.focus_handle.clone();
         let drawer = cx.entity();
+        let grid_bounds = self.grid_bounds.clone();
 
         canvas(
             |_bounds, _window, _cx| (),
@@ -472,6 +566,16 @@ impl TerminalDrawer {
                     let origin = point(
                         snap_down(bounds.origin.x),
                         snap_down(bounds.origin.y),
+                    );
+                    grid_bounds.borrow_mut().insert(
+                        terminal_id,
+                        GridGeometry {
+                            bounds: Bounds::new(origin, bounds.size),
+                            cols,
+                            rows,
+                            cell_width,
+                            cell_height,
+                        },
                     );
 
                     for background in paint_data
@@ -629,19 +733,19 @@ impl TerminalDrawer {
         .into_any_element()
     }
 
-    fn grid_point(
+    fn grid_point_and_side(
         &self,
         terminal_id: u64,
         position: gpui::Point<Pixels>,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<((usize, usize), SelectionSide)> {
         let geometry = *self.grid_bounds.borrow().get(&terminal_id)?;
-        let x =
-            (f32::from(position.x - geometry.bounds.left()) - PANE_BORDER - PANE_PADDING_X).max(0.);
-        let y =
-            (f32::from(position.y - geometry.bounds.top()) - PANE_BORDER - PANE_PADDING_Y).max(0.);
-        Some((
-            ((y / geometry.cell_height) as usize).min(geometry.rows.saturating_sub(1)),
-            ((x / geometry.cell_width) as usize).min(geometry.cols.saturating_sub(1)),
+        Some(grid_point_and_side(
+            f32::from(position.x - geometry.bounds.left()),
+            f32::from(position.y - geometry.bounds.top()),
+            geometry.cols,
+            geometry.rows,
+            geometry.cell_width,
+            geometry.cell_height,
         ))
     }
 
@@ -653,7 +757,7 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
-        let Some(point) = self.grid_point(terminal_id, event.position) else {
+        let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
         self.app_state.update(cx, |state, cx| {
@@ -677,7 +781,18 @@ impl TerminalDrawer {
                             snapshot.mode,
                         )
                     {
-                        entry.terminal.write_input(bytes);
+                        entry.terminal.write_raw(bytes);
+                    }
+                    if event.button == MouseButton::Right {
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if event.button == MouseButton::Right {
+                    if entry.terminal.selected_text().is_none() {
+                        entry
+                            .terminal
+                            .start_selection(SelectionKind::Semantic, point, side);
                     }
                     return;
                 }
@@ -690,19 +805,19 @@ impl TerminalDrawer {
                     self.pressed_link = Some((terminal_id, link.url));
                     return;
                 }
-                if event.modifiers.shift {
-                    entry.terminal.extend_selection(point);
-                    return;
-                }
-                entry.terminal.clear_selection();
+                self.mouse_down_position = Some((terminal_id, event.position));
+                self.selecting = None;
                 let kind = match event.click_count {
                     1 => SelectionKind::Simple,
                     2 => SelectionKind::Semantic,
                     3 => SelectionKind::Lines,
                     _ => return,
                 };
-                entry.terminal.select_kind(point, point, kind);
-                self.selection_anchor = Some((terminal_id, point, kind));
+                if kind == SelectionKind::Simple && event.modifiers.shift {
+                    entry.terminal.update_selection(point, side);
+                    return;
+                }
+                entry.terminal.start_selection(kind, point, side);
             }
         });
         cx.notify();
@@ -715,7 +830,7 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(point) = self.grid_point(terminal_id, event.position) else {
+        let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             self.hovered_link = None;
             return;
         };
@@ -739,7 +854,7 @@ impl TerminalDrawer {
                         term_modifiers(event.modifiers),
                         snapshot.mode,
                     ) {
-                        entry.terminal.write_input(bytes);
+                        entry.terminal.write_raw(bytes);
                     }
                 }
                 return;
@@ -757,11 +872,22 @@ impl TerminalDrawer {
                 }
             } else {
                 self.hovered_link = None;
-                if let Some((selection_id, start, kind)) = self.selection_anchor
-                    && selection_id == terminal_id
-                    && event.dragging()
+                if event.pressed_button == Some(MouseButton::Left)
+                    && self
+                        .mouse_down_position
+                        .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
                 {
-                    entry.terminal.select_kind(start, point, kind);
+                    if self.selecting != Some(terminal_id)
+                        && let Some((_, mouse_down_position)) = self.mouse_down_position
+                    {
+                        let dx = f32::from(event.position.x - mouse_down_position.x);
+                        let dy = f32::from(event.position.y - mouse_down_position.y);
+                        if dx.hypot(dy) <= SELECTION_DRAG_THRESHOLD {
+                            return;
+                        }
+                    }
+                    self.selecting = Some(terminal_id);
+                    entry.terminal.update_selection(point, side);
                     if !snapshot.mode.alt_screen
                         && snapshot.history_size > 0
                         && let Some(lines) = drag_scroll_lines(
@@ -785,7 +911,7 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(point) = self.grid_point(terminal_id, event.position)
+        if let Some((point, _side)) = self.grid_point_and_side(terminal_id, event.position)
             && let Some(entry) = self
                 .app_state
                 .read(cx)
@@ -807,7 +933,7 @@ impl TerminalDrawer {
                         snapshot.mode,
                     )
                 {
-                    entry.terminal.write_input(bytes);
+                    entry.terminal.write_raw(bytes);
                 }
             } else if event.button == MouseButton::Left && event.modifiers.platform {
                 let released = entry
@@ -821,13 +947,17 @@ impl TerminalDrawer {
                 {
                     cx.open_url(&released);
                 }
-            } else if let Some((selection_id, start, kind)) = self.selection_anchor
-                && selection_id == terminal_id
-            {
-                entry.terminal.select_kind(start, point, kind);
             }
         }
-        self.selection_anchor = None;
+        if self.selecting == Some(terminal_id) {
+            self.selecting = None;
+        }
+        if self
+            .mouse_down_position
+            .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
+        {
+            self.mouse_down_position = None;
+        }
         self.pressed_link = None;
         self.last_mouse_point.remove(&terminal_id);
         cx.notify();
@@ -874,7 +1004,6 @@ impl TerminalDrawer {
         // grid's geometry. Reserving space for it while a selection exists
         // resized the PTY mid-drag — rows jumped and blank lines appeared.
         let has_selection = snapshot.cells.iter().any(|cell| cell.selected);
-        let grid_bounds = self.grid_bounds.clone();
         let app_state = self.app_state.clone();
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
@@ -913,16 +1042,6 @@ impl TerminalDrawer {
                     f32::from(bounds.size.height) - 2. * (PANE_BORDER + PANE_PADDING_Y);
                 let cols = (content_width / cell_width).floor().max(2.) as usize;
                 let rows = (content_height / cell_height).floor().max(2.) as usize;
-                grid_bounds.borrow_mut().insert(
-                    terminal_id,
-                    GridGeometry {
-                        bounds,
-                        cols,
-                        rows,
-                        cell_width,
-                        cell_height,
-                    },
-                );
                 if let Some(entry) = app_state
                     .read(cx)
                     .active
@@ -974,6 +1093,19 @@ impl TerminalDrawer {
             .on_scroll_wheel(cx.listener(move |this, event, window, cx| {
                 this.on_scroll(terminal_id, event, window, cx)
             }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                if paths.paths().is_empty() {
+                    return;
+                }
+                this.focus_handle.focus(window, cx);
+                let quoted = paths
+                    .paths()
+                    .iter()
+                    .map(|path| shell_quote(&path.to_string_lossy()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                this.paste_to_terminal(terminal_id, &format!(" {quoted} "), cx);
+            }))
             .child(grid)
             .when(has_selection, |this| {
                 this.child(
@@ -995,6 +1127,41 @@ impl TerminalDrawer {
                             });
                         })),
                 )
+            })
+            .context_menu({
+                let app_state = self.app_state.clone();
+                move |menu, _window, cx| {
+                    let has_selection = app_state
+                        .read(cx)
+                        .active
+                        .as_ref()
+                        .and_then(|active| active.terminal_workspace.terminal(terminal_id))
+                        .and_then(|entry| entry.terminal.selected_text())
+                        .is_some();
+                    menu.menu_with_enable(
+                        tcode_i18n::tr!("terminal.copy").into_owned(),
+                        Box::new(TerminalCopy(terminal_id)),
+                        has_selection,
+                    )
+                    .menu(
+                        tcode_i18n::tr!("terminal.paste").into_owned(),
+                        Box::new(TerminalPaste(terminal_id)),
+                    )
+                    .menu(
+                        tcode_i18n::tr!("terminal.select_all").into_owned(),
+                        Box::new(TerminalSelectAll(terminal_id)),
+                    )
+                    .menu(
+                        tcode_i18n::tr!("terminal.clear").into_owned(),
+                        Box::new(TerminalClear(terminal_id)),
+                    )
+                    .separator()
+                    .menu_with_enable(
+                        tcode_i18n::tr!("terminal.add_context").into_owned(),
+                        Box::new(TerminalAddContext(terminal_id)),
+                        has_selection,
+                    )
+                }
             })
             .into_any_element()
     }
@@ -1036,7 +1203,7 @@ impl Render for TerminalDrawer {
                     .and_then(|active| active.terminal_workspace.active())
                     && entry.terminal.snapshot().mode.focus_in_out
                 {
-                    entry.terminal.write_input(b"\x1b[I".to_vec());
+                    entry.terminal.write_raw(b"\x1b[I".to_vec());
                 }
             });
             let app_state = self.app_state.clone();
@@ -1048,7 +1215,7 @@ impl Render for TerminalDrawer {
                     .and_then(|active| active.terminal_workspace.active())
                     && entry.terminal.snapshot().mode.focus_in_out
                 {
-                    entry.terminal.write_input(b"\x1b[O".to_vec());
+                    entry.terminal.write_raw(b"\x1b[O".to_vec());
                 }
             });
             self.focus_subscriptions.extend([focus_in, focus_out]);
@@ -1330,6 +1497,11 @@ impl Render for TerminalDrawer {
             .bg(cx.theme().background)
             .font_family(TERMINAL_FONT_FAMILY)
             .text_size(px(FONT_SIZE))
+            .on_action(cx.listener(Self::on_terminal_copy))
+            .on_action(cx.listener(Self::on_terminal_paste))
+            .on_action(cx.listener(Self::on_terminal_select_all))
+            .on_action(cx.listener(Self::on_terminal_clear))
+            .on_action(cx.listener(Self::on_terminal_add_context))
             .child(header)
             .child(
                 div()
@@ -1649,9 +1821,46 @@ fn term_mouse_button(button: MouseButton) -> Option<TermMouseButton> {
     }
 }
 
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+fn grid_point_and_side(
+    x: f32,
+    y: f32,
+    cols: usize,
+    rows: usize,
+    cell_width: f32,
+    cell_height: f32,
+) -> ((usize, usize), SelectionSide) {
+    let last_column = cols.saturating_sub(1);
+    let mut column = (x / cell_width) as usize;
+    let cell_x = x.max(0.) % cell_width;
+    let mut side = if cell_x > cell_width / 2. {
+        SelectionSide::Right
+    } else {
+        SelectionSide::Left
+    };
+    if column > last_column {
+        column = last_column;
+        side = SelectionSide::Right;
+    }
+
+    let bottommost_row = rows.saturating_sub(1) as i32;
+    let mut row = (y / cell_height) as i32;
+    if row > bottommost_row {
+        row = bottommost_row;
+        side = SelectionSide::Right;
+    } else if y < 0. {
+        side = SelectionSide::Left;
+    }
+
+    ((row.max(0) as usize, column.min(last_column)), side)
+}
+
 fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32) -> Option<i32> {
     let geometry = geometry?;
-    let top = geometry.bounds.top() + px(PANE_BORDER + PANE_PADDING_Y);
+    let top = geometry.bounds.top();
     let bottom = top + px(geometry.rows as f32 * geometry.cell_height);
     let pixels = if y < top {
         f32::from(top - y)
@@ -1717,6 +1926,37 @@ mod tests {
             wide,
             wide_spacer,
         }
+    }
+
+    #[test]
+    fn grid_point_uses_left_side_for_left_half_of_cell() {
+        assert_eq!(
+            grid_point_and_side(2., 5., 3, 2, 10., 20.),
+            ((0, 0), SelectionSide::Left)
+        );
+    }
+
+    #[test]
+    fn grid_point_uses_right_side_for_right_half_of_cell() {
+        assert_eq!(
+            grid_point_and_side(8., 5., 3, 2, 10., 20.),
+            ((0, 0), SelectionSide::Right)
+        );
+    }
+
+    #[test]
+    fn grid_point_clamps_past_last_column_to_right_side() {
+        assert_eq!(
+            grid_point_and_side(35., 5., 3, 2, 10., 20.),
+            ((0, 2), SelectionSide::Right)
+        );
+    }
+
+    #[test]
+    fn shell_quotes_paths() {
+        assert_eq!(shell_quote("/tmp/a"), "'/tmp/a'");
+        assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 
     #[test]
