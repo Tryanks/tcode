@@ -229,7 +229,7 @@ impl SettingsPage {
                         .items_center()
                         .gap_2()
                         .px_2()
-                        .rounded(cx.theme().radius)
+                        .rounded_full()
                         .cursor_pointer()
                         .when(active, |s| s.bg(cx.theme().sidebar_accent))
                         .hover(|s| s.bg(cx.theme().sidebar_accent))
@@ -254,8 +254,6 @@ impl SettingsPage {
             .w(px(NAV_WIDTH))
             .h_full()
             .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
             .child(
                 window_drag_area(
                     "settings-nav-drag",
@@ -317,28 +315,24 @@ impl SettingsPage {
                     )),
             )
             .child(
-                div()
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(
-                        gpui_component::h_flex()
-                            .id("settings-back")
-                            .h(px(44.))
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().sidebar_accent))
-                            .text_size(px(13.))
-                            .text_color(cx.theme().sidebar_foreground)
-                            .child(Icon::new(IconName::ArrowLeft).size_4())
-                            .child(tcode_i18n::tr!("settings.back"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.app_state
-                                    .update(cx, |state, cx| state.close_settings(cx));
-                            })),
-                    ),
+                div().flex_none().child(
+                    gpui_component::h_flex()
+                        .id("settings-back")
+                        .h(px(44.))
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().sidebar_accent))
+                        .text_size(px(13.))
+                        .text_color(cx.theme().sidebar_foreground)
+                        .child(Icon::new(IconName::ArrowLeft).size_4())
+                        .child(tcode_i18n::tr!("settings.back"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.app_state
+                                .update(cx, |state, cx| state.close_settings(cx));
+                        })),
+                ),
             )
             .into_any_element()
     }
@@ -352,16 +346,14 @@ impl SettingsPage {
                 .flex_none()
                 .h(px(52.))
                 .px_6()
-                .items_center()
-                .border_b_1()
-                .border_color(cx.theme().border),
+                .items_center(),
             window,
             cx,
         )
         .child(
             div()
                 .flex_1()
-                .text_size(px(16.))
+                .text_size(px(15.))
                 .font_medium()
                 .child(tcode_i18n::tr!("settings.title")),
         )
@@ -514,7 +506,7 @@ impl SettingsPage {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
             header = header.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(11.))
                     .text_color(muted)
                     .child(tcode_i18n::tr!("providers.checked", when = ago).into_owned()),
             );
@@ -546,30 +538,13 @@ impl SettingsPage {
 
         let mut list = v_flex()
             .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
+            .rounded(crate::material::radius_card())
             .overflow_hidden();
-        for (index, (_, card)) in self.provider_cards.iter().enumerate() {
-            list = list.child(
-                v_flex()
-                    .w_full()
-                    .items_stretch()
-                    .when(index > 0, |d| {
-                        d.border_t_1().border_color(cx.theme().border)
-                    })
-                    .child(card.clone()),
-            );
+        for (_, card) in &self.provider_cards {
+            list = list.child(v_flex().w_full().items_stretch().child(card.clone()));
         }
         for (_, card) in &self.acp_cards {
-            list = list.child(
-                v_flex()
-                    .w_full()
-                    .items_stretch()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(card.clone()),
-            );
+            list = list.child(v_flex().w_full().items_stretch().child(card.clone()));
         }
 
         v_flex().child(header).child(list)
@@ -590,7 +565,7 @@ impl SettingsPage {
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(px(15.))
                             .font_medium()
                             .child(tcode_i18n::tr!("settings.archived_empty")),
                     )
@@ -610,7 +585,7 @@ impl SettingsPage {
                 div()
                     .pt_4()
                     .pb_1()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .font_semibold()
                     .text_color(cx.theme().foreground)
                     .child(group.project.name.clone()),
@@ -725,7 +700,7 @@ impl SettingsPage {
             .min_w_0()
             .gap_0p5()
             .pr_4()
-            .child(div().text_size(px(14.)).font_medium().child(title.into()))
+            .child(div().text_size(px(15.)).font_medium().child(title.into()))
             .child(
                 div()
                     .text_size(px(13.))
@@ -734,13 +709,8 @@ impl SettingsPage {
             )
     }
 
-    fn row_frame(&self, cx: &Context<Self>) -> gpui::Div {
-        gpui_component::h_flex()
-            .w_full()
-            .py_4()
-            .items_center()
-            .border_t_1()
-            .border_color(cx.theme().border)
+    fn row_frame(&self, _cx: &Context<Self>) -> gpui::Div {
+        gpui_component::h_flex().w_full().py_4().items_center()
     }
 
     fn toggle_row(
@@ -813,7 +783,7 @@ impl SettingsPage {
                         .py_1()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(crate::material::radius_button())
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|s| s.bg(cx.theme().accent))
@@ -828,31 +798,35 @@ impl SettingsPage {
                         })
                         .into_any_element()
                 };
-                v_flex()
-                    .p_1()
-                    .min_w(px(160.))
-                    .gap_0p5()
-                    .child(option(
-                        ThemeMode::System,
-                        tcode_i18n::tr!("settings.theme.system").into_owned().into(),
-                        mode == ThemeMode::System,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Light,
-                        tcode_i18n::tr!("settings.theme.light").into_owned().into(),
-                        mode == ThemeMode::Light,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Dark,
-                        tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
-                        mode == ThemeMode::Dark,
-                        &this,
-                        cx,
-                    ))
+                crate::material::overlay_contour(
+                    v_flex()
+                        .p_1()
+                        .min_w(px(160.))
+                        .gap_0p5()
+                        .child(option(
+                            ThemeMode::System,
+                            tcode_i18n::tr!("settings.theme.system").into_owned().into(),
+                            mode == ThemeMode::System,
+                            &this,
+                            cx,
+                        ))
+                        .child(option(
+                            ThemeMode::Light,
+                            tcode_i18n::tr!("settings.theme.light").into_owned().into(),
+                            mode == ThemeMode::Light,
+                            &this,
+                            cx,
+                        ))
+                        .child(option(
+                            ThemeMode::Dark,
+                            tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
+                            mode == ThemeMode::Dark,
+                            &this,
+                            cx,
+                        )),
+                    cx,
+                )
+                .rounded(crate::material::radius_overlay())
             });
 
         self.row_frame(cx)
@@ -892,7 +866,7 @@ impl SettingsPage {
                             .py_1()
                             .gap_2()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded(crate::material::radius_button())
                             .text_size(px(13.))
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().accent))
@@ -910,21 +884,25 @@ impl SettingsPage {
                                 popover.update(cx, |state, cx| state.dismiss(window, cx));
                             })
                     };
-                    v_flex()
-                        .p_1()
-                        .min_w(px(160.))
-                        .gap_0p5()
-                        .child(option(None, "settings.language.system", cx))
-                        .child(option(
-                            Some(LANGUAGE_ENGLISH),
-                            "settings.language.english",
-                            cx,
-                        ))
-                        .child(option(
-                            Some(LANGUAGE_SIMPLIFIED_CHINESE),
-                            "settings.language.chinese",
-                            cx,
-                        ))
+                    crate::material::overlay_contour(
+                        v_flex()
+                            .p_1()
+                            .min_w(px(160.))
+                            .gap_0p5()
+                            .child(option(None, "settings.language.system", cx))
+                            .child(option(
+                                Some(LANGUAGE_ENGLISH),
+                                "settings.language.english",
+                                cx,
+                            ))
+                            .child(option(
+                                Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                                "settings.language.chinese",
+                                cx,
+                            )),
+                        cx,
+                    )
+                    .rounded(crate::material::radius_overlay())
                 });
         self.row_frame(cx)
             .child(self.row_labels(
@@ -953,6 +931,7 @@ impl Render for SettingsPage {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .bg(crate::material::content_surface(cx))
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
             )

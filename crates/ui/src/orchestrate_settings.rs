@@ -479,10 +479,11 @@ impl OrchestrateSettingsPanel {
             .w_full()
             .gap_1()
             .p_3()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().muted)
+            .rounded(crate::material::radius_card())
+            .border_l_2()
+            .border_color(cx.theme().info)
+            .bg(cx.theme().info.opacity(0.12))
+            .text_color(cx.theme().info_foreground)
             .child(
                 h_flex()
                     .gap_2()
@@ -498,8 +499,8 @@ impl OrchestrateSettingsPanel {
             .child(
                 div()
                     .pl_6()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
+                    .text_size(px(13.))
+                    .text_color(cx.theme().info_foreground)
                     .child(tcode_i18n::tr!("orchestrate.all_models.description")),
             )
             .into_any_element()
@@ -524,7 +525,7 @@ impl OrchestrateSettingsPanel {
                     .child(div().text_size(px(15.)).font_semibold().child(title.into()))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .child(description.into()),
                     ),
@@ -534,68 +535,69 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut section =
-            v_flex()
-                .w_full()
-                .gap_3()
-                .child(self.section_heading(
-                    tcode_i18n::tr!("orchestrate.identity.title"),
-                    tcode_i18n::tr!("orchestrate.identity.description"),
-                    None,
-                    cx,
-                ))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_1p5()
-                        .p_3()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .child(
-                                    div().flex_1().text_size(px(13.)).font_medium().child(
-                                        tcode_i18n::tr!("orchestrate.generic_identity.title"),
-                                    ),
-                                )
-                                .child(
-                                    Button::new("reset-generic-orchestrator-identity")
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Undo)
-                                        .label(tcode_i18n::tr!("orchestrate.restore_default"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.reset_generic_identity(window, cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tcode_i18n::tr!("orchestrate.generic_identity.description")),
-                        )
-                        .child(Input::new(&self.generic_identity)),
-                )
-                .child(self.section_heading(
-                    tcode_i18n::tr!("orchestrate.model_identity.title"),
-                    tcode_i18n::tr!("orchestrate.model_identity.description"),
-                    Some(self.identity_model_picker.clone().into_any_element()),
-                    cx,
-                ));
+        let mut section = v_flex()
+            .w_full()
+            .gap_3()
+            .child(self.section_heading(
+                tcode_i18n::tr!("orchestrate.identity.title"),
+                tcode_i18n::tr!("orchestrate.identity.description"),
+                None,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .p_3()
+                    .rounded(crate::material::radius_card())
+                    .bg(cx.theme().secondary)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(13.))
+                                    .font_medium()
+                                    .child(tcode_i18n::tr!("orchestrate.generic_identity.title")),
+                            )
+                            .child(
+                                Button::new("reset-generic-orchestrator-identity")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Undo)
+                                    .label(tcode_i18n::tr!("orchestrate.restore_default"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_generic_identity(window, cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tcode_i18n::tr!("orchestrate.generic_identity.description")),
+                    )
+                    .child(
+                        Input::new(&self.generic_identity).rounded(crate::material::radius_input()),
+                    ),
+            )
+            .child(self.section_heading(
+                tcode_i18n::tr!("orchestrate.model_identity.title"),
+                tcode_i18n::tr!("orchestrate.model_identity.description"),
+                Some(self.identity_model_picker.clone().into_any_element()),
+                cx,
+            ));
 
         if self.identity_rows.is_empty() {
             section = section.child(
                 div()
                     .w_full()
                     .p_4()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .text_size(px(12.))
+                    .rounded(crate::material::radius_card())
+                    .bg(cx.theme().muted)
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("orchestrate.model_identity.empty")),
             );
@@ -610,9 +612,8 @@ impl OrchestrateSettingsPanel {
                     .w_full()
                     .gap_2()
                     .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    .rounded(crate::material::radius_card())
+                    .bg(cx.theme().secondary)
                     .child(
                         h_flex()
                             .w_full()
@@ -664,7 +665,7 @@ impl OrchestrateSettingsPanel {
                                     })),
                             ),
                     )
-                    .child(Input::new(&row.identity)),
+                    .child(Input::new(&row.identity).rounded(crate::material::radius_input())),
             );
         }
         section.into_any_element()
@@ -684,11 +685,12 @@ impl OrchestrateSettingsPanel {
                     div()
                         .w_full()
                         .p_4()
-                        .rounded(cx.theme().radius)
-                        .border_1()
+                        .rounded(crate::material::radius_card())
+                        .border_l_2()
                         .border_color(cx.theme().danger)
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
+                        .bg(cx.theme().danger.opacity(0.12))
+                        .text_size(px(13.))
+                        .text_color(cx.theme().danger_foreground)
                         .child(tcode_i18n::tr!("orchestrate.children.empty")),
                 )
                 .into_any_element();
@@ -699,20 +701,20 @@ impl OrchestrateSettingsPanel {
                 div()
                     .w_full()
                     .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
+                    .rounded(crate::material::radius_card())
+                    .border_l_2()
                     .border_color(cx.theme().warning)
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
+                    .bg(cx.theme().warning.opacity(0.12))
+                    .text_size(px(13.))
+                    .text_color(cx.theme().warning_foreground)
                     .child(tcode_i18n::tr!("orchestrate.children.none_enabled")),
             );
         }
 
         let mut list = v_flex()
             .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
+            .rounded(crate::material::radius_card())
+            .bg(cx.theme().secondary)
             .overflow_hidden();
         for (index, row) in self.child_rows.iter().enumerate() {
             let Some(profile) = settings.child_models.get(index) else {
@@ -728,9 +730,6 @@ impl OrchestrateSettingsPanel {
                     .w_full()
                     .gap_2()
                     .p_3()
-                    .when(index > 0, |this| {
-                        this.border_t_1().border_color(cx.theme().border)
-                    })
                     .child(
                         h_flex()
                             .w_full()
@@ -757,8 +756,18 @@ impl OrchestrateSettingsPanel {
                             )
                             .child(
                                 div()
+                                    .rounded_full()
+                                    .when(profile.enabled, |status| {
+                                        status
+                                            .bg(cx.theme().success.opacity(0.12))
+                                            .text_color(cx.theme().success_foreground)
+                                    })
+                                    .when(!profile.enabled, |status| {
+                                        status
+                                            .bg(cx.theme().muted)
+                                            .text_color(cx.theme().muted_foreground)
+                                    })
                                     .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
                                     .child(if profile.enabled {
                                         tcode_i18n::tr!("orchestrate.children.enabled")
                                     } else {
@@ -808,9 +817,17 @@ impl OrchestrateSettingsPanel {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(tcode_i18n::tr!("orchestrate.children.effort_label")),
                             )
-                            .child(Input::new(&row.effort).small()),
+                            .child(
+                                Input::new(&row.effort)
+                                    .small()
+                                    .rounded(crate::material::radius_input()),
+                            ),
                     )
-                    .child(Input::new(&row.description).small()),
+                    .child(
+                        Input::new(&row.description)
+                            .small()
+                            .rounded(crate::material::radius_input()),
+                    ),
             );
         }
         section.child(list).into_any_element()

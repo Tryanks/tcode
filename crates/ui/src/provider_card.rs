@@ -466,8 +466,7 @@ impl ProviderCard {
             StatusDot::Success => cx.theme().success,
             StatusDot::Warning => cx.theme().warning,
             StatusDot::Error => cx.theme().danger,
-            // T3 renders the disabled dot amber.
-            StatusDot::Amber => rgb(0xf59e0b).into(),
+            StatusDot::Amber => cx.theme().warning,
         };
 
         let provider_icon = provider_glyph(provider).small();
@@ -493,12 +492,12 @@ impl ProviderCard {
         let mut title = h_flex()
             .gap_2()
             .items_center()
-            .child(div().text_size(px(14.)).font_semibold().child(name.clone()))
+            .child(div().text_size(px(15.)).font_semibold().child(name.clone()))
             .when_some(version, |this, version| {
                 this.child(
                     div()
                         .font_family("monospace")
-                        .text_size(px(12.))
+                        .text_size(px(11.))
                         .text_color(muted)
                         .child(format!("v{}", version.trim_start_matches('v'))),
                 )
@@ -557,12 +556,29 @@ impl ProviderCard {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let (status_bg, status_fg) = match summary.dot {
+            StatusDot::Success => (
+                cx.theme().success.opacity(0.12),
+                cx.theme().success_foreground,
+            ),
+            StatusDot::Warning => (
+                cx.theme().warning.opacity(0.12),
+                cx.theme().warning_foreground,
+            ),
+            StatusDot::Error => (
+                cx.theme().danger.opacity(0.12),
+                cx.theme().danger_foreground,
+            ),
+            StatusDot::Amber => (cx.theme().muted, muted),
+        };
         let mut line = h_flex()
             .flex_wrap()
             .items_center()
             .gap_1()
-            .text_size(px(12.))
-            .text_color(muted);
+            .rounded_full()
+            .bg(status_bg)
+            .text_size(px(13.))
+            .text_color(status_fg);
 
         match &summary.email {
             Some(email) => {
@@ -582,10 +598,9 @@ impl ProviderCard {
                         div()
                             .id("reveal-email")
                             .px_1()
-                            .rounded(px(4.))
+                            .rounded(crate::material::radius_button())
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().accent))
-                            .text_color(cx.theme().foreground)
                             .child(shown)
                             .tooltip(move |window, cx| {
                                 let label = if revealed {
@@ -644,7 +659,7 @@ impl ProviderCard {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(muted)
                             .child(tcode_i18n::tr!("providers.update_message")),
                     );
@@ -684,7 +699,7 @@ impl ProviderCard {
                                 .w_full()
                                 .gap_1()
                                 .items_center()
-                                .rounded(px(6.))
+                                .rounded(crate::material::radius_input())
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .bg(cx.theme().muted)
@@ -714,7 +729,8 @@ impl ProviderCard {
                                 ),
                         );
                 }
-                pane
+                crate::material::overlay_contour(pane, cx)
+                    .rounded(crate::material::radius_overlay())
             })
             .into_any_element()
     }
@@ -732,13 +748,11 @@ impl ProviderCard {
             .px_4()
             .py_3()
             .gap_1p5()
-            .border_t_1()
-            .border_color(cx.theme().border)
             .child(div().text_size(px(13.)).font_medium().child(label))
             .child(control)
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(help),
             )
@@ -792,77 +806,75 @@ impl ProviderCard {
 
     fn render_env(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut block = v_flex()
-            .w_full()
-            .px_4()
-            .py_3()
-            .gap_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_medium()
-                            .child(tcode_i18n::tr!("providers.env.title")),
-                    )
-                    .child(
-                        Button::new("env-add")
-                            .outline()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .label(tcode_i18n::tr!("providers.env.add"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add_env_row(window, cx);
-                            })),
-                    ),
-            );
+        let mut block = v_flex().w_full().px_4().py_3().gap_2().child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_medium()
+                        .child(tcode_i18n::tr!("providers.env.title")),
+                )
+                .child(
+                    Button::new("env-add")
+                        .outline()
+                        .xsmall()
+                        .icon(IconName::Plus)
+                        .label(tcode_i18n::tr!("providers.env.add"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.add_env_row(window, cx);
+                        })),
+                ),
+        );
 
         if self.env_rows.is_empty() {
             block = block.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(muted)
                     .child(tcode_i18n::tr!("providers.env.empty_help")),
             );
         } else {
             for (index, row) in self.env_rows.iter().enumerate() {
-                block = block.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .child(div().flex_1().min_w_0().child(Input::new(&row.name)))
-                        .child(div().flex_1().min_w_0().child(Input::new(&row.value)))
-                        .child(
-                            Switch::new(("env-sensitive", index))
-                                .checked(row.sensitive)
-                                .tooltip(tcode_i18n::tr!("providers.env.sensitive"))
-                                .on_click(cx.listener(move |this, _: &bool, window, cx| {
-                                    this.toggle_env_sensitive(index, window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new(("env-remove", index))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Delete)
-                                .tooltip(tcode_i18n::tr!("providers.env.remove"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.remove_env_row(index, window, cx);
-                                })),
-                        ),
-                );
+                block =
+                    block.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().min_w_0().child(
+                                Input::new(&row.name).rounded(crate::material::radius_input()),
+                            ))
+                            .child(div().flex_1().min_w_0().child(
+                                Input::new(&row.value).rounded(crate::material::radius_input()),
+                            ))
+                            .child(
+                                Switch::new(("env-sensitive", index))
+                                    .checked(row.sensitive)
+                                    .tooltip(tcode_i18n::tr!("providers.env.sensitive"))
+                                    .on_click(cx.listener(move |this, _: &bool, window, cx| {
+                                        this.toggle_env_sensitive(index, window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("env-remove", index))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Delete)
+                                    .tooltip(tcode_i18n::tr!("providers.env.remove"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.remove_env_row(index, window, cx);
+                                    })),
+                            ),
+                    );
             }
         }
         block
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(muted)
                     .child(tcode_i18n::tr!("providers.env.security_help")),
             )
@@ -880,15 +892,13 @@ impl ProviderCard {
                 .px_4()
                 .py_3()
                 .gap_1()
-                .border_t_1()
-                .border_color(cx.theme().border)
                 .child(
                     div()
                         .text_size(px(13.))
                         .font_medium()
                         .child(tcode_i18n::tr!("providers.models.title")),
                 )
-                .child(div().pb_1().text_size(px(12.)).text_color(muted).child(
+                .child(div().pb_1().text_size(px(13.)).text_color(muted).child(
                     if rows.len() == 1 {
                         tcode_i18n::tr!("providers.models.count_one", count = 1).into_owned()
                     } else {
@@ -908,10 +918,9 @@ impl ProviderCard {
                 .gap_2()
                 .items_center()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&self.custom_model)),
+                    div().flex_1().min_w_0().child(
+                        Input::new(&self.custom_model).rounded(crate::material::radius_input()),
+                    ),
                 )
                 .child(
                     Button::new("add-custom-model")
@@ -927,8 +936,8 @@ impl ProviderCard {
         if let Some(error) = &self.slug_error {
             block = block.child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().danger)
+                    .text_size(px(13.))
+                    .text_color(cx.theme().danger_foreground)
                     .child(error.clone()),
             );
         }
@@ -961,13 +970,15 @@ impl ProviderCard {
         if row.custom {
             tags = tags.child(tag(
                 tcode_i18n::tr!("providers.models.custom").into_owned(),
-                cx,
+                cx.theme().info.opacity(0.12),
+                cx.theme().info_foreground,
             ));
         }
         if hidden {
             tags = tags.child(tag(
                 tcode_i18n::tr!("providers.models.hidden").into_owned(),
-                cx,
+                cx.theme().warning.opacity(0.12),
+                cx.theme().warning_foreground,
             ));
         }
 
@@ -1092,7 +1103,9 @@ impl ProviderCard {
                     tcode_i18n::tr!("providers.display_name_help")
                         .into_owned()
                         .into(),
-                    Input::new(&self.display_name).into_any_element(),
+                    Input::new(&self.display_name)
+                        .rounded(crate::material::radius_input())
+                        .into_any_element(),
                     cx,
                 ),
             )
@@ -1112,22 +1125,32 @@ impl ProviderCard {
                     )
                     .into_owned()
                     .into(),
-                    Input::new(&self.binary).into_any_element(),
+                    Input::new(&self.binary)
+                        .rounded(crate::material::radius_input())
+                        .into_any_element(),
                     cx,
                 ),
             )
-            .child(self.field_block(
-                home_label(provider).into(),
-                home_help(provider).into(),
-                Input::new(&self.home).into_any_element(),
-                cx,
-            ))
-            .child(self.field_block(
-                third_label(provider).into(),
-                third_help(provider).into(),
-                Input::new(&self.third_field).into_any_element(),
-                cx,
-            ))
+            .child(
+                self.field_block(
+                    home_label(provider).into(),
+                    home_help(provider).into(),
+                    Input::new(&self.home)
+                        .rounded(crate::material::radius_input())
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(
+                self.field_block(
+                    third_label(provider).into(),
+                    third_help(provider).into(),
+                    Input::new(&self.third_field)
+                        .rounded(crate::material::radius_input())
+                        .into_any_element(),
+                    cx,
+                ),
+            )
             .child(self.render_models(cx))
             .into_any_element()
     }
@@ -1135,8 +1158,24 @@ impl ProviderCard {
 
 impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = self.app_state.read(cx);
+        let enabled = state.provider_enabled(self.provider);
+        let summary = crate::provider_status::summarize(
+            self.provider,
+            state.provider_snapshot(self.provider),
+            enabled,
+        );
+        let rail = match summary.dot {
+            StatusDot::Success => cx.theme().success,
+            StatusDot::Warning | StatusDot::Amber => cx.theme().warning,
+            StatusDot::Error => cx.theme().danger,
+        };
         v_flex()
             .w_full()
+            .rounded(crate::material::radius_card())
+            .border_l_2()
+            .border_color(rail)
+            .bg(cx.theme().secondary)
             .child(self.render_header(cx))
             .when(self.expanded, |this| this.child(self.render_details(cx)))
     }
@@ -1146,15 +1185,14 @@ impl Render for ProviderCard {
 // Copy + helpers
 // ---------------------------------------------------------------------------
 
-fn tag(label: String, cx: &Context<ProviderCard>) -> AnyElement {
+fn tag(label: String, background: gpui::Hsla, foreground: gpui::Hsla) -> AnyElement {
     div()
         .flex_none()
         .px_1()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(cx.theme().border)
-        .text_size(px(10.))
-        .text_color(cx.theme().muted_foreground)
+        .rounded_full()
+        .bg(background)
+        .text_size(px(11.))
+        .text_color(foreground)
         .child(label)
         .into_any_element()
 }
