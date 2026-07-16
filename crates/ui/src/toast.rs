@@ -228,21 +228,24 @@ impl ToastCenter {
         .detach();
     }
 
-    fn accent(kind: ToastKind, cx: &App) -> gpui::Hsla {
+    fn accent(kind: ToastKind, cx: &App) -> (gpui::Hsla, gpui::Hsla) {
         match kind {
-            ToastKind::Success => cx.theme().success,
-            ToastKind::Info => cx.theme().info,
-            ToastKind::Warning => cx.theme().warning,
-            ToastKind::Error => cx.theme().danger,
-            ToastKind::Loading { .. } => cx.theme().primary,
+            ToastKind::Success => (cx.theme().success, cx.theme().success_foreground),
+            ToastKind::Info | ToastKind::Loading { .. } => {
+                (cx.theme().info, cx.theme().info_foreground)
+            }
+            ToastKind::Warning => (cx.theme().warning, cx.theme().warning_foreground),
+            ToastKind::Error => (cx.theme().danger, cx.theme().danger_foreground),
         }
     }
 
     fn render_toast(&self, toast: &Toast, cx: &mut Context<Self>) -> impl IntoElement {
-        let accent = Self::accent(toast.kind, cx);
+        let (accent, accent_foreground) = Self::accent(toast.kind, cx);
         let id = toast.id;
 
-        let icon = Icon::new(toast.kind.icon()).small().text_color(accent);
+        let icon = Icon::new(toast.kind.icon())
+            .small()
+            .text_color(accent_foreground);
 
         let mut header = h_flex()
             .w_full()
@@ -264,6 +267,7 @@ impl ToastCenter {
                 Button::new(("toast-dismiss", id as usize))
                     .ghost()
                     .xsmall()
+                    .rounded(crate::material::radius_button())
                     .icon(IconName::Close)
                     .on_click(cx.listener(move |center, _, _, cx| {
                         center.dismiss(id, cx);
@@ -283,12 +287,12 @@ impl ToastCenter {
                 div()
                     .w_full()
                     .h(px(4.))
-                    .rounded(px(2.))
+                    .rounded_full()
                     .bg(cx.theme().muted)
                     .child(
                         div()
                             .h_full()
-                            .rounded(px(2.))
+                            .rounded_full()
                             .bg(accent)
                             .w(gpui::relative(pct / 100.)),
                     ),
@@ -325,7 +329,7 @@ impl ToastCenter {
                                 .max_h(px(160.))
                                 .overflow_y_scroll()
                                 .p_2()
-                                .rounded(px(6.))
+                                .rounded(crate::material::radius_input())
                                 .bg(cx.theme().muted)
                                 .text_size(px(11.))
                                 .font_family(cx.theme().mono_font_family.clone())
@@ -347,6 +351,9 @@ impl ToastCenter {
                 Button::new(("toast-copy", id as usize))
                     .ghost()
                     .xsmall()
+                    .rounded_full()
+                    .bg(accent.opacity(0.12))
+                    .text_color(accent_foreground)
                     .icon(IconName::Copy)
                     .label(tcode_i18n::tr!("toast.copy_error"))
                     .on_click(move |_, _, cx| {
@@ -361,6 +368,9 @@ impl ToastCenter {
                 Button::new(("toast-action", id as usize))
                     .outline()
                     .xsmall()
+                    .rounded_full()
+                    .bg(accent.opacity(0.12))
+                    .text_color(accent_foreground)
                     .label(action.label.clone())
                     .on_click(move |_, window, cx| handler(window, cx)),
             );
@@ -369,18 +379,17 @@ impl ToastCenter {
             card = card.child(action_row);
         }
 
-        // A thin left accent bar echoing the toast's kind colour.
-        h_flex()
-            .w(px(360.))
-            .items_stretch()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_lg()
-            .overflow_hidden()
-            .child(div().flex_none().w(px(3.)).bg(accent))
-            .child(card)
+        // A thin left semantic rail echoes the event-card language.
+        crate::material::overlay_contour(
+            h_flex()
+                .w(px(360.))
+                .items_stretch()
+                .rounded(crate::material::radius_overlay())
+                .overflow_hidden(),
+            cx,
+        )
+        .child(div().flex_none().w(px(2.)).rounded_full().bg(accent))
+        .child(card)
     }
 }
 

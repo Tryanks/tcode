@@ -64,20 +64,16 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
         .w_full()
         .h(px(1.))
         .flex()
-        .child(
-            div().flex_1().h_full().bg(linear_gradient(
-                90.,
-                linear_color_stop(color, 1.),
-                linear_color_stop(clear, 0.),
-            )),
-        )
-        .child(
-            div().flex_1().h_full().bg(linear_gradient(
-                90.,
-                linear_color_stop(clear, 1.),
-                linear_color_stop(color, 0.),
-            )),
-        )
+        .child(div().flex_1().h_full().bg(linear_gradient(
+            90.,
+            linear_color_stop(color, 1.),
+            linear_color_stop(clear, 0.),
+        )))
+        .child(div().flex_1().h_full().bg(linear_gradient(
+            90.,
+            linear_color_stop(clear, 1.),
+            linear_color_stop(color, 0.),
+        )))
 }
 
 /// The focused composer's blue outer glow (paired with the theme `ring`).
