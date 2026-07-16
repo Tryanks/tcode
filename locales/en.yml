@@ -466,8 +466,7 @@ userinput:
   multi_hint: "Select one or more options."
   previous: "Previous"
   next_question: "Next question"
-  submit_answer: "Submit answer"
-  submit_answers: "Submit answers"
+  done: "Done"
 terminal:
   title: "Terminal"
   restart: "Restart"

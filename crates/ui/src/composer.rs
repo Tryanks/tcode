@@ -640,9 +640,29 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // While a user-input question is pending, Enter is captured by the
-        // question panel; normal send is suppressed (S1 §7).
-        if self.pending_user_input(cx).is_some() {
+        // While a user-input question is pending, normal send is suppressed
+        // (S1 §7). Typed text becomes the current question's custom answer and
+        // flows through the same advance-or-submit path as clicking an option.
+        if let Some((request_id, questions)) = self.pending_user_input(cx) {
+            let text = input.read(cx).value().trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            let index = self
+                .ui_question_index
+                .min(questions.len().saturating_sub(1));
+            if let Some(question) = questions.get(index) {
+                let entry = self.ui_selections.entry(question.id.clone()).or_default();
+                if question.multi_select {
+                    entry.push(text);
+                } else {
+                    *entry = vec![text];
+                }
+            }
+            self.input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+            self.ui_advance_or_submit(&questions, request_id, window, cx);
+            cx.notify();
             return;
         }
         let text = input.read(cx).value().trim().to_string();
@@ -2063,6 +2083,7 @@ impl Composer {
             let label = option.label.clone();
             let question_for_click = question.clone();
             let questions_for_click = questions.clone();
+            let request_for_click = request_id.clone();
             let mark: AnyElement = if multi {
                 if is_selected {
                     Icon::new(IconName::CircleCheck)
@@ -2126,11 +2147,17 @@ impl Composer {
                                 )
                             }),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_toggle_option(&question_for_click, label.clone(), cx);
-                        // Single-select auto-advances to the next question.
+                        // Single-select answers flow onward by themselves: next
+                        // unanswered question, or submission when none remain.
                         if !multi {
-                            this.ui_auto_advance(&questions_for_click, String::new(), cx);
+                            this.ui_advance_or_submit(
+                                &questions_for_click,
+                                request_for_click.clone(),
+                                window,
+                                cx,
+                            );
                         }
                     })),
             );
@@ -2142,13 +2169,12 @@ impl Composer {
             .overflow_y_scroll()
             .child(options_content);
 
-        // Actions row.
+        // Actions row: navigation only. Answers submit themselves — a
+        // single-select click that completes the set submits it, so the only
+        // finishing affordance left is Done on a multi-select question (clicks
+        // there cannot signal "I'm finished").
         let is_last = index + 1 >= total;
-        let submit_label = if !multi && total == 1 {
-            tcode_i18n::tr!("userinput.submit_answer")
-        } else {
-            tcode_i18n::tr!("userinput.submit_answers")
-        };
+        let all_answered = user_input_all_answered(&questions, &self.ui_selections);
         let questions_submit = questions.clone();
         let request_submit = request_id.clone();
         let mut actions = h_flex().w_full().gap_2().items_center();
@@ -2171,19 +2197,22 @@ impl Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.ui_go(1, cx))),
             );
         }
-        actions = actions.child(
-            Button::new("ui-submit")
-                .primary()
-                .small()
-                .label(submit_label)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
-                })),
-        );
+        if multi && all_answered {
+            actions = actions.child(
+                Button::new("ui-done")
+                    .primary()
+                    .small()
+                    .label(tcode_i18n::tr!("userinput.done"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
+                    })),
+            );
+        }
 
         // Number keys 1-9 select the matching option.
         let question_keys = question.clone();
         let questions_keys = questions.clone();
+        let request_keys = request_id.clone();
 
         v_flex()
             .w_full()
@@ -2194,18 +2223,25 @@ impl Composer {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .shadow_sm()
-            .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
-                if let Ok(n) = ev.keystroke.key.parse::<usize>()
-                    && n >= 1
-                    && n <= question_keys.options.len()
-                {
-                    let label = question_keys.options[n - 1].label.clone();
-                    this.ui_toggle_option(&question_keys, label, cx);
-                    if !question_keys.multi_select {
-                        this.ui_auto_advance(&questions_keys, String::new(), cx);
+            .on_key_down(
+                cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
+                    if let Ok(n) = ev.keystroke.key.parse::<usize>()
+                        && n >= 1
+                        && n <= question_keys.options.len()
+                    {
+                        let label = question_keys.options[n - 1].label.clone();
+                        this.ui_toggle_option(&question_keys, label, cx);
+                        if !question_keys.multi_select {
+                            this.ui_advance_or_submit(
+                                &questions_keys,
+                                request_keys.clone(),
+                                window,
+                                cx,
+                            );
+                        }
                     }
-                }
-            }))
+                }),
+            )
             .child(header)
             .child(div().text_size(px(14.)).child(question.question.clone()))
             .child(options)
@@ -2250,23 +2286,34 @@ impl Composer {
         }
     }
 
-    /// Single-select auto-advance (~200ms) to the next question (S1 §7).
-    fn ui_auto_advance(
+    /// After answering: jump to the next unanswered question, or — when the
+    /// answer completed the whole set — submit without any button press
+    /// (S1 §7). The ~200ms pause lets the selection mark register visually
+    /// before the panel moves on.
+    fn ui_advance_or_submit(
         &mut self,
         questions: &[UserInputQuestion],
-        _req: String,
+        request_id: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let total = questions.len();
+        let questions = questions.to_vec();
         let at = self.ui_question_index;
-        if at + 1 >= total {
-            return;
-        }
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(200)).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.ui_question_index == at && at + 1 < total {
-                    this.ui_question_index = at + 1;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // A newer request or manual navigation invalidates this hop.
+                if this.ui_question_index != at
+                    || this.ui_request_id.as_deref() != Some(&request_id)
+                {
+                    return;
+                }
+                if user_input_all_answered(&questions, &this.ui_selections) {
+                    this.ui_submit(&questions, request_id, window, cx);
+                } else if let Some(next) =
+                    next_unanswered_question(&questions, &this.ui_selections, at)
+                {
+                    this.ui_question_index = next;
                     cx.notify();
                 }
             });
@@ -4007,6 +4054,42 @@ fn traits_chip_label(
 /// Build the answers map for a user-input request: keyed by question id, with a
 /// string (single-select / free-text) or string-array (multi-select) value. A
 /// non-empty custom answer overrides the current question's selections (S1 §7).
+/// A question counts as answered once it carries at least one selection (or a
+/// recorded custom-text answer, which is stored the same way).
+fn user_input_answered(
+    question: &UserInputQuestion,
+    selections: &std::collections::HashMap<String, Vec<String>>,
+) -> bool {
+    selections
+        .get(&question.id)
+        .is_some_and(|selected| !selected.is_empty())
+}
+
+fn user_input_all_answered(
+    questions: &[UserInputQuestion],
+    selections: &std::collections::HashMap<String, Vec<String>>,
+) -> bool {
+    questions
+        .iter()
+        .all(|question| user_input_answered(question, selections))
+}
+
+/// The next unanswered question after `from`, wrapping around to earlier ones
+/// (and back to `from` itself) so a skipped question is always revisited.
+fn next_unanswered_question(
+    questions: &[UserInputQuestion],
+    selections: &std::collections::HashMap<String, Vec<String>>,
+    from: usize,
+) -> Option<usize> {
+    let total = questions.len();
+    if total == 0 {
+        return None;
+    }
+    (1..=total)
+        .map(|step| (from + step) % total)
+        .find(|&i| !user_input_answered(&questions[i], selections))
+}
+
 fn assemble_user_input_answers(
     questions: &[UserInputQuestion],
     selections: &std::collections::HashMap<String, Vec<String>>,
@@ -4426,6 +4509,53 @@ mod tests {
             options: Vec::new(),
         };
         assert_eq!(traits_chip_label(&bare, &[], false), None);
+    }
+
+    #[test]
+    fn user_input_answer_flow_advances_to_unanswered_and_detects_completion() {
+        let question = |id: &str| UserInputQuestion {
+            id: id.into(),
+            header: id.into(),
+            question: id.into(),
+            options: vec![agent::UserInputOption {
+                label: "A".into(),
+                description: String::new(),
+            }],
+            multi_select: false,
+        };
+        let questions = vec![question("q1"), question("q2"), question("q3")];
+        let mut selections = std::collections::HashMap::new();
+
+        // Nothing answered: from q1, the next stop is q2.
+        assert!(!user_input_all_answered(&questions, &selections));
+        assert_eq!(
+            next_unanswered_question(&questions, &selections, 0),
+            Some(1)
+        );
+
+        // q1 and q3 answered: from q1 the hop skips answered q3 and lands on q2;
+        // an empty selection does not count as an answer.
+        selections.insert("q1".into(), vec!["A".into()]);
+        selections.insert("q2".into(), Vec::new());
+        selections.insert("q3".into(), vec!["A".into()]);
+        assert!(!user_input_all_answered(&questions, &selections));
+        assert_eq!(
+            next_unanswered_question(&questions, &selections, 2),
+            Some(1)
+        );
+
+        // The wrap search revisits a skipped earlier question from the end.
+        assert_eq!(
+            next_unanswered_question(&questions, &selections, 0),
+            Some(1)
+        );
+
+        // Everything answered → completion, and no hop target remains.
+        selections.insert("q2".into(), vec!["custom text".into()]);
+        assert!(user_input_all_answered(&questions, &selections));
+        assert_eq!(next_unanswered_question(&questions, &selections, 0), None);
+
+        assert_eq!(next_unanswered_question(&[], &selections, 0), None);
     }
 
     #[test]
