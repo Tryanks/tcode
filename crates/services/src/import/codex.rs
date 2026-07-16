@@ -79,7 +79,10 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                             }
                             let content = if role == Some("user") {
                                 first_user.get_or_insert_with(|| text.clone());
-                                ItemContent::UserMessage { text }
+                                ItemContent::UserMessage {
+                                    text,
+                                    context_len: None,
+                                }
                             } else if role == Some("assistant") {
                                 ItemContent::AssistantMessage { text }
                             } else {

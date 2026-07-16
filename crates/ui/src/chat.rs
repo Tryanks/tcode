@@ -23,13 +23,17 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     notification::Notification,
     popover::Popover,
+    scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
     tooltip::Tooltip,
     v_flex,
 };
 
 use tcode_core::git::GitAction;
-use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
+use tcode_core::session::{
+    EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta,
+    parse_orchestrate_callback,
+};
 use tcode_runtime::app::{AppState, RightTab};
 
 use crate::commit_dialog::CommitDialog;
@@ -61,6 +65,15 @@ fn previous_logs_toggle_label(hidden: usize, expanded: bool) -> Option<Cow<'stat
 /// Height reserved under every message for its (hover-revealed) action row, so
 /// revealing it never shifts the timeline.
 const ACTION_ROW_HEIGHT: f32 = 24.;
+/// Line height of the preformatted text inside an expanded disclosure card; also
+/// the per-line unit used to resolve the card's capped scroll viewport.
+const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
+/// Vertical padding (top + bottom) added to a disclosure card's viewport estimate.
+const DISCLOSURE_CARD_PADDING: f32 = 24.;
+/// Cap on an expanded disclosure card's height; taller content scrolls within it.
+const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
+/// Child-thread title budget in a callback disclosure row before it is ellipsized.
+const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 44.;
@@ -364,6 +377,12 @@ fn index_turns(
                         }
                     }
                 }
+                // A disclosure row (orchestrate context / callback) grows a tall
+                // scroll card when expanded, so its toggle state must change the
+                // turn fingerprint or the list keeps the collapsed measurement.
+                if let Some(key) = disclosure_key(&entry.content, &entry.id) {
+                    expanded.contains(&key).hash(&mut content);
+                }
             }
             if let Some(turn) = turns.get(index) {
                 turn.start_ts.hash(&mut content);
@@ -390,13 +409,35 @@ fn index_turns(
         .collect()
 }
 
+/// The per-entry expansion key for a user message that renders as a disclosure
+/// row rather than a bubble: an orchestrate context split (annotated with a
+/// `context_len`) or a child-thread callback (whose text parses as one). `None`
+/// for an ordinary user message, which stays a plain bubble.
+fn disclosure_key(content: &EntryContent, entry_id: &str) -> Option<String> {
+    match content {
+        EntryContent::User {
+            context_len: Some(_),
+            ..
+        } => Some(format!("orchestrate-context-{entry_id}")),
+        EntryContent::User { text, .. } if parse_orchestrate_callback(text).is_some() => {
+            Some(format!("orchestrate-callback-{entry_id}"))
+        }
+        _ => None,
+    }
+}
+
 /// Hash only data that can alter a turn's layout. Text lengths make streaming
 /// updates O(number of entries) without repeatedly hashing growing markdown.
 fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
     match content {
-        EntryContent::User { text, steering } => {
+        EntryContent::User {
+            text,
+            steering,
+            context_len,
+        } => {
             text.len().hash(hash);
             steering.hash(hash);
+            context_len.hash(hash);
         }
         EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
             text.len().hash(hash);
@@ -759,20 +800,38 @@ impl ChatView {
                     ));
                 }
                 Segment::User(entry) => {
-                    let EntryContent::User { text, steering } = &entry.content else {
+                    let EntryContent::User {
+                        text,
+                        steering,
+                        context_len,
+                    } = &entry.content
+                    else {
                         unreachable!();
                     };
-                    let is_head = !head_seen;
-                    head_seen = true;
-                    column = column.child(self.render_user(
-                        index,
-                        &entry.id,
-                        text,
-                        *steering,
-                        is_head,
-                        pinned.0 == Some(entry.id.as_str()),
-                        cx,
-                    ));
+                    // A child-thread callback (never annotated with a split) is a
+                    // centered disclosure row, not a bubble, and carries no action
+                    // row — so it does not consume the turn's `head` either.
+                    if let Some(callback) = context_len
+                        .is_none()
+                        .then(|| parse_orchestrate_callback(text))
+                        .flatten()
+                    {
+                        column =
+                            column.child(self.render_callback_row(index, &entry.id, &callback, cx));
+                    } else {
+                        let is_head = !head_seen;
+                        head_seen = true;
+                        column = column.child(self.render_user(
+                            index,
+                            &entry.id,
+                            text,
+                            *context_len,
+                            *steering,
+                            is_head,
+                            pinned.0 == Some(entry.id.as_str()),
+                            cx,
+                        ));
+                    }
                 }
                 Segment::Assistant(entry) => {
                     let EntryContent::Assistant { text } = &entry.content else {
@@ -868,6 +927,7 @@ impl ChatView {
         turn: usize,
         entry_id: &str,
         text: &str,
+        context_len: Option<usize>,
         steering: Option<SteeringStatus>,
         is_head: bool,
         pinned: bool,
@@ -880,6 +940,17 @@ impl ChatView {
         {
             return self.render_message_editor(turn, cx);
         }
+
+        // An `/orchestrate` turn folds an injected context prefix (guidance +
+        // configuration) ahead of the user's own words. Split it off so the
+        // bubble — and its Copy / Edit — show only `visible`, while the prefix
+        // rides above in a collapsed disclosure row. The provider already
+        // received the whole `text`; edit & resend re-routes through
+        // `orchestrate_turn`, which re-composes the prefix (see `confirm_edit`).
+        let context = context_len
+            .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
+            .map(|len| &text[..len]);
+        let visible = context.map_or(text, |prefix| &text[prefix.len()..]);
 
         let group_key = SharedString::from(format!("user-{entry_id}"));
         let turn_running = self
@@ -896,10 +967,10 @@ impl ChatView {
             .gap_1()
             .items_center()
             .justify_end()
-            .child(self.render_copy_button(&format!("user:{entry_id}"), Arc::from(text), cx));
+            .child(self.render_copy_button(&format!("user:{entry_id}"), Arc::from(visible), cx));
 
         if is_head {
-            let edit_text = text.to_string();
+            let edit_text = visible.to_string();
             let edit_id = entry_id.to_string();
             actions = actions.child(
                 Button::new(SharedString::from(format!("edit-{entry_id}")))
@@ -958,7 +1029,7 @@ impl ChatView {
             );
         }
 
-        v_flex()
+        let bubble = v_flex()
             .group(group_key.clone())
             .w_full()
             .items_end()
@@ -987,10 +1058,149 @@ impl ChatView {
                     .bg(cx.theme().muted)
                     .text_color(cx.theme().foreground)
                     .text_size(px(15.))
-                    .child(text.to_string()),
+                    .child(visible.to_string()),
             )
-            .child(self.reserve_action_row(actions, group_key, pinned))
+            .child(self.reserve_action_row(actions, group_key, pinned));
+
+        let Some(context) = context else {
+            return bubble.into_any_element();
+        };
+        // The injected context sits above the bubble as a centered disclosure row
+        // — collapsed by default, expandable to the verbatim prompt source.
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                self.render_disclosure(
+                    turn,
+                    format!("orchestrate-context-{entry_id}"),
+                    tcode_i18n::tr!("chat.orchestrate_skill")
+                        .into_owned()
+                        .into(),
+                    context,
+                    cx,
+                ),
+            )
+            .child(bubble)
             .into_any_element()
+    }
+
+    /// A child-thread orchestrate callback: rendered as a centered disclosure
+    /// row (title + localized state) rather than a bubble, with no action row.
+    /// Expanding it reveals the callback body (the digest the orchestrator saw).
+    fn render_callback_row(
+        &self,
+        turn: usize,
+        entry_id: &str,
+        callback: &OrchestrateCallback,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = truncate_chars(&callback.title, CALLBACK_TITLE_MAX_CHARS);
+        let label = SharedString::from(format!(
+            "{title} {}",
+            localized_callback_state(&callback.state)
+        ));
+        let body = if callback.body.trim().is_empty() {
+            tcode_i18n::tr!("chat.orchestrate_callback_empty").into_owned()
+        } else {
+            callback.body.clone()
+        };
+        self.render_disclosure(
+            turn,
+            format!("orchestrate-callback-{entry_id}"),
+            label,
+            &body,
+            cx,
+        )
+    }
+
+    /// The reusable disclosure element: a centered, collapsed-by-default row of
+    /// 12px muted `label` + rotating chevron (hover shows an accent background);
+    /// clicking toggles the per-entry expansion keyed by `key`. When open it
+    /// reveals `full_text` verbatim inside a bordered, height-capped scroll card.
+    /// Shared by the orchestrate context split and child-thread callbacks so any
+    /// future injected context can adopt the same affordance.
+    fn render_disclosure(
+        &self,
+        turn: usize,
+        key: String,
+        label: SharedString,
+        full_text: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let expanded = self.expanded.contains(&key);
+        let muted = cx.theme().muted_foreground;
+        let toggle_key = key.clone();
+        let row = h_flex()
+            .id(SharedString::from(format!("disclosure-{key}")))
+            .gap_1()
+            .items_center()
+            .px_2()
+            .py_0p5()
+            .rounded(px(8.))
+            .text_size(px(12.))
+            .text_color(muted)
+            .cursor_pointer()
+            .hover(|row| row.bg(cx.theme().accent))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_expanded(turn, &toggle_key, cx);
+            }))
+            .child(label)
+            .child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
+
+        let mut block = v_flex().w_full().items_center().gap_1().child(row);
+        if expanded {
+            block = block.child(self.render_disclosure_body(&key, full_text, cx));
+        }
+        block.into_any_element()
+    }
+
+    /// The expanded body of a disclosure: the injected text rendered verbatim
+    /// (line by line, so newlines survive regardless of wrapping) as 13px muted
+    /// preformatted source inside a bordered muted card. The guidance can be long,
+    /// so the card gets its own resolved-height, capped scroll viewport rather
+    /// than growing the turn without bound (DESIGN.md scrolling contract).
+    fn render_disclosure_body(
+        &self,
+        key: &str,
+        full_text: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let lines: Vec<AnyElement> = full_text
+            .split('\n')
+            .map(|line| {
+                div()
+                    .w_full()
+                    .line_height(px(DISCLOSURE_LINE_HEIGHT))
+                    .child(if line.is_empty() {
+                        " ".to_string()
+                    } else {
+                        line.to_string()
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        let line_count = lines.len() as f32;
+        let viewport = (line_count * DISCLOSURE_LINE_HEIGHT + DISCLOSURE_CARD_PADDING)
+            .min(DISCLOSURE_CARD_MAX_HEIGHT);
+        div()
+            .id(SharedString::from(format!("disclosure-body-{key}")))
+            .w_full()
+            .h(px(viewport))
+            .overflow_y_scrollbar()
+            .p_3()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().muted)
+            .child(
+                v_flex()
+                    .w_full()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .children(lines),
+            )
     }
 
     /// An assistant message: the rendered markdown plus a hover-revealed Copy
@@ -2642,6 +2852,27 @@ fn copy_payload(text: &str) -> ClipboardItem {
     ClipboardItem::new_string(text.to_string())
 }
 
+/// The localized state word for a callback disclosure row (`completed` /
+/// `failed`), falling back to the raw provider word for anything unexpected.
+fn localized_callback_state(state: &str) -> Cow<'static, str> {
+    match state {
+        "completed" => tcode_i18n::tr!("chat.orchestrate_state_completed"),
+        "failed" => tcode_i18n::tr!("chat.orchestrate_state_failed"),
+        other => Cow::Owned(other.to_string()),
+    }
+}
+
+/// Truncate `text` to at most `max` characters (collapsing any newlines first),
+/// appending an ellipsis when it was shortened.
+fn truncate_chars(text: &str, max: usize) -> String {
+    let text = one_line(text);
+    if text.chars().count() <= max {
+        return text;
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
+}
+
 fn chevron(open: bool) -> IconName {
     if open {
         IconName::ChevronDown
@@ -2979,6 +3210,7 @@ mod tests {
                 EntryContent::User {
                     text: "go".into(),
                     steering: None,
+                    context_len: None,
                 },
             ),
             entry(
@@ -3014,6 +3246,7 @@ mod tests {
                 EntryContent::User {
                     text: "next".into(),
                     steering: None,
+                    context_len: None,
                 },
             ),
             1,
@@ -3093,6 +3326,7 @@ mod tests {
                 EntryContent::User {
                     text: "go".into(),
                     steering: None,
+                    context_len: None,
                 },
             ),
             command("cmd-1"),

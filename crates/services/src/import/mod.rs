@@ -176,7 +176,9 @@ pub fn import_thread(
         .iter()
         .find_map(|entry| match entry {
             ConvertedEntry::Item { item, .. } => match &item.content {
-                agent::ItemContent::UserMessage { text } if !text.trim_start().starts_with('<') => {
+                agent::ItemContent::UserMessage { text, .. }
+                    if !text.trim_start().starts_with('<') =>
+                {
                     Some(text.clone())
                 }
                 _ => None,
