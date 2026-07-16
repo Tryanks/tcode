@@ -1611,18 +1611,25 @@ impl Composer {
         }
 
         let muted = cx.theme().muted_foreground;
-        let mut strip =
-            v_flex()
-                .w_full()
-                .gap_1()
-                .p_2()
-                .rounded(crate::material::radius_card())
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().secondary.opacity(0.5))
-                .child(div().flex_none().px_1().text_size(px(11.)).text_color(muted).child(
-                    tcode_i18n::tr!("composer.queued_count", count = queued.len()),
-                ));
+        let mut strip = v_flex()
+            .w_full()
+            .gap_1()
+            .p_2()
+            .rounded(crate::material::radius_card())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(tcode_i18n::tr!(
+                        "composer.queued_count",
+                        count = queued.len()
+                    )),
+            );
 
         for message in queued {
             let id = message.id;
@@ -1702,7 +1709,11 @@ impl Composer {
                     // Card radius + a T2 fill instead of a four-sided hard border.
                     .bg(cx.theme().secondary)
                     .cursor_pointer()
-                    .child(img(path).size(px(64.)).rounded(crate::material::radius_card()))
+                    .child(
+                        img(path)
+                            .size(px(64.))
+                            .rounded(crate::material::radius_card()),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.image_preview = Some(index);
                         cx.notify();
