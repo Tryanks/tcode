@@ -83,6 +83,8 @@ sidebar:
   show_more: "显示更多"
   show_less: "收起"
   working: "工作中"
+  waiting_approval: "待审批"
+  waiting_approval_tooltip: "正在等待审批"
   archive: "归档对话"
   archive_title: "归档对话？"
   archive_description: "要归档“%{title}”及其已保存的对话吗？此操作无法撤销。"

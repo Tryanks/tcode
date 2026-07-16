@@ -83,6 +83,8 @@ sidebar:
   show_more: "Show more"
   show_less: "Show less"
   working: "Working"
+  waiting_approval: "Approval"
+  waiting_approval_tooltip: "Waiting for approval"
   archive: "Archive thread"
   archive_title: "Archive thread?"
   archive_description: 'Archive "%{title}" and its saved conversation? This cannot be undone.'
