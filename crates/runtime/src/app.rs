@@ -5327,6 +5327,20 @@ impl AppState {
     }
 
     fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut Context<Self>) {
+        // An update landing on the conversation the user is currently viewing
+        // is already read: advance the last-visited watermark alongside it so
+        // switching away later does not surface a stale unread dot. Threads the
+        // user is not viewing keep their watermark (and their dot), as does an
+        // explicit "mark unread" (which only rewrites the watermark).
+        if self.active_session_id() == Some(meta.id.as_str()) {
+            let visited = self.settings.last_visited.entry(meta.id.clone());
+            let visited = visited.or_insert(meta.updated_at);
+            if *visited < meta.updated_at {
+                *visited = meta.updated_at;
+                let settings = self.settings.clone();
+                let _ = self.settings_store.save(&settings);
+            }
+        }
         if let Err(err) = self.store.upsert_meta(meta) {
             self.report_error(
                 RuntimeError::PersistSessionIndex {
@@ -6475,6 +6489,52 @@ mod tests {
 
             state.select_session(&first_id, cx);
             assert!(state.preview_panel_showing());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn updates_on_the_viewed_thread_do_not_mark_it_unread(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-viewed-unread-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
+        let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
+        store.upsert_meta(&first).unwrap();
+        store.upsert_meta(&second).unwrap();
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&first_id, cx);
+
+            // A turn finishes while the user is watching: updated_at moves past
+            // the watermark stamped on entry, and the meta is persisted.
+            let active = state.active.as_mut().unwrap();
+            active.meta.updated_at = now_secs() + 10;
+            let meta = active.meta.clone();
+            state.persist_meta(&meta, cx);
+
+            // Switching away must not surface an unread dot for what the user
+            // already saw happen on screen.
+            state.select_session(&second_id, cx);
+            assert!(!state.session_unread(&first_id));
+
+            // But an update landing on a thread the user is NOT viewing still
+            // marks it unread.
+            let mut parked = state
+                .sessions
+                .iter()
+                .find(|m| m.id == first_id)
+                .cloned()
+                .unwrap();
+            parked.updated_at = now_secs() + 20;
+            state.persist_meta(&parked, cx);
+            assert!(state.session_unread(&first_id));
         });
 
         let _ = std::fs::remove_dir_all(root);
