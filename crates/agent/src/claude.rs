@@ -22,7 +22,7 @@
 //! task owns the child: it reads stdout lines, receives [`SessionCommand`]s, and
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use futures_lite::io::AsyncWrite;
@@ -696,10 +696,13 @@ async fn handle_command(
             // Steering writes the *same* stream-json user-message line as
             // `SendTurn`, but deliberately skips the turn bookkeeping: no
             // `start_turn()`, no `TurnStarted`. The CLI folds the message into
-            // the turn that is already running (it is picked up at the next
-            // input checkpoint — in practice the next tool call) and still
-            // emits exactly one `result` for that turn, so allocating a turn id
-            // here would leave a phantom turn that never completes.
+            // the turn that is already running at its next input checkpoint.
+            // A successful write only queues the request id; acceptance is
+            // emitted when stdout next reports `status: requesting`, the best
+            // available signal that the CLI consumed it. There is a small
+            // residual race: a steer written microseconds before that status
+            // may actually miss the request, but the CLI protocol exposes no
+            // stronger acknowledgement, so we accept it at that checkpoint.
             //
             // Verified live (examples/steer_probe.rs): 1 `TurnStarted`,
             // 1 `TurnCompleted` across a steered turn.
@@ -709,7 +712,7 @@ async fn handle_command(
                 text
             };
             let msg = user_message(&text, &attachments);
-            write_steering_message(stdin, &msg, request_id, event_tx).await;
+            write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
             Flow::Continue
         }
         SessionCommand::Shutdown => {
@@ -735,6 +738,7 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     message: &Value,
     request_id: String,
+    mapper: &mut Mapper,
     event_tx: &async_channel::Sender<AgentEvent>,
 ) {
     if write_line(stdin, message).await.is_err() {
@@ -745,9 +749,7 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
             })
             .await;
     } else {
-        let _ = event_tx
-            .send(AgentEvent::SteerAccepted { request_id })
-            .await;
+        mapper.pending_steers.push_back(request_id);
     }
 }
 
@@ -883,6 +885,10 @@ pub(crate) struct Mapper {
     /// (Claude reports only per-turn usage, so we accumulate it ourselves for
     /// the "Total processed" display).
     cumulative_processed: u64,
+    /// Successfully written steers awaiting the CLI's next input checkpoint.
+    pending_steers: VecDeque<String>,
+    /// Once the CLI exposes request checkpoints, never use the legacy fallback.
+    saw_requesting: bool,
 }
 
 impl Mapper {
@@ -909,6 +915,8 @@ impl Mapper {
             exit_plan_captures: HashSet::new(),
             outgoing: Vec::new(),
             cumulative_processed: 0,
+            pending_steers: VecDeque::new(),
+            saw_requesting: false,
         }
     }
 
@@ -1116,7 +1124,15 @@ impl Mapper {
         match msg.get("type").and_then(Value::as_str) {
             Some("system") => self.on_system(&msg),
             Some("stream_event") => self.on_stream_event(&msg),
-            Some("assistant") => self.on_assistant(&msg),
+            Some("assistant") => {
+                let mut events = if self.saw_requesting {
+                    Vec::new()
+                } else {
+                    self.accept_pending_steers()
+                };
+                events.extend(self.on_assistant(&msg));
+                events
+            }
             Some("user") => self.on_user(&msg),
             Some("control_request") => self.on_control_request(&msg),
             Some("result") => self.on_result(&msg),
@@ -1128,6 +1144,12 @@ impl Mapper {
     }
 
     fn on_system(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        if msg.get("subtype").and_then(Value::as_str) == Some("status")
+            && msg.get("status").and_then(Value::as_str) == Some("requesting")
+        {
+            self.saw_requesting = true;
+            return self.accept_pending_steers();
+        }
         match msg.get("subtype").and_then(Value::as_str) {
             Some("init") => {}
             // Claude compacted its context window (verified shape:
@@ -1162,6 +1184,13 @@ impl Mapper {
             events.push(AgentEvent::ProviderCommands { commands });
         }
         events
+    }
+
+    fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
+        self.pending_steers
+            .drain(..)
+            .map(|request_id| AgentEvent::SteerAccepted { request_id })
+            .collect()
     }
 
     fn on_task_started(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -3511,7 +3540,7 @@ mod tests {
     }
 
     #[test]
-    fn steer_acceptance_requires_successful_write_and_flush() {
+    fn steer_write_success_queues_acceptance_and_failures_remain_fatal() {
         smol::block_on(async {
             use std::io;
             use std::pin::Pin;
@@ -3558,15 +3587,22 @@ mod tests {
 
             let (event_tx, event_rx) = async_channel::unbounded();
             let mut writer = DeterministicWriter::default();
+            let mut mapper = Mapper::new();
             let message = user_message("redirect", &[]);
-            write_steering_message(&mut writer, &message, "steer-ok".into(), &event_tx).await;
-            assert!(matches!(
-                event_rx.recv().await.unwrap(),
-                AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
-            ));
+            write_steering_message(
+                &mut writer,
+                &message,
+                "steer-ok".into(),
+                &mut mapper,
+                &event_tx,
+            )
+            .await;
+            assert!(event_rx.try_recv().is_err());
+            assert_eq!(mapper.pending_steers, VecDeque::from(["steer-ok".into()]));
             assert_eq!(writer.bytes.last(), Some(&b'\n'));
 
             let (event_tx, event_rx) = async_channel::unbounded();
+            let mut mapper = Mapper::new();
             let mut writer = DeterministicWriter {
                 failure: Some(FailurePoint::Write),
                 ..Default::default()
@@ -3575,6 +3611,7 @@ mod tests {
                 &mut writer,
                 &message,
                 "steer-write-failed".into(),
+                &mut mapper,
                 &event_tx,
             )
             .await;
@@ -3589,6 +3626,7 @@ mod tests {
             );
 
             let (event_tx, event_rx) = async_channel::unbounded();
+            let mut mapper = Mapper::new();
             let mut writer = DeterministicWriter {
                 failure: Some(FailurePoint::Flush),
                 ..Default::default()
@@ -3597,6 +3635,7 @@ mod tests {
                 &mut writer,
                 &message,
                 "steer-flush-failed".into(),
+                &mut mapper,
                 &event_tx,
             )
             .await;
@@ -3610,5 +3649,98 @@ mod tests {
                 "stdin flush failures must not accept a steer"
             );
         });
+    }
+
+    fn accepted_request_ids(events: &[AgentEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::SteerAccepted { request_id } => Some(request_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pending_steer_waits_for_requesting_checkpoint() {
+        let mut mapper = Mapper::new();
+        mapper.pending_steers.push_back("steer-1".into());
+
+        assert_eq!(mapper.pending_steers.len(), 1);
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint-1","session_id":"session-1"}"#,
+        );
+        assert_eq!(accepted_request_ids(&events), ["steer-1"]);
+        assert!(mapper.pending_steers.is_empty());
+    }
+
+    #[test]
+    fn requesting_accepts_multiple_pending_steers_in_fifo_order() {
+        let mut mapper = Mapper::new();
+        mapper.pending_steers.push_back("steer-first".into());
+        mapper.pending_steers.push_back("steer-second".into());
+
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint-2","session_id":"session-1"}"#,
+        );
+        assert_eq!(
+            accepted_request_ids(&events),
+            ["steer-first", "steer-second"]
+        );
+    }
+
+    #[test]
+    fn result_keeps_pending_steer_for_follow_up_requesting() {
+        let mut mapper = Mapper::new();
+        mapper.pending_steers.push_back("steer-late".into());
+
+        let result_events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"first response","session_id":"session-1","usage":{"input_tokens":2,"output_tokens":3}}"#,
+        );
+        assert!(accepted_request_ids(&result_events).is_empty());
+        assert_eq!(mapper.pending_steers.len(), 1);
+
+        let requesting_events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"status","status":"requesting","uuid":"follow-up-checkpoint","session_id":"session-1"}"#,
+        );
+        assert_eq!(accepted_request_ids(&requesting_events), ["steer-late"]);
+    }
+
+    #[test]
+    fn assistant_accepts_pending_steer_for_legacy_cli_fallback() {
+        let mut mapper = Mapper::new();
+        mapper.pending_steers.push_back("steer-legacy".into());
+
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg_legacy","type":"message","role":"assistant","content":[{"type":"text","text":"consumed"}]},"session_id":"session-legacy","request_id":"req_legacy"}"#,
+        );
+        assert_eq!(accepted_request_ids(&events), ["steer-legacy"]);
+    }
+
+    #[test]
+    fn assistant_does_not_fallback_after_requesting_was_observed() {
+        let mut mapper = Mapper::new();
+        assert!(
+            feed(
+                &mut mapper,
+                r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint-early","session_id":"session-1"}"#,
+            )
+            .is_empty()
+        );
+        mapper
+            .pending_steers
+            .push_back("steer-after-checkpoint".into());
+
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg_current","type":"message","role":"assistant","content":[{"type":"text","text":"current response"}]},"session_id":"session-1","request_id":"req_current"}"#,
+        );
+        assert!(accepted_request_ids(&events).is_empty());
+        assert_eq!(mapper.pending_steers.len(), 1);
     }
 }
