@@ -19,6 +19,8 @@
 
 use std::path::Path;
 
+use agent::{FileChange, FileChangeKind};
+
 /// The ref name for one checkpoint (`refs/tcode/checkpoints/<session>/<turn>`).
 fn checkpoint_ref(session_id: &str, turn: usize) -> String {
     format!("refs/tcode/checkpoints/{session_id}/{turn}")
@@ -64,6 +66,152 @@ fn run_git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String, St
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Compute the net changes made by one turn from its checkpoint tree to the
+/// next checkpoint tree, or to the current worktree when there is no later
+/// checkpoint. Only the supplied paths are included.
+pub fn net_turn_file_changes(
+    cwd: &Path,
+    session_id: &str,
+    base_turn: usize,
+    target_turn: Option<usize>,
+    paths: &[String],
+) -> Result<Vec<FileChange>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let base = checkpoint_ref(session_id, base_turn);
+    if !checkpoint_ref_exists(cwd, session_id, base_turn) {
+        return Err(format!("checkpoint ref does not exist: {base}"));
+    }
+    let target = target_turn.map(|turn| checkpoint_ref(session_id, turn));
+    if let Some(turn) = target_turn
+        && !checkpoint_ref_exists(cwd, session_id, turn)
+    {
+        return Err(format!(
+            "checkpoint ref does not exist: {}",
+            checkpoint_ref(session_id, turn)
+        ));
+    }
+
+    let mut args = vec![
+        "diff".to_string(),
+        "--no-color".to_string(),
+        "--no-ext-diff".to_string(),
+        "--find-renames".to_string(),
+        base,
+    ];
+    if let Some(target) = target {
+        args.push(target);
+    }
+    args.push("--".to_string());
+    for path in paths {
+        let path = Path::new(path);
+        let relative = path.strip_prefix(cwd).unwrap_or(path);
+        args.push(relative.to_string_lossy().to_string());
+    }
+
+    let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+    let raw = run_git(cwd, &args_ref, None)?;
+    let mut changes = split_git_patch(&raw, cwd);
+
+    // `git diff <tree>` intentionally ignores untracked worktree files. Agent
+    // creates are nevertheless named in `paths`, so add those explicitly when
+    // the target is the worktree and the base tree has no such path.
+    if target_turn.is_none() {
+        for path in paths {
+            let path = Path::new(path);
+            let relative = path.strip_prefix(cwd).unwrap_or(path);
+            let absolute = cwd.join(relative);
+            if changes
+                .iter()
+                .any(|change| Path::new(&change.path) == absolute)
+                || !absolute.is_file()
+            {
+                continue;
+            }
+            let tree_path = format!(
+                "{}:{}",
+                checkpoint_ref(session_id, base_turn),
+                relative.display()
+            );
+            if run_git(cwd, &["cat-file", "-e", &tree_path], None).is_ok() {
+                continue;
+            }
+            let output = crate::process::command("git")
+                .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
+                .arg(relative)
+                .current_dir(cwd)
+                .output()
+                .map_err(|err| format!("git diff --no-index: {err}"))?;
+            if !output.status.success() && output.status.code() != Some(1) {
+                return Err(format!(
+                    "git diff --no-index failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            changes.extend(split_git_patch(
+                &String::from_utf8_lossy(&output.stdout),
+                cwd,
+            ));
+        }
+    }
+    Ok(changes)
+}
+
+fn split_git_patch(raw: &str, cwd: &Path) -> Vec<FileChange> {
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    for line in raw.lines() {
+        if line.starts_with("diff --git ") && !current.is_empty() {
+            sections.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() || line.starts_with("diff --git ") {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+
+    sections
+        .into_iter()
+        .filter_map(|patch| {
+            let old_null = patch.lines().any(|line| line == "--- /dev/null")
+                || patch.lines().any(|line| line.starts_with("new file mode "));
+            let new_null = patch.lines().any(|line| line == "+++ /dev/null")
+                || patch
+                    .lines()
+                    .any(|line| line.starts_with("deleted file mode "));
+            let path = patch
+                .lines()
+                .find_map(|line| line.strip_prefix("rename to "))
+                .or_else(|| patch.lines().find_map(|line| line.strip_prefix("+++ b/")))
+                .or_else(|| patch.lines().find_map(|line| line.strip_prefix("--- a/")))
+                .or_else(|| {
+                    patch
+                        .lines()
+                        .find_map(|line| line.strip_prefix("diff --git "))
+                        .and_then(|header| header.rsplit_once(" b/").map(|(_, path)| path))
+                })?;
+            Some(FileChange {
+                path: cwd.join(path).to_string_lossy().to_string(),
+                kind: if old_null {
+                    FileChangeKind::Create
+                } else if new_null {
+                    FileChangeKind::Delete
+                } else if patch.lines().any(|line| line.starts_with("rename to ")) {
+                    FileChangeKind::Rename
+                } else {
+                    FileChangeKind::Modify
+                },
+                diff: Some(patch),
+            })
+        })
+        .collect()
 }
 
 /// Snapshot `cwd`'s working tree into `refs/tcode/checkpoints/<session>/<turn>`
@@ -201,6 +349,116 @@ mod tests {
     fn commit_all(root: &Path, message: &str) {
         run_git(root, &["add", "-A"], None).unwrap();
         run_git(root, &["commit", "-q", "-m", message], None).unwrap();
+    }
+
+    fn diff_stats(diff: &str) -> (u32, u32) {
+        diff.lines().fold((0, 0), |(added, deleted), line| {
+            if line.starts_with("+++") || line.starts_with("---") {
+                (added, deleted)
+            } else if line.starts_with('+') {
+                (added + 1, deleted)
+            } else if line.starts_with('-') {
+                (added, deleted + 1)
+            } else {
+                (added, deleted)
+            }
+        })
+    }
+
+    #[test]
+    fn net_turn_diff_uses_checkpoint_trees_and_restricts_paths() {
+        let root = scratch_repo();
+        fs::write(root.join("tracked.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        fs::write(root.join("outside.txt"), "outside base\n").unwrap();
+        commit_all(&root, "seed");
+        create_checkpoint(&root, "sess", 1).unwrap();
+
+        // Multiple overlapping rewrites of the same lines. The intermediate
+        // fragments would total 4 additions / 4 deletions, but only the final
+        // tree relative to checkpoint 1 is the turn's true result.
+        fs::write(root.join("tracked.txt"), "alpha\nintermediate\ngamma\n").unwrap();
+        fs::write(root.join("tracked.txt"), "alpha\nsecond pass\ngamma\n").unwrap();
+        fs::write(root.join("tracked.txt"), "alpha\nfinal\ngamma\n").unwrap();
+        fs::write(root.join("created.txt"), "created in turn\n").unwrap();
+        fs::write(root.join("outside.txt"), "outside changed\n").unwrap();
+        create_checkpoint(&root, "sess", 2).unwrap();
+
+        let paths = vec![
+            root.join("tracked.txt").to_string_lossy().to_string(),
+            root.join("created.txt").to_string_lossy().to_string(),
+        ];
+        let changes = net_turn_file_changes(&root, "sess", 1, Some(2), &paths).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes
+                .iter()
+                .all(|change| !change.path.ends_with("outside.txt"))
+        );
+        let tracked = changes
+            .iter()
+            .find(|change| change.path.ends_with("tracked.txt"))
+            .unwrap();
+        let expected = run_git(
+            &root,
+            &[
+                "diff",
+                "--no-color",
+                &checkpoint_ref("sess", 1),
+                &checkpoint_ref("sess", 2),
+                "--",
+                "tracked.txt",
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            diff_stats(tracked.diff.as_deref().unwrap()),
+            diff_stats(&expected)
+        );
+        assert_ne!(diff_stats(tracked.diff.as_deref().unwrap()), (4, 4));
+        assert_eq!(
+            changes
+                .iter()
+                .find(|change| change.path.ends_with("created.txt"))
+                .unwrap()
+                .kind,
+            FileChangeKind::Create
+        );
+
+        // With no next checkpoint, compare the base tree to the worktree.
+        fs::write(root.join("tracked.txt"), "alpha\nworktree\ngamma\n").unwrap();
+        let worktree = net_turn_file_changes(
+            &root,
+            "sess",
+            2,
+            None,
+            &[root.join("tracked.txt").to_string_lossy().to_string()],
+        )
+        .unwrap();
+        assert_eq!(worktree.len(), 1);
+        assert_eq!(worktree[0].kind, FileChangeKind::Modify);
+        assert_eq!(diff_stats(worktree[0].diff.as_deref().unwrap()), (1, 1));
+
+        fs::write(root.join("worktree-created.txt"), "new after checkpoint\n").unwrap();
+        let worktree_create = net_turn_file_changes(
+            &root,
+            "sess",
+            2,
+            None,
+            &[root
+                .join("worktree-created.txt")
+                .to_string_lossy()
+                .to_string()],
+        )
+        .unwrap();
+        assert_eq!(worktree_create.len(), 1);
+        assert_eq!(worktree_create[0].kind, FileChangeKind::Create);
+        assert_eq!(
+            diff_stats(worktree_create[0].diff.as_deref().unwrap()),
+            (1, 0)
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -32,6 +32,7 @@ use gpui_component::{
 };
 
 use crate::plan_panel::PlanPanel;
+use tcode_core::git::merge_file_changes_by_path;
 use tcode_core::session::{EntryContent, ReviewComment, ReviewSide};
 use tcode_runtime::app::{AppState, RightTab};
 use tcode_runtime::ui_facade::{
@@ -742,6 +743,16 @@ impl DiffPanel {
                 active.meta.cwd.clone(),
             )
         };
+
+        if let DiffScope::Turn(turn) = scope {
+            changes = merge_file_changes_by_path(&changes);
+            if let Some(net_changes) = self.app_state.update(cx, |state, cx| {
+                state.request_turn_net_file_changes(turn, cx);
+                state.turn_net_file_changes(turn)
+            }) {
+                changes = net_changes;
+            }
+        }
 
         if matches!(scope, DiffScope::WorkingTree | DiffScope::Branch) {
             let base = (scope == DiffScope::Branch)

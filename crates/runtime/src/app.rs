@@ -1,12 +1,12 @@
 //! Application state: session registry, active session runtime, event pump.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderKind,
-    SessionCommand, SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
+    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, FileChange, InteractionMode,
+    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
+    ProviderKind, SessionCommand, SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
     start_session,
 };
 #[cfg(test)]
@@ -37,7 +37,7 @@ use tcode_services::acp_registry::{
 use tcode_services::checkpoints::checkpoint_ref_exists;
 use tcode_services::checkpoints::{
     create_checkpoint, delete_all_checkpoint_refs, delete_checkpoint_refs_from, is_git_repo,
-    restore_checkpoint,
+    net_turn_file_changes, restore_checkpoint,
 };
 use tcode_services::git::{
     CheckoutError, checkout_if_clean, commit_diff_context, create_git_worktree, list_git_branches,
@@ -730,6 +730,10 @@ pub struct AppState {
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// Invalidates working-tree/branch previews on panel open and turn finish.
     pub diff_refresh_generation: u64,
+    /// Lazily computed checkpoint-tree diffs. `None` is a remembered failure
+    /// (missing ref, non-git/replayed cwd); absence means not requested yet.
+    turn_net_changes: HashMap<(String, usize), Option<Vec<FileChange>>>,
+    turn_net_changes_loading: HashSet<(String, usize)>,
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
@@ -823,6 +827,8 @@ impl AppState {
             debug_edit_open: false,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
+            turn_net_changes: HashMap::new(),
+            turn_net_changes_loading: HashSet::new(),
             debug_palette: None,
             debug_settings_section: None,
             debug_acp_search: None,
@@ -2255,6 +2261,98 @@ impl AppState {
         }
     }
 
+    /// Return a completed net result for the active session/turn. `None` also
+    /// covers pending and unavailable results so callers can use their merged
+    /// per-edit fallback in either state.
+    pub fn turn_net_file_changes(&self, turn: usize) -> Option<Vec<FileChange>> {
+        let session_id = &self.active.as_ref()?.meta.id;
+        self.turn_net_changes
+            .get(&(session_id.clone(), turn))
+            .and_then(|result| result.clone())
+    }
+
+    /// Start the checkpoint diff for a finished turn once. The base is that
+    /// turn's checkpoint and the target is the next recorded checkpoint, or
+    /// the worktree if this is the latest checkpointed turn.
+    pub fn request_turn_net_file_changes(&mut self, turn: usize, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        // A running turn is still producing edits; computing (and permanently
+        // caching) a worktree diff now would freeze a mid-turn snapshot.
+        // Callers keep their per-edit fallback until the turn finishes.
+        if active
+            .timeline
+            .turns
+            .get(turn)
+            .is_some_and(|meta| meta.running)
+        {
+            return;
+        }
+        let session_id = active.meta.id.clone();
+        let key = (session_id.clone(), turn);
+        if self.turn_net_changes.contains_key(&key) || self.turn_net_changes_loading.contains(&key)
+        {
+            return;
+        }
+
+        if !active
+            .meta
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.turn == turn)
+        {
+            self.turn_net_changes.insert(key, None);
+            return;
+        }
+        let target_turn = active
+            .meta
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.turn > turn)
+            .map(|checkpoint| checkpoint.turn)
+            .min();
+        let mut paths = Vec::new();
+        for entry in &active.timeline.entries {
+            if entry.turn != turn {
+                continue;
+            }
+            if let EntryContent::FileChange { changes, .. } = &entry.content {
+                for change in changes {
+                    if !paths.contains(&change.path) {
+                        paths.push(change.path.clone());
+                    }
+                }
+            }
+        }
+        if paths.is_empty() {
+            self.turn_net_changes.insert(key, Some(Vec::new()));
+            return;
+        }
+
+        let cwd = active.meta.cwd.clone();
+        self.turn_net_changes_loading.insert(key.clone());
+        cx.spawn(async move |this, cx| {
+            let result = unblock(cx.background_executor(), move || {
+                net_turn_file_changes(&cwd, &session_id, turn, target_turn, &paths)
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                // Rewind invalidation removes the loading marker. Do not let an
+                // already-running task repopulate an orphaned turn afterward.
+                if state.turn_net_changes_loading.remove(&key) {
+                    if let Err(err) = &result {
+                        log::debug!("turn net diff unavailable: {err}");
+                    }
+                    state.turn_net_changes.insert(key, result.ok());
+                    state.diff_refresh_generation = state.diff_refresh_generation.wrapping_add(1);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn diff_panel_open(&self) -> bool {
         self.active.as_ref().is_some_and(|a| a.diff_open)
     }
@@ -3176,6 +3274,13 @@ impl AppState {
         let Some(turn) = active.timeline.entries.last().map(|e| e.turn) else {
             return;
         };
+        let previous_checkpoint_turn = active
+            .meta
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.turn < turn)
+            .map(|checkpoint| checkpoint.turn)
+            .max();
         // A second queued send can land in the same open turn — checkpoint once.
         if active.meta.checkpoints.iter().any(|c| c.turn == turn) {
             return;
@@ -3185,6 +3290,13 @@ impl AppState {
         }
         match create_checkpoint(&cwd, session_id, turn) {
             Ok(commit) => {
+                // A previous last turn may have been computed against the
+                // worktree. It now has an immutable checkpoint target instead.
+                if let Some(previous_turn) = previous_checkpoint_turn {
+                    let key = (session_id.to_string(), previous_turn);
+                    self.turn_net_changes.remove(&key);
+                    self.turn_net_changes_loading.remove(&key);
+                }
                 if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
                     active.meta.checkpoints.push(Checkpoint {
                         turn,
@@ -3252,6 +3364,10 @@ impl AppState {
             }
             delete_checkpoint_refs_from(&cwd, &session_id, turn);
         }
+        self.turn_net_changes
+            .retain(|(id, cached_turn), _| id != &session_id || *cached_turn < turn);
+        self.turn_net_changes_loading
+            .retain(|(id, cached_turn)| id != &session_id || *cached_turn < turn);
         if let Err(err) = self.store.truncate_events(&session_id, event_offset) {
             self.report_error(
                 RuntimeError::PersistEvent {
