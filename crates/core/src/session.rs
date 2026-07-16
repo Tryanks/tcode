@@ -612,16 +612,32 @@ impl Timeline {
     }
 
     fn accept_steer(&mut self, request_id: &str) {
-        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == request_id) else {
+        let Some(position) = self.entries.iter().position(|entry| entry.id == request_id) else {
             return;
         };
+        if !matches!(
+            self.entries[position].content,
+            EntryContent::User {
+                steering: Some(SteeringStatus::Pending),
+                ..
+            }
+        ) {
+            return;
+        }
+
+        let mut entry = self.entries.remove(position);
+        let current_turn = self.turns.iter().rposition(|turn| turn.running);
         if let EntryContent::User {
             steering: steering @ Some(SteeringStatus::Pending),
             ..
-        } = &mut Arc::make_mut(entry).content
+        } = &mut Arc::make_mut(&mut entry).content
         {
             *steering = Some(SteeringStatus::Accepted);
         }
+        if let Some(turn) = current_turn {
+            Arc::make_mut(&mut entry).turn = turn;
+        }
+        self.entries.push(entry);
     }
 
     fn content_from_item(content: &ItemContent) -> EntryContent {
@@ -1115,6 +1131,64 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn accepted_steer_moves_to_its_consumption_position_live_and_on_replay() {
+        let assistant_item = |id: &str| {
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage { text: id.into() },
+            })
+        };
+        let events = vec![
+            user_msg("user-a", "start"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-a".into(),
+            },
+            AgentEvent::SteerRequested {
+                request_id: "S".into(),
+                text: "change direction".into(),
+            },
+            assistant_item("A"),
+            assistant_item("B"),
+            AgentEvent::SteerAccepted {
+                request_id: "S".into(),
+            },
+            assistant_item("C"),
+            assistant_item("D"),
+        ];
+
+        let mut live = Timeline::default();
+        for event in &events {
+            live.apply_at(None, event);
+        }
+        let replayed = Timeline::fold_events(events);
+
+        let live_ids: Vec<&str> = live.entries.iter().map(|entry| entry.id.as_str()).collect();
+        let replayed_ids: Vec<&str> = replayed
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(live_ids, ["user-a", "A", "B", "S", "C", "D"]);
+        assert_eq!(replayed_ids, live_ids);
+        assert!(matches!(
+            live.entries[3].content,
+            EntryContent::User {
+                steering: Some(SteeringStatus::Accepted),
+                ..
+            }
+        ));
+        assert!(matches!(
+            replayed.entries[3].content,
+            EntryContent::User {
+                steering: Some(SteeringStatus::Accepted),
+                ..
+            }
+        ));
+        assert_eq!(replayed.entries[3].turn, live.entries[3].turn);
     }
 
     fn assistant_delta(id: &str, text: &str) -> AgentEvent {

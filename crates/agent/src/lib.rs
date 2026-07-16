@@ -624,7 +624,12 @@ pub enum AgentEvent {
         request_id: String,
         text: String,
     },
-    /// Emitted only after the provider has accepted the correlated steer.
+    /// Emitted only after the provider has consumed the correlated steer into
+    /// its model context (or provided the strongest available consumption
+    /// signal when its protocol has no explicit acknowledgement). Claude uses
+    /// its next `status: requesting` checkpoint; a steer written microseconds
+    /// before that status can still miss the request, but this is the best
+    /// available signal without CLI protocol support.
     SteerAccepted {
         request_id: String,
     },

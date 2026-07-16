@@ -149,6 +149,12 @@ enum Segment<'a> {
     Error(&'a TimelineEntry),
 }
 
+#[derive(Debug)]
+struct SegmentedEntries<'a> {
+    flow: Vec<Segment<'a>>,
+    pending_steers: Vec<&'a TimelineEntry>,
+}
+
 fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
     match content {
         EntryContent::Error { message } => Cow::Borrowed(message),
@@ -161,11 +167,25 @@ fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
 
 /// Coalesce only adjacent activity entries, leaving messages and errors at
 /// their exact positions in the timeline.
-fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>], turn_running: bool) -> Vec<Segment<'a>> {
+fn segment_entries<'a>(
+    entries: &'a [Arc<TimelineEntry>],
+    turn_running: bool,
+) -> SegmentedEntries<'a> {
     let mut segments = Vec::new();
     let mut activities = Vec::new();
+    let mut pending_steers = Vec::new();
     let live_reasoning_index = turn_running
-        .then(|| entries.len().checked_sub(1))
+        .then(|| {
+            entries.iter().rposition(|entry| {
+                !matches!(
+                    entry.content,
+                    EntryContent::User {
+                        steering: Some(SteeringStatus::Pending),
+                        ..
+                    }
+                )
+            })
+        })
         .flatten()
         .filter(|index| matches!(entries[*index].content, EntryContent::Reasoning { .. }));
 
@@ -178,6 +198,18 @@ fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>], turn_running: bool) ->
 
     for (entry_index, entry) in entries.iter().enumerate() {
         let entry = entry.as_ref();
+        if turn_running
+            && matches!(
+                entry.content,
+                EntryContent::User {
+                    steering: Some(SteeringStatus::Pending),
+                    ..
+                }
+            )
+        {
+            pending_steers.push(entry);
+            continue;
+        }
         match &entry.content {
             EntryContent::Command { .. }
             | EntryContent::Tool { .. }
@@ -204,7 +236,10 @@ fn segment_entries<'a>(entries: &'a [Arc<TimelineEntry>], turn_running: bool) ->
         }
     }
     flush_activities(&mut segments, &mut activities);
-    segments
+    SegmentedEntries {
+        flow: segments,
+        pending_steers,
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -765,7 +800,8 @@ impl ChatView {
     ) -> AnyElement {
         let mut column = v_flex().w_full().gap_4();
 
-        let segments = segment_entries(entries, turn.running);
+        let segmented = segment_entries(entries, turn.running);
+        let segments = &segmented.flow;
         let turn_entries: Vec<&TimelineEntry> = entries.iter().map(AsRef::as_ref).collect();
         let turn_counts = work_log_counts(&turn_entries);
         let last_assistant_id = entries.iter().rev().find_map(|entry| {
@@ -911,6 +947,30 @@ impl ChatView {
             column = column.child(self.render_timestamp(ts, cx));
         }
 
+        // Pending steers float below every live transcript/work-log element.
+        // Keeping them separate from `segments` preserves FIFO order without
+        // making their request-time position look model-visible.
+        for entry in segmented.pending_steers {
+            let EntryContent::User {
+                text,
+                steering,
+                context_len,
+            } = &entry.content
+            else {
+                unreachable!();
+            };
+            column = column.child(self.render_user(
+                index,
+                &entry.id,
+                text,
+                *context_len,
+                *steering,
+                false,
+                pinned.0 == Some(entry.id.as_str()),
+                cx,
+            ));
+        }
+
         column.into_any_element()
     }
 
@@ -1049,17 +1109,24 @@ impl ChatView {
                         }),
                 )
             })
-            .child(
+            .child({
+                let pending = steering == Some(SteeringStatus::Pending);
                 div()
                     .max_w_3_4()
                     .px_4()
                     .py_3()
                     .rounded_xl()
-                    .bg(cx.theme().muted)
+                    .when(pending, |bubble| {
+                        bubble
+                            .border_1()
+                            .border_dashed()
+                            .border_color(cx.theme().border)
+                    })
+                    .when(!pending, |bubble| bubble.bg(cx.theme().muted))
                     .text_color(cx.theme().foreground)
                     .text_size(px(15.))
-                    .child(visible.to_string()),
-            )
+                    .child(visible.to_string())
+            })
             .child(self.reserve_action_row(actions, group_key, pinned));
 
         let Some(context) = context else {
@@ -3101,7 +3168,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     use std::sync::Arc;
-    use tcode_core::session::{EntryContent, TimelineEntry, TurnMeta};
+    use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
 
     fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
         Arc::new(TimelineEntry {
@@ -3351,7 +3418,7 @@ mod tests {
                 },
             ),
         ];
-        let segments = segment_entries(&entries, false);
+        let segments = segment_entries(&entries, false).flow;
 
         assert_eq!(segments.len(), 6);
         assert!(matches!(segments[0], Segment::User(entry) if entry.id == "user"));
@@ -3374,7 +3441,7 @@ mod tests {
     #[test]
     fn segment_entries_coalesces_an_all_activity_turn() {
         let entries = [command("cmd-1"), command("cmd-2")];
-        let segments = segment_entries(&entries, false);
+        let segments = segment_entries(&entries, false).flow;
 
         assert!(matches!(
             segments.as_slice(),
@@ -3384,7 +3451,108 @@ mod tests {
 
     #[test]
     fn segment_entries_handles_an_empty_turn() {
-        assert!(segment_entries(&[], false).is_empty());
+        let segmented = segment_entries(&[], false);
+        assert!(segmented.flow.is_empty());
+        assert!(segmented.pending_steers.is_empty());
+    }
+
+    #[test]
+    fn pending_steers_float_after_live_flow_in_fifo_order_only_while_running() {
+        let pending = |id: &str| {
+            entry(
+                id,
+                EntryContent::User {
+                    text: id.into(),
+                    steering: Some(SteeringStatus::Pending),
+                    context_len: None,
+                },
+            )
+        };
+        let entries = [
+            entry("assistant-a", EntryContent::Assistant { text: "a".into() }),
+            pending("steer-a"),
+            command("command"),
+            pending("steer-b"),
+            entry("assistant-b", EntryContent::Assistant { text: "b".into() }),
+        ];
+
+        let live = segment_entries(&entries, true);
+        assert_eq!(live.flow.len(), 3);
+        assert!(matches!(live.flow[0], Segment::Assistant(entry) if entry.id == "assistant-a"));
+        assert!(matches!(
+            &live.flow[1],
+            Segment::ActivityRun(run) if run.len() == 1 && run[0].id == "command"
+        ));
+        assert!(matches!(live.flow[2], Segment::Assistant(entry) if entry.id == "assistant-b"));
+        assert_eq!(
+            live.pending_steers
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["steer-a", "steer-b"]
+        );
+
+        let idle = segment_entries(&entries, false);
+        assert!(idle.pending_steers.is_empty());
+        assert_eq!(idle.flow.len(), 5);
+        assert!(matches!(idle.flow[1], Segment::User(entry) if entry.id == "steer-a"));
+        assert!(matches!(idle.flow[3], Segment::User(entry) if entry.id == "steer-b"));
+    }
+
+    #[test]
+    fn steer_status_and_reordering_invalidate_the_virtualized_turn_row() {
+        let turns = vec![TurnMeta {
+            running: true,
+            ..Default::default()
+        }];
+        let children = HashMap::new();
+        let expanded = HashSet::new();
+        let pending = entry(
+            "steer",
+            EntryContent::User {
+                text: "redirect".into(),
+                steering: Some(SteeringStatus::Pending),
+                context_len: None,
+            },
+        );
+        let assistant = entry(
+            "assistant",
+            EntryContent::Assistant {
+                text: "working".into(),
+            },
+        );
+        let before = index_turns(
+            &turns,
+            &[pending.clone(), assistant.clone()],
+            None,
+            &children,
+            &expanded,
+        );
+
+        let mut accepted = pending;
+        if let EntryContent::User { steering, .. } = &mut Arc::make_mut(&mut accepted).content {
+            *steering = Some(SteeringStatus::Accepted);
+        }
+        let status_changed = index_turns(
+            &turns,
+            &[accepted.clone(), assistant.clone()],
+            None,
+            &children,
+            &expanded,
+        );
+        assert_eq!(
+            list_sync(&before, &status_changed, false),
+            ListSync::Incremental {
+                append: None,
+                remeasure: vec![0],
+            }
+        );
+
+        let reordered = index_turns(&turns, &[assistant, accepted], None, &children, &expanded);
+        assert_eq!(
+            list_sync(&status_changed, &reordered, false),
+            ListSync::Reset { count: 1 }
+        );
     }
 
     /// A file edit between two commands is one continuous work log. FileChange
@@ -3396,7 +3564,7 @@ mod tests {
             entry("edit", EntryContent::FileChange { changes: vec![] }),
             command("cmd-2"),
         ];
-        let segments = segment_entries(&entries, false);
+        let segments = segment_entries(&entries, false).flow;
 
         assert!(matches!(
             segments.as_slice(),
@@ -3423,7 +3591,7 @@ mod tests {
             ),
         ];
 
-        let segments = segment_entries(&entries, true);
+        let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
             segments.as_slice(),
             [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "reason-2"
@@ -3442,7 +3610,7 @@ mod tests {
             command("later-command"),
         ];
 
-        let segments = segment_entries(&entries, true);
+        let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
             segments.as_slice(),
             [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "later-command"
@@ -3462,7 +3630,7 @@ mod tests {
                 },
             ),
         ];
-        let segments = segment_entries(&entries, true);
+        let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
             segments.as_slice(),
             [Segment::Assistant(entry)] if entry.id == "assistant"
@@ -3478,7 +3646,7 @@ mod tests {
             },
         )];
 
-        assert!(segment_entries(&entries, false).is_empty());
+        assert!(segment_entries(&entries, false).flow.is_empty());
     }
 
     fn file_change(id: &str, paths: &[&str]) -> Arc<TimelineEntry> {
@@ -3607,7 +3775,7 @@ mod tests {
             command("command-2"),
             file_change("files-2", &["src/shared.rs"]),
         ];
-        let segments = segment_entries(&entries, false);
+        let segments = segment_entries(&entries, false).flow;
         let activity_indexes: Vec<usize> = segments
             .iter()
             .enumerate()

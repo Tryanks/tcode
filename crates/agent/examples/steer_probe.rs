@@ -15,8 +15,10 @@
 //!      `TurnCompleted` are observed. A steered message must NOT manufacture a
 //!      phantom turn. After the first `TurnCompleted` we keep draining for a
 //!      few seconds specifically to catch a late second one.
+//!   3. ACCEPTANCE IS CONSUMPTION-TIED — `SteerAccepted` for the request arrives
+//!      after the steering write and before the turn completes.
 //!
-//! Exits 0 only when both hold; 1 otherwise.
+//! Exits 0 only when all three hold; 1 otherwise.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -113,6 +115,7 @@ fn main() {
         let mut turns_started = 0usize;
         let mut turns_completed = 0usize;
         let mut first_status = None;
+        let mut steer_accepted_before_completion = false;
 
         loop {
             // After the first completion, only wait out the grace window: any
@@ -147,6 +150,18 @@ fn main() {
                 AgentEvent::Error { message, .. } => {
                     eprintln!("steer_probe: provider error: {message}");
                 }
+                AgentEvent::SteerAccepted { request_id } if request_id == "steer-probe-1" => {
+                    if turns_completed == 0 {
+                        steer_accepted_before_completion = true;
+                        eprintln!(
+                            "steer_probe: SteerAccepted {request_id} (after write, before first TurnCompleted)"
+                        );
+                    } else {
+                        eprintln!(
+                            "steer_probe: SteerAccepted {request_id} (after TurnCompleted #{turns_completed})"
+                        );
+                    }
+                }
                 AgentEvent::TurnCompleted {
                     status, turn_id, ..
                 } => {
@@ -165,18 +180,27 @@ fn main() {
         println!("--- transcript ---\n{}", assistant.trim());
         println!("--- steering marker {MARKER} present: {steered} ---");
         println!(
+            "--- steer acceptance before completion observed: \
+             {steer_accepted_before_completion} ---"
+        );
+        println!(
             "--- turn accounting: TurnStarted={turns_started} TurnCompleted={turns_completed} \
              (both must be 1; a steer must not create a phantom turn) ---"
         );
 
         let _ = handle.commands.send(SessionCommand::Shutdown).await;
 
-        match (first_status, steered, clean_accounting) {
-            (Some(TurnStatus::Completed), true, true) => 0,
-            (status, steered, clean) => {
+        match (
+            first_status,
+            steered,
+            clean_accounting,
+            steer_accepted_before_completion,
+        ) {
+            (Some(TurnStatus::Completed), true, true, true) => 0,
+            (status, steered, clean, accepted) => {
                 eprintln!(
                     "steer_probe: FAILED (status={status:?}, steered={steered}, \
-                     clean_accounting={clean})"
+                     clean_accounting={clean}, steer_accepted_before_completion={accepted})"
                 );
                 1
             }
