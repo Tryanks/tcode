@@ -31,6 +31,7 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::material;
 use crate::plan_panel::PlanPanel;
 use tcode_core::git::merge_file_changes_by_path;
 use tcode_core::session::{EntryContent, ReviewComment, ReviewSide};
@@ -891,7 +892,7 @@ impl DiffPanel {
                 .px_2p5()
                 .gap_1p5()
                 .items_center()
-                .rounded(px(6.))
+                .rounded(material::radius_button())
                 .cursor_pointer()
                 .text_size(px(13.))
                 .font_medium()
@@ -910,8 +911,6 @@ impl DiffPanel {
             .px_2()
             .gap_1()
             .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
                 tab(
                     "diff-tab",
@@ -1033,12 +1032,12 @@ impl DiffPanel {
                             .px_2()
                             .py_1()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded_full()
                             .text_size(px(13.))
                             .cursor_pointer()
-                            .hover(|row| row.bg(cx.theme().accent))
+                            .hover(|row| row.bg(cx.theme().list_hover))
                             .when(selected_scope == Some(scope), |row| {
-                                row.bg(cx.theme().accent)
+                                row.bg(cx.theme().list_active)
                             })
                             .child(div().flex_1().child(label))
                             .when(selected_scope == Some(scope), |row| {
@@ -1079,7 +1078,7 @@ impl DiffPanel {
                             .px_2()
                             .pt_2()
                             .pb_1()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(tcode_i18n::tr!("diff.turns")),
                     );
@@ -1098,11 +1097,11 @@ impl DiffPanel {
                             .py_1()
                             .gap_2()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded_full()
                             .text_size(px(13.))
                             .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .when(is_sel, |this| this.bg(cx.theme().accent))
+                            .hover(|s| s.bg(cx.theme().list_hover))
+                            .when(is_sel, |this| this.bg(cx.theme().list_active))
                             .child(
                                 div()
                                     .flex_1()
@@ -1131,7 +1130,12 @@ impl DiffPanel {
                     .max_h(px(320.))
                     .overflow_y_scroll()
                     .child(list)
-            });
+            })
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_xl()
+            .rounded(material::radius_overlay());
 
         let wrap_on = self.wrap;
         let split_on = self.split.get(&session).copied().unwrap_or(false);
@@ -1144,8 +1148,6 @@ impl DiffPanel {
             .px_2()
             .gap_1()
             .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(selector)
             .child(div().flex_1())
             .child(
@@ -1220,51 +1222,59 @@ impl DiffPanel {
                 .compact()
                 .label(current.clone())
                 .icon(IconName::ChevronDown);
-            toolbar = toolbar.child(Popover::new("diff-base-popover").trigger(trigger).content(
-                move |_, _, cx| {
-                    let mut list = v_flex().w_full().p_1().gap_0p5();
-                    for (branch_index, branch) in branches.clone().into_iter().enumerate() {
-                        let panel = panel.clone();
-                        let session = session_base.clone();
-                        let chosen = branch.clone();
-                        let selected = branch == current;
-                        list = list.child(
-                            h_flex()
-                                .id(("diff-base-item", branch_index))
-                                .flex_none()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(6.))
-                                .cursor_pointer()
-                                .hover(|row| row.bg(cx.theme().accent))
-                                .when(selected, |row| row.bg(cx.theme().accent))
-                                .child(div().flex_1().child(branch))
-                                .when(selected, |row| {
-                                    row.child(Icon::new(IconName::Check).xsmall())
-                                })
-                                .on_click({
-                                    let popover = cx.entity();
-                                    move |_, window, cx| {
-                                        panel.update(cx, |this, cx| {
-                                            this.bases.insert(session.clone(), chosen.clone());
-                                            this.cache = None;
-                                            this.git_preview = None;
-                                            cx.notify();
-                                        });
-                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                    }
-                                }),
-                        );
-                    }
-                    div()
-                        .id("diff-base-list")
-                        .min_w(px(180.))
-                        .max_h(px(280.))
-                        .overflow_y_scroll()
-                        .child(list)
-                },
-            ));
+            toolbar = toolbar.child(
+                Popover::new("diff-base-popover")
+                    .trigger(trigger)
+                    .content(move |_, _, cx| {
+                        let mut list = v_flex().w_full().p_1().gap_0p5();
+                        for (branch_index, branch) in branches.clone().into_iter().enumerate() {
+                            let panel = panel.clone();
+                            let session = session_base.clone();
+                            let chosen = branch.clone();
+                            let selected = branch == current;
+                            list = list.child(
+                                h_flex()
+                                    .id(("diff-base-item", branch_index))
+                                    .flex_none()
+                                    .w_full()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .hover(|row| row.bg(cx.theme().list_hover))
+                                    .when(selected, |row| row.bg(cx.theme().list_active))
+                                    .child(div().flex_1().child(branch))
+                                    .when(selected, |row| {
+                                        row.child(Icon::new(IconName::Check).xsmall())
+                                    })
+                                    .on_click({
+                                        let popover = cx.entity();
+                                        move |_, window, cx| {
+                                            panel.update(cx, |this, cx| {
+                                                this.bases.insert(session.clone(), chosen.clone());
+                                                this.cache = None;
+                                                this.git_preview = None;
+                                                cx.notify();
+                                            });
+                                            popover
+                                                .update(cx, |state, cx| state.dismiss(window, cx));
+                                        }
+                                    }),
+                            );
+                        }
+                        div()
+                            .id("diff-base-list")
+                            .min_w(px(180.))
+                            .max_h(px(280.))
+                            .overflow_y_scroll()
+                            .child(list)
+                    })
+                    .bg(cx.theme().popover)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .shadow_xl()
+                    .rounded(material::radius_overlay()),
+            );
         }
         toolbar.into_any_element()
     }
@@ -1447,7 +1457,7 @@ impl DiffPanel {
             .flex_1()
             .min_h_0()
             .track_scroll(&self.vscroll)
-            .text_size(px(12.))
+            .text_size(px(13.))
             .font_family(cx.theme().mono_font_family.clone());
         let base = if wrap {
             base.overflow_y_scroll()
@@ -1459,10 +1469,28 @@ impl DiffPanel {
 
     fn render_file_header(&self, file: &RenderedFile, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let rail = match file.kind {
+            FileChangeKind::Create => Some(cx.theme().success),
+            FileChangeKind::Delete => Some(cx.theme().danger),
+            FileChangeKind::Rename => Some(cx.theme().info),
+            FileChangeKind::Modify => None,
+        };
         let kind_label = match file.kind {
-            FileChangeKind::Create => Some(tcode_i18n::tr!("diff.created")),
-            FileChangeKind::Delete => Some(tcode_i18n::tr!("diff.deleted")),
-            FileChangeKind::Rename => Some(tcode_i18n::tr!("diff.renamed")),
+            FileChangeKind::Create => Some((
+                tcode_i18n::tr!("diff.created"),
+                cx.theme().success.opacity(0.12),
+                cx.theme().success_foreground,
+            )),
+            FileChangeKind::Delete => Some((
+                tcode_i18n::tr!("diff.deleted"),
+                cx.theme().danger.opacity(0.12),
+                cx.theme().danger_foreground,
+            )),
+            FileChangeKind::Rename => Some((
+                tcode_i18n::tr!("diff.renamed"),
+                cx.theme().info.opacity(0.12),
+                cx.theme().info_foreground,
+            )),
             FileChangeKind::Modify => None,
         };
         h_flex()
@@ -1472,24 +1500,36 @@ impl DiffPanel {
             .gap_2()
             .items_center()
             .bg(cx.theme().secondary)
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .rounded(material::radius_card())
+            .relative()
+            .when_some(rail, |this, color| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .h_full()
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(color),
+                )
+            })
             .font_family(cx.theme().font_family.clone())
             .child(Icon::new(IconName::File).xsmall().text_color(muted))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .font_medium()
                     .child(file.path.clone()),
             )
-            .when_some(kind_label, |this, label| {
+            .when_some(kind_label, |this, (label, background, foreground)| {
                 this.child(
                     div()
                         .px_1p5()
-                        .rounded(px(4.))
-                        .bg(cx.theme().muted)
-                        .text_size(px(10.))
-                        .text_color(muted)
+                        .rounded_full()
+                        .bg(background)
+                        .text_size(px(11.))
+                        .text_color(foreground)
                         .child(label),
                 )
             })
@@ -1498,7 +1538,7 @@ impl DiffPanel {
                 h_flex()
                     .flex_none()
                     .gap_2()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .child(
                         div()
                             .text_color(cx.theme().success)
@@ -1534,7 +1574,7 @@ impl DiffPanel {
             .py_2()
             .bg(cx.theme().warning.opacity(0.12))
             .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
+            .text_color(cx.theme().warning_foreground)
             .font_family(cx.theme().font_family.clone())
             .child(Icon::new(IconName::TriangleAlert).xsmall())
             .child(message)
@@ -1569,11 +1609,21 @@ impl DiffPanel {
                     .px_3()
                     .py_1p5()
                     .gap_2()
-                    .bg(cx.theme().primary.opacity(0.08))
-                    .border_l_2()
-                    .border_color(cx.theme().primary)
+                    .relative()
+                    .rounded(material::radius_card())
+                    .bg(cx.theme().muted)
                     .font_family(cx.theme().font_family.clone())
                     .text_size(px(11.))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(0.))
+                            .h_full()
+                            .w(px(2.))
+                            .rounded_full()
+                            .bg(cx.theme().primary),
+                    )
                     .child(Icon::empty().path("icons/pencil.svg").xsmall())
                     .child(comment.text.clone())
                     .into_any_element()
@@ -1592,6 +1642,7 @@ impl DiffPanel {
                         .py_2()
                         .gap_2()
                         .bg(cx.theme().muted)
+                        .rounded(material::radius_card())
                         .font_family(cx.theme().font_family.clone())
                         .child(Input::new(input).appearance(false))
                         .child(
@@ -1614,6 +1665,7 @@ impl DiffPanel {
                         .px_3()
                         .py_1()
                         .bg(cx.theme().muted)
+                        .rounded(material::radius_card())
                         .font_family(cx.theme().font_family.clone())
                         .child(
                             Button::new("diff-add-comment")
@@ -1666,7 +1718,7 @@ impl DiffPanel {
             .min_w_full()
             .items_stretch()
             .child(cell(left, ReviewSide::Old, cx))
-            .child(div().w_px().bg(cx.theme().border))
+            .child(div().w_px().bg(cx.theme().border.opacity(0.)))
             .child(cell(right, ReviewSide::New, cx))
             .into_any_element()
     }
@@ -1825,7 +1877,7 @@ impl DiffPanel {
             .gap_1()
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(15.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("diff.empty")),
             )
@@ -1840,10 +1892,7 @@ impl Render for DiffPanel {
         let mut root = v_flex()
             .size_full()
             .min_w_0()
-            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .border_l_1()
-            .border_color(cx.theme().border)
             .child(self.render_tab_strip(cx));
         root = match tab {
             // Preview is rendered by its own panel (see ui/mod.rs); the diff

@@ -22,6 +22,8 @@ use gpui_component::{
 use tcode_core::session::plan_title;
 use tcode_runtime::app::AppState;
 
+use crate::material;
+
 pub struct PlanPanel {
     app_state: Entity<AppState>,
     /// Cached markdown state for the proposed-plan body (rebuilt when the text
@@ -93,9 +95,9 @@ impl PlanPanel {
                         div()
                             .px_2()
                             .py(px(1.))
-                            .rounded(px(4.))
-                            .bg(cx.theme().primary)
-                            .text_color(cx.theme().primary_foreground)
+                            .rounded_full()
+                            .bg(cx.theme().info.opacity(0.12))
+                            .text_color(cx.theme().info_foreground)
                             .text_size(px(11.))
                             .font_medium()
                             .child(tcode_i18n::tr!("plan.badge")),
@@ -106,7 +108,7 @@ impl PlanPanel {
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(14.))
+                            .text_size(px(15.))
                             .font_medium()
                             .child(title),
                     ),
@@ -165,7 +167,7 @@ impl PlanPanel {
                             })),
                     ),
             )
-            .child(div().h_px().w_full().bg(cx.theme().border))
+            .child(material::faded_hairline(cx))
             .into_any_element()
     }
 
@@ -190,17 +192,17 @@ impl PlanPanel {
         let success = cx.theme().success;
         let primary = cx.theme().primary;
 
-        let (marker, bg): (AnyElement, Option<gpui::Hsla>) = match step.status {
+        let (marker, rail): (AnyElement, Option<gpui::Hsla>) = match step.status {
             PlanStepStatus::Completed => (
                 Icon::new(IconName::CircleCheck)
                     .xsmall()
                     .text_color(success)
                     .into_any_element(),
-                Some(tint(success)),
+                Some(success),
             ),
             PlanStepStatus::InProgress => (
                 Spinner::new().xsmall().color(primary).into_any_element(),
-                Some(tint(primary)),
+                Some(primary),
             ),
             PlanStepStatus::Pending => (
                 // An outlined circle with a muted dot.
@@ -234,8 +236,21 @@ impl PlanPanel {
             .py_1p5()
             .gap_2()
             .items_start()
-            .rounded(px(6.))
-            .when_some(bg, |this, color| this.bg(color))
+            .relative()
+            .rounded(material::radius_card())
+            .bg(cx.theme().muted)
+            .when_some(rail, |this, color| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .h_full()
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(color),
+                )
+            })
             .child(div().flex_none().pt(px(1.)).child(marker))
             .child(text)
             .into_any_element()
@@ -250,7 +265,7 @@ impl PlanPanel {
             .gap_1()
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(15.))
                     .font_medium()
                     .child(tcode_i18n::tr!("plan.empty_title")),
             )
@@ -270,10 +285,7 @@ impl Render for PlanPanel {
         let steps = self.app_state.read(cx).plan_steps();
 
         if markdown.is_none() && steps.is_empty() {
-            return v_flex()
-                .size_full()
-                .bg(cx.theme().background)
-                .child(self.render_empty(cx));
+            return v_flex().size_full().child(self.render_empty(cx));
         }
 
         let mut column = v_flex().w_full().p_3().gap_3();
@@ -284,7 +296,7 @@ impl Render for PlanPanel {
             column = column.child(self.render_steps(&steps, cx));
         }
 
-        v_flex().size_full().bg(cx.theme().background).child(
+        v_flex().size_full().child(
             div()
                 .id("plan-scroll")
                 .flex_1()
@@ -294,9 +306,4 @@ impl Render for PlanPanel {
                 .child(column),
         )
     }
-}
-
-/// A subtle background tint from an accent color (row highlight).
-fn tint(color: gpui::Hsla) -> gpui::Hsla {
-    gpui::Hsla { a: 0.12, ..color }
 }
