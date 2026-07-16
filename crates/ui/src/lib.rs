@@ -4,6 +4,7 @@ pub mod assets;
 mod attachments;
 mod chat;
 mod commit_dialog;
+pub mod material;
 mod composer;
 mod composer_trigger;
 mod context_meter;

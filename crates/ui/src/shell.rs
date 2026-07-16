@@ -319,7 +319,7 @@ impl Render for AppShell {
             return div()
                 .id("app-shell")
                 .size_full()
-                .bg(cx.theme().background)
+                .bg(crate::material::content_surface(cx))
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
                 .child(self.settings_page.clone())
@@ -370,14 +370,24 @@ impl Render for AppShell {
             self.right_sized = false;
         }
 
-        let chat_panel = resizable_panel()
-            .visible(chat_visible)
-            .child(self.chat.clone());
+        // The chat and right columns are reading surfaces (T1): they sit on a
+        // near-opaque plane over the vibrancy canvas (docs/visual-redesign.md).
+        let chat_panel = resizable_panel().visible(chat_visible).child(
+            div()
+                .size_full()
+                .bg(crate::material::content_surface(cx))
+                .child(self.chat.clone()),
+        );
         let right = resizable_panel()
             .visible(diff_open)
             .size(px(RIGHT_PANEL_WIDTH))
             .size_range(px(320.)..px(1400.))
-            .child(right_panel(self));
+            .child(
+                div()
+                    .size_full()
+                    .bg(crate::material::content_surface(cx))
+                    .child(right_panel(self)),
+            );
 
         // Remember a dragged width so re-opening the panel restores it.
         let remembered = self.right_width.clone();
@@ -425,7 +435,6 @@ impl Render for AppShell {
         div()
             .id("app-shell")
             .size_full()
-            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
             .child(
