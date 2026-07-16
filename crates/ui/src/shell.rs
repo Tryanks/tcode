@@ -320,6 +320,8 @@ impl Render for AppShell {
                 .id("app-shell")
                 .size_full()
                 .bg(crate::material::content_surface(cx))
+                // T1 paper floats above the glass canvas.
+                .shadow_sm()
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
                 .child(self.settings_page.clone())
@@ -376,6 +378,8 @@ impl Render for AppShell {
             div()
                 .size_full()
                 .bg(crate::material::content_surface(cx))
+                // T1 paper floats above the glass canvas.
+                .shadow_sm()
                 .child(self.chat.clone()),
         );
         let right = resizable_panel()
@@ -386,6 +390,8 @@ impl Render for AppShell {
                 div()
                     .size_full()
                     .bg(crate::material::content_surface(cx))
+                    // T1 paper floats above the glass canvas.
+                    .shadow_sm()
                     .child(right_panel(self)),
             );
 
