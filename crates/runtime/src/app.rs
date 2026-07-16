@@ -157,6 +157,15 @@ impl RightPanelState {
         active.diff_selected_turn = self.selected_turn;
         active.right_tab = self.tab;
     }
+
+    fn open_preview(&mut self) -> bool {
+        if self.open && self.tab == RightTab::Preview {
+            return false;
+        }
+        self.open = true;
+        self.tab = RightTab::Preview;
+        true
+    }
 }
 
 /// UI resources that belong to a conversation but outlive the currently
@@ -665,9 +674,10 @@ pub struct AppState {
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
-    /// Preview MCP server registration, injected into every session so the agent
-    /// can drive the embedded browser. `None` if the server failed to start.
-    pub mcp_registration: Option<agent::McpRegistration>,
+    /// App-wide preview endpoint and its per-session bearer-token issuer.
+    preview_url: Option<String>,
+    preview_tokens: Option<preview_mcp::TokenRegistry>,
+    preview_registrations: HashMap<String, agent::McpRegistration>,
     /// Automation-request receiver from the preview MCP server. `AppShell` takes
     /// this once to pump requests into the live `PreviewPanel` WebView.
     pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
@@ -780,7 +790,9 @@ impl AppState {
             acp_registry_loading: false,
             acp_registry_error: None,
             acp_installing: std::collections::HashSet::new(),
-            mcp_registration: None,
+            preview_url: None,
+            preview_tokens: None,
+            preview_registrations: HashMap::new(),
             preview_requests: None,
             orchestrate_url: None,
             orchestrate_tokens: None,
@@ -822,14 +834,11 @@ impl AppState {
         self.pending_preview_url.take()
     }
 
-    /// Attach the running preview MCP server: its registration (injected into
-    /// every spawned session) and the request receiver (taken by `AppShell`).
+    /// Attach the running preview MCP server: its per-session token issuer and
+    /// the request receiver (taken by `AppShell`).
     pub fn attach_preview_mcp(&mut self, server: preview_mcp::PreviewMcpServer) {
-        self.mcp_registration = Some(agent::McpRegistration {
-            name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
-            url: server.url,
-            bearer_token: server.bearer_token,
-        });
+        self.preview_url = Some(server.url);
+        self.preview_tokens = Some(server.tokens);
         self.preview_requests = Some(server.requests);
     }
 
@@ -950,6 +959,21 @@ impl AppState {
             bearer_token: token,
         };
         self.orchestrate_registrations
+            .insert(meta.id.clone(), registration.clone());
+        Some(registration)
+    }
+
+    fn preview_registration_for(&mut self, meta: &SessionMeta) -> Option<agent::McpRegistration> {
+        if let Some(registration) = self.preview_registrations.get(&meta.id) {
+            return Some(registration.clone());
+        }
+        let token = self.preview_tokens.as_ref()?.register(&meta.id);
+        let registration = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
+            url: self.preview_url.clone()?,
+            bearer_token: token,
+        };
+        self.preview_registrations
             .insert(meta.id.clone(), registration.clone());
         Some(registration)
     }
@@ -4581,11 +4605,41 @@ impl AppState {
     /// Open the right panel on the Preview tab (used when the agent drives the
     /// preview so the webview surfaces without a manual toggle).
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut()
-            && !(active.diff_open && active.right_tab == RightTab::Preview)
-        {
-            active.diff_open = true;
-            active.right_tab = RightTab::Preview;
+        if let Some(active) = self.active.as_mut() {
+            let mut panel = RightPanelState::capture(active);
+            if panel.open_preview() {
+                panel.restore_into(active);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open Preview in the owning conversation's right-panel state without
+    /// changing which conversation the user is viewing.
+    pub fn open_preview_panel_for(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.active_session_id() == Some(session_id) {
+            self.open_preview_panel(cx);
+            return;
+        }
+
+        let mut changed = false;
+        let destination = ConversationDestination::Thread(session_id.to_string());
+        let mut parked_ui = None;
+        if let Some(background) = self.background.get_mut(session_id) {
+            let mut panel = RightPanelState::capture(background);
+            changed |= panel.open_preview();
+            panel.restore_into(background);
+            if !self.conversation_ui.contains_key(&destination) {
+                parked_ui = Some(ConversationUiState::take_from(background));
+            }
+        }
+        if let Some(ui) = parked_ui {
+            self.conversation_ui.insert(destination.clone(), ui);
+        }
+        if let Some(ui) = self.conversation_ui.get_mut(&destination) {
+            changed |= ui.right_panel.open_preview();
+        }
+        if changed {
             cx.notify();
         }
     }
@@ -4782,7 +4836,7 @@ impl AppState {
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let launch_env = self.session_launch_env(&meta);
-        let mcp_registration = self.mcp_registration.clone();
+        let preview_registration = self.preview_registration_for(&meta);
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
@@ -4800,7 +4854,7 @@ impl AppState {
                 &meta,
                 &settings,
                 launch_env,
-                mcp_registration,
+                preview_registration,
                 orchestrate_registration,
             );
             let result = start_session(meta.provider, opts).await;
@@ -5354,9 +5408,19 @@ impl AppState {
             .collect();
         for child_id in child_ids {
             self.drop_background(&child_id);
+            self.revoke_preview_registration(&child_id);
         }
+        self.revoke_preview_registration(parent_id);
         if let Some(registration) = self.orchestrate_registrations.remove(parent_id)
             && let Some(tokens) = &self.orchestrate_tokens
+        {
+            tokens.revoke(&registration.bearer_token);
+        }
+    }
+
+    fn revoke_preview_registration(&mut self, session_id: &str) {
+        if let Some(registration) = self.preview_registrations.remove(session_id)
+            && let Some(tokens) = &self.preview_tokens
         {
             tokens.revoke(&registration.bearer_token);
         }
@@ -6372,6 +6436,45 @@ mod tests {
             assert!(second.diff_open);
             assert_eq!(second.right_tab, RightTab::Plan);
             assert_eq!(second.terminal_workspace.height, 402.);
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn preview_open_for_background_thread_does_not_switch_the_active_thread(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-background-preview-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
+        let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
+        store.upsert_meta(&first).unwrap();
+        store.upsert_meta(&second).unwrap();
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&first_id, cx);
+            let first = state.active.as_mut().unwrap();
+            first.turn_in_flight = true;
+            first.runtime = Runtime::Starting { generation: 1 };
+            state.select_session(&second_id, cx);
+            assert!(state.background.contains_key(&first_id));
+            state.open_preview_panel_for(&first_id, cx);
+
+            assert_eq!(state.active_session_id(), Some(second_id.as_str()));
+            assert!(!state.preview_panel_showing());
+            let background = state.background.get(&first_id).unwrap();
+            assert!(background.diff_open);
+            assert_eq!(background.right_tab, RightTab::Preview);
+
+            state.select_session(&first_id, cx);
+            assert!(state.preview_panel_showing());
         });
 
         let _ = std::fs::remove_dir_all(root);

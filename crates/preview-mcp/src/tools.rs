@@ -2,7 +2,8 @@
 //! with bearer-token auth. Each tool turns its arguments into a [`PreviewOp`],
 //! runs it through the [`Broker`], and maps the reply into an MCP result.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use axum::Router;
 use axum::extract::State;
@@ -63,14 +64,16 @@ pub struct TypeParams {
 #[derive(Clone)]
 pub struct PreviewTools {
     broker: Broker,
+    session_id: String,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl PreviewTools {
-    pub fn new(broker: Broker) -> Self {
+    pub fn new(broker: Broker, session_id: String) -> Self {
         Self {
             broker,
+            session_id,
             tool_router: Self::tool_router(),
         }
     }
@@ -158,7 +161,7 @@ impl PreviewTools {
     /// Route one op through the broker and map its reply into a tool result.
     async fn run(&self, op: PreviewOp) -> CallToolResult {
         log::info!("preview-mcp: tool invoked: {op:?}");
-        match self.broker.invoke(op).await {
+        match self.broker.invoke(&self.session_id, op).await {
             Ok(PreviewReply::Json(value)) => {
                 let text =
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
@@ -188,30 +191,42 @@ impl ServerHandler for PreviewTools {
     }
 }
 
-/// Shared axum state: the MCP service plus the expected bearer token.
-#[derive(Clone)]
-struct HttpState {
-    service: StreamableHttpService<PreviewTools>,
-    token: Arc<String>,
+pub type Service = StreamableHttpService<PreviewTools>;
+
+pub struct ServiceEntry {
+    pub session_id: String,
+    service: Service,
 }
 
-/// Serve the streamable-HTTP MCP endpoint at `/mcp` on `listener`, rejecting any
-/// request whose `Authorization` header isn't `Bearer <token>`.
-pub async fn serve(
-    listener: std::net::TcpListener,
-    broker: Broker,
-    token: String,
-) -> std::io::Result<()> {
+pub type Services = HashMap<String, ServiceEntry>;
+
+pub fn service(broker: Broker, session_id: String) -> ServiceEntry {
+    let service_session_id = session_id.clone();
     let service = StreamableHttpService::new(
-        move || Ok(PreviewTools::new(broker.clone())),
+        move || {
+            Ok(PreviewTools::new(
+                broker.clone(),
+                service_session_id.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
-    let state = HttpState {
+    ServiceEntry {
+        session_id,
         service,
-        token: Arc::new(token),
-    };
-    let app = Router::new().route("/mcp", any(handle)).with_state(state);
+    }
+}
+
+/// Serve the streamable-HTTP MCP endpoint at `/mcp` on `listener`, resolving
+/// each bearer token to its per-session service.
+pub async fn serve(
+    listener: std::net::TcpListener,
+    services: Arc<RwLock<Services>>,
+) -> std::io::Result<()> {
+    let app = Router::new()
+        .route("/mcp", any(handle))
+        .with_state(services);
 
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
@@ -219,44 +234,35 @@ pub async fn serve(
 }
 
 /// Bearer-gate every request, then hand it to the rmcp streamable-HTTP service.
-async fn handle(State(state): State<HttpState>, req: axum::extract::Request) -> Response {
-    if !authorized(&req, &state.token) {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    }
-    let response = state.service.handle(req).await;
-    let (parts, body) = response.into_parts();
-    Response::from_parts(parts, axum::body::Body::new(body))
-}
-
-/// Constant-ish bearer check: `Authorization: Bearer <token>`.
-fn authorized<B>(req: &axum::http::Request<B>, token: &str) -> bool {
-    req.headers()
+async fn handle(
+    State(services): State<Arc<RwLock<Services>>>,
+    req: axum::extract::Request,
+) -> Response {
+    let token = req
+        .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(|presented| presented == token)
-        .unwrap_or(false)
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let service = token.and_then(|token| {
+        services.read().unwrap().get(token).map(|entry| {
+            log::debug!(
+                "preview-mcp: authorized request for session {}",
+                entry.session_id
+            );
+            entry.service.clone()
+        })
+    });
+    let Some(service) = service else {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    };
+    let response = service.handle(req).await;
+    let (parts, body) = response.into_parts();
+    Response::from_parts(parts, axum::body::Body::new(body))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bearer_auth_accepts_matching_and_rejects_others() {
-        let build = |header: Option<&str>| {
-            let mut req = axum::http::Request::builder().uri("/mcp");
-            if let Some(h) = header {
-                req = req.header(AUTHORIZATION, h);
-            }
-            req.body(()).unwrap()
-        };
-        let token = "sekret";
-        assert!(authorized(&build(Some("Bearer sekret")), token));
-        assert!(!authorized(&build(Some("Bearer nope")), token));
-        assert!(!authorized(&build(Some("sekret")), token));
-        assert!(!authorized(&build(None), token));
-    }
 
     #[tokio::test]
     async fn broker_roundtrip_with_fake_resolver() {
@@ -268,6 +274,7 @@ mod tests {
         };
         let resolver = tokio::spawn(async move {
             while let Ok(request) = rx.recv().await {
+                assert_eq!(request.session_id, "session-a");
                 let reply = match &request.op {
                     PreviewOp::Status => {
                         PreviewReply::Json(serde_json::json!({ "url": "https://x/" }))
@@ -282,7 +289,7 @@ mod tests {
             }
         });
 
-        let tools = PreviewTools::new(broker);
+        let tools = PreviewTools::new(broker, "session-a".into());
         let status = tools.run(PreviewOp::Status).await;
         assert_eq!(status.is_error, Some(false));
         let shot = tools.run(PreviewOp::Screenshot).await;
@@ -299,7 +306,7 @@ mod tests {
             requests: tx,
             timeout: std::time::Duration::from_millis(200),
         };
-        let tools = PreviewTools::new(broker);
+        let tools = PreviewTools::new(broker, "session-a".into());
         let result = tools.run(PreviewOp::Status).await;
         assert_eq!(result.is_error, Some(true));
     }
@@ -311,7 +318,7 @@ mod tests {
             requests: tx,
             timeout: std::time::Duration::from_secs(1),
         };
-        let tools = PreviewTools::new(broker);
+        let tools = PreviewTools::new(broker, "session-a".into());
         let names: Vec<String> = tools
             .tool_router
             .list_all()

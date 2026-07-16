@@ -46,6 +46,21 @@ fn visible_preview_key(
         .flatten()
 }
 
+/// Resolve an MCP request's physical session id to the stable WebView key.
+/// Only the active surface can be an unsent project draft; every background
+/// request therefore keys directly by its stored session id.
+fn preview_key_for_session(
+    requested_session_id: &str,
+    active_session_id: Option<&str>,
+    active_key: Option<&str>,
+) -> String {
+    if active_session_id == Some(requested_session_id) {
+        active_key.unwrap_or(requested_session_id).to_string()
+    } else {
+        requested_session_id.to_string()
+    }
+}
+
 /// The reply channel a broker request is answered on.
 type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
 
@@ -75,7 +90,9 @@ mod native {
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
     use raw_window_handle::HasWindowHandle as _;
 
-    use super::{ReplyTx, normalize_url, unavailable_message, visible_preview_key};
+    use super::{
+        ReplyTx, normalize_url, preview_key_for_session, unavailable_message, visible_preview_key,
+    };
     use tcode_runtime::app::AppState;
 
     pub struct PreviewPanel {
@@ -182,6 +199,20 @@ mod native {
             current.map(|(_, key)| key)
         }
 
+        fn routed_key(&mut self, session_id: &str, cx: &Context<Self>) -> String {
+            let active_key = self.active_key(cx);
+            let active_session_id = self
+                .app_state
+                .read(cx)
+                .active_session_id()
+                .map(str::to_string);
+            preview_key_for_session(
+                session_id,
+                active_session_id.as_deref(),
+                active_key.as_deref(),
+            )
+        }
+
         /// Hide native children that no longer belong to the visible Preview
         /// panel. This deliberately never shows a child: an opening transition
         /// may still have stale bounds until `render` mounts its GPUI owner.
@@ -270,21 +301,18 @@ mod native {
             Some(webview)
         }
 
-        /// Navigate the active session's WebView to `url`, remembering it.
-        fn navigate(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-            let Some(session_id) = self.active_key(cx) else {
-                return;
-            };
+        /// Navigate one conversation's WebView to `url`, remembering it.
+        fn navigate(&mut self, key: &str, url: &str, window: &mut Window, cx: &mut Context<Self>) {
             let url = normalize_url(url);
-            let Some(webview) = self.ensure_webview(&session_id, window, cx) else {
+            let Some(webview) = self.ensure_webview(key, window, cx) else {
                 cx.notify();
                 return;
             };
             webview.update(cx, |view, _| view.load_url(&url));
             // A navigation flushes lb-wry's pending-scripts buffer, so subsequent
             // evaluate callbacks will fire.
-            self.warm.insert(session_id.clone());
-            self.urls.insert(session_id, url);
+            self.warm.insert(key.to_string());
+            self.urls.insert(key.to_string(), url);
             self.sync_visibility(cx);
             cx.notify();
         }
@@ -298,8 +326,10 @@ mod native {
         ) {
             if let InputEvent::PressEnter { .. } = event {
                 let url = input.read(cx).value().trim().to_string();
-                if !url.is_empty() {
-                    self.navigate(&url, window, cx);
+                if !url.is_empty()
+                    && let Some(key) = self.active_key(cx)
+                {
+                    self.navigate(&key, &url, window, cx);
                 }
             }
         }
@@ -357,25 +387,24 @@ mod native {
         /// value-returning ops.
         pub fn handle_op(
             &mut self,
+            session_id: String,
             op: PreviewOp,
             reply: ReplyTx,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) {
-            let Some(session_id) = self.active_key(cx) else {
-                let _ = reply.try_send(Err("no active session to preview".into()));
-                return;
-            };
+            let key = self.routed_key(&session_id, cx);
             log::info!("preview: handling op {op:?} for session {session_id}");
 
             match op {
                 PreviewOp::Open { url } => {
-                    self.app_state
-                        .update(cx, |state, cx| state.open_preview_panel(cx));
+                    self.app_state.update(cx, |state, cx| {
+                        state.open_preview_panel_for(&session_id, cx)
+                    });
                     if let Some(url) = url.as_deref() {
-                        self.navigate(url, window, cx);
+                        self.navigate(&key, url, window, cx);
                     } else {
-                        self.ensure_webview(&session_id, window, cx);
+                        self.ensure_webview(&key, window, cx);
                         self.sync_visibility(cx);
                     }
                     if let Some(err) = &self.webview_error {
@@ -384,42 +413,39 @@ mod native {
                     }
                     let payload = serde_json::json!({
                         "ok": true,
-                        "url": self.urls.get(&session_id),
+                        "url": self.urls.get(&key),
                         "note": "call preview_status for live page state once loaded",
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
                 PreviewOp::Navigate { url } => {
-                    self.app_state
-                        .update(cx, |state, cx| state.open_preview_panel(cx));
-                    self.navigate(&url, window, cx);
+                    self.app_state.update(cx, |state, cx| {
+                        state.open_preview_panel_for(&session_id, cx)
+                    });
+                    self.navigate(&key, &url, window, cx);
                     if let Some(err) = &self.webview_error {
                         let _ = reply.try_send(Err(unavailable_message(err)));
                         return;
                     }
                     let payload = serde_json::json!({
                         "ok": true,
-                        "url": self.urls.get(&session_id),
+                        "url": self.urls.get(&key),
                         "note": "page is loading; call preview_status for live state",
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
-                PreviewOp::Status => self.eval_json(&session_id, js::STATUS, reply, window, cx),
-                PreviewOp::Snapshot => self.eval_json(&session_id, js::SNAPSHOT, reply, window, cx),
+                PreviewOp::Status => self.eval_json(&key, js::STATUS, reply, window, cx),
+                PreviewOp::Snapshot => self.eval_json(&key, js::SNAPSHOT, reply, window, cx),
                 PreviewOp::Evaluate { js: expr } => {
-                    self.eval_json(&session_id, &js::evaluate(&expr), reply, window, cx)
+                    self.eval_json(&key, &js::evaluate(&expr), reply, window, cx)
                 }
                 PreviewOp::Click { selector } => {
-                    self.eval_json(&session_id, &js::click(&selector), reply, window, cx)
+                    self.eval_json(&key, &js::click(&selector), reply, window, cx)
                 }
-                PreviewOp::Type { selector, text } => self.eval_json(
-                    &session_id,
-                    &js::type_text(&selector, &text),
-                    reply,
-                    window,
-                    cx,
-                ),
-                PreviewOp::Screenshot => self.screenshot(&session_id, reply, window, cx),
+                PreviewOp::Type { selector, text } => {
+                    self.eval_json(&key, &js::type_text(&selector, &text), reply, window, cx)
+                }
+                PreviewOp::Screenshot => self.screenshot(&session_id, &key, reply, window, cx),
             }
         }
 
@@ -491,6 +517,7 @@ mod native {
         fn screenshot(
             &mut self,
             session_id: &str,
+            key: &str,
             reply: ReplyTx,
             window: &mut Window,
             cx: &mut Context<Self>,
@@ -498,7 +525,30 @@ mod native {
             use base64::Engine as _;
             use gpui::px;
 
-            let Some(view) = self.webviews.get(session_id) else {
+            let visible = {
+                let state = self.app_state.read(cx);
+                if state.active_session_id() != Some(session_id) {
+                    let _ = reply.try_send(Err(
+                        "preview is not visible; the user is viewing another conversation".into(),
+                    ));
+                    return;
+                }
+                visible_preview_key(
+                    Some(key),
+                    state.route,
+                    state.palette_open,
+                    state.preview_panel_showing(),
+                ) == Some(key)
+            };
+            if !visible {
+                let _ = reply.try_send(Err(
+                    "preview is not visible; open the Preview panel before taking a screenshot"
+                        .into(),
+                ));
+                return;
+            }
+
+            let Some(view) = self.webviews.get(key) else {
                 let _ = reply.try_send(Err("preview browser is not open".into()));
                 return;
             };
@@ -530,6 +580,7 @@ mod native {
         fn screenshot(
             &mut self,
             _session_id: &str,
+            _key: &str,
             reply: ReplyTx,
             _window: &mut Window,
             _cx: &mut Context<Self>,
@@ -548,7 +599,7 @@ mod native {
                     .app_state
                     .update(cx, |state, _| state.take_pending_preview_url())
             {
-                self.navigate(&url, window, cx);
+                self.navigate(active.as_deref().unwrap(), &url, window, cx);
             }
 
             // Mirror the active session's URL into the address bar when it changes.
@@ -682,7 +733,9 @@ mod native {
                         .label(format!(":{port}"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let url = ports::url_for_port(port);
-                            this.navigate(&url, window, cx);
+                            if let Some(key) = this.active_key(cx) {
+                                this.navigate(&key, &url, window, cx);
+                            }
                         })),
                 );
             }
@@ -718,12 +771,15 @@ mod placeholder {
         /// `Err` into a normal MCP tool error.
         pub fn handle_op(
             &mut self,
+            session_id: String,
             op: PreviewOp,
             reply: ReplyTx,
             _window: &mut Window,
             _cx: &mut Context<Self>,
         ) {
-            log::info!("preview: rejecting op {op:?} (unsupported on Linux)");
+            log::info!(
+                "preview: rejecting op {op:?} for session {session_id} (unsupported on Linux)"
+            );
             let _ = reply.try_send(Err(
                 tcode_i18n::tr!("preview.unsupported_linux").into_owned()
             ));
@@ -791,6 +847,34 @@ fn normalize_url(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routed_session_uses_active_draft_key_only_for_the_active_surface() {
+        assert_eq!(
+            preview_key_for_session(
+                "physical-draft",
+                Some("physical-draft"),
+                Some("draft:project-a")
+            ),
+            "draft:project-a"
+        );
+        assert_eq!(
+            preview_key_for_session(
+                "stored-background",
+                Some("physical-draft"),
+                Some("draft:project-a")
+            ),
+            "stored-background"
+        );
+        assert_eq!(
+            preview_key_for_session(
+                "stored-active",
+                Some("stored-active"),
+                Some("stored-active")
+            ),
+            "stored-active"
+        );
+    }
 
     #[test]
     fn normalize_url_adds_a_scheme_to_bare_hosts() {
