@@ -8,6 +8,35 @@
 
 use std::collections::HashSet;
 
+use agent::FileChange;
+
+/// Collapse per-edit file changes into one approximate change per path.
+///
+/// This is the non-git fallback used by turn summaries. Concatenating the
+/// fragments makes line statistics additive; it is deliberately only an
+/// approximation because overlapping edits require checkpoint trees to obtain
+/// the real net diff.
+pub fn merge_file_changes_by_path<'a>(
+    changes: impl IntoIterator<Item = &'a FileChange>,
+) -> Vec<FileChange> {
+    let mut merged: Vec<FileChange> = Vec::new();
+    for change in changes {
+        if let Some(existing) = merged.iter_mut().find(|item| item.path == change.path) {
+            existing.kind = change.kind;
+            if let Some(fragment) = &change.diff {
+                let diff = existing.diff.get_or_insert_with(String::new);
+                if !diff.is_empty() && !diff.ends_with('\n') {
+                    diff.push('\n');
+                }
+                diff.push_str(fragment);
+            }
+        } else {
+            merged.push(change.clone());
+        }
+    }
+    merged
+}
+
 // ---------------------------------------------------------------------------
 // Status model
 // ---------------------------------------------------------------------------
@@ -564,6 +593,48 @@ fn parse_porcelain_path(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent::FileChangeKind;
+
+    #[test]
+    fn fallback_merge_collapses_fragments_and_keeps_summed_stats() {
+        let changes = [
+            FileChange {
+                path: "/repo/src/lib.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+middle\n".into()),
+            },
+            FileChange {
+                path: "/repo/other.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: Some("-gone\n+new\n".into()),
+            },
+            FileChange {
+                path: "/repo/src/lib.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: Some("-middle\n-final\n+replacement\n".into()),
+            },
+        ];
+
+        let merged = merge_file_changes_by_path(&changes);
+        assert_eq!(merged.len(), 2);
+        let lib = merged
+            .iter()
+            .find(|change| change.path.ends_with("src/lib.rs"))
+            .unwrap();
+        let diff = lib.diff.as_deref().unwrap();
+        let stats = diff.lines().fold((0, 0), |(added, deleted), line| {
+            if line.starts_with("+++") || line.starts_with("---") {
+                (added, deleted)
+            } else if line.starts_with('+') {
+                (added + 1, deleted)
+            } else if line.starts_with('-') {
+                (added, deleted + 1)
+            } else {
+                (added, deleted)
+            }
+        });
+        assert_eq!(stats, (2, 3));
+    }
 
     fn dirty_upstream() -> GitStatus {
         GitStatus {

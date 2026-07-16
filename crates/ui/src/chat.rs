@@ -29,7 +29,7 @@ use gpui_component::{
     v_flex,
 };
 
-use tcode_core::git::GitAction;
+use tcode_core::git::{GitAction, merge_file_changes_by_path};
 use tcode_core::session::{
     EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta,
     parse_orchestrate_callback,
@@ -925,18 +925,26 @@ impl ChatView {
         // silently. Replay marks turns idle (mark_idle), so finished turns from
         // stored sessions still render the card.
         if !turn.running {
-            let mut changes: Vec<&FileChange> = Vec::new();
+            let mut fragments: Vec<&FileChange> = Vec::new();
             for entry in entries {
                 if let EntryContent::FileChange {
                     changes: file_changes,
                     ..
                 } = &entry.content
                 {
-                    changes.extend(file_changes.iter());
+                    fragments.extend(file_changes.iter());
                 }
             }
-            if !changes.is_empty() {
-                column = column.child(self.render_changed_files(index, cwd, &changes, cx));
+            if !fragments.is_empty() {
+                let fallback = merge_file_changes_by_path(fragments);
+                let changes = self.app_state.update(cx, |state, cx| {
+                    state.request_turn_net_file_changes(index, cx);
+                    state.turn_net_file_changes(index)
+                });
+                let changes = changes.unwrap_or(fallback);
+                if !changes.is_empty() {
+                    column = column.child(self.render_changed_files(index, cwd, &changes, cx));
+                }
             }
         }
 
@@ -1964,7 +1972,7 @@ impl ChatView {
         &self,
         index: usize,
         cwd: &Path,
-        changes: &[&FileChange],
+        changes: &[FileChange],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -3088,7 +3096,7 @@ struct FileRow {
 /// Group file changes by their parent directory (preserving first-seen order),
 /// so the CHANGED FILES card can render a folder → files tree. Paths are shown
 /// relative to the session `cwd` when they live under it.
-fn group_by_dir(changes: &[&FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>)> {
+fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>)> {
     let mut groups: Vec<(String, Vec<FileRow>)> = Vec::new();
     for change in changes {
         let display = tcode_runtime::ui_facade::relativize_to_workspace(&change.path, cwd);
