@@ -108,6 +108,19 @@ fn thread_visible(meta: &SessionMeta, collapsed_parents: &HashSet<String>) -> bo
         .is_none_or(|parent_id| !collapsed_parents.contains(parent_id))
 }
 
+/// Threads a group will actually render, in order. Children hidden by a
+/// collapsed parent are dropped before the collapsed limit is applied, so
+/// hidden rows never consume "Show more" slots.
+fn visible_threads<'a>(
+    sessions: &'a [SessionMeta],
+    collapsed_parents: &HashSet<String>,
+) -> Vec<&'a SessionMeta> {
+    sessions
+        .iter()
+        .filter(|meta| thread_visible(meta, collapsed_parents))
+        .collect()
+}
+
 fn toggle_parent_for_row_click(
     collapsed_parents: &mut HashSet<String>,
     parent_id: &str,
@@ -658,7 +671,8 @@ impl SessionsSidebar {
         let group_key = format!("group-{project_id}");
 
         let expanded = self.expanded_groups.contains(&project_id);
-        let total = group.sessions.len();
+        let threads = visible_threads(&group.sessions, &self.collapsed_parents);
+        let total = threads.len();
         let visible = if expanded {
             total
         } else {
@@ -767,12 +781,7 @@ impl SessionsSidebar {
                 }));
 
         if !collapsed {
-            for meta in group
-                .sessions
-                .iter()
-                .take(visible)
-                .filter(|meta| thread_visible(meta, &self.collapsed_parents))
-            {
+            for meta in threads.iter().take(visible).copied() {
                 let is_active = active_id == Some(meta.id.as_str());
                 // "Working" covers parked sessions too — a thread that keeps
                 // running in the background keeps its green dot.
@@ -1436,6 +1445,36 @@ mod tests {
         });
 
         assert_eq!(state.active_direct_children, 1);
+    }
+
+    #[test]
+    fn collapsed_children_do_not_consume_thread_list_slots() {
+        let mut sessions = vec![session("parent", None)];
+        for i in 0..7 {
+            sessions.push(session(&format!("child-{i}"), Some("parent")));
+        }
+        for i in 0..5 {
+            sessions.push(session(&format!("thread-{i}"), None));
+        }
+
+        let collapsed = HashSet::from(["parent".to_string()]);
+        let threads = visible_threads(&sessions, &collapsed);
+
+        // Parent plus the five ordinary threads all fit inside the collapsed
+        // limit once the hidden children stop counting toward it.
+        assert_eq!(threads.len(), THREADS_COLLAPSED_LIMIT);
+        assert!(threads
+            .iter()
+            .all(|meta| meta.parent_session_id.is_none()));
+        assert_eq!(
+            thread_list_toggle_label(threads.len(), false),
+            None,
+            "no Show more row when every visible thread already fits"
+        );
+
+        // Expanding the parent brings the children back into the count.
+        let expanded = visible_threads(&sessions, &HashSet::new());
+        assert_eq!(expanded.len(), sessions.len());
     }
 
     #[test]
