@@ -49,10 +49,11 @@ const EXIT_PLAN_DENY_MESSAGE: &str = "The client captured your proposed plan. St
 /// Verified against `@anthropic-ai/claude-agent-sdk` v0.3.170
 /// `SDKControlSetPermissionModeRequest` (`sdk.d.ts`): `'default'` prompts for
 /// dangerous operations, `'acceptEdits'` auto-accepts file edits, and
-/// `'bypassPermissions'` skips all permission checks.
+/// `'bypassPermissions'` skips all permission checks. ReadOnly also launches in
+/// default mode; tcode enforces its narrower policy in [`Mapper`].
 pub(crate) fn permission_mode_flag(mode: ApprovalMode) -> &'static str {
     match mode {
-        ApprovalMode::Supervised => "default",
+        ApprovalMode::Supervised | ApprovalMode::ReadOnly => "default",
         ApprovalMode::AutoAcceptEdits => "acceptEdits",
         ApprovalMode::FullAccess => "bypassPermissions",
     }
@@ -671,7 +672,7 @@ async fn handle_command(
             // only a stdin write failure warrants a Warning.
             let flag = permission_mode_flag(mode);
             mapper.base_permission_mode = flag;
-            mapper.full_access = mode == ApprovalMode::FullAccess;
+            mapper.approval_mode = mode;
             let msg = mapper.set_permission_mode_request(mode);
             if write_line(stdin, &msg).await.is_err() {
                 let _ = event_tx
@@ -861,10 +862,10 @@ pub(crate) struct Mapper {
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
     pending_user_input: HashMap<String, Value>,
-    /// Whether the session runs in full-access (bypassPermissions) mode, in
-    /// which normal tools that reach `can_use_tool` are auto-allowed with no
-    /// approval event (AskUserQuestion / ExitPlanMode are still handled first).
-    full_access: bool,
+    /// Canonical session access policy. FullAccess auto-allows every ordinary
+    /// tool; ReadOnly auto-allows only classified file reads. Special tools are
+    /// handled before either policy.
+    approval_mode: ApprovalMode,
     /// Set when we send an `interrupt` control_request; the next non-success
     /// `result` is then attributed to the interrupt rather than a failure
     /// (the CLI's result carries no reliable interrupt marker).
@@ -906,7 +907,7 @@ impl Mapper {
             tail_requests: Vec::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
-            full_access: false,
+            approval_mode: ApprovalMode::Supervised,
             interrupt_pending: false,
             ultrathink: false,
             interaction_mode: InteractionMode::Build,
@@ -925,7 +926,7 @@ impl Mapper {
         self.interaction_mode = config.interaction_mode;
         self.base_permission_mode = config.base_permission_mode;
         self.applied_permission_mode = config.base_permission_mode.to_string();
-        self.full_access = config.approval_mode == ApprovalMode::FullAccess;
+        self.approval_mode = config.approval_mode;
     }
 
     /// Drain queued control-response writes for the actor to send.
@@ -1686,7 +1687,7 @@ impl Mapper {
         // (c) Full-access: ordinary SDK permission checks are bypassed, but the
         // callback stays installed. Any non-special tool that reaches it is
         // auto-allowed with no approval event (S2 §1.1/§1.2 "full-access allow").
-        if self.full_access {
+        if self.approval_mode == ApprovalMode::FullAccess {
             self.outgoing.push(json!({
                 "type": "control_response",
                 "response": {
@@ -1702,8 +1703,30 @@ impl Mapper {
         }
 
         // (d) Classify per the T3 substring matrix (S2 §1.3).
+        let request_type = classify_claude_tool(&tool_name);
+
+        // (e) Read-only: native read tools proceed without prompting. Commands
+        // and every other tool still fall through to the ordinary approval flow.
+        let read_only_allow = self.approval_mode == ApprovalMode::ReadOnly
+            && request_type == ClaudeRequestType::FileRead;
+        if read_only_allow {
+            self.outgoing.push(json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "allow",
+                        "updatedInput": input,
+                    }
+                }
+            }));
+            return Vec::new();
+        }
+
+        // (f) Everything else becomes a user-visible approval request.
         let detail = approval_detail(&tool_name, &input);
-        let kind = match classify_claude_tool(&tool_name) {
+        let kind = match request_type {
             ClaudeRequestType::FileRead => ApprovalKind::FileRead { detail },
             ClaudeRequestType::ExecCommand => ApprovalKind::ExecCommand {
                 command: input
@@ -3258,7 +3281,7 @@ mod tests {
     #[test]
     fn full_access_auto_allows_without_event() {
         let mut m = Mapper::new();
-        m.full_access = true;
+        m.approval_mode = ApprovalMode::FullAccess;
         let evs = feed(
             &mut m,
             r#"{"type":"control_request","request_id":"req-fa","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
@@ -3296,6 +3319,45 @@ mod tests {
             },
             other => panic!("expected ApprovalRequested, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_only_auto_allows_file_reads_without_approval() {
+        let mut m = Mapper::new();
+        m.approval_mode = ApprovalMode::ReadOnly;
+        let evs = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"req-ro-read","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/tmp/a.txt"}}}"#,
+        );
+        assert!(evs.is_empty(), "read-only file read emitted an approval");
+        assert!(m.pending_approvals.is_empty());
+        let outgoing = m.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["response"]["request_id"], "req-ro-read");
+        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            outgoing[0]["response"]["response"]["updatedInput"]["file_path"],
+            "/tmp/a.txt"
+        );
+    }
+
+    #[test]
+    fn read_only_file_write_still_requests_approval() {
+        let mut m = Mapper::new();
+        m.approval_mode = ApprovalMode::ReadOnly;
+        let evs = feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"req-ro-write","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/a.txt","content":"changed"}}}"#,
+        );
+        assert!(matches!(
+            evs.as_slice(),
+            [AgentEvent::ApprovalRequested(ApprovalRequest {
+                id,
+                kind: ApprovalKind::FileChange { .. },
+                ..
+            })] if id == "req-ro-write"
+        ));
+        assert!(m.take_outgoing().is_empty());
     }
 
     #[test]
@@ -3396,6 +3458,7 @@ mod tests {
     #[test]
     fn permission_mode_flag_maps_all_modes() {
         assert_eq!(permission_mode_flag(ApprovalMode::Supervised), "default");
+        assert_eq!(permission_mode_flag(ApprovalMode::ReadOnly), "default");
         assert_eq!(
             permission_mode_flag(ApprovalMode::AutoAcceptEdits),
             "acceptEdits"

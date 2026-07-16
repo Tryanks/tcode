@@ -65,7 +65,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch a brief to a new child tcode thread and return its thread id. access is one of read_only (review/investigation: the child cannot change files; actions beyond that pause for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts)."
+        description = "Dispatch a brief to a new child tcode thread and return its thread id. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts)."
     )]
     async fn dispatch(
         &self,

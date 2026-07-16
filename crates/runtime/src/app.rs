@@ -703,6 +703,11 @@ pub struct AppState {
     /// Requests from the orchestrate MCP runtime, pumped on the gpui thread.
     pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
     callback_last_turn: HashMap<String, usize>,
+    callback_approval_requests: HashSet<(String, String)>,
+    /// Live provider approvals for sessions without an authoritative active
+    /// timeline. Maintained incrementally from `on_event`; never replayed from
+    /// disk, because a persisted approval cannot survive its provider process.
+    sessions_awaiting_approval: HashMap<String, Vec<agent::ApprovalRequest>>,
     /// A URL the preview panel should navigate to on its next render (set by the
     /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
     pub pending_preview_url: Option<String>,
@@ -818,6 +823,8 @@ impl AppState {
             orchestrate_registrations: HashMap::new(),
             orchestrate_requests: None,
             callback_last_turn: HashMap::new(),
+            callback_approval_requests: HashSet::new(),
+            sessions_awaiting_approval: HashMap::new(),
             pending_preview_url: None,
             git_status: None,
             git_busy: false,
@@ -1219,9 +1226,11 @@ impl AppState {
                 thread_id,
             } => {
                 self.require_child(&parent_id, &thread_id)?;
+                self.sessions_awaiting_approval.remove(&thread_id);
                 if self.active_session_id() == Some(&thread_id) {
                     if let Some(child) = self.active.as_mut() {
                         child.queue.clear();
+                        child.timeline.mark_idle();
                         child.shutdown_to_idle();
                     }
                 } else {
@@ -1305,11 +1314,16 @@ impl AppState {
 
     fn child_status_json(&self, meta: &SessionMeta) -> serde_json::Value {
         let (state, final_message, usage) = self.child_result(meta);
+        let waiting_approval = self
+            .pending_approval_for(&meta.id)
+            .as_ref()
+            .map(approval_request_summary);
         let mut status = serde_json::json!({
             "thread_id": meta.id,
             "title": meta.title,
             "provider": match meta.provider { ProviderKind::ClaudeCode => "claude", ProviderKind::Codex => "codex", ProviderKind::Acp => "acp" },
             "state": state,
+            "waiting_approval": waiting_approval,
             "last_output_tail": tail_chars(&final_message, 600),
             "updated_at": meta.updated_at,
         });
@@ -3084,6 +3098,7 @@ impl AppState {
         remove_worktree: bool,
         cx: &mut Context<Self>,
     ) {
+        self.sessions_awaiting_approval.remove(session_id);
         let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
         if self.active_session_id() == Some(session_id) {
             // shutdown_active drops the ActiveSession (and its terminal PTY).
@@ -3190,6 +3205,18 @@ impl AppState {
         self.background
             .get(session_id)
             .is_some_and(|s| s.turn_in_flight || !s.queue.is_empty())
+    }
+
+    /// The first approval currently blocking a session, including parked and
+    /// reopened sessions whose in-memory timeline may be stale.
+    pub fn pending_approval_for(&self, session_id: &str) -> Option<agent::ApprovalRequest> {
+        if let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) {
+            return active.timeline.pending_approvals.first().cloned();
+        }
+        self.sessions_awaiting_approval
+            .get(session_id)
+            .and_then(|requests| requests.first())
+            .cloned()
     }
 
     /// Number of active or parked sessions with a provider turn in flight.
@@ -4135,6 +4162,35 @@ impl AppState {
             timeline.usage.as_ref(),
         );
         self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+    }
+
+    fn deliver_child_approval_callback(
+        &mut self,
+        child_id: &str,
+        request: &agent::ApprovalRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(child) = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
+            .cloned()
+        else {
+            return;
+        };
+        if !self
+            .callback_approval_requests
+            .insert((child_id.to_string(), request.id.clone()))
+        {
+            return;
+        }
+        let parent_id = child.parent_session_id.as_deref().unwrap();
+        let text = format!(
+            "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {}.",
+            child.title,
+            approval_request_summary(request)
+        );
+        self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
     }
 
     /// Deliver a child result into the orchestrator's current reasoning turn.
@@ -5154,6 +5210,7 @@ impl AppState {
         }
 
         if let AgentEvent::SessionClosed { reason } = &event {
+            self.sessions_awaiting_approval.remove(session_id);
             self.close_orchestrator_children(session_id);
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
@@ -5313,10 +5370,17 @@ impl AppState {
             _ => {}
         }
 
+        self.track_pending_approval_event(session_id, &event);
         self.record_event(session_id, &event, cx);
 
-        if let AgentEvent::TurnCompleted { status, .. } = &event {
-            self.deliver_child_callback(session_id, *status, cx);
+        match &event {
+            AgentEvent::TurnCompleted { status, .. } => {
+                self.deliver_child_callback(session_id, *status, cx);
+            }
+            AgentEvent::ApprovalRequested(request) => {
+                self.deliver_child_approval_callback(session_id, request, cx);
+            }
+            _ => {}
         }
 
         // Plan surfaces: a fresh proposed plan re-arms the composer's plan-ready
@@ -5412,6 +5476,32 @@ impl AppState {
         }
 
         cx.notify();
+    }
+
+    fn track_pending_approval_event(&mut self, session_id: &str, event: &AgentEvent) {
+        match event {
+            AgentEvent::ApprovalRequested(request) => {
+                let requests = self
+                    .sessions_awaiting_approval
+                    .entry(session_id.to_string())
+                    .or_default();
+                if !requests.iter().any(|pending| pending.id == request.id) {
+                    requests.push(request.clone());
+                }
+            }
+            AgentEvent::ApprovalResolved { request_id, .. } => {
+                if let Some(requests) = self.sessions_awaiting_approval.get_mut(session_id) {
+                    requests.retain(|request| request.id != *request_id);
+                    if requests.is_empty() {
+                        self.sessions_awaiting_approval.remove(session_id);
+                    }
+                }
+            }
+            AgentEvent::TurnCompleted { .. } => {
+                self.sessions_awaiting_approval.remove(session_id);
+            }
+            _ => {}
+        }
     }
 
     /// Append to JSONL + fold into the active timeline (if it's this session).
@@ -5543,6 +5633,9 @@ impl AppState {
 
     pub fn shutdown_active(&mut self) {
         self.persist_terminal_preferences();
+        if let Some(session_id) = self.active_session_id().map(str::to_string) {
+            self.sessions_awaiting_approval.remove(&session_id);
+        }
         if let Some(active) = self.active.take()
             && let Runtime::Live(commands) = active.runtime
         {
@@ -5594,6 +5687,7 @@ impl AppState {
 
     /// Shut down and forget a parked session (archive/delete paths).
     fn drop_background(&mut self, session_id: &str) {
+        self.sessions_awaiting_approval.remove(session_id);
         if let Some(parked) = self.background.remove(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {
@@ -5770,7 +5864,7 @@ fn resolve_dispatch_access(access: Option<&str>) -> Result<ApprovalMode, String>
     };
     match access.to_ascii_lowercase().as_str() {
         "full" => Ok(ApprovalMode::FullAccess),
-        "read_only" => Ok(ApprovalMode::Supervised),
+        "read_only" => Ok(ApprovalMode::ReadOnly),
         "workspace_write" => Ok(ApprovalMode::AutoAcceptEdits),
         _ => Err(format!(
             "unknown access: {access}; expected read_only, workspace_write, or full"
@@ -5841,6 +5935,25 @@ fn final_assistant_message(timeline: &Timeline) -> String {
 fn tail_chars(text: &str, max: usize) -> String {
     let count = text.chars().count();
     text.chars().skip(count.saturating_sub(max)).collect()
+}
+
+fn approval_request_summary(request: &agent::ApprovalRequest) -> String {
+    let detail = match &request.kind {
+        agent::ApprovalKind::ExecCommand { command, .. } => format!("command `{command}`"),
+        agent::ApprovalKind::FileRead { detail } => format!("file read `{detail}`"),
+        agent::ApprovalKind::FileChange { changes, .. } => match changes.as_slice() {
+            [change] => format!("file change `{}`", change.path),
+            changes => format!("{} file changes", changes.len()),
+        },
+        agent::ApprovalKind::ToolUse { name, .. } => format!("tool `{name}`"),
+    };
+    let one_line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated: String = one_line.chars().take(180).collect();
+    if one_line.chars().count() > 180 {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
 }
 
 fn token_usage_json(usage: &agent::TokenUsage) -> serde_json::Value {
@@ -6634,7 +6747,7 @@ mod tests {
         );
         assert_eq!(
             resolve_dispatch_access(Some("read_only")),
-            Ok(ApprovalMode::Supervised)
+            Ok(ApprovalMode::ReadOnly)
         );
         assert_eq!(
             resolve_dispatch_access(Some("WORKSPACE_WRITE")),
@@ -7430,6 +7543,59 @@ mod tests {
         assert!(failed.starts_with("[orchestrate] thread child (\"Title\") failed. tokens:"));
         assert!(failed.ends_with("\ndone"));
         assert!(failed.contains("tokens: input 100 (+25 cached), output 40, total 165."));
+    }
+
+    #[gpui::test]
+    fn child_approval_request_sends_exactly_one_parent_callback(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-approval-callback-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut parent = live_session(ProviderKind::Codex, commands);
+            parent.meta.id = "parent".into();
+            parent.turn_in_flight = true;
+            state.background.insert(parent.meta.id.clone(), parent);
+
+            let mut child =
+                SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
+            child.id = "child".into();
+            child.title = "Read-only review".into();
+            child.parent_session_id = Some("parent".into());
+            state.sessions.push(child.clone());
+
+            let request = agent::ApprovalRequest {
+                id: "approval-1".into(),
+                turn_id: Some("turn-1".into()),
+                kind: agent::ApprovalKind::ExecCommand {
+                    command: "touch blocked".into(),
+                    cwd: Some("/tmp/project".into()),
+                    reason: None,
+                },
+                options: Vec::new(),
+            };
+            state.on_event("child", AgentEvent::ApprovalRequested(request.clone()), cx);
+            state.on_event("child", AgentEvent::ApprovalRequested(request), cx);
+
+            let SessionCommand::Steer { text, .. } = receiver.try_recv().unwrap() else {
+                panic!("approval callback did not steer the parent")
+            };
+            assert!(text.starts_with("[orchestrate] thread child"));
+            assert!(text.contains("waiting for approval: command `touch blocked`"));
+            assert!(receiver.try_recv().is_err(), "callback was delivered twice");
+
+            let status = state.child_status_json(&child);
+            assert_eq!(
+                status["waiting_approval"],
+                serde_json::json!("command `touch blocked`")
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

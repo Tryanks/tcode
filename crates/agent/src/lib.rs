@@ -478,8 +478,8 @@ pub async fn list_models(
 /// The user-facing permission model, provider-agnostic.
 ///
 /// Providers map this onto their native controls:
-/// - Claude Code: `--permission-mode` default / acceptEdits / bypassPermissions
-///   (switchable mid-session via the control protocol).
+/// - Claude Code: `--permission-mode` default / acceptEdits / bypassPermissions,
+///   plus tcode-side ReadOnly filtering (switchable mid-session).
 /// - Codex: approval-policy × sandbox-mode combinations on thread start
 ///   (mid-session switch may require a resume-restart).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -487,6 +487,8 @@ pub async fn list_models(
 pub enum ApprovalMode {
     /// Ask before commands and file changes.
     Supervised,
+    /// Read-only actions run without prompts; anything that mutates pauses for approval.
+    ReadOnly,
     /// Auto-approve edits, ask before other actions.
     AutoAcceptEdits,
     /// Allow commands and edits without prompts.

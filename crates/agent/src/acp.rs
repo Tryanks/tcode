@@ -24,11 +24,12 @@ use futures_lite::{AsyncBufReadExt as _, AsyncReadExt as _, StreamExt as _, futu
 use serde_json::{Value, json};
 
 use crate::{
-    AcpAgent, AcpLaunch, AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption,
-    ApprovalOptionKind, ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind,
-    ItemContent, ItemStatus, McpRegistration, OptionDescriptor, OptionSelection, PlanStep,
-    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    AcpAgent, AcpLaunch, AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode,
+    ApprovalOption, ApprovalOptionKind, ApprovalRequest, Attachment, DeltaKind, FileChange,
+    FileChangeKind, ItemContent, ItemStatus, McpRegistration, OptionDescriptor, OptionSelection,
+    PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    TurnStatus,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -435,7 +436,7 @@ async fn handshake(
         .map(str::to_string)
         .filter(|_| caps.load_session);
 
-    let (session_id, modes, models, config_options) = match resumed {
+    let (session_id, mut modes, models, config_options) = match resumed {
         Some(session_id) => {
             // `session/load` replays the whole conversation as `session/update`
             // notifications. Our JSONL log is the authoritative history and the
@@ -480,6 +481,36 @@ async fn handshake(
         }
     };
 
+    if opts.approval_mode == ApprovalMode::ReadOnly
+        && let Some(plan_mode) = modes.as_ref().and_then(acp_plan_mode)
+        && modes
+            .as_ref()
+            .is_some_and(|modes| modes.current_mode_id != plan_mode)
+    {
+        match connection
+            .set_session_mode(acp::SetSessionModeRequest::new(
+                session_id.clone(),
+                plan_mode.clone(),
+            ))
+            .await
+        {
+            Ok(_) => modes.as_mut().unwrap().current_mode_id = plan_mode,
+            Err(err) => {
+                // ACP has no provider-independent permission policy. If an
+                // advertised plan mode cannot be selected, retain the agent's
+                // current mode, which is the same least-privilege fallback used
+                // for Supervised sessions.
+                let _ = events
+                    .send(AgentEvent::Warning(format!(
+                        "{} could not enter its read-only plan mode: {}",
+                        agent.name,
+                        describe(&err)
+                    )))
+                    .await;
+            }
+        }
+    }
+
     let model = models
         .as_ref()
         .map(|models| models.current_model_id.0.to_string());
@@ -496,6 +527,14 @@ async fn handshake(
         model,
         can_close: caps.session_capabilities.close.is_some(),
     })
+}
+
+fn acp_plan_mode(modes: &acp::SessionModeState) -> Option<acp::SessionModeId> {
+    modes
+        .available_modes
+        .iter()
+        .find(|mode| mode.id.0.eq_ignore_ascii_case("plan"))
+        .map(|mode| mode.id.clone())
 }
 
 async fn new_session(
