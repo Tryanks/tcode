@@ -474,21 +474,53 @@ impl OrchestrateSettingsPanel {
             .display_name(provider, model, cx)
     }
 
+    /// A status message in the shared rail language: a soft neutral fill with a
+    /// floating 2px rail in the semantic color — no colored slab.
+    fn status_note(
+        &self,
+        accent: gpui::Hsla,
+        text: impl Into<gpui::SharedString>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .w_full()
+            .items_stretch()
+            .rounded(crate::material::radius_card())
+            .overflow_hidden()
+            .bg(cx.theme().muted.opacity(0.6))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(2.))
+                    .ml(px(8.))
+                    .my(px(8.))
+                    .rounded_full()
+                    .bg(accent),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .px_3()
+                    .py_2p5()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().foreground)
+                    .child(text.into()),
+            )
+            .into_any_element()
+    }
+
+    /// Quiet helper text, System-Settings style: a muted caption under the
+    /// section, not a colored callout box.
     fn render_intro(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .w_full()
-            .gap_1()
-            .p_3()
-            .rounded(crate::material::radius_card())
-            .border_l_2()
-            .border_color(cx.theme().info)
-            .bg(cx.theme().info.opacity(0.12))
-            .text_color(cx.theme().info_foreground)
+            .gap_0p5()
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_1p5()
                     .items_center()
-                    .child(Icon::new(IconName::Info).small())
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Info).xsmall())
                     .child(
                         div()
                             .text_size(px(13.))
@@ -498,9 +530,9 @@ impl OrchestrateSettingsPanel {
             )
             .child(
                 div()
-                    .pl_6()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().info_foreground)
+                    .pl(px(20.))
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("orchestrate.all_models.description")),
             )
             .into_any_element()
@@ -720,34 +752,20 @@ impl OrchestrateSettingsPanel {
         ));
         if self.child_rows.is_empty() {
             return section
-                .child(
-                    div()
-                        .w_full()
-                        .p_4()
-                        .rounded(crate::material::radius_card())
-                        .border_l_2()
-                        .border_color(cx.theme().danger)
-                        .bg(cx.theme().danger.opacity(0.12))
-                        .text_size(px(13.))
-                        .text_color(cx.theme().danger_foreground)
-                        .child(tcode_i18n::tr!("orchestrate.children.empty")),
-                )
+                .child(self.status_note(
+                    cx.theme().danger,
+                    tcode_i18n::tr!("orchestrate.children.empty"),
+                    cx,
+                ))
                 .into_any_element();
         }
 
         if !settings.child_models.iter().any(|profile| profile.enabled) {
-            section = section.child(
-                div()
-                    .w_full()
-                    .p_3()
-                    .rounded(crate::material::radius_card())
-                    .border_l_2()
-                    .border_color(cx.theme().warning)
-                    .bg(cx.theme().warning.opacity(0.12))
-                    .text_size(px(13.))
-                    .text_color(cx.theme().warning_foreground)
-                    .child(tcode_i18n::tr!("orchestrate.children.none_enabled")),
-            );
+            section = section.child(self.status_note(
+                cx.theme().warning,
+                tcode_i18n::tr!("orchestrate.children.none_enabled"),
+                cx,
+            ));
         }
 
         // Child profiles: one grouped list, rows split by inset hairlines.

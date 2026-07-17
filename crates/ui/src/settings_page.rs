@@ -233,10 +233,12 @@ impl SettingsPage {
                         .items_center()
                         .gap_2()
                         .px_2()
-                        .rounded_full()
+                        // Match the main sidebar: 6px rounded rect, tinted when
+                        // active, neutral hover only when not.
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .when(active, |s| s.bg(cx.theme().sidebar_accent))
-                        .hover(|s| s.bg(cx.theme().sidebar_accent))
+                        .when(active, |s| s.bg(cx.theme().list_active))
+                        .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
                         .child(Icon::new(icon).size_4().text_color(fg))
                         .child(
                             div()
