@@ -23,7 +23,6 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     notification::Notification,
     popover::Popover,
-    scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
     tooltip::Tooltip,
     v_flex,
@@ -43,11 +42,13 @@ use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_millis;
 use crate::window_drag_area;
 
-/// Content-column max width (T3 centers the timeline at ~760px).
-const CONTENT_MAX_WIDTH: f32 = 768.;
+/// Content-column max width (T3 centers the timeline at ~760px). Shared with
+/// the composer, which mirrors this column so the input aligns with the
+/// messages above it.
+pub(crate) const CONTENT_MAX_WIDTH: f32 = 768.;
 /// Minimum horizontal padding around the content column so bubbles/cards never
 /// clip when the chat region is narrowed (e.g. the diff panel is open).
-const CONTENT_MIN_PADDING: f32 = 24.;
+pub(crate) const CONTENT_MIN_PADDING: f32 = 24.;
 /// How many activity rows to show before the "+N previous log entrys" expander.
 const WORKLOG_VISIBLE_ROWS: usize = 2;
 
@@ -65,11 +66,8 @@ fn previous_logs_toggle_label(hidden: usize, expanded: bool) -> Option<Cow<'stat
 /// Height reserved under every message for its (hover-revealed) action row, so
 /// revealing it never shifts the timeline.
 const ACTION_ROW_HEIGHT: f32 = 24.;
-/// Line height of the preformatted text inside an expanded disclosure card; also
-/// the per-line unit used to resolve the card's capped scroll viewport.
+/// Line height of the preformatted text inside an expanded disclosure card.
 const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
-/// Vertical padding (top + bottom) added to a disclosure card's viewport estimate.
-const DISCLOSURE_CARD_PADDING: f32 = 24.;
 /// Cap on an expanded disclosure card's height; taller content scrolls within it.
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 /// Child-thread title budget in a callback disclosure row before it is ellipsized.
@@ -1262,7 +1260,7 @@ impl ChatView {
     /// The reusable disclosure element: a centered, collapsed-by-default row of
     /// 13px muted `label` + rotating chevron (hover shows an accent background);
     /// clicking toggles the per-entry expansion keyed by `key`. When open it
-    /// reveals `full_text` verbatim inside a bordered, height-capped scroll card.
+    /// reveals `full_text` verbatim inside a muted, height-capped scroll card.
     /// Shared by the orchestrate context split and child-thread callbacks so any
     /// future injected context can adopt the same affordance.
     fn render_disclosure(
@@ -1302,9 +1300,14 @@ impl ChatView {
 
     /// The expanded body of a disclosure: the injected text rendered verbatim
     /// (line by line, so newlines survive regardless of wrapping) as 13px muted
-    /// preformatted source inside a muted card. The guidance can be long,
-    /// so the card gets its own resolved-height, capped scroll viewport rather
-    /// than growing the turn without bound (DESIGN.md scrolling contract).
+    /// preformatted source inside a muted card. The guidance can be long, so the
+    /// card caps its height and the text scrolls INSIDE it — the card chrome
+    /// (fill, radius, padding) is a fixed shell that never moves (DESIGN.md
+    /// scrolling contract). Two nested divs are deliberate: gpui-component's
+    /// `overflow_y_scrollbar` wrapper strips the element's explicit height and
+    /// paints its background onto the scrolling content layer, which is what
+    /// made the whole rounded card slide and clip; `occlude` keeps wheel events
+    /// over the card from also reaching the timeline list behind it.
     fn render_disclosure_body(
         &self,
         key: &str,
@@ -1326,23 +1329,25 @@ impl ChatView {
                     .into_any_element()
             })
             .collect();
-        let line_count = lines.len() as f32;
-        let viewport = (line_count * DISCLOSURE_LINE_HEIGHT + DISCLOSURE_CARD_PADDING)
-            .min(DISCLOSURE_CARD_MAX_HEIGHT);
         div()
-            .id(SharedString::from(format!("disclosure-body-{key}")))
             .w_full()
-            .h(px(viewport))
-            .overflow_y_scrollbar()
-            .p_3()
             .rounded(crate::material::radius_card())
             .bg(cx.theme().muted)
+            .occlude()
+            .p_3()
             .child(
-                v_flex()
+                div()
+                    .id(SharedString::from(format!("disclosure-body-{key}")))
                     .w_full()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .children(lines),
+                    .max_h(px(DISCLOSURE_CARD_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .text_size(px(13.))
+                            .text_color(muted)
+                            .children(lines),
+                    ),
             )
     }
 
@@ -4193,5 +4198,107 @@ mod tests {
         cx.update(|cx| md.sync("Stored reply. And more.".into(), false, cx));
         cx.run_until_parked();
         assert_eq!(rendered(&md.state, cx), "Stored reply. And more.\n");
+    }
+
+    /// The disclosure card's scroll contract: a fixed chrome shell (fill,
+    /// radius) whose height caps at the viewport, with the text scrolling
+    /// INSIDE it — and wheel events over the card never reach the timeline
+    /// list behind it (the "whole card gets clipped and scrolls with the chat"
+    /// regression). Mirrors `render_disclosure_body` nested in the virtualized
+    /// timeline `list`.
+    #[gpui::test]
+    fn disclosure_card_scrolls_internally_without_moving_the_list(cx: &mut TestAppContext) {
+        use gpui::{
+            Context, InteractiveElement as _, IntoElement, ListAlignment, ListState,
+            ParentElement as _, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+            StatefulInteractiveElement as _, Styled as _, Window, div, list, point, px, size,
+        };
+        use gpui_component::v_flex;
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+
+        let list_state = ListState::new(2, ListAlignment::Top, px(50.));
+        let card_scroll = ScrollHandle::new();
+
+        struct TestView {
+            list: ListState,
+            card: ScrollHandle,
+        }
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let card = self.card.clone();
+                list(self.list.clone(), move |ix, _, _| {
+                    if ix == 0 {
+                        // Same shape as render_disclosure_body: an occluding
+                        // chrome shell around a capped native scroll viewport
+                        // holding 50 x 20px lines.
+                        div()
+                            .w_full()
+                            .debug_selector(|| "card-chrome".to_string())
+                            .occlude()
+                            .child(
+                                div()
+                                    .id("disclosure-body")
+                                    .w_full()
+                                    .max_h(px(100.))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&card)
+                                    .debug_selector(|| "card-viewport".to_string())
+                                    .child(
+                                        v_flex().w_full().children(
+                                            (0..50).map(|i| {
+                                                div().h(px(20.)).child(format!("line {i}"))
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .into_any_element()
+                    } else {
+                        // Enough content below that the list itself can scroll.
+                        div().h(px(600.)).w_full().into_any_element()
+                    }
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        cx.draw(point(px(0.), px(0.)), size(px(400.), px(300.)), |_, cx| {
+            cx.new(|_| TestView {
+                list: list_state.clone(),
+                card: card_scroll.clone(),
+            })
+            .into_any_element()
+        });
+
+        // The viewport is capped even though its content is 1000px tall.
+        let viewport = cx
+            .debug_bounds("card-viewport")
+            .expect("card viewport should be painted");
+        assert_eq!(
+            viewport.size.height,
+            px(100.),
+            "the card must keep its fixed capped height"
+        );
+
+        // Wheel down over the card (which spans y 0..100 at the list top).
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            ..Default::default()
+        });
+
+        assert!(
+            card_scroll.offset().y < px(0.),
+            "the card's content must scroll inside its fixed viewport, got {:?}",
+            card_scroll.offset()
+        );
+        let top = list_state.logical_scroll_top();
+        assert_eq!(
+            (top.item_ix, top.offset_in_item),
+            (0, px(0.)),
+            "the timeline list must not co-scroll under the card"
+        );
     }
 }
