@@ -13,3 +13,10 @@ members = [
 ]
 resolver = "3"
 default-members = ["crates/app"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

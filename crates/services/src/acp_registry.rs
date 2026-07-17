@@ -387,10 +387,17 @@ fn download(
 }
 
 fn sha256(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 /// Unpack an archive into `dir`, by the URL's extension. A URL that is not an
