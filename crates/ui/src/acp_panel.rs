@@ -251,15 +251,46 @@ impl Render for AcpAgentCard {
     }
 }
 
+/// Kimi's Anthropic-compatible coding endpoint (the built-in third-party preset).
+const KIMI_BASE_URL: &str = "https://api.kimi.com/coding/";
+const KIMI_MODEL: &str = "k3[1m]";
+const KIMI_NAME: &str = "Kimi";
+
+/// Which screen the Add-agent dialog is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelView {
+    /// Provider entries (Claude Code / Codex) + the ACP agent marketplace.
+    Home,
+    /// The third-party Claude Code endpoint form (Kimi preset or custom).
+    ThirdParty,
+    /// The custom ACP agent form.
+    CustomAcp,
+}
+
+/// Which third-party preset the endpoint form is seeded from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TpPreset {
+    /// Bundled Kimi preset: base URL + model pre-filled, only the key needed.
+    Kimi,
+    /// A blank Anthropic-compatible endpoint the user fills in fully.
+    Custom,
+}
+
 /// Long-lived state for the Add agent dialog.
 pub struct AcpPanel {
     app_state: Entity<AppState>,
+    view: PanelView,
     search: Entity<InputState>,
-    custom_open: bool,
     custom_name: Entity<InputState>,
     custom_command: Entity<InputState>,
     custom_args: Entity<InputState>,
     custom_env: Entity<InputState>,
+    /// Third-party Claude Code endpoint form.
+    tp_preset: TpPreset,
+    tp_name: Entity<InputState>,
+    tp_base_url: Entity<InputState>,
+    tp_model: Entity<InputState>,
+    tp_key: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -278,12 +309,21 @@ impl AcpPanel {
         ];
         let panel = Self {
             app_state,
+            view: PanelView::Home,
             search,
-            custom_open: false,
             custom_name: input("My agent", window, cx),
             custom_command: input("node", window, cx),
             custom_args: input("/path/to/agent.js --acp", window, cx),
             custom_env: input("KEY=value KEY2=value2", window, cx),
+            tp_preset: TpPreset::Kimi,
+            tp_name: input(KIMI_NAME, window, cx),
+            tp_base_url: input(KIMI_BASE_URL, window, cx),
+            tp_model: input(KIMI_MODEL, window, cx),
+            tp_key: input(
+                &tcode_i18n::tr!("providers.third_party.key_hint"),
+                window,
+                cx,
+            ),
             _subscriptions: subscriptions,
         };
         panel
@@ -293,7 +333,25 @@ impl AcpPanel {
     }
 
     pub fn prepare_to_open(&mut self, cx: &mut Context<Self>) {
-        self.custom_open = false;
+        self.view = PanelView::Home;
+        cx.notify();
+    }
+
+    /// Seed the third-party form's inputs from a preset and switch to it.
+    fn open_third_party(&mut self, preset: TpPreset, window: &mut Window, cx: &mut Context<Self>) {
+        self.tp_preset = preset;
+        let (name, base_url, model) = match preset {
+            TpPreset::Kimi => (KIMI_NAME, KIMI_BASE_URL, KIMI_MODEL),
+            TpPreset::Custom => ("", "", ""),
+        };
+        self.tp_name
+            .update(cx, |i, cx| i.set_value(name, window, cx));
+        self.tp_base_url
+            .update(cx, |i, cx| i.set_value(base_url, window, cx));
+        self.tp_model
+            .update(cx, |i, cx| i.set_value(model, window, cx));
+        self.tp_key.update(cx, |i, cx| i.set_value("", window, cx));
+        self.view = PanelView::ThirdParty;
         cx.notify();
     }
 
@@ -450,9 +508,239 @@ impl AcpPanel {
                             .child(tcode_i18n::tr!("providers.acp.custom").into_owned()),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.custom_open = true;
+                        this.view = PanelView::CustomAcp;
                         cx.notify();
                     })),
+            )
+            .into_any_element()
+    }
+
+    /// The provider entries shown above the ACP marketplace: Claude Code (opens
+    /// the third-party endpoint form) and Codex (present but disabled for now).
+    fn render_provider_entries(&self, cx: &mut Context<Self>) -> AnyElement {
+        let entry = |id: &'static str,
+                     glyph: Icon,
+                     title: String,
+                     subtitle: String,
+                     enabled: bool,
+                     cx: &mut Context<Self>|
+         -> AnyElement {
+            let muted = cx.theme().muted_foreground;
+            let mut row = h_flex()
+                .id(id)
+                .w_full()
+                .p_3()
+                .gap_3()
+                .items_center()
+                .rounded(material::radius_card())
+                .bg(cx.theme().muted)
+                .child(glyph.text_color(if enabled {
+                    cx.theme().foreground
+                } else {
+                    muted
+                }))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_medium()
+                                .text_color(if enabled {
+                                    cx.theme().foreground
+                                } else {
+                                    muted
+                                })
+                                .child(title),
+                        )
+                        .child(div().text_size(px(12.)).text_color(muted).child(subtitle)),
+                );
+            if enabled {
+                row = row
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().list_hover))
+                    .child(Icon::new(IconName::ChevronRight).small().text_color(muted))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_third_party(TpPreset::Kimi, window, cx);
+                    }));
+            } else {
+                row = row.child(
+                    div()
+                        .rounded_full()
+                        .px_2()
+                        .text_size(px(12.))
+                        .bg(cx.theme().muted)
+                        .text_color(muted)
+                        .child(tcode_i18n::tr!("providers.third_party.soon").into_owned()),
+                );
+            }
+            row.into_any_element()
+        };
+
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_medium()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tcode_i18n::tr!("providers.third_party.section").into_owned()),
+            )
+            .child(entry(
+                "provider-entry-claude",
+                crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode).small(),
+                tcode_i18n::tr!("providers.third_party.claude_title").into_owned(),
+                tcode_i18n::tr!("providers.third_party.claude_subtitle").into_owned(),
+                true,
+                cx,
+            ))
+            .child(entry(
+                "provider-entry-codex",
+                crate::provider_card::provider_glyph(agent::ProviderKind::Codex).small(),
+                tcode_i18n::tr!("providers.third_party.codex_title").into_owned(),
+                tcode_i18n::tr!("providers.third_party.codex_subtitle").into_owned(),
+                false,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The third-party Claude Code endpoint form (Kimi preset or fully custom).
+    fn render_third_party(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let preset_tab = |this: &Self,
+                          id: &'static str,
+                          label: String,
+                          preset: TpPreset,
+                          cx: &mut Context<Self>|
+         -> AnyElement {
+            let active = this.tp_preset == preset;
+            h_flex()
+                .id(id)
+                .px_3()
+                .py_1p5()
+                .rounded(material::radius_button())
+                .cursor_pointer()
+                .when(active, |s| s.bg(cx.theme().accent).font_medium())
+                .hover(|s| s.bg(cx.theme().accent))
+                .child(div().text_size(px(13.)).child(label))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_third_party(preset, window, cx);
+                }))
+                .into_any_element()
+        };
+        let field = |label: String, control: AnyElement| -> AnyElement {
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(div().text_size(px(12.)).font_medium().child(label))
+                .child(control)
+                .into_any_element()
+        };
+        let is_kimi = self.tp_preset == TpPreset::Kimi;
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                Button::new("tp-back")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::ArrowLeft)
+                    .label(tcode_i18n::tr!("settings.back").into_owned())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.view = PanelView::Home;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(preset_tab(
+                        self,
+                        "tp-preset-kimi",
+                        KIMI_NAME.to_string(),
+                        TpPreset::Kimi,
+                        cx,
+                    ))
+                    .child(preset_tab(
+                        self,
+                        "tp-preset-custom",
+                        tcode_i18n::tr!("providers.acp.custom").into_owned(),
+                        TpPreset::Custom,
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(if is_kimi {
+                        tcode_i18n::tr!("providers.third_party.kimi_help").into_owned()
+                    } else {
+                        tcode_i18n::tr!("providers.third_party.custom_help").into_owned()
+                    }),
+            )
+            .child(field(
+                tcode_i18n::tr!("providers.third_party.name").into_owned(),
+                Input::new(&self.tp_name).xsmall().into_any_element(),
+            ))
+            .child(field(
+                tcode_i18n::tr!("providers.third_party.base_url").into_owned(),
+                Input::new(&self.tp_base_url).xsmall().into_any_element(),
+            ))
+            .child(field(
+                tcode_i18n::tr!("providers.third_party.model").into_owned(),
+                Input::new(&self.tp_model).xsmall().into_any_element(),
+            ))
+            // The API key is the point of the whole flow — give it prominence.
+            .child(field(
+                tcode_i18n::tr!("providers.third_party.key").into_owned(),
+                Input::new(&self.tp_key).small().into_any_element(),
+            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("tp-cancel")
+                            .ghost()
+                            .xsmall()
+                            .label(tcode_i18n::tr!("settings.cancel").into_owned())
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("tp-add")
+                            .with_variant(ButtonVariant::Primary)
+                            .xsmall()
+                            .label(tcode_i18n::tr!("providers.third_party.connect").into_owned())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let name = this.tp_name.read(cx).value().to_string();
+                                let base_url = this.tp_base_url.read(cx).value().to_string();
+                                let model = this.tp_model.read(cx).value().to_string();
+                                let key = this.tp_key.read(cx).value().to_string();
+                                // Endpoint + key are required; the rest can default.
+                                if base_url.trim().is_empty() || key.trim().is_empty() {
+                                    return;
+                                }
+                                this.app_state.update(cx, |state, cx| {
+                                    state.create_third_party_profile(
+                                        &name,
+                                        &base_url,
+                                        Some(&model),
+                                        &key,
+                                        cx,
+                                    );
+                                });
+                                this.view = PanelView::Home;
+                                window.close_dialog(cx);
+                                cx.notify();
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -474,7 +762,7 @@ impl AcpPanel {
                     .icon(IconName::ArrowLeft)
                     .label(tcode_i18n::tr!("settings.back").into_owned())
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.custom_open = false;
+                        this.view = PanelView::Home;
                         cx.notify();
                     })),
             )
@@ -527,7 +815,7 @@ impl AcpPanel {
                                 this.app_state.update(cx, |state, cx| {
                                     state.add_custom_acp_agent(name, command, args, env, cx)
                                 });
-                                this.custom_open = false;
+                                this.view = PanelView::Home;
                                 window.close_dialog(cx);
                                 cx.notify();
                             })),
@@ -539,12 +827,16 @@ impl AcpPanel {
 
 impl Render for AcpPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .w_full()
-            .when(!self.custom_open, |view| {
-                view.child(self.render_marketplace(cx))
-            })
-            .when(self.custom_open, |view| view.child(self.render_custom(cx)))
+        v_flex().w_full().child(match self.view {
+            PanelView::Home => v_flex()
+                .w_full()
+                .gap_3()
+                .child(self.render_provider_entries(cx))
+                .child(self.render_marketplace(cx))
+                .into_any_element(),
+            PanelView::ThirdParty => self.render_third_party(cx),
+            PanelView::CustomAcp => self.render_custom(cx),
+        })
     }
 }
 

@@ -26,9 +26,10 @@ use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::session::{
     EntryContent, ReviewComment, Timeline, implement_prompt, plan_title, turn_user_event_offset,
 };
-#[cfg(test)]
-use tcode_core::settings::EnvVar;
-use tcode_core::settings::{OrchestrateSettings, ProjectSort, ProviderSettings, Settings};
+use tcode_core::settings::{
+    EnvVar, OrchestrateSettings, ProjectSort, ProviderProfile, ProviderSettings, ResolvedProfile,
+    Settings, provider_label,
+};
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
@@ -1400,8 +1401,20 @@ impl AppState {
     /// rows, their sensitive counterparts read back out of `secrets.json`, and
     /// the home override. Applied to every child we spawn for this provider.
     pub fn launch_env(&self, provider: ProviderKind) -> LaunchEnv {
-        let settings = self.settings.provider(provider);
-        let secrets = self.settings_store.provider_secrets(provider);
+        self.launch_env_for_profile(Settings::builtin_profile_id(provider))
+    }
+
+    /// The environment for a specific provider *profile* (built-in or
+    /// user-created): its plaintext env rows, their sensitive counterparts read
+    /// back out of `secrets.json` under the profile id, and the home override.
+    /// This is the profile-aware generalization of [`Self::launch_env`]; a
+    /// built-in profile id (a [`provider_key`]) reproduces the old behavior.
+    pub fn launch_env_for_profile(&self, profile_id: &str) -> LaunchEnv {
+        let Some(profile) = self.settings.resolved_profile(profile_id) else {
+            return LaunchEnv::default();
+        };
+        let settings = profile.settings;
+        let secrets = self.settings_store.profile_secrets(profile_id);
         let env = settings
             .env
             .iter()
@@ -1429,7 +1442,13 @@ impl AppState {
     /// `ProviderKind::Acp` bucket is not what we want there).
     fn session_launch_env(&self, meta: &SessionMeta) -> LaunchEnv {
         if meta.provider != ProviderKind::Acp {
-            return self.launch_env(meta.provider);
+            // A native session runs against its selected profile (a third-party
+            // endpoint, say), falling back to the kind's built-in profile.
+            let id = meta
+                .profile_id
+                .clone()
+                .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
+            return self.launch_env_for_profile(&id);
         }
         let env = meta
             .acp_agent_id
@@ -1499,6 +1518,198 @@ impl AppState {
     pub fn provider_accent(&self, provider: ProviderKind) -> Option<gpui::Rgba> {
         let raw = self.settings.provider(provider).accent_color?;
         parse_hex_color(&raw)
+    }
+
+    // -- provider profiles (built-in + user-created) ------------------------
+    //
+    // A *profile* is a named configuration on top of a protocol `ProviderKind`.
+    // The built-in Claude/Codex cards are profiles too (ids "claude"/"codex").
+    // The model catalog, version, and status probe stay keyed by kind and are
+    // shared across a kind's profiles; a profile overrides only its card config
+    // (env, binary, home, accent, custom/hidden models) and its own secrets.
+
+    /// Every selectable native profile, grouped by kind: Codex (built-in then
+    /// its user profiles), then Claude (built-in then its user profiles). ACP is
+    /// handled separately through the installed-agent list.
+    pub fn all_profiles(&self) -> Vec<ResolvedProfile> {
+        let mut out = self.settings.profiles_for_kind(ProviderKind::Codex);
+        out.extend(self.settings.profiles_for_kind(ProviderKind::ClaudeCode));
+        out
+    }
+
+    /// The protocol kind a profile drives (built-in or user). Falls back to
+    /// ClaudeCode for an unknown id (callers treat unknown ids as gone).
+    pub fn profile_kind(&self, id: &str) -> ProviderKind {
+        self.settings
+            .resolved_profile(id)
+            .map(|profile| profile.kind)
+            .unwrap_or(ProviderKind::ClaudeCode)
+    }
+
+    /// A profile's effective card settings (built-in or user-created).
+    pub fn profile_settings(&self, id: &str) -> ProviderSettings {
+        self.settings
+            .resolved_profile(id)
+            .map(|profile| profile.settings)
+            .unwrap_or_default()
+    }
+
+    /// A profile's display name (its override, else the built-in label, else id).
+    pub fn profile_display_name(&self, id: &str) -> String {
+        self.settings.profile_display_name(id)
+    }
+
+    /// A profile's accent color, when configured.
+    pub fn profile_accent(&self, id: &str) -> Option<gpui::Rgba> {
+        parse_hex_color(&self.profile_settings(id).accent_color?)
+    }
+
+    /// Persist a mutation to one profile's card settings, routing built-in ids to
+    /// their `providers` card and user ids to the `profiles` map.
+    pub fn update_profile_settings(
+        &mut self,
+        id: &str,
+        mutate: impl FnOnce(&mut ProviderSettings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = self.settings.clone();
+        if let Some(kind) = Settings::builtin_kind_from_id(id) {
+            mutate(settings.provider_mut(kind));
+        } else if let Some(profile) = settings.profiles.get_mut(id) {
+            mutate(&mut profile.settings);
+        } else {
+            return;
+        }
+        self.update_settings(settings, cx);
+    }
+
+    /// Store (or clear) one sensitive env value for a profile in `secrets.json`.
+    pub fn set_profile_secret(
+        &mut self,
+        id: &str,
+        name: &str,
+        value: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = self.settings_store.set_profile_secret(id, name, value) {
+            self.report_error(
+                RuntimeError::PersistSettings {
+                    error: err.to_string(),
+                },
+                cx,
+            );
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Create a new user profile driving `kind`, seeded with a default name.
+    /// Returns the new profile's stable id.
+    pub fn create_profile(&mut self, kind: ProviderKind, cx: &mut Context<Self>) -> String {
+        let mut settings = self.settings.clone();
+        let base_name = format!("New {} profile", provider_label(kind));
+        let id = settings.allocate_profile_id(&base_name);
+        settings.profiles.insert(
+            id.clone(),
+            ProviderProfile {
+                kind,
+                settings: ProviderSettings {
+                    display_name: Some(base_name),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        self.update_settings(settings, cx);
+        id
+    }
+
+    /// Create a first-class *third-party* Claude Code profile from the Add-agent
+    /// dialog: a named endpoint (Kimi preset or a custom Anthropic-compatible
+    /// URL). Wires the three env vars, registers the model as a custom slug so it
+    /// shows in the picker, gives the profile its own isolated `HOME` (seeded so
+    /// `claude` runs non-interactively and never touches the official
+    /// `~/.claude`), and stores the API key in `secrets.json`. Returns the id.
+    pub fn create_third_party_profile(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        model: Option<&str>,
+        api_key: &str,
+        cx: &mut Context<Self>,
+    ) -> String {
+        let mut settings = self.settings.clone();
+        let name = name.trim();
+        let name = if name.is_empty() { "Third-party" } else { name };
+        let id = settings.allocate_profile_id(name);
+
+        // Each third-party Claude profile gets an isolated HOME so its auth /
+        // config never collides with the official Claude login. Seed onboarding
+        // so the CLI starts straight into API-key mode.
+        let home = self.store.root().join("profile-homes").join(&id);
+        let _ = std::fs::create_dir_all(&home);
+        let _ = std::fs::write(
+            home.join(".claude.json"),
+            r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
+        );
+
+        let mut env = vec![EnvVar {
+            name: "ANTHROPIC_BASE_URL".into(),
+            value: base_url.trim().to_string(),
+            sensitive: false,
+        }];
+        if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            env.push(EnvVar {
+                name: "ANTHROPIC_MODEL".into(),
+                value: model.to_string(),
+                sensitive: false,
+            });
+        }
+        env.push(EnvVar {
+            name: "ANTHROPIC_API_KEY".into(),
+            value: String::new(),
+            sensitive: true,
+        });
+        let custom_models = model
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(|m| vec![m.to_string()])
+            .unwrap_or_default();
+
+        settings.profiles.insert(
+            id.clone(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    display_name: Some(name.to_string()),
+                    env,
+                    custom_models,
+                    home_path: Some(home),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        self.update_settings(settings, cx);
+        let _ =
+            self.settings_store
+                .set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(api_key.trim()));
+        cx.notify();
+        id
+    }
+
+    /// Delete a user profile: remove its card, its secrets, and detach any
+    /// sessions still pointing at it (they fall back to the built-in profile).
+    /// Built-in ids are ignored.
+    pub fn delete_profile(&mut self, id: &str, cx: &mut Context<Self>) {
+        if Settings::is_builtin_profile_id(id) {
+            return;
+        }
+        let mut settings = self.settings.clone();
+        if settings.profiles.remove(id).is_none() {
+            return;
+        }
+        let _ = self.settings_store.clear_profile_secrets(id);
+        self.update_settings(settings, cx);
+        cx.notify();
     }
 
     // -- provider status snapshots (Settings → Providers card) --------------
@@ -1706,6 +1917,39 @@ impl AppState {
         picker_models(
             self.models_for(provider),
             &self.settings.provider(provider),
+            &self.settings.favorite_models,
+        )
+    }
+
+    /// The model catalog backing a profile. The *built-in* profiles share the
+    /// kind's probed catalog; a *user* profile (a third-party endpoint) has its
+    /// own models, so it starts from an empty catalog and shows only the slugs
+    /// the user added to its card (e.g. Kimi's `k3[1m]`) — never the official
+    /// provider's model list.
+    fn catalog_for_profile(&self, id: &str) -> &[ModelSpec] {
+        if Settings::is_builtin_profile_id(id) {
+            self.models_for(self.profile_kind(id))
+        } else {
+            &[]
+        }
+    }
+
+    /// A profile's model list for its Settings card: its catalog resolved against
+    /// this profile's custom/hidden/order + favorites.
+    pub fn resolved_models_for_profile(&self, id: &str) -> Vec<ResolvedModel> {
+        resolve_models(
+            self.catalog_for_profile(id),
+            &self.profile_settings(id),
+            &self.settings.favorite_models,
+        )
+    }
+
+    /// A profile's picker-visible model list (as [`Self::picker_models`], but
+    /// resolved against the profile's card).
+    pub fn picker_models_for_profile(&self, id: &str) -> Vec<ResolvedModel> {
+        picker_models(
+            self.catalog_for_profile(id),
+            &self.profile_settings(id),
             &self.settings.favorite_models,
         )
     }
@@ -3608,6 +3852,7 @@ impl AppState {
     }
 
     /// Create a new session, make it active, and start its provider process.
+    #[allow(clippy::too_many_arguments)] // provider + profile + acp + project ids
     pub fn create_session(
         &mut self,
         provider: ProviderKind,
@@ -3617,10 +3862,14 @@ impl AppState {
         // Which installed ACP agent to run (required when `provider` is
         // `ProviderKind::Acp`, ignored otherwise).
         acp_agent_id: Option<String>,
+        // Which provider profile to run against (`None` = the built-in profile
+        // for `provider`; `Some(id)` selects a user-created profile).
+        profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.acp_agent_id = acp_agent_id;
+        meta.profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
         // Smoke mode forces Supervised so the approval path stays exercised even
         // though the app-wide default is now FullAccess (T3 parity). Must be set
         // before `ensure_started` spawns the provider with these launch flags.
@@ -3737,6 +3986,7 @@ impl AppState {
         ProviderKind,
         Option<String>,
         Option<String>,
+        Option<String>,
         Option<OptionSelection>,
     ) {
         if let Some(meta) = self
@@ -3756,6 +4006,10 @@ impl AppState {
                 meta.provider,
                 meta.model.clone(),
                 meta.acp_agent_id.clone(),
+                // Inherit the profile too, so "new thread" keeps talking to the
+                // same third-party endpoint instead of falling back to the
+                // built-in provider (which would reject the profile's model).
+                meta.profile_id.clone(),
                 reasoning_effort,
             );
         }
@@ -3770,9 +4024,10 @@ impl AppState {
                 meta.provider,
                 meta.model.clone(),
                 meta.acp_agent_id.clone(),
+                meta.profile_id.clone(),
                 None,
             ),
-            None => (ProviderKind::ClaudeCode, None, None, None),
+            None => (ProviderKind::ClaudeCode, None, None, None, None),
         }
     }
 
@@ -3781,7 +4036,8 @@ impl AppState {
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.park_active();
-        let (provider, model, acp_agent_id, reasoning_effort) = self.draft_defaults(&project_id);
+        let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
+            self.draft_defaults(&project_id);
         let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());
         let mut draft = Self::build_draft_session(
             project_id,
@@ -3791,6 +4047,7 @@ impl AppState {
             acp_agent_id,
             provider_commands,
         );
+        draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_ui = self.restore_conversation_ui(&mut draft);
@@ -4460,8 +4717,13 @@ impl AppState {
         &mut self,
         provider: ProviderKind,
         model: Option<String>,
+        // Which provider profile the picked row belongs to (`None` = the built-in
+        // profile for `provider`). Only bound while the session is a draft; a
+        // live thread's profile is fixed for its lifetime.
+        profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
         let store = self.store.clone();
         let Some(active) = self.active.as_mut() else {
             return;
@@ -4470,11 +4732,15 @@ impl AppState {
         // row carries its provider explicitly: model ids are provider-defined
         // and custom ids cannot be classified safely from their spelling.
         if active.draft {
-            if active.meta.provider == provider && active.meta.model == model {
+            if active.meta.provider == provider
+                && active.meta.model == model
+                && active.meta.profile_id == profile_id
+            {
                 return;
             }
             active.meta.provider = provider;
             active.meta.acp_agent_id = None;
+            active.meta.profile_id = profile_id;
             active.meta.model = model;
             // A different model has different option descriptors: drop stale
             // selections so each resolves to the new model's defaults.
@@ -6097,7 +6363,15 @@ fn session_options(
     mcp_server: Option<agent::McpRegistration>,
     orchestrate_server: Option<agent::McpRegistration>,
 ) -> SessionOptions {
-    let provider_settings = settings.provider(meta.provider);
+    // A session's binary / launch-args come from its selected profile (built-in
+    // or user-created), so a third-party profile can point at its own CLI while
+    // sharing the protocol adapter. Falls back to the kind's built-in card.
+    let provider_settings = meta
+        .profile_id
+        .as_deref()
+        .and_then(|id| settings.resolved_profile(id))
+        .map(|profile| profile.settings)
+        .unwrap_or_else(|| settings.provider(meta.provider));
     // For an ACP session, which agent to launch (and how) comes from the
     // installed-agent list, keyed by the id the session was created with.
     let acp_agent: Option<InstalledAgent> = meta
@@ -7116,7 +7390,12 @@ mod tests {
 
             // `claude-fable-5` cannot be reliably classified by a hard-coded
             // model-name heuristic. The provider comes from its picker row.
-            state.set_active_model(ProviderKind::ClaudeCode, Some("claude-fable-5".into()), cx);
+            state.set_active_model(
+                ProviderKind::ClaudeCode,
+                Some("claude-fable-5".into()),
+                None,
+                cx,
+            );
 
             let draft = state.active.as_ref().unwrap();
             assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
@@ -7147,7 +7426,7 @@ mod tests {
         acp.updated_at = 40;
         state.sessions = vec![acp];
 
-        let (provider, model, acp_agent_id, effort) = state.draft_defaults("project-acp");
+        let (provider, model, acp_agent_id, _profile, effort) = state.draft_defaults("project-acp");
         assert_eq!(provider, ProviderKind::Acp);
         assert_eq!(model.as_deref(), Some("agent-model"));
         assert_eq!(acp_agent_id.as_deref(), Some("agent.example"));
@@ -7241,7 +7520,8 @@ mod tests {
         // The target's archived session is globally newest and first, but must
         // not be reselected by the global fallback.
         state.sessions = vec![target_archived, other_active];
-        let (provider, model, acp_agent_id, effort) = state.draft_defaults("project-target");
+        let (provider, model, acp_agent_id, _profile, effort) =
+            state.draft_defaults("project-target");
         assert_eq!(provider, ProviderKind::Acp);
         assert_eq!(model.as_deref(), Some("active-model"));
         assert_eq!(acp_agent_id.as_deref(), Some("active-agent"));
@@ -7279,11 +7559,44 @@ mod tests {
         other_archived.archived_at = Some(301);
 
         state.sessions = vec![other_archived, target_archived];
-        let (provider, model, acp_agent_id, effort) = state.draft_defaults("project-target");
+        let (provider, model, acp_agent_id, _profile, effort) =
+            state.draft_defaults("project-target");
         assert_eq!(provider, ProviderKind::ClaudeCode);
         assert!(model.is_none());
         assert!(acp_agent_id.is_none());
         assert!(effort.is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A new draft must inherit the previous session's *profile*, not just its
+    /// model — otherwise "new thread" keeps the third-party model but routes it
+    /// to the built-in provider, which rejects it.
+    #[test]
+    fn draft_defaults_inherit_profile_id() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-draft-profile-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        let mut prev = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/kimi"),
+            Some("k3[1m]".into()),
+        );
+        prev.project_id = Some("project-kimi".into());
+        prev.profile_id = Some("klaude-kode".into());
+        prev.updated_at = 500;
+        state.sessions = vec![prev];
+
+        let (provider, model, _acp, profile, _effort) = state.draft_defaults("project-kimi");
+        assert_eq!(provider, ProviderKind::ClaudeCode);
+        assert_eq!(model.as_deref(), Some("k3[1m]"));
+        assert_eq!(
+            profile.as_deref(),
+            Some("klaude-kode"),
+            "the draft must stay on the third-party profile"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -7428,6 +7741,102 @@ mod tests {
                 ("ANTHROPIC_API_KEY".to_string(), "sk-x".to_string()),
             ]
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A third-party Claude profile ("Klaude Kode" → Kimi) launches against its
+    /// own endpoint, binary, and key, in parallel with the untouched official
+    /// Claude profile. This is the end-to-end proof of profile-ization at the
+    /// launch layer.
+    #[test]
+    fn third_party_profile_launches_in_parallel_with_builtin() {
+        let root = std::env::temp_dir().join(format!("tcode-profile-env-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        let mut settings = state.settings.clone();
+        // Official Claude keeps its own key.
+        settings.provider_mut(ProviderKind::ClaudeCode).env = vec![EnvVar {
+            name: "ANTHROPIC_API_KEY".into(),
+            value: String::new(),
+            sensitive: true,
+        }];
+        // A user "Klaude Kode" profile pointing at Kimi's Anthropic-compatible
+        // endpoint, with its own binary and (sensitive) key.
+        settings.profiles.insert(
+            "klaude-kode".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    display_name: Some("Klaude Kode".into()),
+                    env: vec![
+                        EnvVar {
+                            name: "ANTHROPIC_BASE_URL".into(),
+                            value: "https://api.kimi.com/coding/".into(),
+                            sensitive: false,
+                        },
+                        EnvVar {
+                            name: "ANTHROPIC_MODEL".into(),
+                            value: "k3[1m]".into(),
+                            sensitive: false,
+                        },
+                        EnvVar {
+                            name: "ANTHROPIC_API_KEY".into(),
+                            value: String::new(),
+                            sensitive: true,
+                        },
+                    ],
+                    binary_path: Some(PathBuf::from("/opt/kimi/claude")),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        state.settings = settings;
+        state
+            .settings_store
+            .set_secret(
+                ProviderKind::ClaudeCode,
+                "ANTHROPIC_API_KEY",
+                Some("sk-official"),
+            )
+            .unwrap();
+        state
+            .settings_store
+            .set_profile_secret("klaude-kode", "ANTHROPIC_API_KEY", Some("sk-kimi"))
+            .unwrap();
+
+        // The profile's launch env carries the Kimi endpoint + its own key.
+        let env = state.launch_env_for_profile("klaude-kode").env;
+        assert!(env.contains(&(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://api.kimi.com/coding/".to_string()
+        )));
+        assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "k3[1m]".to_string())));
+        assert!(env.contains(&("ANTHROPIC_API_KEY".to_string(), "sk-kimi".to_string())));
+
+        // The built-in profile is untouched: official key, no third-party URL.
+        let builtin = state.launch_env(ProviderKind::ClaudeCode).env;
+        assert!(builtin.contains(&("ANTHROPIC_API_KEY".to_string(), "sk-official".to_string())));
+        assert!(!builtin.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
+
+        // A session bound to the profile resolves the profile's env + binary,
+        // while its protocol stays ClaudeCode.
+        let mut meta = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/x"),
+            Some("k3[1m]".into()),
+        );
+        meta.profile_id = Some("klaude-kode".into());
+        let launch_env = state.session_launch_env(&meta);
+        assert!(
+            launch_env
+                .env
+                .iter()
+                .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.kimi.com/coding/")
+        );
+        let opts = session_options(&meta, &state.settings, launch_env, None, None);
+        assert_eq!(opts.binary_path, Some(PathBuf::from("/opt/kimi/claude")));
+
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8295,7 +8704,7 @@ mod tests {
         let store = SessionStore::open_at(data).unwrap();
         let state = cx.new(|_| AppState::new(store));
         state.update(cx, |state, cx| {
-            state.create_session(ProviderKind::ClaudeCode, cwd, None, None, None, cx);
+            state.create_session(ProviderKind::ClaudeCode, cwd, None, None, None, None, cx);
         });
         state
     }

@@ -111,6 +111,10 @@ struct ModelRow {
     /// Display name.
     name: String,
     provider: ProviderKind,
+    /// Which provider profile this row belongs to (`None` = the built-in profile
+    /// for `provider`). Lets a native provider expose several profiles — e.g.
+    /// official Claude and a third-party endpoint — in one rail.
+    profile_id: Option<String>,
     /// This row starts a session with an installed ACP agent rather than
     /// selecting a model (ACP agents own their model list).
     acp: bool,
@@ -151,6 +155,16 @@ fn provider_short(provider: ProviderKind) -> &'static str {
 fn tinted_provider_glyph(provider: ProviderKind, app_state: &AppState) -> Icon {
     let glyph = provider_glyph(provider);
     match app_state.provider_accent(provider) {
+        Some(accent) => glyph.text_color(accent),
+        None => glyph,
+    }
+}
+
+/// A profile's rail glyph: the kind's glyph tinted with the profile's own accent
+/// (so a third-party profile can be told apart from the built-in at a glance).
+fn tinted_profile_glyph(profile_id: &str, app_state: &AppState) -> Icon {
+    let glyph = provider_glyph(app_state.profile_kind(profile_id));
+    match app_state.profile_accent(profile_id) {
         Some(accent) => glyph.text_color(accent),
         None => glyph,
     }
@@ -201,7 +215,10 @@ fn approval_mode_meta(mode: ApprovalMode) -> (String, String, &'static str) {
 #[derive(Clone, PartialEq, Eq)]
 enum PickerRail {
     Favorites,
-    Provider(ProviderKind),
+    /// One provider profile (by profile id) — a built-in (`"claude"`/`"codex"`)
+    /// or a user-created third-party profile. Each profile is its own rail entry
+    /// and lists only its own models.
+    Profile(String),
     /// One installed ACP agent (by registry id). ACP agents have no model
     /// catalog — the agent publishes its models over the wire once the session
     /// is up — so this rail lists the agent itself.
@@ -1112,11 +1129,12 @@ impl Composer {
     }
 
     /// The rail the picker shows: an explicit user choice, else Favorites when
-    /// any favorites exist (S1 §2), else the active provider.
+    /// any favorites exist (S1 §2), else the active session's profile.
     fn rail_for(
         &self,
         provider: ProviderKind,
         agent_id: Option<&str>,
+        profile_id: Option<&str>,
         has_favorites: bool,
     ) -> PickerRail {
         if let Some(rail) = self.picker_rail.clone() {
@@ -1125,7 +1143,11 @@ impl Composer {
         match (provider, agent_id) {
             (ProviderKind::Acp, Some(id)) => PickerRail::Acp(id.to_string()),
             _ if has_favorites => PickerRail::Favorites,
-            _ => PickerRail::Provider(provider),
+            // A native session's rail is its selected profile, defaulting to the
+            // built-in profile for the provider.
+            _ => PickerRail::Profile(profile_id.map(str::to_string).unwrap_or_else(|| {
+                tcode_core::settings::Settings::builtin_profile_id(provider).to_string()
+            })),
         }
     }
 
@@ -1134,19 +1156,24 @@ impl Composer {
     /// The model-picker button + popover (anchored above, ~360px).
     fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let app_state = self.app_state.read(cx);
-        let (provider, current_model, acp_agent_id) = match &app_state.active {
+        let (provider, current_model, acp_agent_id, active_profile) = match &app_state.active {
             Some(active) => (
                 active.meta.provider,
                 active.meta.model.clone(),
                 active.meta.acp_agent_id.clone(),
+                active.meta.profile_id.clone(),
             ),
             None => return div().into_any_element(),
         };
         let catalog = app_state.models_for(provider);
         // The picker honors the provider card's Models section: hidden models
         // are gone, custom slugs are present, and the persisted order (plus
-        // favorites-first) decides the sequence.
-        let resolved = app_state.picker_models(provider);
+        // favorites-first) decides the sequence. When a third-party profile is
+        // active, resolve against *its* card so its custom models are named.
+        let resolved = match &active_profile {
+            Some(id) => app_state.picker_models_for_profile(id),
+            None => app_state.picker_models(provider),
+        };
         let display = current_model_name_resolved(&resolved, catalog, current_model.as_deref());
 
         // Build the filtered row list for the current frame. Favorites open
@@ -1156,7 +1183,12 @@ impl Composer {
             .into_iter()
             .flat_map(|p| app_state.picker_models(p))
             .any(|m| m.favorite);
-        let rail = self.rail_for(provider, acp_agent_id.as_deref(), has_favorites);
+        let rail = self.rail_for(
+            provider,
+            acp_agent_id.as_deref(),
+            active_profile.as_deref(),
+            has_favorites,
+        );
         let all_rows: Vec<ModelRow> = match &rail {
             PickerRail::Favorites => [ProviderKind::Codex, ProviderKind::ClaudeCode]
                 .into_iter()
@@ -1169,20 +1201,30 @@ impl Composer {
                             id: m.id,
                             name: m.name,
                             provider: p,
+                            profile_id: None,
                             acp: false,
                         })
                 })
                 .collect(),
-            PickerRail::Provider(p) => app_state
-                .picker_models(*p)
-                .into_iter()
-                .map(|m| ModelRow {
-                    id: m.id,
-                    name: m.name,
-                    provider: *p,
-                    acp: false,
-                })
-                .collect(),
+            // Each profile is its own rail and lists only its own models: the
+            // built-in profiles show the official catalog; a third-party profile
+            // (e.g. Klaude Kode → Kimi) shows only the models added to its card.
+            PickerRail::Profile(id) => {
+                let kind = app_state.profile_kind(id);
+                let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
+                let profile_id = id.clone();
+                app_state
+                    .picker_models_for_profile(id)
+                    .into_iter()
+                    .map(move |m| ModelRow {
+                        id: m.id,
+                        name: m.name,
+                        provider: kind,
+                        profile_id: (!is_builtin).then(|| profile_id.clone()),
+                        acp: false,
+                    })
+                    .collect()
+            }
             // One row: "use this agent". Its models arrive as ProviderOptions
             // once the session starts and render in the traits picker.
             PickerRail::Acp(id) => app_state
@@ -1193,6 +1235,7 @@ impl Composer {
                     id: agent.id.clone(),
                     name: agent.name.clone(),
                     provider: ProviderKind::Acp,
+                    profile_id: None,
                     acp: true,
                 })
                 .collect(),
@@ -1201,8 +1244,10 @@ impl Composer {
             .into_iter()
             .filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query))
             .collect();
+        // Only the built-in profiles have a probed catalog that can still be
+        // loading; a third-party profile shows its own slugs immediately.
         let loading = app_state.models_loading(provider)
-            && matches!(rail, PickerRail::Provider(_))
+            && matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id))
             && rows.is_empty()
             && query.is_empty();
 
@@ -3331,8 +3376,11 @@ fn render_model_pane(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
 
-    // Left rail: favorites star + one glyph per provider.
+    // Left rail: favorites star + one glyph per profile. The `label` names the
+    // entry on hover so two profiles of the same kind (official vs third-party)
+    // are told apart even though they share a glyph.
     let rail_icon = |id: gpui::SharedString,
+                     label: gpui::SharedString,
                      icon: Icon,
                      active: bool,
                      target: PickerRail,
@@ -3350,6 +3398,9 @@ fn render_model_pane(
             .cursor_pointer()
             .when(active, |s| s.bg(cx.theme().muted))
             .hover(|s| s.bg(cx.theme().muted))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+            })
             .child(
                 icon.small()
                     .text_color(if active { cx.theme().foreground } else { muted }),
@@ -3364,36 +3415,45 @@ fn render_model_pane(
             .into_any_element()
     };
 
-    let mut rail_col = v_flex()
-        .w_full()
-        .py_2()
-        .px_1p5()
-        .gap_1()
-        .child(rail_icon(
-            "rail-fav".into(),
-            Icon::new(IconName::Star),
-            rail == PickerRail::Favorites,
-            PickerRail::Favorites,
-            cx,
-        ))
-        .child(rail_icon(
-            "rail-claude".into(),
-            tinted_provider_glyph(ProviderKind::ClaudeCode, app_entity.read(cx)),
-            rail == PickerRail::Provider(ProviderKind::ClaudeCode),
-            PickerRail::Provider(ProviderKind::ClaudeCode),
-            cx,
-        ))
-        .child(rail_icon(
-            "rail-codex".into(),
-            tinted_provider_glyph(ProviderKind::Codex, app_entity.read(cx)),
-            rail == PickerRail::Provider(ProviderKind::Codex),
-            PickerRail::Provider(ProviderKind::Codex),
+    let mut rail_col = v_flex().w_full().py_2().px_1p5().gap_1().child(rail_icon(
+        "rail-fav".into(),
+        tcode_i18n::tr!("composer.favorites").into_owned().into(),
+        Icon::new(IconName::Star),
+        rail == PickerRail::Favorites,
+        PickerRail::Favorites,
+        cx,
+    ));
+    // One entry per native profile (Claude group first, then Codex): the two
+    // built-ins plus any user-created third-party profiles. Each is its own rail.
+    let profile_ids: Vec<String> = {
+        let st = app_entity.read(cx);
+        [ProviderKind::ClaudeCode, ProviderKind::Codex]
+            .into_iter()
+            .flat_map(|kind| {
+                st.settings
+                    .profiles_for_kind(kind)
+                    .into_iter()
+                    .map(|profile| profile.id)
+            })
+            .collect()
+    };
+    for id in profile_ids {
+        let glyph = tinted_profile_glyph(&id, app_entity.read(cx));
+        let label = app_entity.read(cx).profile_display_name(&id);
+        rail_col = rail_col.child(rail_icon(
+            gpui::SharedString::from(format!("rail-profile-{id}")),
+            label.into(),
+            glyph,
+            rail == PickerRail::Profile(id.clone()),
+            PickerRail::Profile(id.clone()),
             cx,
         ));
+    }
     // …then one entry per installed ACP agent (Settings → Providers → ACP Agents).
-    for (id, _name) in acp_agents {
+    for (id, name) in acp_agents {
         rail_col = rail_col.child(rail_icon(
             gpui::SharedString::from(format!("rail-acp-{id}")),
+            gpui::SharedString::from(name.clone()),
             Icon::empty().path("icons/box.svg"),
             rail == PickerRail::Acp(id.clone()),
             PickerRail::Acp(id.clone()),
@@ -3491,7 +3551,7 @@ fn render_model_pane(
                     if row.acp {
                         s.set_active_acp_agent(&row.id, cx);
                     } else {
-                        s.set_active_model(row.provider, Some(row.id), cx);
+                        s.set_active_model(row.provider, Some(row.id), row.profile_id, cx);
                     }
                 });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
@@ -3517,6 +3577,7 @@ fn render_model_row(
     let name = row.name.clone();
     let id = row.id.clone();
     let provider = row.provider;
+    let profile_id = row.profile_id.clone();
     let fav_id = row.id.clone();
 
     let app_select = app_entity.clone();
@@ -3540,7 +3601,7 @@ fn render_model_row(
                 app_select.update(cx, |s, cx| s.set_active_acp_agent(&id, cx));
             } else {
                 app_select.update(cx, |s, cx| {
-                    s.set_active_model(provider, Some(id.clone()), cx)
+                    s.set_active_model(provider, Some(id.clone()), profile_id.clone(), cx)
                 });
             }
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));

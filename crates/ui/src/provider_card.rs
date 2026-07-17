@@ -45,7 +45,13 @@ struct EnvRowState {
 
 pub struct ProviderCard {
     app_state: Entity<AppState>,
+    /// The protocol this card's profile drives (glyph, home labels, third-field
+    /// semantics, shared model catalog / status / version are all keyed on it).
     provider: ProviderKind,
+    /// Which profile this card edits. A built-in id (`"claude"` / `"codex"`) for
+    /// the two default cards, or a user profile slug. All config/secret writes
+    /// are keyed on this; catalog/status/version stay keyed on `provider`.
+    profile_id: String,
     expanded: bool,
     /// Whether the account email in the summary line is revealed.
     email_revealed: bool,
@@ -64,11 +70,13 @@ impl ProviderCard {
     pub fn new(
         app_state: Entity<AppState>,
         provider: ProviderKind,
+        profile_id: impl Into<String>,
         expanded: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let settings = app_state.read(cx).provider_settings(provider);
+        let profile_id = profile_id.into();
+        let settings = app_state.read(cx).profile_settings(&profile_id);
         let text_input =
             |placeholder: String, value: String, window: &mut Window, cx: &mut Context<Self>| {
                 cx.new(|cx| {
@@ -140,6 +148,7 @@ impl ProviderCard {
         let mut card = Self {
             app_state,
             provider,
+            profile_id,
             expanded,
             email_revealed: false,
             display_name,
@@ -158,14 +167,20 @@ impl ProviderCard {
     // -- persistence --------------------------------------------------------
 
     fn settings(&self, cx: &App) -> ProviderSettings {
-        self.app_state.read(cx).provider_settings(self.provider)
+        self.app_state.read(cx).profile_settings(&self.profile_id)
     }
 
     fn update(&self, mutate: impl FnOnce(&mut ProviderSettings), cx: &mut Context<Self>) {
-        let provider = self.provider;
+        let profile_id = self.profile_id.clone();
         self.app_state.update(cx, |state, cx| {
-            state.update_provider_settings(provider, mutate, cx);
+            state.update_profile_settings(&profile_id, mutate, cx);
         });
+    }
+
+    /// Whether this card edits a user-created profile (offer Delete + a distinct
+    /// name field) rather than a built-in one.
+    fn is_user_profile(&self) -> bool {
+        !tcode_core::settings::Settings::is_builtin_profile_id(&self.profile_id)
     }
 
     fn reload(&self, cx: &mut Context<Self>) {
@@ -221,7 +236,7 @@ impl ProviderCard {
                 && self
                     .app_state
                     .read(cx)
-                    .launch_env(self.provider)
+                    .launch_env_for_profile(&self.profile_id)
                     .env
                     .iter()
                     .any(|(key, _)| key == &var.name);
@@ -308,10 +323,10 @@ impl ProviderCard {
             .cloned()
             .collect();
         self.update(move |settings| settings.env = persisted, cx);
-        let provider = self.provider;
+        let profile_id = self.profile_id.clone();
         self.app_state.update(cx, |state, cx| {
             for (name, value) in &secrets {
-                state.set_provider_secret(provider, name, value.as_deref(), cx);
+                state.set_profile_secret(&profile_id, name, value.as_deref(), cx);
             }
         });
         // The rows whose secret we just wrote now render as "stored".
@@ -346,9 +361,9 @@ impl ProviderCard {
         let env = settings.env.clone();
         self.update(move |s| s.env = env, cx);
         if removed.sensitive && !removed.name.is_empty() {
-            let provider = self.provider;
+            let profile_id = self.profile_id.clone();
             self.app_state.update(cx, |state, cx| {
-                state.set_provider_secret(provider, &removed.name, None, cx);
+                state.set_profile_secret(&profile_id, &removed.name, None, cx);
             });
         }
         let settings = self.settings(cx);
@@ -371,12 +386,12 @@ impl ProviderCard {
         let env = settings.env.clone();
         self.update(move |s| s.env = env, cx);
         if !name.is_empty() {
-            let provider = self.provider;
+            let profile_id = self.profile_id.clone();
             let secret = becoming_sensitive
                 .then_some(plaintext)
                 .filter(|v| !v.is_empty());
             self.app_state.update(cx, |state, cx| {
-                state.set_provider_secret(provider, &name, secret.as_deref(), cx);
+                state.set_profile_secret(&profile_id, &name, secret.as_deref(), cx);
             });
         }
         let settings = self.settings(cx);
@@ -444,8 +459,10 @@ impl ProviderCard {
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
         let provider = self.provider;
-        let name = state.settings.provider_display_name(provider);
-        let enabled = state.provider_enabled(provider);
+        // Name + enabled come from this profile's card; the status/version/probe
+        // is shared across all profiles of the kind (same CLI).
+        let name = state.profile_display_name(&self.profile_id);
+        let enabled = state.profile_settings(&self.profile_id).enabled;
         let summary =
             crate::provider_status::summarize(provider, state.provider_snapshot(provider), enabled);
         let version = state
@@ -460,7 +477,7 @@ impl ProviderCard {
             .provider_version(provider)
             .is_some_and(|v| v.update_available);
         let muted = cx.theme().muted_foreground;
-        let accent = state.provider_accent(provider);
+        let accent = state.profile_accent(&self.profile_id);
 
         let dot_color = match summary.dot {
             StatusDot::Success => cx.theme().success,
@@ -884,7 +901,7 @@ impl ProviderCard {
 
     fn render_models(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
-        let rows = state.resolved_models(self.provider);
+        let rows = state.resolved_models_for_profile(&self.profile_id);
         let muted = cx.theme().muted_foreground;
 
         let mut block =
@@ -1153,6 +1170,32 @@ impl ProviderCard {
                 ),
             )
             .child(self.render_models(cx))
+            .when(self.is_user_profile(), |this| {
+                this.child(self.render_delete(cx))
+            })
+            .into_any_element()
+    }
+
+    /// A destructive "Delete profile" action, only rendered for user-created
+    /// profiles (built-in Claude/Codex cards can't be deleted).
+    fn render_delete(&self, cx: &mut Context<Self>) -> AnyElement {
+        let profile_id = self.profile_id.clone();
+        v_flex()
+            .w_full()
+            .px_4()
+            .py_3()
+            .child(
+                Button::new("delete-profile")
+                    .danger()
+                    .small()
+                    .icon(IconName::Delete)
+                    .label(tcode_i18n::tr!("providers.delete_profile").into_owned())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let profile_id = profile_id.clone();
+                        this.app_state
+                            .update(cx, |state, cx| state.delete_profile(&profile_id, cx));
+                    })),
+            )
             .into_any_element()
     }
 }
