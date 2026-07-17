@@ -26,6 +26,7 @@ pub(crate) struct ModelOption {
     pub id: String,
     pub name: String,
     pub effort: Option<String>,
+    pub profile_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,7 +44,7 @@ pub(crate) struct ProviderModelPicker {
     trigger_id: &'static str,
     trigger_kind: TriggerKind,
     selected_provider: ProviderKind,
-    selected: Option<(ProviderKind, String)>,
+    selected: Option<(ProviderKind, String, Option<String>)>,
     excluded: Vec<(ProviderKind, String)>,
     _app_subscription: Subscription,
 }
@@ -77,6 +78,7 @@ impl ProviderModelPicker {
         trigger_id: &'static str,
         provider: ProviderKind,
         model: impl Into<String>,
+        profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let app_subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
@@ -87,7 +89,7 @@ impl ProviderModelPicker {
             trigger_id,
             trigger_kind: TriggerKind::Selection,
             selected_provider: provider,
-            selected: Some((provider, model)),
+            selected: Some((provider, model, profile_id)),
             excluded: Vec::new(),
             _app_subscription: app_subscription,
         }
@@ -104,9 +106,10 @@ impl ProviderModelPicker {
         &mut self,
         provider: ProviderKind,
         model: impl Into<String>,
+        profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let selected = (provider, model.into());
+        let selected = (provider, model.into(), profile_id);
         if self.selected.as_ref() != Some(&selected) {
             self.selected_provider = provider;
             self.selected = Some(selected);
@@ -117,28 +120,41 @@ impl ProviderModelPicker {
     fn options(&self, cx: &App) -> Vec<ModelOption> {
         let state = self.app_state.read(cx);
         let mut options = Vec::new();
-        for provider in [ProviderKind::Codex, ProviderKind::ClaudeCode] {
-            let catalog = state.models_for(provider);
-            for model in state.resolved_models(provider) {
+        for profile in state.all_profiles() {
+            let catalog = state.models_for(profile.kind);
+            let profile_id = (!tcode_core::settings::Settings::is_builtin_profile_id(&profile.id))
+                .then_some(profile.id.clone());
+            for model in state.picker_models_for_profile(&profile.id) {
                 let effort = catalog
                     .iter()
                     .find(|spec| spec.id == model.id)
                     .and_then(default_reasoning_effort);
                 options.push(ModelOption {
-                    provider,
+                    provider: profile.kind,
                     id: model.id,
                     name: model.name,
                     effort,
+                    profile_id: profile_id.clone(),
                 });
             }
         }
         options
     }
 
-    pub(crate) fn display_name(&self, provider: ProviderKind, model: &str, cx: &App) -> String {
+    pub(crate) fn display_name(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+        profile_id: Option<&str>,
+        cx: &App,
+    ) -> String {
         self.options(cx)
             .into_iter()
-            .find(|option| option.provider == provider && option.id == model)
+            .find(|option| {
+                option.provider == provider
+                    && option.id == model
+                    && option.profile_id.as_deref() == profile_id
+            })
             .map(|option| option.name)
             .unwrap_or_else(|| model.to_string())
     }
@@ -151,12 +167,14 @@ impl ProviderModelPicker {
                 .icon(IconName::Plus)
                 .label(label.clone()),
             TriggerKind::Selection => {
-                let (provider, model) = self
+                let (provider, model, profile_id) = self
                     .selected
                     .as_ref()
-                    .map(|(provider, model)| (*provider, model.as_str()))
-                    .unwrap_or((self.selected_provider, ""));
-                let display = self.display_name(provider, model, cx);
+                    .map(|(provider, model, profile_id)| {
+                        (*provider, model.as_str(), profile_id.as_deref())
+                    })
+                    .unwrap_or((self.selected_provider, "", None));
+                let display = self.display_name(provider, model, profile_id, cx);
                 Button::new(self.trigger_id).outline().compact().child(
                     h_flex()
                         .w(px(230.))
@@ -212,10 +230,45 @@ impl Render for ProviderModelPicker {
                             .child(tcode_i18n::tr!("model_picker.no_models")),
                     );
                 } else {
+                    let show_headers = available.iter().any(|option| option.profile_id.is_some());
+                    let mut previous_profile_id: Option<Option<String>> = None;
                     for (index, option) in available.into_iter().enumerate() {
-                        let is_selected = selected.as_ref().is_some_and(|(provider, model)| {
-                            *provider == option.provider && model == &option.id
-                        });
+                        if show_headers && previous_profile_id.as_ref() != Some(&option.profile_id)
+                        {
+                            let label = option.profile_id.as_deref().map_or_else(
+                                || provider_label(option.provider).to_string(),
+                                |id| {
+                                    let settings =
+                                        picker.read(cx).app_state.read(cx).profile_settings(id);
+                                    settings
+                                        .display_name
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|name| !name.is_empty())
+                                        .unwrap_or(id)
+                                        .to_string()
+                                },
+                            );
+                            rows = rows.child(
+                                div()
+                                    .flex_none()
+                                    .px_2()
+                                    .pt_2()
+                                    .pb_1()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(label),
+                            );
+                            previous_profile_id = Some(option.profile_id.clone());
+                        }
+                        let is_selected =
+                            selected
+                                .as_ref()
+                                .is_some_and(|(provider, model, profile_id)| {
+                                    *provider == option.provider
+                                        && model == &option.id
+                                        && profile_id == &option.profile_id
+                                });
                         let picker = picker.clone();
                         let popover = cx.entity();
                         rows = rows.child(
@@ -252,8 +305,11 @@ impl Render for ProviderModelPicker {
                                     picker.update(cx, |picker, cx| {
                                         picker.selected_provider = selected.provider;
                                         if matches!(picker.trigger_kind, TriggerKind::Selection) {
-                                            picker.selected =
-                                                Some((selected.provider, selected.id.clone()));
+                                            picker.selected = Some((
+                                                selected.provider,
+                                                selected.id.clone(),
+                                                selected.profile_id.clone(),
+                                            ));
                                         }
                                         cx.emit(ModelSelected(selected));
                                     });

@@ -26,6 +26,8 @@ struct DispatchParams {
     #[serde(default)]
     effort: Option<String>,
     #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
     access: Option<String>,
     title: String,
     brief: String,
@@ -65,7 +67,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch a brief to a new child tcode thread and return its thread id. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts)."
+        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts)."
     )]
     async fn dispatch(
         &self,
@@ -77,6 +79,7 @@ impl OrchestrateTools {
                 provider: p.provider,
                 model: p.model,
                 effort: p.effort,
+                profile: p.profile,
                 access: p.access,
                 title: p.title,
                 brief: p.brief,

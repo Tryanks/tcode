@@ -211,6 +211,10 @@ pub struct OrchestratorIdentity {
 pub struct OrchestrateChildModel {
     pub provider: ProviderKind,
     pub model: String,
+    /// Which provider profile (endpoint config) the dispatch launches against;
+    /// `None` = the kind's built-in profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
     /// Disabled profiles retain all routing preferences but cannot receive a
     /// dispatch and are omitted from the lead model's available-fleet table.
     #[serde(default = "default_true")]
@@ -294,6 +298,7 @@ impl Default for OrchestrateSettings {
                 OrchestrateChildModel {
                     provider: ProviderKind::Codex,
                     model: "gpt-5.6-sol".into(),
+                    profile_id: None,
                     enabled: true,
                     effort: Some("medium".into()),
                     description: DEFAULT_GPT_MEDIUM_CHILD_DEFINITION.into(),
@@ -301,6 +306,7 @@ impl Default for OrchestrateSettings {
                 OrchestrateChildModel {
                     provider: ProviderKind::Codex,
                     model: "gpt-5.6-sol".into(),
+                    profile_id: None,
                     enabled: true,
                     effort: Some("max".into()),
                     description: DEFAULT_GPT_MAX_CHILD_DEFINITION.into(),
@@ -308,6 +314,7 @@ impl Default for OrchestrateSettings {
                 OrchestrateChildModel {
                     provider: ProviderKind::ClaudeCode,
                     model: "claude-sonnet-5".into(),
+                    profile_id: None,
                     enabled: true,
                     effort: Some("high".into()),
                     description: DEFAULT_SONNET_CHILD_DEFINITION.into(),
@@ -315,6 +322,7 @@ impl Default for OrchestrateSettings {
                 OrchestrateChildModel {
                     provider: ProviderKind::ClaudeCode,
                     model: "claude-opus-4-8".into(),
+                    profile_id: None,
                     enabled: true,
                     effort: Some("high".into()),
                     description: DEFAULT_OPUS_CHILD_DEFINITION.into(),
@@ -322,6 +330,7 @@ impl Default for OrchestrateSettings {
                 OrchestrateChildModel {
                     provider: ProviderKind::ClaudeCode,
                     model: "claude-fable-5".into(),
+                    profile_id: None,
                     enabled: true,
                     effort: Some("high".into()),
                     description: DEFAULT_FABLE_CHILD_DEFINITION.into(),
@@ -408,6 +417,21 @@ impl OrchestrateSettings {
                 && entry.matches_effort(effort)
         })
     }
+
+    pub fn enabled_child_profiles(
+        &self,
+        provider: ProviderKind,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> impl Iterator<Item = &OrchestrateChildModel> {
+        self.child_models.iter().filter(move |entry| {
+            entry.enabled
+                && entry.provider == provider
+                && model.is_none_or(|model| entry.model == model)
+                && !entry.model.trim().is_empty()
+                && entry.matches_effort(effort)
+        })
+    }
 }
 
 /// Provider and model used for the isolated, background request that names a
@@ -419,6 +443,10 @@ pub struct TitleGenerationSettings {
     pub provider: ProviderKind,
     #[serde(default = "default_title_model")]
     pub model: String,
+    /// Which provider profile (endpoint config) the dispatch launches against;
+    /// `None` = the kind's built-in profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 pub const DEFAULT_TITLE_MODEL: &str = "gpt-5.6-luna";
@@ -436,6 +464,7 @@ impl Default for TitleGenerationSettings {
         Self {
             provider: default_title_provider(),
             model: default_title_model(),
+            profile_id: None,
         }
     }
 }
@@ -830,6 +859,7 @@ mod tests {
         let profile = OrchestrateChildModel {
             provider: ProviderKind::Codex,
             model: "m".into(),
+            profile_id: None,
             enabled: true,
             effort: Some("High".into()),
             description: String::new(),
@@ -853,6 +883,7 @@ mod tests {
             TitleGenerationSettings {
                 provider: ProviderKind::Codex,
                 model: "gpt-5.6-luna".into(),
+                profile_id: None,
             }
         );
         let partial: TitleGenerationSettings = serde_json::from_str("{}").unwrap();
@@ -862,12 +893,40 @@ mod tests {
             title_generation: TitleGenerationSettings {
                 provider: ProviderKind::ClaudeCode,
                 model: "claude-haiku-4-5".into(),
+                profile_id: Some("work-claude".into()),
             },
             ..Default::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.title_generation, settings.title_generation);
+    }
+
+    #[test]
+    fn provider_profile_fields_are_backward_compatible_and_round_trip() {
+        let child: OrchestrateChildModel =
+            serde_json::from_str(r#"{"provider":"codex","model":"m","enabled":true}"#).unwrap();
+        assert_eq!(child.profile_id, None);
+
+        let title: TitleGenerationSettings =
+            serde_json::from_str(r#"{"provider":"codex","model":"m"}"#).unwrap();
+        assert_eq!(title.profile_id, None);
+
+        let child = OrchestrateChildModel {
+            profile_id: Some("kimi".into()),
+            ..child
+        };
+        let child_back: OrchestrateChildModel =
+            serde_json::from_str(&serde_json::to_string(&child).unwrap()).unwrap();
+        assert_eq!(child_back, child);
+
+        let title = TitleGenerationSettings {
+            profile_id: Some("kimi".into()),
+            ..title
+        };
+        let title_back: TitleGenerationSettings =
+            serde_json::from_str(&serde_json::to_string(&title).unwrap()).unwrap();
+        assert_eq!(title_back, title);
     }
 
     #[test]
