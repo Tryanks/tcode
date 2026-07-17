@@ -70,6 +70,13 @@ pub struct SessionMeta {
     pub id: String,
     pub title: String,
     pub provider: ProviderKind,
+    /// Which provider *profile* this session runs against. `None` (and absent in
+    /// legacy index files) means the built-in profile for `provider`; `Some(id)`
+    /// selects a user-created profile (e.g. a third-party Anthropic endpoint).
+    /// `provider` stays the protocol discriminant — the profile only changes the
+    /// env / binary / home the same protocol is spawned with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
     pub cwd: PathBuf,
     #[serde(default)]
     pub project_id: Option<String>,
@@ -131,6 +138,7 @@ impl SessionMeta {
             id: uuid::Uuid::new_v4().to_string(),
             title: format!("New {} session", provider.display_name()),
             provider,
+            profile_id: None,
             cwd,
             project_id: None,
             model,

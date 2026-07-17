@@ -21,8 +21,6 @@ use gpui_component::{
     v_flex,
 };
 
-use agent::ProviderKind;
-
 use tcode_runtime::app::AppState;
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
@@ -65,7 +63,8 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
 pub struct SettingsPage {
     app_state: Entity<AppState>,
     /// One card per provider, in T3's driver order (Codex, then Claude).
-    provider_cards: Vec<(ProviderKind, Entity<ProviderCard>)>,
+    /// One card per native profile, keyed by profile id (built-in + user).
+    provider_cards: Vec<(String, Entity<ProviderCard>)>,
     /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
@@ -145,13 +144,16 @@ impl SettingsPage {
         // Screenshot-only: `--debug-provider-expanded <codex|claude>` opens one
         // card's details (clicking the chevron cannot be driven headlessly).
         let expanded = self.app_state.read(cx).debug_provider_expanded.clone();
-        self.provider_cards = [ProviderKind::Codex, ProviderKind::ClaudeCode]
+        let profiles = self.app_state.read(cx).all_profiles();
+        self.provider_cards = profiles
             .into_iter()
-            .map(|provider| {
+            .map(|profile| {
                 let app_state = self.app_state.clone();
-                let open = expanded.as_deref() == Some(crate::settings::provider_key(provider));
-                let card = cx.new(|cx| ProviderCard::new(app_state, provider, open, window, cx));
-                (provider, card)
+                let open = expanded.as_deref() == Some(profile.id.as_str());
+                let kind = profile.kind;
+                let id = profile.id.clone();
+                let card = cx.new(|cx| ProviderCard::new(app_state, kind, id, open, window, cx));
+                (profile.id, card)
             })
             .collect();
     }
@@ -493,6 +495,24 @@ impl SettingsPage {
     /// bordered list. The marketplace lives behind the Add agent dialog.
     fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         self.sync_acp_cards(window, cx);
+        // Reconcile the profile cards with the current profile set: creating or
+        // deleting a profile changes it, and the card list must follow (else a
+        // deleted profile's card lingers and its Delete looks like a no-op).
+        let current_ids: Vec<String> = self
+            .app_state
+            .read(cx)
+            .all_profiles()
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        let card_ids: Vec<String> = self
+            .provider_cards
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        if current_ids != card_ids {
+            self.build_provider_cards(window, cx);
+        }
         let state = self.app_state.read(cx);
         let checked_at = state.providers_checked_at();
         let checking = state.providers_checking();
