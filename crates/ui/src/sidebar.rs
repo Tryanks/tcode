@@ -532,19 +532,6 @@ impl SessionsSidebar {
             cx,
         )
         .child(
-            Button::new("collapse-sidebar")
-                .ghost()
-                .small()
-                .compact()
-                .icon(IconName::PanelLeft)
-                .tooltip(tcode_i18n::tr!("sidebar.collapse"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state.update(cx, |state, cx| {
-                        state.toggle_sidebar_collapsed(cx);
-                    });
-                })),
-        )
-        .child(
             div()
                 .text_sm()
                 .font_bold()
@@ -561,6 +548,23 @@ impl SessionsSidebar {
                 .text_size(px(9.))
                 .font_semibold()
                 .child("DEV"),
+        )
+        .child(div().flex_1())
+        // Far right of the sidebar header (macOS sidebar-toggle convention);
+        // sitting next to the traffic lights it reads as a misaligned fourth
+        // light.
+        .child(
+            Button::new("collapse-sidebar")
+                .ghost()
+                .small()
+                .compact()
+                .icon(IconName::PanelLeft)
+                .tooltip(tcode_i18n::tr!("sidebar.collapse"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.app_state.update(cx, |state, cx| {
+                        state.toggle_sidebar_collapsed(cx);
+                    });
+                })),
         )
     }
 

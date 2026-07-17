@@ -3118,7 +3118,9 @@ impl Render for Composer {
             } else {
                 cx.theme().input
             })
-            .bg(cx.theme().background)
+            // White console on paper (T3-grade fill): the glass `background`
+            // token would render as a murky translucent wash here.
+            .bg(cx.theme().popover)
             .when(composer_focused, |this| {
                 this.shadow(crate::material::focus_glow(cx))
             })

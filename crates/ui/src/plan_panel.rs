@@ -244,8 +244,8 @@ impl PlanPanel {
                     div()
                         .absolute()
                         .left(px(0.))
-                        .top(px(0.))
-                        .h_full()
+                        .top(px(6.))
+                        .bottom(px(6.))
                         .w(px(2.))
                         .rounded_full()
                         .bg(color),

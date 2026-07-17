@@ -388,7 +388,15 @@ impl ToastCenter {
                 .overflow_hidden(),
             cx,
         )
-        .child(div().flex_none().w(px(2.)).rounded_full().bg(accent))
+        .child(
+            div()
+                .flex_none()
+                .w(px(2.))
+                .ml(px(8.))
+                .my(px(8.))
+                .rounded_full()
+                .bg(accent),
+        )
         .child(card)
     }
 }

@@ -46,7 +46,8 @@
         "success.background": "#34C759",
         "success.foreground": "#248A3D",
         "warning.background": "#FF9500",
-        "warning.foreground": "#C93400"
+        "warning.foreground": "#C93400",
+        "overlay": "#1F232852"
       }
     },
     {
@@ -92,7 +93,8 @@
         "success.background": "#30D158",
         "success.foreground": "#4ADE80",
         "warning.background": "#FF9F0A",
-        "warning.foreground": "#FFB340"
+        "warning.foreground": "#FFB340",
+        "overlay": "#00000080"
       }
     }
   ]

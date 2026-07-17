@@ -1437,8 +1437,16 @@ impl ChatView {
             .items_stretch()
             .rounded(crate::material::radius_card())
             .overflow_hidden()
-            .bg(cx.theme().muted)
-            .child(div().flex_none().w(px(2.)).rounded_full().bg(danger))
+            .bg(cx.theme().muted.opacity(0.6))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(2.))
+                    .ml(px(8.))
+                    .my(px(8.))
+                    .rounded_full()
+                    .bg(danger),
+            )
             .child(content)
             .into_any_element()
     }
@@ -2059,8 +2067,8 @@ impl ChatView {
 
         let header = h_flex()
             .w_full()
-            .px_4()
-            .py_2()
+            .px_1()
+            .py_1()
             .gap_2()
             .items_center()
             .child(
@@ -2110,10 +2118,10 @@ impl ChatView {
                     })),
             );
 
-        let mut content = v_flex().flex_1().min_w_0().child(header);
+        let mut content = v_flex().w_full().child(header);
 
         if !collapsed {
-            let mut body = v_flex().w_full().px_2().pb_2().gap(px(1.));
+            let mut body = v_flex().w_full().pb_1().gap(px(1.));
             for (dir, files) in group_by_dir(changes, cwd) {
                 let dir_add: u32 = files.iter().map(|f| f.added).sum();
                 let dir_del: u32 = files.iter().map(|f| f.deleted).sum();
@@ -2126,6 +2134,8 @@ impl ChatView {
                             .gap_1p5()
                             .items_center()
                             .text_size(px(13.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(cx.theme().list_hover))
                             .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted))
                             .child(Icon::new(IconName::Folder).xsmall().text_color(muted))
                             .child(
@@ -2150,6 +2160,8 @@ impl ChatView {
                             .gap_1p5()
                             .items_center()
                             .text_size(px(13.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(cx.theme().list_hover))
                             .child(Icon::new(IconName::File).xsmall().text_color(muted))
                             .child(
                                 div()
@@ -2167,21 +2179,9 @@ impl ChatView {
             content = content.child(body);
         }
 
-        h_flex()
-            .w_full()
-            .items_stretch()
-            .rounded(crate::material::radius_card())
-            .overflow_hidden()
-            .bg(cx.theme().muted)
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(2.))
-                    .rounded_full()
-                    .bg(cx.theme().success),
-            )
-            .child(content)
-            .into_any_element()
+        // A quiet manifest aligned with the prose column: no card slab, no
+        // rail — the small-caps header and hover rows carry the structure.
+        content.into_any_element()
     }
 
     /// The inline proposed-plan timeline card (S1 §5): a "Plan" badge, title,
@@ -2322,11 +2322,13 @@ impl ChatView {
             .items_stretch()
             .rounded(crate::material::radius_card())
             .overflow_hidden()
-            .bg(cx.theme().muted)
+            .bg(cx.theme().muted.opacity(0.6))
             .child(
                 div()
                     .flex_none()
                     .w(px(2.))
+                    .ml(px(8.))
+                    .my(px(8.))
                     .rounded_full()
                     .bg(cx.theme().info),
             )
@@ -2651,6 +2653,9 @@ impl ChatView {
             let footer_dialog = dialog.clone();
             dlg.title(tcode_i18n::tr!("git.commit.title").into_owned())
                 .w(px(600.))
+                // Opaque T3 panel over the library's translucent default.
+                .bg(cx.theme().popover)
+                .shadow_xl()
                 .content(move |content_el, _window, _cx| content_el.child(content.clone()))
                 .footer(render_commit_footer(&footer_dialog, window, cx))
         });
