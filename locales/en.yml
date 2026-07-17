@@ -465,6 +465,7 @@ plan:
   saved_workspace: "Saved %{file}"
 userinput:
   question_count: "%{index}/%{total}"
+  custom_placeholder: "Type your own answer…"
   multi_hint: "Select one or more options."
   previous: "Previous"
   next_question: "Next question"

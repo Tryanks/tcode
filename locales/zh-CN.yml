@@ -458,6 +458,7 @@ plan:
   saved_workspace: "已保存 %{file}"
 userinput:
   question_count: "%{index}/%{total}"
+  custom_placeholder: "输入自定义答案…"
   multi_hint: "选择一个或多个选项。"
   previous: "上一个"
   next_question: "下一个问题"
