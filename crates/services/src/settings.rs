@@ -51,9 +51,14 @@ impl SettingsStore {
 
     /// The sensitive env values for one provider (used only when spawning).
     pub fn provider_secrets(&self, provider: ProviderKind) -> BTreeMap<String, String> {
-        self.load_secrets()
-            .remove(provider_key(provider))
-            .unwrap_or_default()
+        self.profile_secrets(provider_key(provider))
+    }
+
+    /// The sensitive env values for one profile id. Built-in profiles use their
+    /// [`provider_key`] as id, so this also covers them; user-created profiles
+    /// are keyed by their slug id.
+    pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
+        self.load_secrets().remove(profile_id).unwrap_or_default()
     }
 
     /// Store (`Some`) or clear (`None`) one provider secret. Written 0600 and
@@ -64,8 +69,18 @@ impl SettingsStore {
         name: &str,
         value: Option<&str>,
     ) -> std::io::Result<()> {
+        self.set_profile_secret(provider_key(provider), name, value)
+    }
+
+    /// Store (`Some`) or clear (`None`) one profile secret, by profile id.
+    pub fn set_profile_secret(
+        &self,
+        profile_id: &str,
+        name: &str,
+        value: Option<&str>,
+    ) -> std::io::Result<()> {
         let mut all = self.load_secrets();
-        let entry = all.entry(provider_key(provider).to_string()).or_default();
+        let entry = all.entry(profile_id.to_string()).or_default();
         match value {
             Some(value) => {
                 entry.insert(name.to_string(), value.to_string());
@@ -75,9 +90,18 @@ impl SettingsStore {
             }
         }
         if entry.is_empty() {
-            all.remove(provider_key(provider));
+            all.remove(profile_id);
         }
         self.write_secrets(&all)
+    }
+
+    /// Drop every secret stored for a profile id (used when deleting a profile).
+    pub fn clear_profile_secrets(&self, profile_id: &str) -> std::io::Result<()> {
+        let mut all = self.load_secrets();
+        if all.remove(profile_id).is_some() {
+            return self.write_secrets(&all);
+        }
+        Ok(())
     }
 
     fn write_secrets(
@@ -163,6 +187,7 @@ mod tests {
             unknown: serde_json::Map::new(),
             language: Some("zh-CN".into()),
             providers,
+            profiles: BTreeMap::new(),
             codex_binary: None,
             claude_binary: None,
             theme_mode: ThemeMode::Dark,
@@ -290,6 +315,62 @@ mod tests {
             .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", None)
             .unwrap();
         assert!(store.provider_secrets(ProviderKind::ClaudeCode).is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_secrets_are_keyed_by_profile_id() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-settings-profile-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.clone());
+
+        // A user profile "klaude-kode" stores its own key, isolated from the
+        // built-in "claude" profile (which shares the provider_key id).
+        store
+            .set_profile_secret("klaude-kode", "ANTHROPIC_API_KEY", Some("sk-kimi-xyz"))
+            .unwrap();
+        store
+            .set_secret(
+                ProviderKind::ClaudeCode,
+                "ANTHROPIC_API_KEY",
+                Some("sk-official"),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .profile_secrets("klaude-kode")
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("sk-kimi-xyz")
+        );
+        // Built-in profile id == provider_key, reachable both ways.
+        assert_eq!(
+            store
+                .provider_secrets(ProviderKind::ClaudeCode)
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("sk-official")
+        );
+        assert_eq!(
+            store
+                .profile_secrets("claude")
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("sk-official")
+        );
+
+        // Deleting a profile drops only its bucket.
+        store.clear_profile_secrets("klaude-kode").unwrap();
+        assert!(store.profile_secrets("klaude-kode").is_empty());
+        assert_eq!(
+            store
+                .provider_secrets(ProviderKind::ClaudeCode)
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("sk-official")
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -155,6 +155,42 @@ impl ProviderSettings {
     }
 }
 
+/// A user-created provider profile (Settings → Providers "+ New profile").
+///
+/// A profile pairs a *protocol* ([`ProviderKind`] — which native CLI/adapter
+/// spawns it) with a full [`ProviderSettings`] card. Several profiles may share
+/// one protocol, which is how a session can talk to the official Anthropic API
+/// *and* a third-party Anthropic-compatible endpoint at the same time: both are
+/// `ProviderKind::ClaudeCode`, each with its own `ANTHROPIC_BASE_URL` /
+/// `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` env and its own isolated home.
+///
+/// The two *built-in* profiles (Claude Code, Codex) are not stored here — they
+/// remain in [`Settings::providers`] under their [`provider_key`]. Only extra,
+/// user-created profiles live in [`Settings::profiles`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    /// The protocol this profile drives. Determines which native adapter
+    /// (`claude` / `codex`) spawns it and how its stdio is normalized.
+    pub kind: ProviderKind,
+    /// The card configuration (env, binary, home, models, display name, …).
+    /// Flattened so a profile's JSON is a superset of a provider card's.
+    #[serde(flatten)]
+    pub settings: ProviderSettings,
+}
+
+/// A profile resolved to the two things the launch path needs: which protocol
+/// to speak, and the effective card settings to spawn with. Produced by
+/// [`Settings::resolved_profile`] for both built-in and user profiles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProfile {
+    /// Stable profile id: a built-in [`provider_key`] or a user-chosen slug.
+    pub id: String,
+    /// The protocol this profile drives.
+    pub kind: ProviderKind,
+    /// The effective card settings.
+    pub settings: ProviderSettings,
+}
+
 /// A model-specific identity override for an orchestrator. Models without an
 /// entry here remain fully eligible for `/orchestrate`; they inherit
 /// [`OrchestrateSettings::generic_identity`] instead.
@@ -418,8 +454,15 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Per-provider cards (Settings → Providers), keyed by [`provider_key`].
+    /// These are the two *built-in* profiles (Claude Code, Codex).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// User-created provider profiles, keyed by a stable slug id. Each carries
+    /// its own [`ProviderKind`], so multiple profiles can drive the same
+    /// protocol (e.g. official Claude + a third-party endpoint). Built-in
+    /// profiles are *not* here — they live in `providers`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, ProviderProfile>,
     /// Legacy (pre-`providers`) binary overrides. Read once and migrated into
     /// `providers` on load; never written back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -513,6 +556,122 @@ impl Settings {
             .filter(|name| !name.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| provider_label(provider).to_string())
+    }
+
+    /// The built-in profile id for a native protocol (its [`provider_key`]).
+    /// This is the id a session carries when it uses the default, non-custom
+    /// configuration for its kind.
+    pub fn builtin_profile_id(kind: ProviderKind) -> &'static str {
+        provider_key(kind)
+    }
+
+    /// Whether `id` names a built-in profile (`"claude"` / `"codex"` / `"acp"`).
+    pub fn is_builtin_profile_id(id: &str) -> bool {
+        matches!(id, "claude" | "codex" | "acp")
+    }
+
+    /// The protocol kind of a built-in profile id, if it is one. Used to route a
+    /// mutation of a built-in profile back to its `providers` card.
+    pub fn builtin_kind_from_id(id: &str) -> Option<ProviderKind> {
+        match id {
+            "claude" => Some(ProviderKind::ClaudeCode),
+            "codex" => Some(ProviderKind::Codex),
+            "acp" => Some(ProviderKind::Acp),
+            _ => None,
+        }
+    }
+
+    /// Resolve a profile id to its protocol kind and effective card settings.
+    /// Built-in ids resolve to the matching `providers` card; anything else to
+    /// a user-created `profiles` entry. `None` for an unknown id.
+    pub fn resolved_profile(&self, id: &str) -> Option<ResolvedProfile> {
+        for kind in [
+            ProviderKind::Codex,
+            ProviderKind::ClaudeCode,
+            ProviderKind::Acp,
+        ] {
+            if provider_key(kind) == id {
+                return Some(ResolvedProfile {
+                    id: id.to_string(),
+                    kind,
+                    settings: self.provider(kind),
+                });
+            }
+        }
+        self.profiles.get(id).map(|profile| ResolvedProfile {
+            id: id.to_string(),
+            kind: profile.kind,
+            settings: profile.settings.clone(),
+        })
+    }
+
+    /// Every selectable profile that drives `kind`: the built-in first, then any
+    /// user profiles of that kind in id order. This is what the provider/model
+    /// picker iterates.
+    pub fn profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
+        let mut out = vec![ResolvedProfile {
+            id: provider_key(kind).to_string(),
+            kind,
+            settings: self.provider(kind),
+        }];
+        for (id, profile) in &self.profiles {
+            if profile.kind == kind {
+                out.push(ResolvedProfile {
+                    id: id.clone(),
+                    kind,
+                    settings: profile.settings.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// A profile's card title: its display-name override, else — for built-ins —
+    /// the driver label, else the id. Used by the sidebar / picker / status row.
+    pub fn profile_display_name(&self, id: &str) -> String {
+        let Some(profile) = self.resolved_profile(id) else {
+            return id.to_string();
+        };
+        if let Some(name) = profile
+            .settings
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return name.to_string();
+        }
+        if Self::is_builtin_profile_id(id) {
+            provider_label(profile.kind).to_string()
+        } else {
+            id.to_string()
+        }
+    }
+
+    /// Turn a human name into a stable, unique profile id (slug). Never collides
+    /// with a built-in id or an existing profile id.
+    pub fn allocate_profile_id(&self, name: &str) -> String {
+        let base: String = name
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let base = base.trim_matches('-');
+        let base = if base.is_empty() { "profile" } else { base };
+        let taken =
+            |id: &str, s: &Settings| Self::is_builtin_profile_id(id) || s.profiles.contains_key(id);
+        if !taken(base, self) {
+            return base.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base}-{n}");
+            if !taken(&candidate, self) {
+                return candidate;
+            }
+            n += 1;
+        }
     }
 
     /// One installed ACP agent, by registry id.
@@ -724,6 +883,81 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert!(back.sidebar_collapsed);
     }
+    #[test]
+    fn resolves_builtin_and_user_profiles() {
+        let mut settings = Settings::default();
+        // Give the built-in Claude card a base URL and a display name.
+        settings.provider_mut(ProviderKind::ClaudeCode).display_name = Some("Claude".into());
+
+        // A user profile driving the same protocol (third-party Claude).
+        let id = settings.allocate_profile_id("Klaude Kode");
+        assert_eq!(id, "klaude-kode");
+        settings.profiles.insert(
+            id.clone(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    display_name: Some("Klaude Kode".into()),
+                    env: vec![EnvVar {
+                        name: "ANTHROPIC_BASE_URL".into(),
+                        value: "https://api.kimi.com/coding/".into(),
+                        sensitive: false,
+                    }],
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+
+        // Built-in id resolves to the provider card.
+        let builtin = settings.resolved_profile("claude").unwrap();
+        assert_eq!(builtin.kind, ProviderKind::ClaudeCode);
+        assert!(Settings::is_builtin_profile_id("claude"));
+
+        // User id resolves to its profile, tagged with the shared protocol.
+        let custom = settings.resolved_profile(&id).unwrap();
+        assert_eq!(custom.kind, ProviderKind::ClaudeCode);
+        assert_eq!(custom.settings.env[0].value, "https://api.kimi.com/coding/");
+        assert!(!Settings::is_builtin_profile_id(&id));
+
+        // Both Claude profiles are offered for the kind, built-in first.
+        let claude_profiles = settings.profiles_for_kind(ProviderKind::ClaudeCode);
+        assert_eq!(claude_profiles.len(), 2);
+        assert_eq!(claude_profiles[0].id, "claude");
+        assert_eq!(claude_profiles[1].id, id);
+        // Codex still resolves to exactly its built-in.
+        assert_eq!(settings.profiles_for_kind(ProviderKind::Codex).len(), 1);
+
+        // Display names: built-in falls back to label; user shows its name.
+        assert_eq!(settings.profile_display_name("claude"), "Claude");
+        assert_eq!(settings.profile_display_name(&id), "Klaude Kode");
+        assert_eq!(settings.resolved_profile("nope"), None);
+
+        // A second profile of the same name gets a distinct id.
+        assert_eq!(settings.allocate_profile_id("Klaude Kode"), "klaude-kode-2");
+    }
+
+    #[test]
+    fn profiles_round_trip_through_json() {
+        let mut settings = Settings::default();
+        let id = settings.allocate_profile_id("Kimi");
+        settings.profiles.insert(
+            id.clone(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    display_name: Some("Kimi".into()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.profiles, settings.profiles);
+        // Legacy files with no `profiles` key still parse (defaults to empty).
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(legacy.profiles.is_empty());
+    }
+
     /// A build that predates a field must not destroy it: unknown keys survive a
     /// load → save round trip. (We hit this for real: an older binary dropped
     /// `acp_agents` and the next save wiped the installed agents.)

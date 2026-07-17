@@ -21,6 +21,9 @@ pub enum SmokeSpec {
         provider: ProviderKind,
         /// Which ACP agent to run, when `provider == Acp` (`--smoke "acp:<id>|…"`).
         acp_agent_id: Option<String>,
+        /// Which provider profile to run against, for the native providers
+        /// (`--smoke "claude:<profile-id>|…"`). `None` = the built-in profile.
+        profile_id: Option<String>,
         cwd: PathBuf,
         prompt: String,
     },
@@ -36,22 +39,35 @@ pub fn parse_args() -> Option<SmokeSpec> {
         Some("--smoke") => {
             let spec = args.next().unwrap_or_else(|| usage());
             let mut parts = spec.splitn(3, '|');
-            // `acp:<agent-id>` runs an installed ACP agent; the two native
-            // providers keep their bare names.
-            let (provider, acp_agent_id) = match parts.next() {
-                Some("codex") => (ProviderKind::Codex, None),
-                Some("claude") => (ProviderKind::ClaudeCode, None),
+            // `acp:<agent-id>` runs an installed ACP agent; the native providers
+            // keep their bare names, optionally suffixed with `:<profile-id>` to
+            // run a user-created profile (e.g. `claude:klaude-kode`).
+            let (provider, acp_agent_id, profile_id) = match parts.next() {
                 Some(token) if token.starts_with("acp:") => (
                     ProviderKind::Acp,
                     Some(token.trim_start_matches("acp:").to_string()),
+                    None,
                 ),
-                _ => usage(),
+                Some(token) => {
+                    let (name, profile) = match token.split_once(':') {
+                        Some((name, profile)) => (name, Some(profile.to_string())),
+                        None => (token, None),
+                    };
+                    let kind = match name {
+                        "codex" => ProviderKind::Codex,
+                        "claude" => ProviderKind::ClaudeCode,
+                        _ => usage(),
+                    };
+                    (kind, None, profile)
+                }
+                None => usage(),
             };
             let cwd = PathBuf::from(parts.next().unwrap_or_else(|| usage()));
             let prompt = parts.next().unwrap_or_else(|| usage()).to_string();
             Some(SmokeSpec::New {
                 provider,
                 acp_agent_id,
+                profile_id,
                 cwd,
                 prompt,
             })
@@ -66,7 +82,7 @@ pub fn parse_args() -> Option<SmokeSpec> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: tcode [--smoke \"<codex|claude|acp:<agent-id>>|<cwd>|<prompt>\"] [--smoke-resume \"<prompt>\"]"
+        "usage: tcode [--smoke \"<codex|claude[:<profile-id>]|acp:<agent-id>>|<cwd>|<prompt>\"] [--smoke-resume \"<prompt>\"]"
     );
     std::process::exit(2);
 }
@@ -85,17 +101,19 @@ pub fn drive(spec: SmokeSpec, app_state: Entity<AppState>, cx: &mut App) {
             SmokeSpec::New {
                 provider,
                 acp_agent_id,
+                profile_id,
                 cwd,
                 prompt,
             } => {
                 log::info!(
-                    "smoke: creating {} session in {}",
+                    "smoke: creating {} session in {} (profile: {})",
                     acp_agent_id
                         .clone()
                         .unwrap_or(provider.display_name().to_string()),
-                    cwd.display()
+                    cwd.display(),
+                    profile_id.as_deref().unwrap_or("built-in"),
                 );
-                state.create_session(provider, cwd, None, None, acp_agent_id, cx);
+                state.create_session(provider, cwd, None, None, acp_agent_id, profile_id, cx);
                 state.send_turn(prompt, Vec::new(), cx);
             }
             SmokeSpec::Resume { prompt } => {
