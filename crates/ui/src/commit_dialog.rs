@@ -188,7 +188,7 @@ impl CommitDialog {
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .font_family(cx.theme().mono_font_family.clone())
                     .child(path),
             )
@@ -226,7 +226,7 @@ impl Render for CommitDialog {
             .w_full()
             .gap_1p5()
             .items_center()
-            .text_size(px(12.))
+            .text_size(px(13.))
             .text_color(muted)
             .child(
                 Icon::empty()
@@ -252,7 +252,7 @@ impl Render for CommitDialog {
                     .w_full()
                     .p_3()
                     .gap_2()
-                    .rounded(px(8.))
+                    .rounded(crate::material::radius_card())
                     .border_1()
                     .border_color(cx.theme().warning)
                     .bg(cx.theme().warning.opacity(0.08))
@@ -260,7 +260,7 @@ impl Render for CommitDialog {
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .font_medium()
                             .text_color(cx.theme().warning)
                             .child(Icon::new(IconName::TriangleAlert).xsmall())
@@ -268,7 +268,7 @@ impl Render for CommitDialog {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(muted)
                             .child(tcode_i18n::tr!("git.commit.default_warning_body")),
                     )
@@ -300,7 +300,7 @@ impl Render for CommitDialog {
             file_rows = file_rows.child(
                 div()
                     .p_2()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(muted)
                     .child(tcode_i18n::tr!("git.commit.no_changes")),
             );
@@ -320,7 +320,7 @@ impl Render for CommitDialog {
             v_flex().w_full().gap_1().child(files_header).child(
                 div()
                     .w_full()
-                    .rounded(px(8.))
+                    .rounded(crate::material::radius_input())
                     .border_1()
                     .border_color(cx.theme().border)
                     .p_1()
@@ -342,6 +342,7 @@ impl Render for CommitDialog {
             )
             .child(
                 Button::new("commit-regenerate")
+                    .rounded(crate::material::radius_button())
                     .ghost()
                     .xsmall()
                     .icon(IconName::Undo)
@@ -360,9 +361,16 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Input::new(&self.message)),
+                .child(Input::new(&self.message).rounded(crate::material::radius_input())),
         );
 
-        div().w_full().min_w(px(520.)).child(body)
+        crate::material::overlay_contour(
+            div()
+                .w_full()
+                .min_w(px(520.))
+                .rounded(crate::material::radius_overlay()),
+            cx,
+        )
+        .child(body)
     }
 }

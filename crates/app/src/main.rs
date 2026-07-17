@@ -7,8 +7,8 @@ mod smoke;
 use std::{borrow::Cow, time::Duration};
 
 use gpui::{
-    App, AppContext as _, Entity, KeyBinding, ParentElement as _, TitlebarOptions, WindowBounds,
-    WindowOptions, point, px, size,
+    App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px, size,
 };
 use tcode_runtime::app::AppState;
 use tcode_services::{shell_env, store::SessionStore};
@@ -22,6 +22,23 @@ use gpui_component::{
 };
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
+
+/// On platforms with an opaque window the translucent canvas colors would
+/// composite against black; flatten them to their solid RGB. Keep the literals
+/// in sync with themes/tcode.json (checked by `smoke` builds via debug_assert).
+/// Vibrancy is macOS-only and can be disabled with `TCODE_NO_VIBRANCY=1`
+/// (diagnostic escape hatch: opaque window + flattened palette).
+fn vibrancy_enabled() -> bool {
+    cfg!(target_os = "macos") && !std::env::var("TCODE_NO_VIBRANCY").is_ok_and(|v| v == "1")
+}
+
+fn flatten_canvas_for_opaque_window(theme_json: &str) -> String {
+    let flattened = theme_json
+        .replace("#F2F4F7C7", "#F2F4F7")
+        .replace("#15171CC7", "#15171C");
+    debug_assert_ne!(flattened, theme_json, "canvas colors moved; update flatten");
+    flattened
+}
 const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn finish_quit_prompt(app_state: &Entity<AppState>, epoch: u64, cx: &mut App) -> bool {
@@ -69,7 +86,8 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
             let cancel_state = prompt_state.clone();
             let enter_state = prompt_state.clone();
             let escape_state = prompt_state.clone();
-            window.open_alert_dialog(cx, move |alert, _, _| {
+            window.open_alert_dialog(cx, move |alert, _, cx| {
+                let alert = alert.bg(cx.theme().popover);
                 let quit_state = quit_state.clone();
                 let cancel_state = cancel_state.clone();
                 let enter_state = enter_state.clone();
@@ -279,8 +297,17 @@ fn main() {
             cx.text_system()
                 .add_fonts(vec![Cow::Borrowed(assets::DM_SANS)])
                 .expect("failed to register bundled DM Sans font");
+            // The theme's canvas color is translucent so the macOS vibrancy
+            // material shows through (docs/visual-redesign.md). Elsewhere the
+            // window is opaque and that alpha would composite against black,
+            // so flatten the canvas onto each mode's solid base first.
+            let theme_json: Cow<'_, str> = if vibrancy_enabled() {
+                Cow::Borrowed(TCODE_THEME)
+            } else {
+                Cow::Owned(flatten_canvas_for_opaque_window(TCODE_THEME))
+            };
             ThemeRegistry::global_mut(cx)
-                .load_themes_from_str(TCODE_THEME)
+                .load_themes_from_str(&theme_json)
                 .expect("embedded themes/tcode.json must be valid");
             let light = ThemeRegistry::global(cx).themes()["tcode Light"].clone();
             let dark = ThemeRegistry::global(cx).themes()["tcode Dark"].clone();
@@ -396,6 +423,13 @@ fn main() {
                     appears_transparent: cfg!(target_os = "macos"),
                     traffic_light_position: Some(point(px(12.), px(18.))),
                 }),
+                // macOS vibrancy: blur whatever is behind the window; theme
+                // background colors carry alpha so the material shows through.
+                window_background: if vibrancy_enabled() {
+                    WindowBackgroundAppearance::Blurred
+                } else {
+                    WindowBackgroundAppearance::Opaque
+                },
                 ..Default::default()
             };
 

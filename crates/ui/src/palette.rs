@@ -411,10 +411,12 @@ impl Render for CommandPalette {
                         .px_2()
                         .gap_2()
                         .items_center()
-                        .rounded(px(8.))
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .when(is_sel, |s| s.bg(cx.theme().accent))
-                        .hover(|s| s.bg(cx.theme().accent))
+                        .when(is_sel, |s| s.bg(cx.theme().list_active))
+                        .when(!is_sel, |s| {
+                            s.hover(|style| style.bg(cx.theme().list_hover))
+                        })
                         .child(Icon::new(item.icon.clone()).small().text_color(muted))
                         .child(
                             v_flex()
@@ -422,7 +424,7 @@ impl Render for CommandPalette {
                                 .min_w_0()
                                 .child(
                                     div()
-                                        .text_size(px(14.))
+                                        .text_size(px(15.))
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .child(item.label.clone()),
@@ -479,47 +481,44 @@ impl Render for CommandPalette {
             .child(list_content);
 
         // Centered modal card, anchored ~15% from the top over a dim backdrop.
-        let card = v_flex()
-            .w(px(640.))
-            .max_h(px(440.))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .shadow_lg()
-            .overflow_hidden()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(48.))
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(Icon::new(IconName::Search).small().text_color(muted))
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&self.query).appearance(false)),
+        let card = crate::material::overlay_contour(
+            v_flex()
+                .w(px(640.))
+                .max_h(px(440.))
+                .rounded(crate::material::radius_overlay())
+                .overflow_hidden(),
+            cx,
+        )
+        .child(
+            h_flex()
+                .flex_none()
+                .h(px(48.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .child(Icon::new(IconName::Search).small().text_color(muted))
+                .child(
+                    div().flex_1().child(
+                        Input::new(&self.query)
+                            .appearance(false)
+                            .rounded(crate::material::radius_input()),
                     ),
-            )
-            .child(list)
-            .child(
-                h_flex()
-                    .flex_none()
-                    .h(px(34.))
-                    .px_3()
-                    .gap_3()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(tcode_i18n::tr!("palette.navigate"))
-                    .child(tcode_i18n::tr!("palette.select"))
-                    .child(tcode_i18n::tr!("palette.close")),
-            );
+                ),
+        )
+        .child(list)
+        .child(
+            h_flex()
+                .flex_none()
+                .h(px(34.))
+                .px_3()
+                .gap_3()
+                .items_center()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(tcode_i18n::tr!("palette.navigate"))
+                .child(tcode_i18n::tr!("palette.select"))
+                .child(tcode_i18n::tr!("palette.close")),
+        );
 
         div()
             .id("palette-overlay")

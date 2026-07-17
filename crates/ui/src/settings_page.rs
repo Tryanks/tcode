@@ -188,10 +188,14 @@ impl SettingsPage {
         self.acp_panel
             .update(cx, |panel, cx| panel.prepare_to_open(cx));
         let panel = self.acp_panel.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let panel = panel.clone();
             dialog
                 .w(px(620.))
+                // Opaque T3 panel: the library default paints the translucent
+                // glass canvas, which lets the page bleed through.
+                .bg(cx.theme().popover)
+                .shadow_xl()
                 .title(tcode_i18n::tr!("providers.acp.add_agent").into_owned())
                 .content(move |content, _, _| content.h(px(456.)).child(panel.clone()))
         });
@@ -229,10 +233,12 @@ impl SettingsPage {
                         .items_center()
                         .gap_2()
                         .px_2()
-                        .rounded(cx.theme().radius)
+                        // Match the main sidebar: 6px rounded rect, tinted when
+                        // active, neutral hover only when not.
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .when(active, |s| s.bg(cx.theme().sidebar_accent))
-                        .hover(|s| s.bg(cx.theme().sidebar_accent))
+                        .when(active, |s| s.bg(cx.theme().list_active))
+                        .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
                         .child(Icon::new(icon).size_4().text_color(fg))
                         .child(
                             div()
@@ -254,8 +260,6 @@ impl SettingsPage {
             .w(px(NAV_WIDTH))
             .h_full()
             .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
             .child(
                 window_drag_area(
                     "settings-nav-drag",
@@ -317,28 +321,24 @@ impl SettingsPage {
                     )),
             )
             .child(
-                div()
-                    .flex_none()
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(
-                        gpui_component::h_flex()
-                            .id("settings-back")
-                            .h(px(44.))
-                            .items_center()
-                            .gap_2()
-                            .px_3()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().sidebar_accent))
-                            .text_size(px(13.))
-                            .text_color(cx.theme().sidebar_foreground)
-                            .child(Icon::new(IconName::ArrowLeft).size_4())
-                            .child(tcode_i18n::tr!("settings.back"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.app_state
-                                    .update(cx, |state, cx| state.close_settings(cx));
-                            })),
-                    ),
+                div().flex_none().child(
+                    gpui_component::h_flex()
+                        .id("settings-back")
+                        .h(px(44.))
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().sidebar_accent))
+                        .text_size(px(13.))
+                        .text_color(cx.theme().sidebar_foreground)
+                        .child(Icon::new(IconName::ArrowLeft).size_4())
+                        .child(tcode_i18n::tr!("settings.back"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.app_state
+                                .update(cx, |state, cx| state.close_settings(cx));
+                        })),
+                ),
             )
             .into_any_element()
     }
@@ -352,16 +352,14 @@ impl SettingsPage {
                 .flex_none()
                 .h(px(52.))
                 .px_6()
-                .items_center()
-                .border_b_1()
-                .border_color(cx.theme().border),
+                .items_center(),
             window,
             cx,
         )
         .child(
             div()
                 .flex_1()
-                .text_size(px(16.))
+                .text_size(px(15.))
                 .font_medium()
                 .child(tcode_i18n::tr!("settings.title")),
         )
@@ -437,36 +435,35 @@ impl SettingsPage {
 
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.app_state.read(cx).settings.clone();
-        v_flex()
-            .child(self.section_label(tcode_i18n::tr!("settings.general_section"), cx))
-            .child(self.language_row(settings.language.as_deref(), cx))
-            .child(self.theme_row(settings.theme_mode, cx))
-            .child(self.title_generation_row(cx))
-            .child(self.toggle_row(
+        let rows = vec![
+            self.language_row(settings.language.as_deref(), cx),
+            self.theme_row(settings.theme_mode, cx),
+            self.title_generation_row(cx),
+            self.toggle_row(
                 "word-wrap",
                 tcode_i18n::tr!("settings.word_wrap.title"),
                 tcode_i18n::tr!("settings.word_wrap.description"),
                 settings.word_wrap_diffs,
                 cx,
                 |s, checked| s.word_wrap_diffs = checked,
-            ))
-            .child(self.toggle_row(
+            ),
+            self.toggle_row(
                 "delete-confirm",
                 tcode_i18n::tr!("settings.delete_confirmation.title"),
                 tcode_i18n::tr!("settings.delete_confirmation.description"),
                 !settings.skip_delete_confirmation,
                 cx,
                 |s, checked| s.skip_delete_confirmation = !checked,
-            ))
-            .child(self.toggle_row(
+            ),
+            self.toggle_row(
                 "auto-open-task-panel",
                 tcode_i18n::tr!("settings.auto_open_task_panel.title"),
                 tcode_i18n::tr!("settings.auto_open_task_panel.description"),
                 settings.auto_open_task_panel,
                 cx,
                 |s, checked| s.auto_open_task_panel = checked,
-            ))
-            .child(self.toggle_row(
+            ),
+            self.toggle_row(
                 "provider-update-checks",
                 tcode_i18n::tr!("settings.provider_updates.title"),
                 tcode_i18n::tr!("settings.provider_updates.description"),
@@ -474,7 +471,11 @@ impl SettingsPage {
                 !settings.provider_update_checks_disabled,
                 cx,
                 |s, checked| s.provider_update_checks_disabled = !checked,
-            ))
+            ),
+        ];
+        v_flex()
+            .child(self.section_label(tcode_i18n::tr!("settings.general_section"), cx))
+            .child(self.grouped(rows, cx))
     }
 
     fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -499,12 +500,12 @@ impl SettingsPage {
 
         let mut header = gpui_component::h_flex()
             .w_full()
-            .pb_2()
             .items_center()
             .gap_2()
             .child(
                 div()
                     .flex_1()
+                    .pl_3()
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
@@ -514,7 +515,7 @@ impl SettingsPage {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
             header = header.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(11.))
                     .text_color(muted)
                     .child(tcode_i18n::tr!("providers.checked", when = ago).into_owned()),
             );
@@ -544,77 +545,63 @@ impl SettingsPage {
                 })),
         );
 
-        let mut list = v_flex()
-            .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .overflow_hidden();
-        for (index, (_, card)) in self.provider_cards.iter().enumerate() {
-            list = list.child(
-                v_flex()
-                    .w_full()
-                    .items_stretch()
-                    .when(index > 0, |d| {
-                        d.border_t_1().border_color(cx.theme().border)
-                    })
-                    .child(card.clone()),
-            );
-        }
-        for (_, card) in &self.acp_cards {
-            list = list.child(
-                v_flex()
-                    .w_full()
-                    .items_stretch()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(card.clone()),
-            );
-        }
+        // Native providers form one grouped list; each card renders as a row
+        // (its expanded editor nests under the row via an inset hairline).
+        let provider_rows: Vec<AnyElement> = self
+            .provider_cards
+            .iter()
+            .map(|(_, card)| card.clone().into_any_element())
+            .collect();
 
-        v_flex().child(header).child(list)
+        let mut section = v_flex()
+            .w_full()
+            .gap_3()
+            .child(header)
+            .child(self.grouped(provider_rows, cx));
+        // ACP agent cards keep their own component styling (defined outside this
+        // file); they sit beneath the native providers in the same section.
+        for (_, card) in &self.acp_cards {
+            section = section.child(card.clone());
+        }
+        section
     }
 
     /// Archived Threads: archived sessions grouped by project, each with
     /// Unarchive + Delete-permanently controls (Group A).
     fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.app_state.read(cx).archived_groups();
-        let mut col =
-            v_flex().child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx));
 
         if groups.is_empty() {
-            return col.child(
-                v_flex()
-                    .py(px(48.))
-                    .gap_1()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_medium()
-                            .child(tcode_i18n::tr!("settings.archived_empty")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("settings.archived_empty_desc")),
-                    ),
-            );
+            return v_flex()
+                .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx))
+                .child(
+                    v_flex()
+                        .py(px(48.))
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_medium()
+                                .child(tcode_i18n::tr!("settings.archived_empty")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tcode_i18n::tr!("settings.archived_empty_desc")),
+                        ),
+                );
         }
 
         let now = now_secs();
         let mut key = 0usize;
+        // Each project becomes its own grouped list, spaced from the next.
+        let mut col = v_flex()
+            .gap(px(20.))
+            .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx));
         for group in groups {
-            col = col.child(
-                div()
-                    .pt_4()
-                    .pb_1()
-                    .text_size(px(12.))
-                    .font_semibold()
-                    .text_color(cx.theme().foreground)
-                    .child(group.project.name.clone()),
-            );
+            let mut rows: Vec<AnyElement> = Vec::new();
             for meta in &group.sessions {
                 key += 1;
                 let archived_at = meta.archived_at.unwrap_or(meta.created_at);
@@ -628,7 +615,7 @@ impl SettingsPage {
                 let id_unarchive = meta.id.clone();
                 let id_delete = meta.id.clone();
                 let title = meta.title.clone();
-                col = col.child(
+                rows.push(
                     self.row_frame(cx)
                         .child(self.row_labels(meta.title.clone(), desc, cx))
                         .child(
@@ -658,9 +645,15 @@ impl SettingsPage {
                                             );
                                         })),
                                 ),
-                        ),
+                        )
+                        .into_any_element(),
                 );
             }
+            col = col.child(
+                v_flex()
+                    .child(self.section_label(group.project.name.clone(), cx))
+                    .child(self.grouped(rows, cx)),
+            );
         }
         col
     }
@@ -703,14 +696,52 @@ impl SettingsPage {
 
     // -- row builders -------------------------------------------------------
 
+    /// A group's header: 11px muted caption sitting above its container.
     fn section_label(&self, label: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
         div()
-            .pb_2()
+            .pl_3()
+            .pb(px(6.))
             .text_size(px(11.))
             .font_medium()
             .text_color(cx.theme().muted_foreground)
             .child(label.into())
             .into_any_element()
+    }
+
+    /// One grouped-list container: a clean box on the paper plane — popover
+    /// fill, a single hairline border, input-radius corners, no shadow.
+    fn group(&self, cx: &Context<Self>) -> gpui::Div {
+        v_flex()
+            .w_full()
+            .rounded(crate::material::radius_input())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .overflow_hidden()
+    }
+
+    /// Inset hairline between two rows — flush right, indented past the row's
+    /// left padding so it never reads as a full-bleed rule.
+    fn row_divider(&self, cx: &Context<Self>) -> AnyElement {
+        div()
+            .w_full()
+            .pl_3()
+            .child(div().w_full().h(px(1.)).bg(cx.theme().border))
+            .into_any_element()
+    }
+
+    /// Assemble rows into a group, inset-divided between neighbours (never after
+    /// the last).
+    fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
+        let mut group = self.group(cx);
+        let last = rows.len().saturating_sub(1);
+        for (index, row) in rows.into_iter().enumerate() {
+            group = group.child(row);
+            if index != last {
+                group = group.child(self.row_divider(cx));
+            }
+        }
+        group
     }
 
     /// Left description block (bold title + muted description).
@@ -724,8 +755,7 @@ impl SettingsPage {
             .flex_1()
             .min_w_0()
             .gap_0p5()
-            .pr_4()
-            .child(div().text_size(px(14.)).font_medium().child(title.into()))
+            .child(div().text_size(px(15.)).font_medium().child(title.into()))
             .child(
                 div()
                     .text_size(px(13.))
@@ -734,13 +764,16 @@ impl SettingsPage {
             )
     }
 
-    fn row_frame(&self, cx: &Context<Self>) -> gpui::Div {
+    /// A single group row: transparent, ~44px min height, label left / control
+    /// right. The group container owns the fill and border.
+    fn row_frame(&self, _cx: &Context<Self>) -> gpui::Div {
         gpui_component::h_flex()
             .w_full()
-            .py_4()
+            .min_h(px(44.))
+            .px_3()
+            .py_2()
+            .gap_3()
             .items_center()
-            .border_t_1()
-            .border_color(cx.theme().border)
     }
 
     fn toggle_row(
@@ -813,7 +846,7 @@ impl SettingsPage {
                         .py_1()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(crate::material::radius_button())
                         .text_size(px(13.))
                         .cursor_pointer()
                         .hover(|s| s.bg(cx.theme().accent))
@@ -828,31 +861,35 @@ impl SettingsPage {
                         })
                         .into_any_element()
                 };
-                v_flex()
-                    .p_1()
-                    .min_w(px(160.))
-                    .gap_0p5()
-                    .child(option(
-                        ThemeMode::System,
-                        tcode_i18n::tr!("settings.theme.system").into_owned().into(),
-                        mode == ThemeMode::System,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Light,
-                        tcode_i18n::tr!("settings.theme.light").into_owned().into(),
-                        mode == ThemeMode::Light,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Dark,
-                        tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
-                        mode == ThemeMode::Dark,
-                        &this,
-                        cx,
-                    ))
+                crate::material::overlay_contour(
+                    v_flex()
+                        .p_1()
+                        .min_w(px(160.))
+                        .gap_0p5()
+                        .child(option(
+                            ThemeMode::System,
+                            tcode_i18n::tr!("settings.theme.system").into_owned().into(),
+                            mode == ThemeMode::System,
+                            &this,
+                            cx,
+                        ))
+                        .child(option(
+                            ThemeMode::Light,
+                            tcode_i18n::tr!("settings.theme.light").into_owned().into(),
+                            mode == ThemeMode::Light,
+                            &this,
+                            cx,
+                        ))
+                        .child(option(
+                            ThemeMode::Dark,
+                            tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
+                            mode == ThemeMode::Dark,
+                            &this,
+                            cx,
+                        )),
+                    cx,
+                )
+                .rounded(crate::material::radius_overlay())
             });
 
         self.row_frame(cx)
@@ -892,7 +929,7 @@ impl SettingsPage {
                             .py_1()
                             .gap_2()
                             .items_center()
-                            .rounded(px(6.))
+                            .rounded(crate::material::radius_button())
                             .text_size(px(13.))
                             .cursor_pointer()
                             .hover(|s| s.bg(cx.theme().accent))
@@ -910,21 +947,25 @@ impl SettingsPage {
                                 popover.update(cx, |state, cx| state.dismiss(window, cx));
                             })
                     };
-                    v_flex()
-                        .p_1()
-                        .min_w(px(160.))
-                        .gap_0p5()
-                        .child(option(None, "settings.language.system", cx))
-                        .child(option(
-                            Some(LANGUAGE_ENGLISH),
-                            "settings.language.english",
-                            cx,
-                        ))
-                        .child(option(
-                            Some(LANGUAGE_SIMPLIFIED_CHINESE),
-                            "settings.language.chinese",
-                            cx,
-                        ))
+                    crate::material::overlay_contour(
+                        v_flex()
+                            .p_1()
+                            .min_w(px(160.))
+                            .gap_0p5()
+                            .child(option(None, "settings.language.system", cx))
+                            .child(option(
+                                Some(LANGUAGE_ENGLISH),
+                                "settings.language.english",
+                                cx,
+                            ))
+                            .child(option(
+                                Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                                "settings.language.chinese",
+                                cx,
+                            )),
+                        cx,
+                    )
+                    .rounded(crate::material::radius_overlay())
                 });
         self.row_frame(cx)
             .child(self.row_labels(
@@ -953,6 +994,7 @@ impl Render for SettingsPage {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .bg(crate::material::content_surface(cx))
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
             )

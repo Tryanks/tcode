@@ -207,7 +207,7 @@ impl Render for ProviderModelPicker {
                         div()
                             .flex_none()
                             .p_4()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .child(tcode_i18n::tr!("model_picker.no_models")),
                     );
@@ -227,7 +227,7 @@ impl Render for ProviderModelPicker {
                                 .py_1p5()
                                 .gap_2()
                                 .items_center()
-                                .rounded(px(6.))
+                                .rounded(crate::material::radius_button())
                                 .cursor_pointer()
                                 .hover(|style| style.bg(cx.theme().accent))
                                 .child(provider_glyph(option.provider).small())
@@ -263,12 +263,7 @@ impl Render for ProviderModelPicker {
                     }
                 }
 
-                let mut tabs = h_flex()
-                    .w_full()
-                    .p_1()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border);
+                let mut tabs = h_flex().w_full().p_1().gap_1();
                 for (tab_index, provider) in [ProviderKind::Codex, ProviderKind::ClaudeCode]
                     .into_iter()
                     .enumerate()
@@ -284,12 +279,12 @@ impl Render for ProviderModelPicker {
                             .items_center()
                             .justify_center()
                             .gap_1p5()
-                            .rounded(px(6.))
+                            .rounded(crate::material::radius_button())
                             .cursor_pointer()
                             .when(is_selected, |tab| tab.bg(cx.theme().accent).font_medium())
                             .hover(|tab| tab.bg(cx.theme().accent))
                             .child(provider_glyph(provider).xsmall())
-                            .child(div().text_size(px(12.)).child(provider_label(provider)))
+                            .child(div().text_size(px(13.)).child(provider_label(provider)))
                             .on_click(move |_, _, cx| {
                                 picker.update(cx, |picker, cx| {
                                     picker.selected_provider = provider;
@@ -300,13 +295,21 @@ impl Render for ProviderModelPicker {
                     );
                 }
 
-                v_flex().w(px(390.)).child(tabs).child(
-                    div()
-                        .w_full()
-                        .h(px(300.))
-                        .overflow_y_scrollbar()
-                        .child(div().size_full().child(rows)),
+                crate::material::overlay_contour(
+                    v_flex()
+                        .w(px(390.))
+                        .child(tabs)
+                        .child(crate::material::faded_hairline(cx))
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(300.))
+                                .overflow_y_scrollbar()
+                                .child(div().size_full().child(rows)),
+                        ),
+                    cx,
                 )
+                .rounded(crate::material::radius_overlay())
             })
     }
 }

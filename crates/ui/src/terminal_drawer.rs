@@ -30,6 +30,8 @@ use term::{
 
 use tcode_runtime::app::{AppState, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 
+use crate::material;
+
 const FONT_SIZE: f32 = 13.;
 #[cfg(target_os = "macos")]
 const TERMINAL_FONT_FAMILY: &str = "Menlo";
@@ -1020,7 +1022,7 @@ impl TerminalDrawer {
             .px(px(PANE_PADDING_X))
             .py(px(PANE_PADDING_Y))
             .border_1()
-            .rounded(cx.theme().radius)
+            .rounded(material::radius_card())
             .border_color(
                 if self
                     .app_state
@@ -1285,18 +1287,12 @@ impl Render for TerminalDrawer {
                     .h(px(25.))
                     .gap(px(2.))
                     .px_2()
-                    .rounded_t(px(5.))
+                    .rounded(material::radius_button())
                     .cursor_pointer()
                     .bg(if selected {
-                        cx.theme().muted.opacity(0.72)
+                        cx.theme().list_active
                     } else {
                         cx.theme().background.opacity(0.)
-                    })
-                    .border_b_1()
-                    .border_color(if selected {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border.opacity(0.)
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.app_state
@@ -1318,7 +1314,7 @@ impl Render for TerminalDrawer {
                     .when(*bell, |this| {
                         this.child(
                             div()
-                                .text_size(px(10.))
+                                .text_size(px(11.))
                                 .text_color(cx.theme().warning)
                                 .child("●"),
                         )
@@ -1349,9 +1345,6 @@ impl Render for TerminalDrawer {
             .px_2()
             .gap_1()
             .items_center()
-            .border_t_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(tab_strip)
             .child(div().flex_1())
             .when(active_exited, |this| {
@@ -1494,7 +1487,6 @@ impl Render for TerminalDrawer {
         v_flex()
             .size_full()
             .min_h_0()
-            .bg(cx.theme().background)
             .font_family(TERMINAL_FONT_FAMILY)
             .text_size(px(FONT_SIZE))
             .on_action(cx.listener(Self::on_terminal_copy))

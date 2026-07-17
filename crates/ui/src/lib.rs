@@ -9,6 +9,7 @@ mod composer_trigger;
 mod context_meter;
 mod diff_panel;
 pub mod git;
+pub mod material;
 mod orchestrate_settings;
 mod palette;
 mod plan_panel;
