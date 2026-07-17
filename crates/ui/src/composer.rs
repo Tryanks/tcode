@@ -434,6 +434,10 @@ fn mime_from_path(path: &std::path::Path) -> String {
 pub struct Composer {
     app_state: Entity<AppState>,
     input: Entity<InputState>,
+    /// Dedicated free-form answer field shown inside an agent question card.
+    /// Keeping it separate from the turn composer makes the pending question
+    /// and the destination of typed text unambiguous.
+    user_input_custom: Entity<InputState>,
     /// Unsent text is isolated by persisted thread or project New thread page.
     text_cache: ComposerTextCache,
     model_search: Entity<InputState>,
@@ -504,6 +508,11 @@ impl Composer {
         let model_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder(tcode_i18n::tr!("composer.search_models"))
         });
+        let user_input_custom = cx.new(|cx| {
+            InputState::new(window, cx)
+                .submit_on_enter(true)
+                .placeholder(tcode_i18n::tr!("userinput.custom_placeholder"))
+        });
 
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
@@ -539,6 +548,17 @@ impl Composer {
                     _ => {}
                 }
             }),
+            cx.subscribe_in(
+                &user_input_custom,
+                window,
+                |this, input, event, window, cx| match event {
+                    InputEvent::PressEnter { shift: false, .. } => {
+                        this.submit_custom_user_input(input, window, cx);
+                    }
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            ),
             // Live-filter the model picker as the user types in its search box.
             cx.subscribe(&model_search, |_, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -550,6 +570,7 @@ impl Composer {
         Self {
             app_state,
             input,
+            user_input_custom,
             text_cache: ComposerTextCache::default(),
             model_search,
             picker_rail: None,
@@ -649,26 +670,8 @@ impl Composer {
         // While a user-input question is pending, normal send is suppressed
         // (S1 §7). Typed text becomes the current question's custom answer and
         // flows through the same advance-or-submit path as clicking an option.
-        if let Some((request_id, questions)) = self.pending_user_input(cx) {
-            let text = input.read(cx).value().trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-            let index = self
-                .ui_question_index
-                .min(questions.len().saturating_sub(1));
-            if let Some(question) = questions.get(index) {
-                let entry = self.ui_selections.entry(question.id.clone()).or_default();
-                if question.multi_select {
-                    entry.push(text);
-                } else {
-                    *entry = vec![text];
-                }
-            }
-            self.input
-                .update(cx, |state, cx| state.set_value("", window, cx));
-            self.ui_advance_or_submit(&questions, request_id, window, cx);
-            cx.notify();
+        if self.pending_user_input(cx).is_some() {
+            self.submit_custom_user_input(input, window, cx);
             return;
         }
         let text = input.read(cx).value().trim().to_string();
@@ -2055,7 +2058,7 @@ impl Composer {
 
     /// Keep the per-request question state in sync: reset the index/selections
     /// when a new request arrives (or the pending one resolves).
-    fn sync_user_input_state(&mut self, cx: &mut Context<Self>) {
+    fn sync_user_input_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.app_state.read(cx).active.as_ref().and_then(|a| {
             a.timeline
                 .pending_user_input
@@ -2066,6 +2069,9 @@ impl Composer {
             self.ui_request_id = current;
             self.ui_question_index = 0;
             self.ui_selections.clear();
+            self.user_input_custom.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
         }
     }
 
@@ -2207,6 +2213,52 @@ impl Composer {
             .overflow_y_scroll()
             .child(options_content);
 
+        let custom_input = self.user_input_custom.clone();
+        let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
+        let custom_answer =
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(cx.theme().input)
+                .bg(cx.theme().popover)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.user_input_custom).appearance(false)),
+                )
+                .child(
+                    div()
+                        .id("ui-custom-answer-submit")
+                        .size(px(28.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if custom_has_text {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().muted
+                        })
+                        .cursor_pointer()
+                        .when(custom_has_text, |this| this.hover(|this| this.opacity(0.9)))
+                        .child(Icon::new(IconName::ArrowUp).xsmall().text_color(
+                            if custom_has_text {
+                                cx.theme().primary_foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            },
+                        ))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.submit_custom_user_input(&custom_input, window, cx);
+                        })),
+                );
+
         // Actions row: navigation only. Answers submit themselves — a
         // single-select click that completes the set submits it, so the only
         // finishing affordance left is Done on a multi-select question (clicks
@@ -2283,6 +2335,7 @@ impl Composer {
             .child(header)
             .child(div().text_size(px(15.)).child(question.question.clone()))
             .child(options)
+            .child(custom_answer)
             .when(multi, |this| {
                 this.child(
                     div()
@@ -2313,6 +2366,35 @@ impl Composer {
         } else {
             *entry = vec![label];
         }
+        cx.notify();
+    }
+
+    fn submit_custom_user_input(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((request_id, questions)) = self.pending_user_input(cx) else {
+            return;
+        };
+        let text = input.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let index = self
+            .ui_question_index
+            .min(questions.len().saturating_sub(1));
+        if let Some(question) = questions.get(index) {
+            let entry = self.ui_selections.entry(question.id.clone()).or_default();
+            if question.multi_select {
+                entry.push(text);
+            } else {
+                *entry = vec![text];
+            }
+        }
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.ui_advance_or_submit(&questions, request_id, window, cx);
         cx.notify();
     }
 
@@ -2366,7 +2448,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let custom = self.input.read(cx).value().trim().to_string();
+        let custom = self.user_input_custom.read(cx).value().trim().to_string();
         let custom = if custom.is_empty() {
             None
         } else {
@@ -2378,7 +2460,7 @@ impl Composer {
             self.ui_question_index,
             custom,
         );
-        self.input
+        self.user_input_custom
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_selections.clear();
         self.ui_question_index = 0;
@@ -2942,7 +3024,7 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_user_input_state(cx);
+        self.sync_user_input_state(window, cx);
         self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
         self.apply_debug_seed(window, cx);
