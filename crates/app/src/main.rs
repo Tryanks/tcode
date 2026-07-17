@@ -421,7 +421,7 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: None,
                     appears_transparent: cfg!(target_os = "macos"),
-                    traffic_light_position: Some(point(px(12.), px(18.))),
+                    traffic_light_position: Some(point(px(12.), px(19.))),
                 }),
                 // macOS vibrancy: blur whatever is behind the window; theme
                 // background colors carry alpha so the material shows through.
