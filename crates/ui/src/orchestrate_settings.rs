@@ -32,6 +32,7 @@ struct IdentityRowState {
 struct ChildRowState {
     provider: ProviderKind,
     model: String,
+    profile_id: Option<String>,
     effort: Entity<InputState>,
     description: Entity<InputState>,
 }
@@ -191,6 +192,7 @@ impl OrchestrateSettingsPanel {
             self.child_rows.push(ChildRowState {
                 provider: entry.provider,
                 model: entry.model,
+                profile_id: entry.profile_id,
                 effort,
                 description,
             });
@@ -336,6 +338,7 @@ impl OrchestrateSettingsPanel {
         let profile = OrchestrateChildModel {
             provider: option.provider,
             model: option.id.clone(),
+            profile_id: option.profile_id.clone(),
             enabled: true,
             effort: option.effort.clone(),
             description: OrchestrateSettings::builtin_child_definition(
@@ -352,6 +355,7 @@ impl OrchestrateSettingsPanel {
                     entry.provider == profile.provider
                         && entry.model == profile.model
                         && entry.effort == profile.effort
+                        && entry.profile_id == profile.profile_id
                 }) {
                     settings.orchestrate.child_models.push(profile);
                 }
@@ -468,10 +472,16 @@ impl OrchestrateSettingsPanel {
         }
     }
 
-    fn model_name(&self, provider: ProviderKind, model: &str, cx: &App) -> String {
+    fn model_name(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+        profile_id: Option<&str>,
+        cx: &App,
+    ) -> String {
         self.identity_model_picker
             .read(cx)
-            .display_name(provider, model, cx)
+            .display_name(provider, model, profile_id, cx)
     }
 
     /// A status message in the shared rail language: a soft neutral fill with a
@@ -674,7 +684,7 @@ impl OrchestrateSettingsPanel {
         // Per-model identities: one grouped list, rows split by inset hairlines.
         let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.identity_rows.iter().enumerate() {
-            let name = self.model_name(row.provider, &row.model, cx);
+            let name = self.model_name(row.provider, &row.model, None, cx);
             let provider = row.provider;
             let model = row.model.clone();
             let reset_model = row.model.clone();
@@ -775,10 +785,28 @@ impl OrchestrateSettingsPanel {
                 continue;
             };
             let provider = row.provider;
-            let name = self.model_name(provider, &row.model, cx);
+            let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
             let effort = profile.effort.clone().unwrap_or_else(|| {
                 tcode_i18n::tr!("orchestrate.children.effort_default").into_owned()
             });
+            let subtitle = if let Some(id) = row.profile_id.as_deref() {
+                let profile_settings = self.app_state.read(cx).profile_settings(id);
+                let profile_name = profile_settings
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(id);
+                format!(
+                    "{} · {} · {} · {}",
+                    provider_label(provider),
+                    row.model,
+                    effort,
+                    profile_name
+                )
+            } else {
+                format!("{} · {} · {}", provider_label(provider), row.model, effort)
+            };
             rows.push(
                 v_flex()
                     .w_full()
@@ -801,12 +829,7 @@ impl OrchestrateSettingsPanel {
                                             .font_family("monospace")
                                             .text_size(px(11.))
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(format!(
-                                                "{} · {} · {}",
-                                                provider_label(provider),
-                                                row.model,
-                                                effort,
-                                            )),
+                                            .child(subtitle),
                                     ),
                             )
                             .child(

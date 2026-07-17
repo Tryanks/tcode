@@ -88,6 +88,7 @@ impl SettingsPage {
                 "title-model-dropdown",
                 title_generation.provider,
                 title_generation.model,
+                title_generation.profile_id,
                 cx,
             )
         });
@@ -95,7 +96,12 @@ impl SettingsPage {
             cx.observe(&app_state, |this, _, cx| {
                 let selection = this.app_state.read(cx).settings.title_generation.clone();
                 this.title_model_picker.update(cx, |picker, cx| {
-                    picker.set_selected(selection.provider, selection.model, cx);
+                    picker.set_selected(
+                        selection.provider,
+                        selection.model,
+                        selection.profile_id,
+                        cx,
+                    );
                 });
                 cx.notify();
             }),
@@ -105,6 +111,7 @@ impl SettingsPage {
                     move |settings| {
                         settings.title_generation.provider = selected.provider;
                         settings.title_generation.model = selected.id;
+                        settings.title_generation.profile_id = selected.profile_id;
                     },
                     cx,
                 );

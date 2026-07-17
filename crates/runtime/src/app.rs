@@ -1028,6 +1028,7 @@ impl AppState {
         provider: ProviderKind,
         model: Option<String>,
         effort: Option<String>,
+        profile_id: Option<String>,
         approval_mode: ApprovalMode,
         title: String,
         cwd: Option<PathBuf>,
@@ -1064,7 +1065,16 @@ impl AppState {
             }
             None => parent.cwd.clone(),
         };
-        let meta = build_child_meta(&parent, provider, model, effort, approval_mode, title, cwd);
+        let mut meta = build_child_meta(
+            &parent,
+            provider,
+            model,
+            effort,
+            profile_id,
+            approval_mode,
+            cwd,
+        );
+        meta.title = title;
         self.store
             .upsert_meta(&meta)
             .map_err(|err| format!("failed to persist child session: {err}"))?;
@@ -1102,23 +1112,31 @@ impl AppState {
                 provider,
                 model,
                 effort,
+                profile,
                 access,
                 title,
                 brief,
                 cwd,
             } => {
-                let (provider, model, effort) = resolve_orchestrate_dispatch(
+                let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
                     &self.settings.orchestrate,
                     &provider,
                     model.as_deref(),
                     effort.as_deref(),
+                    profile.as_deref(),
                 )?;
+                if let Some(id) = profile_id.as_deref()
+                    && self.settings.resolved_profile(id).is_none()
+                {
+                    return Err(format!("unknown profile: {id}"));
+                }
                 let approval_mode = resolve_dispatch_access(access.as_deref())?;
                 let id = self.create_child_session(
                     &parent_id,
                     provider,
                     Some(model),
                     effort,
+                    profile_id,
                     approval_mode,
                     title,
                     cwd.map(PathBuf::from),
@@ -6038,7 +6056,7 @@ fn render_orchestrate_configuration(
         text.push_str(identity);
     }
     text.push_str(
-        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. The definitions below are user-configured routing guidance.\n",
+        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. When an entry names a `profile`, pass it exactly as listed. The definitions below are user-configured routing guidance.\n",
     );
     if !settings.child_models.iter().any(|child| child.enabled) {
         text.push_str("No child models are enabled. Work without dispatching until the user enables one in Settings → Orchestrate.");
@@ -6051,13 +6069,24 @@ fn render_orchestrate_configuration(
             ProviderKind::Acp => "acp",
         };
         let effort = child.effort.as_deref().unwrap_or("provider default");
-        text.push_str(&format!(
-            "\n#### `{}` / `{}` — effort `{}`\n\n{}\n",
-            escape_markdown_inline(provider),
-            escape_markdown_inline(&child.model),
-            escape_markdown_inline(effort),
-            child.description.trim(),
-        ));
+        if let Some(profile_id) = child.profile_id.as_deref() {
+            text.push_str(&format!(
+                "\n#### `{}` / `{}` — effort `{}` — profile `{}`\n\n{}\n",
+                escape_markdown_inline(provider),
+                escape_markdown_inline(&child.model),
+                escape_markdown_inline(effort),
+                escape_markdown_inline(profile_id),
+                child.description.trim(),
+            ));
+        } else {
+            text.push_str(&format!(
+                "\n#### `{}` / `{}` — effort `{}`\n\n{}\n",
+                escape_markdown_inline(provider),
+                escape_markdown_inline(&child.model),
+                escape_markdown_inline(effort),
+                child.description.trim(),
+            ));
+        }
     }
     text
 }
@@ -6074,7 +6103,8 @@ fn resolve_orchestrate_dispatch(
     provider: &str,
     model: Option<&str>,
     effort: Option<&str>,
-) -> Result<(ProviderKind, String, Option<String>), String> {
+    profile: Option<&str>,
+) -> Result<(ProviderKind, String, Option<String>, Option<String>), String> {
     let provider = match provider.trim().to_ascii_lowercase().as_str() {
         "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
         "codex" => ProviderKind::Codex,
@@ -6088,14 +6118,26 @@ fn resolve_orchestrate_dispatch(
     };
     let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
     let requested_effort = effort.map(str::trim).filter(|effort| !effort.is_empty());
-    let profile = match requested_model {
-        Some(model) => settings.enabled_child_profile(provider, model, requested_effort),
-        None => settings.child_models.iter().find(|entry| {
-            entry.enabled
-                && entry.provider == provider
-                && !entry.model.trim().is_empty()
-                && entry.matches_effort(requested_effort)
-        }),
+    let requested_profile = profile.map(str::trim).filter(|profile| !profile.is_empty());
+    let candidates: Vec<_> = settings
+        .enabled_child_profiles(provider, requested_model, requested_effort)
+        .filter(|entry| {
+            requested_profile.is_none_or(|requested| {
+                entry
+                    .profile_id
+                    .as_deref()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(requested))
+            })
+        })
+        .collect();
+    let child = if requested_profile.is_some() {
+        candidates.first().copied()
+    } else {
+        candidates
+            .iter()
+            .find(|entry| entry.profile_id.is_none())
+            .copied()
+            .or_else(|| candidates.first().copied())
     }
     .ok_or_else(|| {
         let enabled = settings
@@ -6103,11 +6145,15 @@ fn resolve_orchestrate_dispatch(
             .iter()
             .filter(|entry| entry.enabled && entry.provider == provider)
             .map(|entry| {
-                format!(
+                let mut option = format!(
                     "{} (effort {})",
                     entry.model,
                     entry.effort.as_deref().unwrap_or("provider default")
-                )
+                );
+                if let Some(profile_id) = entry.profile_id.as_deref() {
+                    option.push_str(&format!(", profile {profile_id}"));
+                }
+                option
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -6115,13 +6161,21 @@ fn resolve_orchestrate_dispatch(
         let effort = requested_effort
             .map(|effort| format!(" (effort {effort})"))
             .unwrap_or_default();
+        let profile = requested_profile
+            .map(|profile| format!(" under profile {profile}"))
+            .unwrap_or_default();
         format!(
-            "no enabled child profile matches {requested}{effort} under {}; enabled profiles: {}",
+            "no enabled child profile matches {requested}{effort}{profile} under {}; enabled profiles: {}",
             provider_name(provider),
             if enabled.is_empty() { "none" } else { &enabled }
         )
     })?;
-    Ok((provider, profile.model.clone(), profile.effort.clone()))
+    Ok((
+        provider,
+        child.model.clone(),
+        child.effort.clone(),
+        child.profile_id.clone(),
+    ))
 }
 
 fn resolve_dispatch_access(access: Option<&str>) -> Result<ApprovalMode, String> {
@@ -6151,14 +6205,14 @@ fn build_child_meta(
     provider: ProviderKind,
     model: Option<String>,
     effort: Option<String>,
+    profile_id: Option<String>,
     approval_mode: ApprovalMode,
-    title: String,
     cwd: PathBuf,
 ) -> SessionMeta {
     let mut meta = SessionMeta::new(provider, cwd, model);
-    meta.title = title;
     meta.project_id = parent.project_id.clone();
     meta.parent_session_id = Some(parent.id.clone());
+    meta.profile_id = profile_id;
     meta.approval_mode = approval_mode;
     if let Some(effort) = effort {
         meta.option_selections.push(OptionSelection {
@@ -6418,6 +6472,10 @@ fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMeta {
     let title = &settings.title_generation;
     let model = (!title.model.trim().is_empty()).then(|| title.model.trim().to_string());
     let mut meta = SessionMeta::new(title.provider, cwd, model);
+    meta.profile_id = title
+        .profile_id
+        .clone()
+        .filter(|id| settings.resolved_profile(id).is_some());
     meta.approval_mode = ApprovalMode::Supervised;
     meta.interaction_mode = InteractionMode::Build;
     meta.orchestrate_enabled = false;
@@ -6697,9 +6755,18 @@ mod tests {
         let mut settings = Settings::default();
         settings.title_generation.provider = ProviderKind::ClaudeCode;
         settings.title_generation.model = "claude-haiku-4-5".into();
+        settings.profiles.insert(
+            "work-claude".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings::default(),
+            },
+        );
+        settings.title_generation.profile_id = Some("work-claude".into());
         let custom = title_session_meta(&settings, PathBuf::from("/tmp/project"));
         assert_eq!(custom.provider, ProviderKind::ClaudeCode);
         assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(custom.profile_id.as_deref(), Some("work-claude"));
         assert_eq!(custom.approval_mode, ApprovalMode::Supervised);
         assert_eq!(custom.interaction_mode, InteractionMode::Build);
         assert!(!custom.orchestrate_enabled);
@@ -6707,6 +6774,10 @@ mod tests {
             title_turn_options().effort.as_deref(),
             Some(AI_TITLE_REASONING_EFFORT)
         );
+
+        settings.title_generation.profile_id = Some("deleted-profile".into());
+        let fallback = title_session_meta(&settings, PathBuf::from("/tmp/project"));
+        assert_eq!(fallback.profile_id, None);
     }
 
     #[gpui::test]
@@ -6965,32 +7036,69 @@ mod tests {
 
     #[test]
     fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
-        let settings = OrchestrateSettings::default();
+        let mut settings = OrchestrateSettings::default();
+        let mut custom_profile = settings.child_models[0].clone();
+        custom_profile.profile_id = Some("kimi".into());
+        settings.child_models.push(custom_profile);
         assert_eq!(
-            resolve_orchestrate_dispatch(&settings, "codex", None, None).unwrap(),
+            resolve_orchestrate_dispatch(&settings, "codex", None, None, None).unwrap(),
             (
                 ProviderKind::Codex,
                 "gpt-5.6-sol".into(),
-                Some("medium".into())
+                Some("medium".into()),
+                None
             )
         );
         assert_eq!(
             resolve_orchestrate_dispatch(
                 &settings,
+                "codex",
+                Some("gpt-5.6-sol"),
+                Some("medium"),
+                Some("KIMI"),
+            )
+            .unwrap(),
+            (
+                ProviderKind::Codex,
+                "gpt-5.6-sol".into(),
+                Some("medium".into()),
+                Some("kimi".into()),
+            )
+        );
+        let unknown_profile = resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-5.6-sol"),
+            Some("medium"),
+            Some("missing"),
+        )
+        .unwrap_err();
+        assert!(unknown_profile.contains("profile missing"));
+        assert!(unknown_profile.contains("profile kimi"));
+        assert_eq!(
+            resolve_orchestrate_dispatch(
+                &settings,
                 "claude_code",
                 Some("claude-opus-4-8"),
-                Some(" HIGH ")
+                Some(" HIGH "),
+                None,
             )
             .unwrap(),
             (
                 ProviderKind::ClaudeCode,
                 "claude-opus-4-8".into(),
-                Some("high".into())
+                Some("high".into()),
+                None
             )
         );
-        let wrong_effort =
-            resolve_orchestrate_dispatch(&settings, "codex", Some("gpt-5.6-sol"), Some("xhigh"))
-                .unwrap_err();
+        let wrong_effort = resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-5.6-sol"),
+            Some("xhigh"),
+            None,
+        )
+        .unwrap_err();
         assert!(
             wrong_effort.contains(
                 "no enabled child profile matches gpt-5.6-sol (effort xhigh) under codex"
@@ -6999,14 +7107,14 @@ mod tests {
         assert!(wrong_effort.contains("gpt-5.6-sol (effort medium)"));
         assert!(wrong_effort.contains("gpt-5.6-sol (effort max)"));
         let denied =
-            resolve_orchestrate_dispatch(&settings, "claude", Some("claude-haiku-4-5"), None)
+            resolve_orchestrate_dispatch(&settings, "claude", Some("claude-haiku-4-5"), None, None)
                 .unwrap_err();
         assert!(denied.contains("no enabled child profile matches"));
 
         let mut empty = settings;
         empty.child_models.clear();
         assert!(
-            resolve_orchestrate_dispatch(&empty, "codex", None, None)
+            resolve_orchestrate_dispatch(&empty, "codex", None, None, None)
                 .unwrap_err()
                 .contains("enabled profiles: none")
         );
@@ -7898,14 +8006,14 @@ mod tests {
             ProviderKind::Codex,
             Some("gpt-test".into()),
             Some("high".into()),
+            Some("work-codex".into()),
             ApprovalMode::AutoAcceptEdits,
-            "Research".into(),
             PathBuf::from("/p/sub"),
         );
         assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(child.project_id.as_deref(), Some("project"));
         assert_eq!(child.model.as_deref(), Some("gpt-test"));
-        assert_eq!(child.title, "Research");
+        assert_eq!(child.profile_id.as_deref(), Some("work-codex"));
         assert_eq!(child.approval_mode, ApprovalMode::AutoAcceptEdits);
         assert_eq!(child.option_selections.len(), 1);
         assert_eq!(child.option_selections[0].id, "reasoningEffort");
