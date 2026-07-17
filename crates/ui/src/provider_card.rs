@@ -508,7 +508,8 @@ impl ProviderCard {
 
         h_flex()
             .w_full()
-            .px_4()
+            .min_h(px(44.))
+            .px_3()
             .py_3()
             .gap_3()
             .items_center()
@@ -1158,26 +1159,23 @@ impl ProviderCard {
 
 impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.app_state.read(cx);
-        let enabled = state.provider_enabled(self.provider);
-        let summary = crate::provider_status::summarize(
-            self.provider,
-            state.provider_snapshot(self.provider),
-            enabled,
-        );
-        let rail = match summary.dot {
-            StatusDot::Success => cx.theme().success,
-            StatusDot::Warning | StatusDot::Amber => cx.theme().warning,
-            StatusDot::Error => cx.theme().danger,
-        };
+        // A row inside the providers group — the group owns the fill and border;
+        // the expanded editor nests under the row, set off by an inset hairline.
         v_flex()
             .w_full()
-            .rounded(crate::material::radius_card())
-            .border_l_2()
-            .border_color(rail)
-            .bg(cx.theme().secondary)
             .child(self.render_header(cx))
-            .when(self.expanded, |this| this.child(self.render_details(cx)))
+            .when(self.expanded, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .child(
+                            div()
+                                .pl_4()
+                                .child(div().w_full().h(px(1.)).bg(cx.theme().border)),
+                        )
+                        .child(self.render_details(cx)),
+                )
+            })
     }
 }
 

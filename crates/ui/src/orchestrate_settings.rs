@@ -534,8 +534,39 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
+    /// One grouped-list container: popover fill, a single hairline border,
+    /// input-radius corners, no shadow.
+    fn group(&self, cx: &Context<Self>) -> gpui::Div {
+        v_flex()
+            .w_full()
+            .rounded(crate::material::radius_input())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .overflow_hidden()
+    }
+
+    /// Assemble rows into a group, split by inset hairlines (indented past the
+    /// row's left padding, never after the last row).
+    fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
+        let mut group = self.group(cx);
+        let last = rows.len().saturating_sub(1);
+        for (index, row) in rows.into_iter().enumerate() {
+            group = group.child(row);
+            if index != last {
+                group = group.child(
+                    div()
+                        .w_full()
+                        .pl_3()
+                        .child(div().w_full().h(px(1.)).bg(cx.theme().border)),
+                );
+            }
+        }
+        group
+    }
+
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut section = v_flex()
+        let section = v_flex()
             .w_full()
             .gap_3()
             .child(self.section_heading(
@@ -544,44 +575,46 @@ impl OrchestrateSettingsPanel {
                 None,
                 cx,
             ))
+            // Generic identity: a single-row group holding the header, help and
+            // its text area — no slab fill.
             .child(
-                v_flex()
-                    .w_full()
-                    .gap_1p5()
-                    .p_3()
-                    .rounded(crate::material::radius_card())
-                    .bg(cx.theme().secondary)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(13.))
-                                    .font_medium()
-                                    .child(tcode_i18n::tr!("orchestrate.generic_identity.title")),
-                            )
-                            .child(
-                                Button::new("reset-generic-orchestrator-identity")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Undo)
-                                    .label(tcode_i18n::tr!("orchestrate.restore_default"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.reset_generic_identity(window, cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("orchestrate.generic_identity.description")),
-                    )
-                    .child(
-                        Input::new(&self.generic_identity).rounded(crate::material::radius_input()),
-                    ),
+                self.group(cx).child(
+                    v_flex()
+                        .w_full()
+                        .gap_1p5()
+                        .px_3()
+                        .py_3()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .child(
+                                    div().flex_1().text_size(px(13.)).font_medium().child(
+                                        tcode_i18n::tr!("orchestrate.generic_identity.title"),
+                                    ),
+                                )
+                                .child(
+                                    Button::new("reset-generic-orchestrator-identity")
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Undo)
+                                        .label(tcode_i18n::tr!("orchestrate.restore_default"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.reset_generic_identity(window, cx);
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tcode_i18n::tr!("orchestrate.generic_identity.description")),
+                        )
+                        .child(
+                            Input::new(&self.generic_identity)
+                                .rounded(crate::material::radius_input()),
+                        ),
+                ),
             )
             .child(self.section_heading(
                 tcode_i18n::tr!("orchestrate.model_identity.title"),
@@ -591,29 +624,34 @@ impl OrchestrateSettingsPanel {
             ));
 
         if self.identity_rows.is_empty() {
-            section = section.child(
-                div()
-                    .w_full()
-                    .p_4()
-                    .rounded(crate::material::radius_card())
-                    .bg(cx.theme().muted)
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("orchestrate.model_identity.empty")),
-            );
+            return section
+                .child(
+                    self.group(cx).child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_3()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tcode_i18n::tr!("orchestrate.model_identity.empty")),
+                    ),
+                )
+                .into_any_element();
         }
+
+        // Per-model identities: one grouped list, rows split by inset hairlines.
+        let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.identity_rows.iter().enumerate() {
             let name = self.model_name(row.provider, &row.model, cx);
             let provider = row.provider;
             let model = row.model.clone();
             let reset_model = row.model.clone();
-            section = section.child(
+            rows.push(
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .p_3()
-                    .rounded(crate::material::radius_card())
-                    .bg(cx.theme().secondary)
+                    .px_3()
+                    .py_3()
                     .child(
                         h_flex()
                             .w_full()
@@ -665,10 +703,11 @@ impl OrchestrateSettingsPanel {
                                     })),
                             ),
                     )
-                    .child(Input::new(&row.identity).rounded(crate::material::radius_input())),
+                    .child(Input::new(&row.identity).rounded(crate::material::radius_input()))
+                    .into_any_element(),
             );
         }
-        section.into_any_element()
+        section.child(self.grouped(rows, cx)).into_any_element()
     }
 
     fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -711,11 +750,8 @@ impl OrchestrateSettingsPanel {
             );
         }
 
-        let mut list = v_flex()
-            .w_full()
-            .rounded(crate::material::radius_card())
-            .bg(cx.theme().secondary)
-            .overflow_hidden();
+        // Child profiles: one grouped list, rows split by inset hairlines.
+        let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.child_rows.iter().enumerate() {
             let Some(profile) = settings.child_models.get(index) else {
                 continue;
@@ -725,11 +761,12 @@ impl OrchestrateSettingsPanel {
             let effort = profile.effort.clone().unwrap_or_else(|| {
                 tcode_i18n::tr!("orchestrate.children.effort_default").into_owned()
             });
-            list = list.child(
+            rows.push(
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .p_3()
+                    .px_3()
+                    .py_3()
                     .child(
                         h_flex()
                             .w_full()
@@ -827,10 +864,11 @@ impl OrchestrateSettingsPanel {
                         Input::new(&row.description)
                             .small()
                             .rounded(crate::material::radius_input()),
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
-        section.child(list).into_any_element()
+        section.child(self.grouped(rows, cx)).into_any_element()
     }
 }
 
@@ -841,6 +879,7 @@ impl Render for OrchestrateSettingsPanel {
             .gap_6()
             .child(
                 div()
+                    .pl_3()
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
