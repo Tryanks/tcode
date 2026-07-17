@@ -629,7 +629,7 @@ mod native {
                         .child(tcode_i18n::tr!("preview.unavailable"))
                         .child(
                             div()
-                                .text_size(gpui::px(12.))
+                                .text_size(gpui::px(13.))
                                 .child(tcode_i18n::tr!("preview.unavailable_hint")),
                         )
                         .into_any_element(),
@@ -649,7 +649,6 @@ mod native {
 
             v_flex()
                 .size_full()
-                .bg(cx.theme().background)
                 .child(self.render_chrome(cx))
                 .children(self.render_port_row(cx))
                 .child(body)
@@ -663,8 +662,6 @@ mod native {
                 .w_full()
                 .gap_1()
                 .p_1()
-                .border_b_1()
-                .border_color(cx.theme().border)
                 .child(
                     Button::new("preview-back")
                         .ghost()
@@ -795,7 +792,6 @@ mod placeholder {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .bg(cx.theme().background)
                 .text_color(cx.theme().muted_foreground)
                 .child(tcode_i18n::tr!("preview.unsupported_linux"))
         }

@@ -1,0 +1,25 @@
+{
+  "projects": [
+    {
+      "id": "vm-seed-project",
+      "name": "tcode-demo",
+      "root": "/Users/admin/tcode-demo",
+      "created_at": 1784106000
+    }
+  ],
+  "sessions": [
+    {
+      "id": "vm-seed-rust-cache-fix",
+      "title": "Fix stale cache invalidation",
+      "provider": "codex",
+      "cwd": "/Users/admin/tcode-demo",
+      "project_id": "vm-seed-project",
+      "model": "gpt-5.2-codex",
+      "approval_mode": "full_access",
+      "option_selections": [],
+      "interaction_mode": "build",
+      "created_at": 1784106060,
+      "updated_at": 1784106300
+    }
+  ]
+}

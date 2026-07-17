@@ -48,6 +48,11 @@ pub(super) fn open(app_state: Entity<AppState>, window: &mut Window, cx: &mut Ap
         let dialog_content = content.clone();
         builder
             .w(px(680.))
+            .rounded(crate::material::radius_overlay())
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_xl()
             .title(tcode_i18n::tr!("sidebar.add_project").into_owned())
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
             .footer(render_add_footer(&footer, window, cx))
@@ -155,10 +160,15 @@ impl AddProjectDialog {
             progress.start(receiver, total, current_tool, cx)
         });
         let content = progress.clone();
-        window.open_dialog(cx, move |builder, _, _| {
+        window.open_dialog(cx, move |builder, _, cx| {
             let progress_content = content.clone();
             builder
                 .w(px(480.))
+                .rounded(crate::material::radius_overlay())
+                .bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .shadow_xl()
                 .title(tcode_i18n::tr!("sidebar.importing").into_owned())
                 .close_button(false)
                 .overlay_closable(false)
@@ -172,14 +182,14 @@ impl AddProjectDialog {
             RecentState::Loading => v_flex()
                 .gap_3()
                 .py_4()
-                .text_sm()
+                .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
                 .child(tcode_i18n::tr!("sidebar.recent_loading"))
                 .child(Progress::new("recent-directories-loading").loading(true))
                 .into_any_element(),
             RecentState::Ready(recent) if recent.is_empty() => div()
                 .py_4()
-                .text_sm()
+                .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
                 .child(tcode_i18n::tr!("sidebar.recent_empty"))
                 .into_any_element(),
@@ -201,9 +211,10 @@ impl AddProjectDialog {
                             .gap_1()
                             .px_3()
                             .py_2()
-                            .rounded(cx.theme().radius)
+                            .rounded(crate::material::radius_card())
+                            .text_size(px(13.))
                             .cursor_pointer()
-                            .hover(|style| style.bg(cx.theme().accent))
+                            .hover(|style| style.bg(cx.theme().list_hover))
                             .on_click(cx.listener(move |dialog, _, window, cx| {
                                 dialog.choose_recent(selected.clone(), window, cx);
                             }))
@@ -216,20 +227,20 @@ impl AddProjectDialog {
                                     .child(
                                         div()
                                             .flex_none()
-                                            .text_xs()
+                                            .text_size(px(11.))
                                             .text_color(cx.theme().muted_foreground)
                                             .child(ago),
                                     ),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(path),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(counts),
                             ),
@@ -259,7 +270,7 @@ impl Render for AddProjectDialog {
                     .gap_2()
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(13.))
                             .font_semibold()
                             .child(tcode_i18n::tr!("sidebar.recent_activity")),
                     )
@@ -272,9 +283,14 @@ impl Render for AddProjectDialog {
                         h_flex()
                             .w_full()
                             .gap_2()
-                            .child(Input::new(&self.path_input).flex_1())
+                            .child(
+                                Input::new(&self.path_input)
+                                    .flex_1()
+                                    .rounded(crate::material::radius_input()),
+                            )
                             .child(
                                 Button::new("browse-project-directory")
+                                    .rounded(crate::material::radius_button())
                                     .label(tcode_i18n::tr!("sidebar.browse"))
                                     .on_click(cx.listener(|dialog, _, window, cx| {
                                         dialog.browse(window, cx);
@@ -284,7 +300,7 @@ impl Render for AddProjectDialog {
                     .when(self.path_error, |column| {
                         column.child(
                             div()
-                                .text_xs()
+                                .text_size(px(11.))
                                 .text_color(cx.theme().danger)
                                 .child(tcode_i18n::tr!("sidebar.invalid_path")),
                         )
@@ -365,7 +381,7 @@ impl Render for ImportProgress {
             .child(Progress::new("external-import-progress").value(percent))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!(
                         "sidebar.import_progress",
@@ -378,7 +394,7 @@ impl Render for ImportProgress {
                 column
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(13.))
                             .font_semibold()
                             .text_color(cx.theme().foreground)
                             .child(tcode_i18n::tr!(
@@ -390,6 +406,7 @@ impl Render for ImportProgress {
                     .child(
                         h_flex().w_full().justify_end().child(
                             Button::new("external-import-ok")
+                                .rounded(crate::material::radius_button())
                                 .primary()
                                 .label(tcode_i18n::tr!("sidebar.import_ok"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
@@ -409,6 +426,7 @@ fn render_add_footer(
     DialogFooter::new()
         .child(
             Button::new("add-project-cancel")
+                .rounded(crate::material::radius_button())
                 .label(tcode_i18n::tr!("sidebar.cancel"))
                 .on_click(move |_, window, cx| {
                     let _ = &cancel;
@@ -417,6 +435,7 @@ fn render_add_footer(
         )
         .child(
             Button::new("add-project-open")
+                .rounded(crate::material::radius_button())
                 .primary()
                 .label(tcode_i18n::tr!("sidebar.open"))
                 .on_click(move |_, window, cx| {

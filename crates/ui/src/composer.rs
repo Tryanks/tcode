@@ -15,9 +15,9 @@ use agent::{
 };
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
-    EventEmitter, ExternalPaths, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    PathBuilder, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, canvas, div, img, point, prelude::FluentBuilder as _, px, rgb,
+    EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathBuilder, Pixels, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, canvas, div, img, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
@@ -1234,6 +1234,10 @@ impl Composer {
         );
 
         Popover::new(("model-picker-popover", self.model_picker_token))
+            // T3 overlay contour: popover fill + hairline border (from the
+            // default appearance) lifted to `shadow_xl` at the 14px overlay radius.
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .default_open(self.model_picker_token > 0)
             .trigger(trigger)
@@ -1311,6 +1315,9 @@ impl Composer {
 
         let app_entity = self.app_state.clone();
         Popover::new("traits-popover")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
@@ -1391,6 +1398,9 @@ impl Composer {
         );
 
         Popover::new("context-popover")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| render_context_meter_pane(usage, provider, pct, cx))
@@ -1419,6 +1429,9 @@ impl Composer {
         let app_entity = self.app_state.clone();
         let pending_restart = self.app_state.read(cx).approval_pending_restart();
         Popover::new("permission-popover")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
@@ -1447,6 +1460,9 @@ impl Composer {
             .child(Icon::new(IconName::Ellipsis).small().text_color(muted));
 
         Popover::new("overflow-popover")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| render_overflow_pane(usage, mode, interaction, cx))
@@ -1472,7 +1488,7 @@ impl Composer {
                     .flex_none()
                     .px_3()
                     .py_2p5()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(muted)
                     .child(if loading {
                         tcode_i18n::tr!("composer.searching").into_owned()
@@ -1497,7 +1513,7 @@ impl Composer {
                             .px_2()
                             .pt_1p5()
                             .pb_0p5()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .font_medium()
                             .text_color(muted)
                             .child(tcode_i18n::tr!(group).into_owned()),
@@ -1538,7 +1554,7 @@ impl Composer {
                                     .min_w_0()
                                     .overflow_hidden()
                                     .text_ellipsis()
-                                    .text_size(px(12.))
+                                    .text_size(px(13.))
                                     .text_color(muted)
                                     .child(row.secondary.clone()),
                             )
@@ -1562,11 +1578,13 @@ impl Composer {
                 .w_full()
                 .max_h(px(288.))
                 .overflow_y_scroll()
-                .rounded(px(12.))
+                // T3 overlay contour: popover fill + hairline border + shadow_xl
+                // at the 14px overlay radius (this menu floats over the card).
+                .rounded(crate::material::radius_overlay())
                 .border_1()
                 .border_color(cx.theme().border)
-                .bg(cx.theme().background)
-                .shadow_lg()
+                .bg(cx.theme().popover)
+                .shadow_xl()
                 .child(list)
                 .into_any_element(),
         )
@@ -1593,18 +1611,25 @@ impl Composer {
         }
 
         let muted = cx.theme().muted_foreground;
-        let mut strip =
-            v_flex()
-                .w_full()
-                .gap_1()
-                .p_2()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().secondary.opacity(0.5))
-                .child(div().flex_none().px_1().text_xs().text_color(muted).child(
-                    tcode_i18n::tr!("composer.queued_count", count = queued.len()),
-                ));
+        let mut strip = v_flex()
+            .w_full()
+            .gap_1()
+            .p_2()
+            .rounded(crate::material::radius_card())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(tcode_i18n::tr!(
+                        "composer.queued_count",
+                        count = queued.len()
+                    )),
+            );
 
         for message in queued {
             let id = message.id;
@@ -1625,7 +1650,7 @@ impl Composer {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_sm()
+                            .text_size(px(13.))
                             .text_color(cx.theme().foreground)
                             .child(truncate_queued(&message.text)),
                     )
@@ -1679,12 +1704,16 @@ impl Composer {
                     .id(("thumb", index))
                     .relative()
                     .size(px(64.))
-                    .rounded(px(8.))
+                    .rounded(crate::material::radius_card())
                     .overflow_hidden()
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    // Card radius + a T2 fill instead of a four-sided hard border.
+                    .bg(cx.theme().secondary)
                     .cursor_pointer()
-                    .child(img(path).size(px(64.)).rounded(px(8.)))
+                    .child(
+                        img(path)
+                            .size(px(64.))
+                            .rounded(crate::material::radius_card()),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.image_preview = Some(index);
                         cx.notify();
@@ -1746,13 +1775,13 @@ impl Composer {
                             div()
                                 .max_w(px(420.))
                                 .max_h(px(420.))
-                                .rounded(px(12.))
+                                .rounded(crate::material::radius_card())
                                 .overflow_hidden()
                                 .child(img(path).max_w(px(420.)).max_h(px(420.))),
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(13.))
                                 .text_color(gpui::white())
                                 .child(name),
                         ),
@@ -1840,7 +1869,7 @@ impl Composer {
                 .child(Spinner::new().small().color(cx.theme().primary))
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
                         .child(tcode_i18n::tr!("composer.preparing_worktree")),
                 )
@@ -1904,6 +1933,9 @@ impl Composer {
         let app_main = self.app_state.clone();
 
         let chevron = Popover::new("implement-menu")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("implement-menu-trigger")
@@ -1960,7 +1992,7 @@ impl Composer {
             .flex_none()
             .h(px(32.))
             .items_center()
-            .rounded(px(8.))
+            .rounded(crate::material::radius_button())
             .bg(primary)
             .text_color(fg)
             .overflow_hidden()
@@ -2147,7 +2179,7 @@ impl Composer {
                             .when(!option.description.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .text_size(px(12.))
+                                        .text_size(px(13.))
                                         .text_color(muted)
                                         .child(option.description.clone()),
                                 )
@@ -2224,7 +2256,7 @@ impl Composer {
             .w_full()
             .gap_2()
             .p(px(14.))
-            .rounded(px(12.))
+            .rounded(crate::material::radius_card())
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -2249,7 +2281,7 @@ impl Composer {
                 }),
             )
             .child(header)
-            .child(div().text_size(px(14.)).child(question.question.clone()))
+            .child(div().text_size(px(15.)).child(question.question.clone()))
             .child(options)
             .when(multi, |this| {
                 this.child(
@@ -2399,7 +2431,7 @@ impl Composer {
                     h_flex()
                         .gap_1p5()
                         .items_center()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(muted)
                         .child(Icon::empty().path("icons/git-branch.svg").xsmall())
                         .child(picker_current.clone()),
@@ -2413,13 +2445,16 @@ impl Composer {
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(muted)
                     .child(Icon::empty().path("icons/git-branch.svg").xsmall())
                     .child(picker_current.clone())
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
             Popover::new("branch-popover")
+                // T3 overlay contour (shadow_xl at the 14px overlay radius).
+                .rounded(crate::material::radius_overlay())
+                .shadow_xl()
                 .anchor(Anchor::BottomRight)
                 .trigger(trigger)
                 .on_open_change(move |open, _window, cx| {
@@ -2532,7 +2567,7 @@ impl Composer {
                 .pt_2()
                 .items_center()
                 .justify_between()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted)
                 .child(left)
                 .child(right)
@@ -2574,13 +2609,16 @@ impl Composer {
             h_flex()
                 .gap_1p5()
                 .items_center()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted)
                 .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
                 .child(label)
                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
         );
         Popover::new("workspace-popover")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_state, _window, cx| {
@@ -2681,7 +2719,7 @@ impl Composer {
                 .gap_1()
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .font_family(cx.theme().mono_font_family.clone())
                         .child(command.clone()),
                 )
@@ -2698,7 +2736,7 @@ impl Composer {
                 .gap_0p5()
                 .children(changes.iter().map(|change| {
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.))
                         .font_family(cx.theme().mono_font_family.clone())
                         .child(format!(
                             "{} {}",
@@ -2708,12 +2746,12 @@ impl Composer {
                 }))
                 .into_any_element(),
             ApprovalKind::FileRead { detail } => div()
-                .text_size(px(12.5))
+                .text_size(px(13.))
                 .font_family(cx.theme().mono_font_family.clone())
                 .child(detail.clone())
                 .into_any_element(),
             ApprovalKind::ToolUse { name, input, .. } => div()
-                .text_size(px(12.5))
+                .text_size(px(13.))
                 .font_family(cx.theme().mono_font_family.clone())
                 .child(format!("{name} {input}"))
                 .into_any_element(),
@@ -2729,7 +2767,7 @@ impl Composer {
             .w_full()
             .gap_2()
             .p(px(14.))
-            .rounded(px(12.))
+            .rounded(crate::material::radius_card())
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -3067,13 +3105,26 @@ impl Render for Composer {
                 }),
         );
 
+        // The hero input surface (spec §5): 16px composer corners; resting =
+        // hairline `input.border` + `shadow_md`; focused = ring-colored border +
+        // the blue `focus_glow`. Focus is read off the field's own handle.
+        let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
             .w_full()
-            .rounded(px(16.))
+            .rounded(crate::material::radius_composer())
             .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .shadow_sm()
+            .border_color(if composer_focused {
+                cx.theme().ring
+            } else {
+                cx.theme().input
+            })
+            // White console on paper (T3-grade fill): the glass `background`
+            // token would render as a murky translucent wash here.
+            .bg(cx.theme().popover)
+            .when(composer_focused, |this| {
+                this.shadow(crate::material::focus_glow(cx))
+            })
+            .when(!composer_focused, |this| this.shadow_md())
             // ⌘V with image clipboard content, and arrow/Escape trigger-menu
             // navigation (fires after the input's own key actions).
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -3138,7 +3189,7 @@ impl Render for Composer {
                 this.child(
                     div()
                         .px_4()
-                        .text_xs()
+                        .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .child(tcode_i18n::tr!(
                             "composer.queue_hint",
@@ -3449,7 +3500,7 @@ fn render_model_row(
                     .rounded(px(4.))
                     .border_1()
                     .border_color(cx.theme().border)
-                    .text_size(px(10.))
+                    .text_size(px(11.))
                     .text_color(muted)
                     .child(format!("⌘{}", index + 1)),
             )
@@ -3617,7 +3668,7 @@ fn render_traits_pane(
                             .flex_none()
                             .px_2()
                             .py_1p5()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(muted)
                             .child(tcode_i18n::tr!("composer.ultrathink_locked")),
                     );

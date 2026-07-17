@@ -1194,13 +1194,13 @@ impl ChatView {
                     .px_4()
                     .py_3()
                     .rounded_xl()
+                    .bg(cx.theme().muted)
                     .when(pending, |bubble| {
                         bubble
                             .border_1()
                             .border_dashed()
                             .border_color(cx.theme().border)
                     })
-                    .when(!pending, |bubble| bubble.bg(cx.theme().muted))
                     .text_color(cx.theme().foreground)
                     .text_size(px(15.))
                     .child(content)
@@ -1260,7 +1260,7 @@ impl ChatView {
     }
 
     /// The reusable disclosure element: a centered, collapsed-by-default row of
-    /// 12px muted `label` + rotating chevron (hover shows an accent background);
+    /// 13px muted `label` + rotating chevron (hover shows an accent background);
     /// clicking toggles the per-entry expansion keyed by `key`. When open it
     /// reveals `full_text` verbatim inside a bordered, height-capped scroll card.
     /// Shared by the orchestrate context split and child-thread callbacks so any
@@ -1283,7 +1283,7 @@ impl ChatView {
             .px_2()
             .py_0p5()
             .rounded(px(8.))
-            .text_size(px(12.))
+            .text_size(px(13.))
             .text_color(muted)
             .cursor_pointer()
             .hover(|row| row.bg(cx.theme().accent))
@@ -1302,7 +1302,7 @@ impl ChatView {
 
     /// The expanded body of a disclosure: the injected text rendered verbatim
     /// (line by line, so newlines survive regardless of wrapping) as 13px muted
-    /// preformatted source inside a bordered muted card. The guidance can be long,
+    /// preformatted source inside a muted card. The guidance can be long,
     /// so the card gets its own resolved-height, capped scroll viewport rather
     /// than growing the turn without bound (DESIGN.md scrolling contract).
     fn render_disclosure_body(
@@ -1335,9 +1335,7 @@ impl ChatView {
             .h(px(viewport))
             .overflow_y_scrollbar()
             .p_3()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(cx.theme().border)
+            .rounded(crate::material::radius_card())
             .bg(cx.theme().muted)
             .child(
                 v_flex()
@@ -1401,14 +1399,11 @@ impl ChatView {
     /// its users staring at "Request was abo…".
     fn render_error_card(&self, id: &str, message: &str, cx: &mut Context<Self>) -> AnyElement {
         let danger = cx.theme().danger;
-        v_flex()
-            .w_full()
+        let content = v_flex()
+            .flex_1()
+            .min_w_0()
             .gap_2()
             .p_3()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(danger.opacity(0.35))
-            .bg(danger.opacity(0.06))
             .child(
                 h_flex()
                     .gap_2()
@@ -1416,13 +1411,13 @@ impl ChatView {
                     .child(
                         Icon::new(IconName::TriangleAlert)
                             .xsmall()
-                            .text_color(danger),
+                            .text_color(cx.theme().danger_foreground),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
                             .font_medium()
-                            .text_color(danger)
+                            .text_color(cx.theme().danger_foreground)
                             .child(tcode_i18n::tr!("chat.error_label").to_uppercase()),
                     )
                     .child(div().flex_1())
@@ -1436,7 +1431,23 @@ impl ChatView {
                     .text_color(cx.theme().foreground)
                     .whitespace_normal()
                     .child(message.to_string()),
+            );
+        h_flex()
+            .w_full()
+            .items_stretch()
+            .rounded(crate::material::radius_card())
+            .overflow_hidden()
+            .bg(cx.theme().muted.opacity(0.6))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(2.))
+                    .ml(px(8.))
+                    .my(px(8.))
+                    .rounded_full()
+                    .bg(danger),
             )
+            .child(content)
             .into_any_element()
     }
 
@@ -1600,7 +1611,7 @@ impl ChatView {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .child(tcode_i18n::tr!("chat.edit_hint")),
                     )
@@ -1898,7 +1909,7 @@ impl ChatView {
             .gap_2()
             .items_center()
             .when(!compact, |row| row.py_0p5())
-            .text_size(px(if compact { 12. } else { 13. }))
+            .text_size(px(13.))
             .child(Icon::new(icon).xsmall().text_color(muted))
             .child(summary)
             .into_any_element()
@@ -2010,26 +2021,26 @@ impl ChatView {
                         .py_1()
                         .rounded_lg()
                         .bg(cx.theme().muted)
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(cx.theme().foreground)
                         .child(text.clone()),
                 )
                 .into_any_element(),
             EntryContent::Assistant { text } => div()
                 .w_full()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .line_height(px(19.))
                 .text_color(cx.theme().foreground)
                 .child(text.clone())
                 .into_any_element(),
             EntryContent::Error { .. } | EntryContent::ProviderStartError { .. } => div()
                 .w_full()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(cx.theme().danger)
                 .child(displayed_error_text(&entry.content).into_owned())
                 .into_any_element(),
             EntryContent::FileChange { changes } => div()
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(muted)
                 .child(tcode_i18n::tr!("chat.changed_files", count = changes.len()))
                 .into_any_element(),
@@ -2056,8 +2067,8 @@ impl ChatView {
 
         let header = h_flex()
             .w_full()
-            .px_4()
-            .py_2()
+            .px_1()
+            .py_1()
             .gap_2()
             .items_center()
             .child(
@@ -2107,16 +2118,10 @@ impl ChatView {
                     })),
             );
 
-        let mut card = v_flex()
-            .w_full()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(cx.theme().border)
-            .overflow_hidden()
-            .child(header);
+        let mut content = v_flex().w_full().child(header);
 
         if !collapsed {
-            let mut body = v_flex().w_full().px_2().pb_2().gap(px(1.));
+            let mut body = v_flex().w_full().pb_1().gap(px(1.));
             for (dir, files) in group_by_dir(changes, cwd) {
                 let dir_add: u32 = files.iter().map(|f| f.added).sum();
                 let dir_del: u32 = files.iter().map(|f| f.deleted).sum();
@@ -2129,6 +2134,8 @@ impl ChatView {
                             .gap_1p5()
                             .items_center()
                             .text_size(px(13.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(cx.theme().list_hover))
                             .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted))
                             .child(Icon::new(IconName::Folder).xsmall().text_color(muted))
                             .child(
@@ -2153,6 +2160,8 @@ impl ChatView {
                             .gap_1p5()
                             .items_center()
                             .text_size(px(13.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(cx.theme().list_hover))
                             .child(Icon::new(IconName::File).xsmall().text_color(muted))
                             .child(
                                 div()
@@ -2167,10 +2176,12 @@ impl ChatView {
                     );
                 }
             }
-            card = card.child(body);
+            content = content.child(body);
         }
 
-        card.into_any_element()
+        // A quiet manifest aligned with the prose column: no card slab, no
+        // rail — the small-caps header and hover rows carry the structure.
+        content.into_any_element()
     }
 
     /// The inline proposed-plan timeline card (S1 §5): a "Plan" badge, title,
@@ -2193,7 +2204,7 @@ impl ChatView {
         } else if let Some(md) = self.md_states.get(&format!("plan:{item_id}")) {
             div()
                 .w_full()
-                .text_size(px(14.))
+                .text_size(px(15.))
                 .line_height(px(22.))
                 .child(TextView::new(&md.state).selectable(true))
                 .into_any_element()
@@ -2209,13 +2220,11 @@ impl ChatView {
         let md_save = markdown.to_string();
         let copied = self.copied.as_deref() == Some("plan");
 
-        v_flex()
-            .w_full()
+        let content = v_flex()
+            .flex_1()
+            .min_w_0()
             .gap_2()
             .p_4()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .w_full()
@@ -2225,9 +2234,9 @@ impl ChatView {
                         div()
                             .px_2()
                             .py(px(1.))
-                            .rounded(px(4.))
-                            .bg(cx.theme().primary)
-                            .text_color(cx.theme().primary_foreground)
+                            .rounded_full()
+                            .bg(cx.theme().info.opacity(0.12))
+                            .text_color(cx.theme().info_foreground)
                             .text_size(px(11.))
                             .font_medium()
                             .child(tcode_i18n::tr!("plan.badge")),
@@ -2306,7 +2315,24 @@ impl ChatView {
                                     .update(cx, |s, cx| s.save_plan_to_workspace(md, cx));
                             })),
                     ),
+            );
+
+        h_flex()
+            .w_full()
+            .items_stretch()
+            .rounded(crate::material::radius_card())
+            .overflow_hidden()
+            .bg(cx.theme().muted.opacity(0.6))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(2.))
+                    .ml(px(8.))
+                    .my(px(8.))
+                    .rounded_full()
+                    .bg(cx.theme().info),
             )
+            .child(content)
             .into_any_element()
     }
 
@@ -2331,7 +2357,7 @@ impl ChatView {
             .w_full()
             .gap_1p5()
             .items_center()
-            .text_size(px(12.))
+            .text_size(px(13.))
             .text_color(cx.theme().muted_foreground)
             .child(Icon::new(IconName::Info).xsmall())
             .child(format_local_time(ts))
@@ -2358,9 +2384,7 @@ impl ChatView {
             .px_4()
             .when(collapsed, |this| this.pl(px(36.)))
             .gap_2()
-            .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border);
+            .items_center();
 
         // A draft shows a muted "New thread" label; an open thread its title;
         // nothing active shows "No active thread".
@@ -2368,7 +2392,7 @@ impl ChatView {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(16.))
+                .text_size(px(15.))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
                 .child(tcode_i18n::tr!("chat.new_thread"))
@@ -2382,13 +2406,13 @@ impl ChatView {
                     .min_w(px(120.))
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(16.))
+                    .text_size(px(15.))
                     .font_medium()
                     .child(title.clone()),
                 None => div()
                     .flex_1()
                     .min_w_0()
-                    .text_size(px(16.))
+                    .text_size(px(15.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("chat.no_active_thread")),
@@ -2574,7 +2598,12 @@ impl ChatView {
                     }
                     menu = menu.child(row);
                 }
-                menu.into_any_element()
+                crate::material::overlay_contour(
+                    menu.rounded(crate::material::radius_overlay())
+                        .overflow_hidden(),
+                    cx,
+                )
+                .into_any_element()
             });
 
         Some(
@@ -2624,6 +2653,9 @@ impl ChatView {
             let footer_dialog = dialog.clone();
             dlg.title(tcode_i18n::tr!("git.commit.title").into_owned())
                 .w(px(600.))
+                // Opaque T3 panel over the library's translucent default.
+                .bg(cx.theme().popover)
+                .shadow_xl()
                 .content(move |content_el, _window, _cx| content_el.child(content.clone()))
                 .footer(render_commit_footer(&footer_dialog, window, cx))
         });
@@ -2670,48 +2702,53 @@ impl ChatView {
                         .child(Icon::new(icon).xsmall().text_color(muted))
                         .child(label)
                 };
-                v_flex()
-                    .w(px(180.))
-                    .p_1()
-                    .gap_0p5()
-                    .child(
-                        menu_item(
-                            "open-zed",
-                            IconName::ExternalLink,
-                            tcode_i18n::tr!("chat.open_zed").into_owned().into(),
+                crate::material::overlay_contour(
+                    v_flex()
+                        .w(px(180.))
+                        .p_1()
+                        .gap_0p5()
+                        .rounded(crate::material::radius_overlay())
+                        .overflow_hidden()
+                        .child(
+                            menu_item(
+                                "open-zed",
+                                IconName::ExternalLink,
+                                tcode_i18n::tr!("chat.open_zed").into_owned().into(),
+                            )
+                            .on_click(move |_, window, cx| {
+                                open_in_zed(&zed_cwd, window, cx);
+                                p1.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
                         )
-                        .on_click(move |_, window, cx| {
-                            open_in_zed(&zed_cwd, window, cx);
-                            p1.update(cx, |st, cx| st.dismiss(window, cx));
-                        }),
-                    )
-                    .child(
-                        menu_item(
-                            "reveal-in-file-manager",
-                            IconName::FolderOpen,
-                            tcode_i18n::tr!("chat.reveal_in_file_manager")
-                                .into_owned()
-                                .into(),
+                        .child(
+                            menu_item(
+                                "reveal-in-file-manager",
+                                IconName::FolderOpen,
+                                tcode_i18n::tr!("chat.reveal_in_file_manager")
+                                    .into_owned()
+                                    .into(),
+                            )
+                            .on_click(move |_, window, cx| {
+                                reveal_in_file_manager(&reveal_cwd, cx);
+                                p2.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
                         )
-                        .on_click(move |_, window, cx| {
-                            reveal_in_file_manager(&reveal_cwd, cx);
-                            p2.update(cx, |st, cx| st.dismiss(window, cx));
-                        }),
-                    )
-                    .child(
-                        menu_item(
-                            "copy-path",
-                            IconName::Copy,
-                            tcode_i18n::tr!("chat.copy_path").into_owned().into(),
-                        )
-                        .on_click(move |_, window, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                copy_cwd.display().to_string(),
-                            ));
-                            p3.update(cx, |st, cx| st.dismiss(window, cx));
-                        }),
-                    )
-                    .into_any_element()
+                        .child(
+                            menu_item(
+                                "copy-path",
+                                IconName::Copy,
+                                tcode_i18n::tr!("chat.copy_path").into_owned().into(),
+                            )
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_cwd.display().to_string(),
+                                ));
+                                p3.update(cx, |st, cx| st.dismiss(window, cx));
+                            }),
+                        ),
+                    cx,
+                )
+                .into_any_element()
             });
 
         h_flex()
@@ -2756,13 +2793,13 @@ impl ChatView {
             .gap_1()
             .child(
                 div()
-                    .text_size(px(20.))
+                    .text_size(px(15.))
                     .font_semibold()
                     .child(tcode_i18n::tr!("chat.empty_title")),
             )
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("chat.empty_description")),
             )
@@ -3193,7 +3230,7 @@ fn diff_counts(added: u32, deleted: u32, cx: &Context<ChatView>) -> AnyElement {
     h_flex()
         .flex_none()
         .gap_2()
-        .text_size(px(12.))
+        .text_size(px(13.))
         .child(
             div()
                 .text_color(cx.theme().success)

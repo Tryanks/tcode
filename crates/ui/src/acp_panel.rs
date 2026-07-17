@@ -3,7 +3,7 @@
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px, rgb,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
@@ -18,6 +18,8 @@ use gpui_component::{
 use tcode_core::acp::InstalledAcpAgent;
 use tcode_runtime::app::AppState;
 use tcode_runtime::ui_facade::AcpMarketplaceItem;
+
+use crate::material;
 
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
@@ -67,7 +69,7 @@ impl AcpAgentCard {
         let dot_color = if agent.enabled {
             cx.theme().success
         } else {
-            rgb(0xf59e0b).into()
+            cx.theme().warning
         };
         let glyph = div()
             .relative()
@@ -93,7 +95,7 @@ impl AcpAgentCard {
             .items_center()
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(15.))
                     .font_semibold()
                     .child(agent.name.clone()),
             )
@@ -101,7 +103,7 @@ impl AcpAgentCard {
                 row.child(
                     div()
                         .font_family("monospace")
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(muted)
                         .child(format!("v{}", agent.version.trim_start_matches('v'))),
                 )
@@ -117,7 +119,7 @@ impl AcpAgentCard {
             .child(
                 v_flex().flex_1().min_w_0().gap_0p5().child(title).child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(muted)
                         .child(launch_summary(agent)),
                 ),
@@ -150,14 +152,12 @@ impl AcpAgentCard {
             .into_any_element()
     }
 
-    fn field_block(&self, label: String, control: AnyElement, cx: &Context<Self>) -> AnyElement {
+    fn field_block(&self, label: String, control: AnyElement, _cx: &Context<Self>) -> AnyElement {
         v_flex()
             .w_full()
             .px_4()
             .py_3()
             .gap_1p5()
-            .border_t_1()
-            .border_color(cx.theme().border)
             .child(div().text_size(px(13.)).font_medium().child(label))
             .child(control)
             .into_any_element()
@@ -214,25 +214,18 @@ impl AcpAgentCard {
                 ),
             )
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .px_4()
-                    .py_3()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new(gpui::SharedString::from(format!("acp-remove-{remove_id}")))
-                            .outline()
-                            .danger()
-                            .small()
-                            .label(tcode_i18n::tr!("providers.acp.remove").into_owned())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let id = remove_id.clone();
-                                this.app_state
-                                    .update(cx, |state, cx| state.remove_acp_agent(&id, cx));
-                            })),
-                    ),
+                h_flex().w_full().justify_end().px_4().py_3().child(
+                    Button::new(gpui::SharedString::from(format!("acp-remove-{remove_id}")))
+                        .outline()
+                        .danger()
+                        .small()
+                        .label(tcode_i18n::tr!("providers.acp.remove").into_owned())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let id = remove_id.clone();
+                            this.app_state
+                                .update(cx, |state, cx| state.remove_acp_agent(&id, cx));
+                        })),
+                ),
             )
             .into_any_element()
     }
@@ -246,10 +239,15 @@ impl Render for AcpAgentCard {
             .settings
             .acp_agent(&self.agent_id)
             .cloned();
-        v_flex().w_full().when_some(agent, |card, agent| {
-            card.child(self.render_header(&agent, cx))
-                .when(self.expanded, |card| card.child(self.render_details(cx)))
-        })
+        v_flex()
+            .w_full()
+            .rounded(material::radius_card())
+            .bg(cx.theme().secondary)
+            .overflow_hidden()
+            .when_some(agent, |card, agent| {
+                card.child(self.render_header(&agent, cx))
+                    .when(self.expanded, |card| card.child(self.render_details(cx)))
+            })
     }
 }
 
@@ -302,10 +300,12 @@ impl AcpPanel {
     fn render_market_row(&self, agent: &AcpMarketplaceItem, cx: &mut Context<Self>) -> AnyElement {
         let id = agent.id.clone();
         h_flex()
+            .id(gpui::SharedString::from(format!("acp-market-row-{id}")))
             .w_full()
             .p_3()
             .gap_3()
             .items_start()
+            .hover(|row| row.bg(cx.theme().list_hover))
             .child(
                 Icon::empty()
                     .path("icons/box.svg")
@@ -322,7 +322,7 @@ impl AcpPanel {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(14.))
+                                    .text_size(px(15.))
                                     .font_medium()
                                     .child(agent.name.clone()),
                             )
@@ -330,7 +330,7 @@ impl AcpPanel {
                                 row.child(
                                     div()
                                         .font_family("monospace")
-                                        .text_size(px(12.))
+                                        .text_size(px(13.))
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!("v{}", agent.version)),
                                 )
@@ -338,20 +338,24 @@ impl AcpPanel {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .child(agent.description.clone()),
                     ),
             )
             .child(if agent.installed {
                 div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
+                    .rounded_full()
+                    .bg(cx.theme().success.opacity(0.12))
+                    .text_size(px(13.))
+                    .text_color(cx.theme().success_foreground)
                     .child(tcode_i18n::tr!("providers.acp.installed").into_owned())
                     .into_any_element()
             } else if !agent.supported {
                 div()
-                    .text_size(px(12.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("providers.acp.unsupported").into_owned())
                     .into_any_element()
@@ -390,15 +394,14 @@ impl AcpPanel {
         let error = state.acp_registry_error.clone();
         let loading = state.acp_registry_loading;
         let empty = market.is_empty();
-        let border = cx.theme().border;
         let mut rows = v_flex().w_full();
         if let Some(error) = error.filter(|_| empty) {
             rows = rows.child(
                 div()
                     .flex_none()
                     .p_3()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().danger)
+                    .text_size(px(13.))
+                    .text_color(cx.theme().danger_foreground)
                     .child(error),
             );
         } else if empty && loading {
@@ -406,17 +409,16 @@ impl AcpPanel {
                 div()
                     .flex_none()
                     .p_3()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("providers.acp.loading").into_owned()),
             );
         }
-        for (index, agent) in market.iter().enumerate() {
+        for agent in &market {
             rows = rows.child(
                 v_flex()
                     .w_full()
                     .flex_none()
-                    .when(index > 0, |row| row.border_t_1().border_color(border))
                     .child(self.render_market_row(agent, cx)),
             );
         }
@@ -429,9 +431,8 @@ impl AcpPanel {
                     .w_full()
                     .h(px(360.))
                     .overflow_y_scrollbar()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(border)
+                    .rounded(material::radius_card())
+                    .bg(cx.theme().muted)
                     .child(div().size_full().child(rows)),
             )
             .child(
@@ -441,8 +442,6 @@ impl AcpPanel {
                     .pt_3()
                     .gap_2()
                     .items_center()
-                    .border_t_1()
-                    .border_color(border)
                     .cursor_pointer()
                     .child(Icon::new(IconName::Plus).text_color(cx.theme().muted_foreground))
                     .child(
@@ -487,7 +486,7 @@ impl AcpPanel {
             )
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("providers.acp.custom_help").into_owned()),
             )

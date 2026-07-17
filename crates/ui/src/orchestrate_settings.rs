@@ -474,20 +474,53 @@ impl OrchestrateSettingsPanel {
             .display_name(provider, model, cx)
     }
 
+    /// A status message in the shared rail language: a soft neutral fill with a
+    /// floating 2px rail in the semantic color — no colored slab.
+    fn status_note(
+        &self,
+        accent: gpui::Hsla,
+        text: impl Into<gpui::SharedString>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .w_full()
+            .items_stretch()
+            .rounded(crate::material::radius_card())
+            .overflow_hidden()
+            .bg(cx.theme().muted.opacity(0.6))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(2.))
+                    .ml(px(8.))
+                    .my(px(8.))
+                    .rounded_full()
+                    .bg(accent),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .px_3()
+                    .py_2p5()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().foreground)
+                    .child(text.into()),
+            )
+            .into_any_element()
+    }
+
+    /// Quiet helper text, System-Settings style: a muted caption under the
+    /// section, not a colored callout box.
     fn render_intro(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .w_full()
-            .gap_1()
-            .p_3()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().muted)
+            .gap_0p5()
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_1p5()
                     .items_center()
-                    .child(Icon::new(IconName::Info).small())
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Icon::new(IconName::Info).xsmall())
                     .child(
                         div()
                             .text_size(px(13.))
@@ -497,8 +530,8 @@ impl OrchestrateSettingsPanel {
             )
             .child(
                 div()
-                    .pl_6()
-                    .text_size(px(12.))
+                    .pl(px(20.))
+                    .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(tcode_i18n::tr!("orchestrate.all_models.description")),
             )
@@ -524,7 +557,7 @@ impl OrchestrateSettingsPanel {
                     .child(div().text_size(px(15.)).font_semibold().child(title.into()))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .child(description.into()),
                     ),
@@ -533,25 +566,56 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
+    /// One grouped-list container: popover fill, a single hairline border,
+    /// input-radius corners, no shadow.
+    fn group(&self, cx: &Context<Self>) -> gpui::Div {
+        v_flex()
+            .w_full()
+            .rounded(crate::material::radius_input())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .overflow_hidden()
+    }
+
+    /// Assemble rows into a group, split by inset hairlines (indented past the
+    /// row's left padding, never after the last row).
+    fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
+        let mut group = self.group(cx);
+        let last = rows.len().saturating_sub(1);
+        for (index, row) in rows.into_iter().enumerate() {
+            group = group.child(row);
+            if index != last {
+                group = group.child(
+                    div()
+                        .w_full()
+                        .pl_3()
+                        .child(div().w_full().h(px(1.)).bg(cx.theme().border)),
+                );
+            }
+        }
+        group
+    }
+
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut section =
-            v_flex()
-                .w_full()
-                .gap_3()
-                .child(self.section_heading(
-                    tcode_i18n::tr!("orchestrate.identity.title"),
-                    tcode_i18n::tr!("orchestrate.identity.description"),
-                    None,
-                    cx,
-                ))
-                .child(
+        let section = v_flex()
+            .w_full()
+            .gap_3()
+            .child(self.section_heading(
+                tcode_i18n::tr!("orchestrate.identity.title"),
+                tcode_i18n::tr!("orchestrate.identity.description"),
+                None,
+                cx,
+            ))
+            // Generic identity: a single-row group holding the header, help and
+            // its text area — no slab fill.
+            .child(
+                self.group(cx).child(
                     v_flex()
                         .w_full()
                         .gap_1p5()
-                        .p_3()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(cx.theme().border)
+                        .px_3()
+                        .py_3()
                         .child(
                             h_flex()
                                 .w_full()
@@ -574,45 +638,52 @@ impl OrchestrateSettingsPanel {
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tcode_i18n::tr!("orchestrate.generic_identity.description")),
                         )
-                        .child(Input::new(&self.generic_identity)),
-                )
-                .child(self.section_heading(
-                    tcode_i18n::tr!("orchestrate.model_identity.title"),
-                    tcode_i18n::tr!("orchestrate.model_identity.description"),
-                    Some(self.identity_model_picker.clone().into_any_element()),
-                    cx,
-                ));
+                        .child(
+                            Input::new(&self.generic_identity)
+                                .rounded(crate::material::radius_input()),
+                        ),
+                ),
+            )
+            .child(self.section_heading(
+                tcode_i18n::tr!("orchestrate.model_identity.title"),
+                tcode_i18n::tr!("orchestrate.model_identity.description"),
+                Some(self.identity_model_picker.clone().into_any_element()),
+                cx,
+            ));
 
         if self.identity_rows.is_empty() {
-            section = section.child(
-                div()
-                    .w_full()
-                    .p_4()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("orchestrate.model_identity.empty")),
-            );
+            return section
+                .child(
+                    self.group(cx).child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_3()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tcode_i18n::tr!("orchestrate.model_identity.empty")),
+                    ),
+                )
+                .into_any_element();
         }
+
+        // Per-model identities: one grouped list, rows split by inset hairlines.
+        let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.identity_rows.iter().enumerate() {
             let name = self.model_name(row.provider, &row.model, cx);
             let provider = row.provider;
             let model = row.model.clone();
             let reset_model = row.model.clone();
-            section = section.child(
+            rows.push(
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    .px_3()
+                    .py_3()
                     .child(
                         h_flex()
                             .w_full()
@@ -664,10 +735,11 @@ impl OrchestrateSettingsPanel {
                                     })),
                             ),
                     )
-                    .child(Input::new(&row.identity)),
+                    .child(Input::new(&row.identity).rounded(crate::material::radius_input()))
+                    .into_any_element(),
             );
         }
-        section.into_any_element()
+        section.child(self.grouped(rows, cx)).into_any_element()
     }
 
     fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -680,40 +752,24 @@ impl OrchestrateSettingsPanel {
         ));
         if self.child_rows.is_empty() {
             return section
-                .child(
-                    div()
-                        .w_full()
-                        .p_4()
-                        .rounded(cx.theme().radius)
-                        .border_1()
-                        .border_color(cx.theme().danger)
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("orchestrate.children.empty")),
-                )
+                .child(self.status_note(
+                    cx.theme().danger,
+                    tcode_i18n::tr!("orchestrate.children.empty"),
+                    cx,
+                ))
                 .into_any_element();
         }
 
         if !settings.child_models.iter().any(|profile| profile.enabled) {
-            section = section.child(
-                div()
-                    .w_full()
-                    .p_3()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().warning)
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("orchestrate.children.none_enabled")),
-            );
+            section = section.child(self.status_note(
+                cx.theme().warning,
+                tcode_i18n::tr!("orchestrate.children.none_enabled"),
+                cx,
+            ));
         }
 
-        let mut list = v_flex()
-            .w_full()
-            .rounded(cx.theme().radius)
-            .border_1()
-            .border_color(cx.theme().border)
-            .overflow_hidden();
+        // Child profiles: one grouped list, rows split by inset hairlines.
+        let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.child_rows.iter().enumerate() {
             let Some(profile) = settings.child_models.get(index) else {
                 continue;
@@ -723,14 +779,12 @@ impl OrchestrateSettingsPanel {
             let effort = profile.effort.clone().unwrap_or_else(|| {
                 tcode_i18n::tr!("orchestrate.children.effort_default").into_owned()
             });
-            list = list.child(
+            rows.push(
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .p_3()
-                    .when(index > 0, |this| {
-                        this.border_t_1().border_color(cx.theme().border)
-                    })
+                    .px_3()
+                    .py_3()
                     .child(
                         h_flex()
                             .w_full()
@@ -757,8 +811,18 @@ impl OrchestrateSettingsPanel {
                             )
                             .child(
                                 div()
+                                    .rounded_full()
+                                    .when(profile.enabled, |status| {
+                                        status
+                                            .bg(cx.theme().success.opacity(0.12))
+                                            .text_color(cx.theme().success_foreground)
+                                    })
+                                    .when(!profile.enabled, |status| {
+                                        status
+                                            .bg(cx.theme().muted)
+                                            .text_color(cx.theme().muted_foreground)
+                                    })
                                     .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
                                     .child(if profile.enabled {
                                         tcode_i18n::tr!("orchestrate.children.enabled")
                                     } else {
@@ -808,12 +872,21 @@ impl OrchestrateSettingsPanel {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(tcode_i18n::tr!("orchestrate.children.effort_label")),
                             )
-                            .child(Input::new(&row.effort).small()),
+                            .child(
+                                Input::new(&row.effort)
+                                    .small()
+                                    .rounded(crate::material::radius_input()),
+                            ),
                     )
-                    .child(Input::new(&row.description).small()),
+                    .child(
+                        Input::new(&row.description)
+                            .small()
+                            .rounded(crate::material::radius_input()),
+                    )
+                    .into_any_element(),
             );
         }
-        section.child(list).into_any_element()
+        section.child(self.grouped(rows, cx)).into_any_element()
     }
 }
 
@@ -824,6 +897,7 @@ impl Render for OrchestrateSettingsPanel {
             .gap_6()
             .child(
                 div()
+                    .pl_3()
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)

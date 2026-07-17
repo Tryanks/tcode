@@ -532,19 +532,6 @@ impl SessionsSidebar {
             cx,
         )
         .child(
-            Button::new("collapse-sidebar")
-                .ghost()
-                .small()
-                .compact()
-                .icon(IconName::PanelLeft)
-                .tooltip(tcode_i18n::tr!("sidebar.collapse"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state.update(cx, |state, cx| {
-                        state.toggle_sidebar_collapsed(cx);
-                    });
-                })),
-        )
-        .child(
             div()
                 .text_sm()
                 .font_bold()
@@ -561,6 +548,23 @@ impl SessionsSidebar {
                 .text_size(px(9.))
                 .font_semibold()
                 .child("DEV"),
+        )
+        .child(div().flex_1())
+        // Far right of the sidebar header (macOS sidebar-toggle convention);
+        // sitting next to the traffic lights it reads as a misaligned fourth
+        // light.
+        .child(
+            Button::new("collapse-sidebar")
+                .ghost()
+                .small()
+                .compact()
+                .icon(IconName::PanelLeft)
+                .tooltip(tcode_i18n::tr!("sidebar.collapse"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.app_state.update(cx, |state, cx| {
+                        state.toggle_sidebar_collapsed(cx);
+                    });
+                })),
         )
     }
 
@@ -619,7 +623,8 @@ impl SessionsSidebar {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("sidebar.projects")),
+                    // Small-caps section label; `to_uppercase` is a no-op on CJK.
+                    .child(tcode_i18n::tr!("sidebar.projects").to_uppercase()),
             )
             .child(
                 h_flex()
@@ -863,10 +868,11 @@ impl SessionsSidebar {
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
             .pr_2()
-            .rounded(cx.theme().radius)
+            // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
+            .rounded(px(6.))
             .cursor_pointer()
-            .when(is_active, |s| s.bg(cx.theme().sidebar_accent))
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
+            .when(is_active, |s| s.bg(cx.theme().list_active))
+            .when(!is_active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
             .on_click(cx.listener({
                 let session_id = session_id.clone();
                 move |this, _, _, cx| {
@@ -1054,8 +1060,7 @@ impl SessionsSidebar {
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_none()
-            .border_t_1()
-            .border_color(cx.theme().sidebar_border)
+            // No full-bleed divider above the footer: whitespace separates it.
             .child(
                 h_flex()
                     .id("sidebar-settings")
@@ -1086,9 +1091,8 @@ impl SessionsSidebar {
     fn render_collapsed(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
+            // No seam against the content column: material contrast does the work.
             .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
             .items_center()
             .pb_2()
             .gap_2()
@@ -1224,9 +1228,8 @@ impl Render for SessionsSidebar {
 
         v_flex()
             .size_full()
+            // No seam against the content column: material contrast does the work.
             .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
             .text_color(cx.theme().sidebar_foreground)
             .on_action(cx.listener(Self::on_rename))
             .on_action(cx.listener(Self::on_mark_unread))
@@ -1463,9 +1466,7 @@ mod tests {
         // Parent plus the five ordinary threads all fit inside the collapsed
         // limit once the hidden children stop counting toward it.
         assert_eq!(threads.len(), THREADS_COLLAPSED_LIMIT);
-        assert!(threads
-            .iter()
-            .all(|meta| meta.parent_session_id.is_none()));
+        assert!(threads.iter().all(|meta| meta.parent_session_id.is_none()));
         assert_eq!(
             thread_list_toggle_label(threads.len(), false),
             None,
