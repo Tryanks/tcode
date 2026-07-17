@@ -1,8 +1,9 @@
 //! Reusable native-provider model picker used by settings surfaces.
 //!
-//! The provider tabs, resolved model catalog, offline/custom-model handling,
-//! and selection event live here so Orchestrate and other settings do not grow
-//! subtly different pickers.
+//! The profile tabs (one per provider profile, built-in or user-created),
+//! resolved model catalog, offline/custom-model handling, and selection event
+//! live here so Orchestrate and other settings do not grow subtly different
+//! pickers.
 
 use gpui::{
     App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -15,6 +16,7 @@ use gpui_component::{
 };
 
 use agent::{OptionDescriptor, ProviderKind};
+use tcode_core::settings::Settings;
 use tcode_runtime::app::AppState;
 
 use crate::provider_card::provider_glyph;
@@ -26,6 +28,7 @@ pub(crate) struct ModelOption {
     pub id: String,
     pub name: String,
     pub effort: Option<String>,
+    pub profile_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,8 +45,9 @@ pub(crate) struct ProviderModelPicker {
     popover_id: &'static str,
     trigger_id: &'static str,
     trigger_kind: TriggerKind,
-    selected_provider: ProviderKind,
-    selected: Option<(ProviderKind, String)>,
+    /// The active tab: a profile id (built-in or user-created).
+    selected_profile: String,
+    selected: Option<(ProviderKind, String, Option<String>)>,
     excluded: Vec<(ProviderKind, String)>,
     _app_subscription: Subscription,
 }
@@ -64,7 +68,7 @@ impl ProviderModelPicker {
             popover_id,
             trigger_id,
             trigger_kind: TriggerKind::Add(label.into()),
-            selected_provider: ProviderKind::Codex,
+            selected_profile: Settings::builtin_profile_id(ProviderKind::Codex).to_string(),
             selected: None,
             excluded: Vec::new(),
             _app_subscription: app_subscription,
@@ -77,6 +81,7 @@ impl ProviderModelPicker {
         trigger_id: &'static str,
         provider: ProviderKind,
         model: impl Into<String>,
+        profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let app_subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
@@ -86,8 +91,8 @@ impl ProviderModelPicker {
             popover_id,
             trigger_id,
             trigger_kind: TriggerKind::Selection,
-            selected_provider: provider,
-            selected: Some((provider, model)),
+            selected_profile: selection_profile_id(provider, profile_id.as_deref()),
+            selected: Some((provider, model, profile_id)),
             excluded: Vec::new(),
             _app_subscription: app_subscription,
         }
@@ -104,11 +109,12 @@ impl ProviderModelPicker {
         &mut self,
         provider: ProviderKind,
         model: impl Into<String>,
+        profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let selected = (provider, model.into());
+        let selected = (provider, model.into(), profile_id);
         if self.selected.as_ref() != Some(&selected) {
-            self.selected_provider = provider;
+            self.selected_profile = selection_profile_id(provider, selected.2.as_deref());
             self.selected = Some(selected);
             cx.notify();
         }
@@ -117,28 +123,41 @@ impl ProviderModelPicker {
     fn options(&self, cx: &App) -> Vec<ModelOption> {
         let state = self.app_state.read(cx);
         let mut options = Vec::new();
-        for provider in [ProviderKind::Codex, ProviderKind::ClaudeCode] {
-            let catalog = state.models_for(provider);
-            for model in state.resolved_models(provider) {
+        for profile in state.all_profiles() {
+            let catalog = state.models_for(profile.kind);
+            let profile_id =
+                (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
+            for model in state.picker_models_for_profile(&profile.id) {
                 let effort = catalog
                     .iter()
                     .find(|spec| spec.id == model.id)
                     .and_then(default_reasoning_effort);
                 options.push(ModelOption {
-                    provider,
+                    provider: profile.kind,
                     id: model.id,
                     name: model.name,
                     effort,
+                    profile_id: profile_id.clone(),
                 });
             }
         }
         options
     }
 
-    pub(crate) fn display_name(&self, provider: ProviderKind, model: &str, cx: &App) -> String {
+    pub(crate) fn display_name(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+        profile_id: Option<&str>,
+        cx: &App,
+    ) -> String {
         self.options(cx)
             .into_iter()
-            .find(|option| option.provider == provider && option.id == model)
+            .find(|option| {
+                option.provider == provider
+                    && option.id == model
+                    && option.profile_id.as_deref() == profile_id
+            })
             .map(|option| option.name)
             .unwrap_or_else(|| model.to_string())
     }
@@ -151,12 +170,17 @@ impl ProviderModelPicker {
                 .icon(IconName::Plus)
                 .label(label.clone()),
             TriggerKind::Selection => {
-                let (provider, model) = self
+                let (provider, model, profile_id) = self
                     .selected
                     .as_ref()
-                    .map(|(provider, model)| (*provider, model.as_str()))
-                    .unwrap_or((self.selected_provider, ""));
-                let display = self.display_name(provider, model, cx);
+                    .map(|(provider, model, profile_id)| {
+                        (*provider, model.as_str(), profile_id.as_deref())
+                    })
+                    .unwrap_or_else(|| {
+                        let kind = self.app_state.read(cx).profile_kind(&self.selected_profile);
+                        (kind, "", None)
+                    });
+                let display = self.display_name(provider, model, profile_id, cx);
                 Button::new(self.trigger_id).outline().compact().child(
                     h_flex()
                         .w(px(230.))
@@ -182,19 +206,27 @@ impl Render for ProviderModelPicker {
         Popover::new(self.popover_id)
             .trigger(self.trigger(cx))
             .content(move |_, _, cx| {
-                let (options, selected_provider, selected, excluded) = {
+                let (options, profiles, selected_profile, selected, excluded) = {
                     let picker = picker.read(cx);
                     (
                         picker.options(cx),
-                        picker.selected_provider,
+                        picker.app_state.read(cx).all_profiles(),
+                        picker.selected_profile.clone(),
                         picker.selected.clone(),
                         picker.excluded.clone(),
                     )
                 };
+                // A deleted profile falls back to the first tab (built-ins
+                // always exist, so the list is never empty).
+                let current_profile = if profiles.iter().any(|p| p.id == selected_profile) {
+                    selected_profile
+                } else {
+                    profiles.first().map(|p| p.id.clone()).unwrap_or_default()
+                };
                 let available: Vec<_> = options
                     .into_iter()
                     .filter(|option| {
-                        option.provider == selected_provider
+                        option_profile_id(option) == current_profile
                             && !excluded.iter().any(|(provider, model)| {
                                 *provider == option.provider && model == &option.id
                             })
@@ -213,9 +245,14 @@ impl Render for ProviderModelPicker {
                     );
                 } else {
                     for (index, option) in available.into_iter().enumerate() {
-                        let is_selected = selected.as_ref().is_some_and(|(provider, model)| {
-                            *provider == option.provider && model == &option.id
-                        });
+                        let is_selected =
+                            selected
+                                .as_ref()
+                                .is_some_and(|(provider, model, profile_id)| {
+                                    *provider == option.provider
+                                        && model == &option.id
+                                        && profile_id == &option.profile_id
+                                });
                         let picker = picker.clone();
                         let popover = cx.entity();
                         rows = rows.child(
@@ -250,10 +287,13 @@ impl Render for ProviderModelPicker {
                                 .on_click(move |_, window, cx| {
                                     let selected = option.clone();
                                     picker.update(cx, |picker, cx| {
-                                        picker.selected_provider = selected.provider;
+                                        picker.selected_profile = option_profile_id(&selected);
                                         if matches!(picker.trigger_kind, TriggerKind::Selection) {
-                                            picker.selected =
-                                                Some((selected.provider, selected.id.clone()));
+                                            picker.selected = Some((
+                                                selected.provider,
+                                                selected.id.clone(),
+                                                selected.profile_id.clone(),
+                                            ));
                                         }
                                         cx.emit(ModelSelected(selected));
                                     });
@@ -263,12 +303,25 @@ impl Render for ProviderModelPicker {
                     }
                 }
 
+                // One tab per profile: the two built-ins first, then the user's
+                // profiles in their card order.
                 let mut tabs = h_flex().w_full().p_1().gap_1();
-                for (tab_index, provider) in [ProviderKind::Codex, ProviderKind::ClaudeCode]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let is_selected = provider == selected_provider;
+                for (tab_index, profile) in profiles.iter().enumerate() {
+                    let is_selected = profile.id == current_profile;
+                    let label = if Settings::is_builtin_profile_id(&profile.id) {
+                        provider_label(profile.kind).to_string()
+                    } else {
+                        profile
+                            .settings
+                            .display_name
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or(&profile.id)
+                            .to_string()
+                    };
+                    let kind = profile.kind;
+                    let profile_id = profile.id.clone();
                     let picker = picker.clone();
                     let popover = cx.entity();
                     tabs = tabs.child(
@@ -283,11 +336,11 @@ impl Render for ProviderModelPicker {
                             .cursor_pointer()
                             .when(is_selected, |tab| tab.bg(cx.theme().accent).font_medium())
                             .hover(|tab| tab.bg(cx.theme().accent))
-                            .child(provider_glyph(provider).xsmall())
-                            .child(div().text_size(px(13.)).child(provider_label(provider)))
+                            .child(provider_glyph(kind).xsmall())
+                            .child(div().text_size(px(13.)).child(label))
                             .on_click(move |_, _, cx| {
                                 picker.update(cx, |picker, cx| {
-                                    picker.selected_provider = provider;
+                                    picker.selected_profile = profile_id.clone();
                                     cx.notify();
                                 });
                                 popover.update(cx, |_, cx| cx.notify());
@@ -312,6 +365,19 @@ impl Render for ProviderModelPicker {
                 .rounded(crate::material::radius_overlay())
             })
     }
+}
+
+/// The profile a selection belongs to: its explicit profile id, or the kind's
+/// built-in profile.
+fn selection_profile_id(provider: ProviderKind, profile_id: Option<&str>) -> String {
+    profile_id
+        .map(str::to_string)
+        .unwrap_or_else(|| Settings::builtin_profile_id(provider).to_string())
+}
+
+/// The profile tab an option files under (see [`selection_profile_id`]).
+fn option_profile_id(option: &ModelOption) -> String {
+    selection_profile_id(option.provider, option.profile_id.as_deref())
 }
 
 fn default_reasoning_effort(spec: &agent::ModelSpec) -> Option<String> {
