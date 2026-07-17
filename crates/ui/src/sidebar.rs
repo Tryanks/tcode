@@ -25,9 +25,9 @@ use crate::time::now_secs;
 use crate::window_drag_area;
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
-/// traffic lights (positioned at ~(9, 9)); a small inset elsewhere.
+/// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
 #[cfg(target_os = "macos")]
-const TRAFFIC_LIGHT_INSET: f32 = 74.;
+const TRAFFIC_LIGHT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
 const TRAFFIC_LIGHT_INSET: f32 = 8.;
 
