@@ -300,11 +300,33 @@ impl SessionStore {
         events
     }
 
-    /// Count the persisted events for a session (number of parseable JSONL
-    /// lines). Used to record a checkpoint's `event_offset` before a turn's user
-    /// message is appended, so a later revert can truncate deterministically.
+    /// Count the persisted events for a session (number of JSONL lines). Used
+    /// to record a checkpoint's `event_offset` before a turn's user message is
+    /// appended, so a later revert can truncate deterministically.
+    ///
+    /// This is a byte scan for newlines, NOT a parse: it runs on the UI thread
+    /// at every send, where parsing a long session's whole log (tens of MB)
+    /// would stall. Line count equals event count because `append_event`
+    /// writes exactly one `\n`-terminated line per event. A line corrupted by
+    /// a crash mid-write is counted here but skipped by `read_events`, so a
+    /// revert truncation boundary can sit at most that many events too deep —
+    /// a slightly shallower truncate, never an over-truncate.
     pub fn event_count(&self, id: &str) -> usize {
-        self.read_events(id).len()
+        let path = self.events_path(id);
+        let Ok(file) = File::open(&path) else {
+            return 0;
+        };
+        let mut reader = BufReader::new(file);
+        let mut count = 0;
+        while let Ok(buf) = reader.fill_buf() {
+            if buf.is_empty() {
+                break;
+            }
+            count += buf.iter().filter(|&&b| b == b'\n').count();
+            let len = buf.len();
+            reader.consume(len);
+        }
+        count
     }
 
     /// Truncate a session's JSONL log to its first `keep` events, discarding the
