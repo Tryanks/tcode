@@ -105,6 +105,11 @@ ip=$("$TART" ip "$VM_NAME")
 [[ -n "$ip" ]] || { echo "Could not determine VM IP" >&2; exit 1; }
 
 export SSHPASS=$VM_PASSWORD
+# Multiplex every SSH/SCP call over one shared connection: this script makes
+# ~20 round trips and a fresh handshake + password auth each time is the real
+# cost (not the loopback copy). The first call opens a master socket; the rest
+# reuse it, so they skip the key exchange and auth entirely.
+ssh_ctl="${TMPDIR:-/tmp}/tcode-vm-ssh-$$"
 ssh_opts=(
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
@@ -112,10 +117,18 @@ ssh_opts=(
   -o ConnectTimeout=5
   -o ServerAliveInterval=5
   -o ServerAliveCountMax=3
+  -o ControlMaster=auto
+  -o "ControlPath=$ssh_ctl"
+  -o ControlPersist=60
 )
 ssh_cmd=(sshpass -e ssh "${ssh_opts[@]}")
 scp_cmd=(sshpass -e scp "${ssh_opts[@]}")
 remote="$VM_USER@$ip"
+# Tear the master connection down on exit so no socket lingers between runs.
+cleanup_ssh_master() {
+  ssh -o "ControlPath=$ssh_ctl" -O exit "$remote" >/dev/null 2>&1 || true
+}
+trap cleanup_ssh_master EXIT
 
 connected=false
 for _ in $(seq 1 60); do
