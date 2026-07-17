@@ -797,6 +797,7 @@ fn user_message(text: &str, attachments: &[Attachment]) -> Value {
 enum ToolItem {
     Command {
         command: String,
+        output: String,
     },
     File {
         changes: Vec<FileChange>,
@@ -890,6 +891,16 @@ pub(crate) struct Mapper {
     pending_steers: VecDeque<String>,
     /// Once the CLI exposes request checkpoints, never use the legacy fallback.
     saw_requesting: bool,
+    /// Claude may return the turn-level `result` while a Bash command continues
+    /// as a background task. Keep those task ids authoritative so the app does
+    /// not expose a new turn until the command really stops.
+    background_tasks: HashSet<String>,
+    /// Bash tasks which were observed in `background_tasks_changed`, retained
+    /// until their final notification so the command card can be completed.
+    background_task_history: HashSet<String>,
+    /// A successful turn result held while one or more background Bash tasks
+    /// still belong to that turn.
+    pending_turn_completion: Vec<AgentEvent>,
 }
 
 impl Mapper {
@@ -918,6 +929,9 @@ impl Mapper {
             cumulative_processed: 0,
             pending_steers: VecDeque::new(),
             saw_requesting: false,
+            background_tasks: HashSet::new(),
+            background_task_history: HashSet::new(),
+            pending_turn_completion: Vec::new(),
         }
     }
 
@@ -1159,6 +1173,7 @@ impl Mapper {
             Some("task_started") => return self.on_task_started(msg),
             Some("task_updated") => return self.on_task_updated(msg),
             Some("task_notification") => return self.on_task_notification(msg),
+            Some("background_tasks_changed") => return self.on_background_tasks_changed(msg),
             other => {
                 log::debug!("claude: ignoring system/{other:?}");
                 return Vec::new();
@@ -1201,17 +1216,34 @@ impl Mapper {
         if let Some(task_id) = msg.get("task_id").and_then(Value::as_str) {
             self.task_tools
                 .insert(task_id.to_owned(), tool_use_id.to_owned());
-            self.tail_requests.push(TailRequest::Start {
-                parent_id: tool_use_id.to_owned(),
-                task_id: task_id.to_owned(),
-                session_id: msg
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            });
+            if msg.get("task_type").and_then(Value::as_str) != Some("local_bash") {
+                self.tail_requests.push(TailRequest::Start {
+                    parent_id: tool_use_id.to_owned(),
+                    task_id: task_id.to_owned(),
+                    session_id: msg
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                });
+            }
         }
         self.update_subagent(tool_use_id, ItemStatus::InProgress, None, false)
+    }
+
+    fn on_background_tasks_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let current: HashSet<String> = msg
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|task| task.get("task_type").and_then(Value::as_str) == Some("local_bash"))
+            .filter_map(|task| task.get("task_id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        self.background_task_history.extend(current.iter().cloned());
+        self.background_tasks = current;
+        self.finish_pending_turn_if_idle()
     }
 
     fn on_task_updated(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1234,6 +1266,10 @@ impl Mapper {
     }
 
     fn on_task_notification(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let task_id = msg
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let tool_use_id = msg
             .get("tool_use_id")
             .and_then(Value::as_str)
@@ -1244,8 +1280,14 @@ impl Mapper {
                     .and_then(|task_id| self.task_tools.get(task_id).cloned())
             });
         let Some(tool_use_id) = tool_use_id else {
-            return Vec::new();
+            return self.finish_pending_turn_if_idle();
         };
+        let is_background_bash = task_id
+            .as_ref()
+            .is_some_and(|id| self.background_task_history.remove(id));
+        if let Some(task_id) = &task_id {
+            self.background_tasks.remove(task_id);
+        }
         if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
             self.tail_requests.push(TailRequest::PreferPath {
                 parent_id: tool_use_id.clone(),
@@ -1264,7 +1306,51 @@ impl Mapper {
             .get("summary")
             .and_then(Value::as_str)
             .map(one_line_summary);
-        self.update_subagent(&tool_use_id, status, summary, false)
+        let mut events = if is_background_bash {
+            self.complete_background_command(&tool_use_id, status, summary)
+        } else {
+            self.update_subagent(&tool_use_id, status, summary, false)
+        };
+        events.extend(self.finish_pending_turn_if_idle());
+        events
+    }
+
+    fn complete_background_command(
+        &mut self,
+        tool_use_id: &str,
+        status: ItemStatus,
+        summary: Option<String>,
+    ) -> Vec<AgentEvent> {
+        let Some(ToolItem::Command {
+            command,
+            mut output,
+        }) = self.tool_items.remove(tool_use_id)
+        else {
+            return Vec::new();
+        };
+        if output.trim().is_empty()
+            && let Some(summary) = summary
+        {
+            output = summary;
+        }
+        vec![AgentEvent::ItemCompleted(ThreadItem {
+            id: tool_use_id.to_owned(),
+            parent_item_id: None,
+            content: ItemContent::CommandExecution {
+                command,
+                output,
+                exit_code: (status == ItemStatus::Completed).then_some(0),
+                status,
+            },
+        })]
+    }
+
+    fn finish_pending_turn_if_idle(&mut self) -> Vec<AgentEvent> {
+        if self.background_tasks.is_empty() {
+            std::mem::take(&mut self.pending_turn_completion)
+        } else {
+            Vec::new()
+        }
     }
 
     fn update_subagent(
@@ -1507,6 +1593,7 @@ impl Mapper {
             (
                 ToolItem::Command {
                     command: command.clone(),
+                    output: String::new(),
                 },
                 ItemContent::CommandExecution {
                     command,
@@ -1567,6 +1654,10 @@ impl Mapper {
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            let background_task_id = msg
+                .pointer("/tool_use_result/backgroundTaskId")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let item = match self.tool_items.remove(&tool_use_id) {
                 Some(i) => i,
                 None => continue,
@@ -1582,7 +1673,26 @@ impl Mapper {
                 ItemStatus::Completed
             };
             let content = match item {
-                ToolItem::Command { command } => ItemContent::CommandExecution {
+                ToolItem::Command { command, .. } if background_task_id.is_some() => {
+                    self.tool_items.insert(
+                        tool_use_id.clone(),
+                        ToolItem::Command {
+                            command: command.clone(),
+                            output: output.clone(),
+                        },
+                    );
+                    if let Some(task_id) = background_task_id {
+                        self.background_tasks.insert(task_id.clone());
+                        self.background_task_history.insert(task_id);
+                    }
+                    ItemContent::CommandExecution {
+                        command,
+                        output,
+                        exit_code: None,
+                        status: ItemStatus::InProgress,
+                    }
+                }
+                ToolItem::Command { command, .. } => ItemContent::CommandExecution {
                     command,
                     output,
                     exit_code: if is_error { Some(1) } else { Some(0) },
@@ -1607,7 +1717,18 @@ impl Mapper {
                         .or_else(|| (!output.trim().is_empty()).then(|| one_line_summary(&output))),
                 },
             };
-            out.push(AgentEvent::ItemCompleted(ThreadItem {
+            let event = if matches!(
+                &content,
+                ItemContent::CommandExecution {
+                    status: ItemStatus::InProgress,
+                    ..
+                }
+            ) {
+                AgentEvent::ItemUpdated
+            } else {
+                AgentEvent::ItemCompleted
+            };
+            out.push(event(ThreadItem {
                 id: tool_use_id,
                 parent_item_id: None,
                 content,
@@ -1807,7 +1928,12 @@ impl Mapper {
             status,
             usage,
         });
-        events
+        if self.background_tasks.is_empty() || status != TurnStatus::Completed {
+            events
+        } else {
+            self.pending_turn_completion = events;
+            Vec::new()
+        }
     }
 }
 
@@ -1818,7 +1944,9 @@ fn is_file_tool(name: &str) -> bool {
 fn subagent_status(status: &str) -> ItemStatus {
     match status {
         "completed" | "done" | "succeeded" => ItemStatus::Completed,
-        "failed" | "error" | "cancelled" | "canceled" => ItemStatus::Failed,
+        "failed" | "error" | "cancelled" | "canceled" | "stopped" | "killed" | "interrupted" => {
+            ItemStatus::Failed
+        }
         _ => ItemStatus::InProgress,
     }
 }
@@ -3004,6 +3132,115 @@ mod tests {
             },
             other => panic!("expected ItemCompleted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn background_bash_keeps_turn_running_until_task_stops() {
+        let mut m = Mapper::new();
+        let turn_id = m.start_turn();
+
+        let started = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg-bg","content":[{"type":"tool_use","id":"toolu-bg","name":"Bash","input":{"command":"sleep 30","run_in_background":true}}]}}"#,
+        );
+        assert!(matches!(
+            &started[0],
+            AgentEvent::ItemStarted(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    status: ItemStatus::InProgress,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"sleep"}]}"#,
+            )
+            .is_empty()
+        );
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","task_type":"local_bash"}"#,
+            )
+            .is_empty()
+        );
+        let running = feed(
+            &mut m,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-bg","content":"Command running in background with ID: bg-1"}]},"tool_use_result":{"backgroundTaskId":"bg-1"}}"#,
+        );
+        assert!(matches!(
+            &running[0],
+            AgentEvent::ItemUpdated(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    status: ItemStatus::InProgress,
+                    exit_code: None,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        // Claude ends its model turn as soon as it launches the process. The
+        // canonical turn must stay open while that process is still listed.
+        let result = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        );
+        assert!(result.is_empty());
+
+        let finished = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        );
+        assert!(matches!(
+            &finished[0],
+            AgentEvent::TurnCompleted {
+                turn_id: completed,
+                status: TurnStatus::Completed,
+                ..
+            } if completed == &turn_id
+        ));
+    }
+
+    #[test]
+    fn background_bash_notification_completes_command_card() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg-bg","content":[{"type":"tool_use","id":"toolu-bg","name":"Bash","input":{"command":"sleep 30","run_in_background":true}}]}}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash"}]}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","task_type":"local_bash"}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-bg","content":"Command running in background with ID: bg-1"}]},"tool_use_result":{"backgroundTaskId":"bg-1"}}"#,
+        );
+
+        let finished = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_notification","task_id":"bg-1","tool_use_id":"toolu-bg","status":"completed","summary":"sleep finished"}"#,
+        );
+        assert!(matches!(
+            &finished[0],
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    status: ItemStatus::Completed,
+                    exit_code: Some(0),
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]
