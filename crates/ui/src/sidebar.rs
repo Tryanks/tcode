@@ -868,11 +868,10 @@ impl SessionsSidebar {
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
             .pr_2()
-            .rounded(cx.theme().radius)
+            // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
+            .rounded(px(6.))
             .cursor_pointer()
-            // Selection is a blue-tinted pill (single-line row); the selected
-            // row ignores hover, unselected rows hover the neutral glass accent.
-            .when(is_active, |s| s.rounded_full().bg(cx.theme().list_active))
+            .when(is_active, |s| s.bg(cx.theme().list_active))
             .when(!is_active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
             .on_click(cx.listener({
                 let session_id = session_id.clone();

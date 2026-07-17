@@ -411,7 +411,7 @@ impl Render for CommandPalette {
                         .px_2()
                         .gap_2()
                         .items_center()
-                        .rounded_full()
+                        .rounded(px(6.))
                         .cursor_pointer()
                         .when(is_sel, |s| s.bg(cx.theme().list_active))
                         .when(!is_sel, |s| {
