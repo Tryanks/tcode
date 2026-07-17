@@ -37,8 +37,8 @@ use tcode_services::acp_registry::{
 #[cfg(test)]
 use tcode_services::checkpoints::checkpoint_ref_exists;
 use tcode_services::checkpoints::{
-    create_checkpoint, delete_all_checkpoint_refs, delete_checkpoint_refs_from, is_git_repo,
-    net_turn_file_changes, restore_checkpoint,
+    create_checkpoint, delete_all_checkpoint_refs, delete_checkpoint_refs_from,
+    delete_checkpoint_turns, is_git_repo, net_turn_file_changes, restore_checkpoint,
 };
 use tcode_services::git::{
     CheckoutError, checkout_if_clean, commit_diff_context, create_git_worktree, list_git_branches,
@@ -80,6 +80,11 @@ pub use crate::terminal::{
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
 const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// How many pre-turn checkpoints a session keeps. Older checkpoint refs are
+/// deleted (their turns lose the Revert affordance); without a cap the refs —
+/// and the git objects they pin — accumulate for the life of the repo.
+const MAX_CHECKPOINTS_PER_SESSION: usize = 20;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
@@ -333,6 +338,17 @@ pub struct ActiveSession {
     /// Source of [`QueuedMessage::id`]s.
     next_queue_id: u64,
     turn_in_flight: bool,
+    /// The queue head has been recorded to the transcript but not dispatched
+    /// yet — set between `record_user_message` and the successful
+    /// `dispatch_next_pending` when the pre-turn checkpoint runs off the main
+    /// thread. Re-entering `dispatch_next_queued` with this set must not record
+    /// the head a second time.
+    recorded_undispatched: bool,
+    /// A pre-turn checkpoint capture is running on the background executor for
+    /// this session; dispatch of the recorded head resumes when it lands (see
+    /// `finish_checkpoint_capture`). Blocks `dispatch_next_queued` meanwhile so
+    /// a second send can't interleave a record into the same capture window.
+    awaiting_checkpoint: bool,
     /// Provider-native commands / skills discovered at session start (Claude
     /// `slash_commands` + `skills`; Codex `skills/list` + custom prompts).
     /// Seeded from the per-provider cache, then replaced by live updates.
@@ -454,6 +470,12 @@ impl ActiveSession {
     /// Pull a message out of the queue by id (the strip's steer/✕ buttons).
     fn take_queued(&mut self, id: u64) -> Option<QueuedMessage> {
         let index = self.queue.iter().position(|m| m.id == id)?;
+        // Dropping the recorded-but-undispatched head leaves its user message
+        // in the transcript with no turn behind it (harmless — the next send
+        // simply continues), but the next head must be recorded afresh.
+        if index == 0 {
+            self.recorded_undispatched = false;
+        }
         Some(self.queue.remove(index))
     }
 
@@ -551,6 +573,7 @@ impl ActiveSession {
             .map_err(|_| ())?;
         self.queue.remove(0);
         self.turn_in_flight = true;
+        self.recorded_undispatched = false;
         Ok(true)
     }
 
@@ -3549,54 +3572,169 @@ impl AppState {
     /// Snapshot the pre-turn working tree into a hidden git ref so the turn the
     /// just-recorded user message opened can later be reverted. `event_offset`
     /// is the JSONL length before that message, used as the revert truncation
-    /// boundary. Runs synchronously so the snapshot precedes any file edits.
-    fn capture_checkpoint(
+    /// boundary.
+    ///
+    /// The git work (repo check + `add -A` + `write-tree` + …) runs on the
+    /// background executor — on the UI thread it froze every send in a large or
+    /// I/O-starved checkout — while `awaiting_checkpoint` holds the recorded
+    /// head back so the snapshot still precedes any agent file edits.
+    /// `finish_checkpoint_capture` applies the result and releases the turn.
+    fn start_checkpoint_capture(
         &mut self,
         session_id: &str,
+        turn: usize,
         event_offset: usize,
         cx: &mut Context<Self>,
     ) {
-        let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) else {
+        let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) else {
             return;
         };
         let cwd = active.meta.cwd.clone();
-        let Some(turn) = active.timeline.entries.last().map(|e| e.turn) else {
+        active.awaiting_checkpoint = true;
+        let session_id = session_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let git = {
+                let cwd = cwd.clone();
+                let session_id = session_id.clone();
+                unblock(cx.background_executor(), move || {
+                    if !is_git_repo(&cwd) {
+                        return None;
+                    }
+                    match create_checkpoint(&cwd, &session_id, turn) {
+                        Ok(commit) => Some(commit),
+                        Err(err) => {
+                            log::warn!("failed to create checkpoint: {err}");
+                            None
+                        }
+                    }
+                })
+            }
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                state.finish_checkpoint_capture(&session_id, turn, event_offset, git, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A background checkpoint capture landed: stash the commit on the session
+    /// (unless the timeline moved on — a rewind while capturing truncates both
+    /// the turn and the offset it was taken at), then dispatch the recorded
+    /// head the capture was holding back.
+    fn finish_checkpoint_capture(
+        &mut self,
+        session_id: &str,
+        turn: usize,
+        event_offset: usize,
+        commit: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // The session may have been parked while the capture ran.
+        let is_active = self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.meta.id == session_id);
+        if is_active {
+            self.active.as_mut().unwrap().awaiting_checkpoint = false;
+            if let Some(commit) = commit {
+                self.apply_checkpoint(session_id, turn, event_offset, commit, cx);
+            }
+            // The recorded head (if still queued) can go out now.
+            if self.dispatch_next_queued(cx).is_err() {
+                self.report_error(RuntimeError::ProcessGone, cx);
+            }
+        } else if self.background.contains_key(session_id) {
+            self.background
+                .get_mut(session_id)
+                .unwrap()
+                .awaiting_checkpoint = false;
+            if let Some(commit) = commit {
+                self.apply_checkpoint(session_id, turn, event_offset, commit, cx);
+            }
+            if let Some(parked) = self.background.get_mut(session_id) {
+                let _ = parked.dispatch_next_pending();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Record a captured checkpoint on the session's meta (active or parked)
+    /// and cap how many checkpoints the session keeps — refs are only ever
+    /// added by turns and never garbage-collected otherwise, so an uncapped
+    /// session grows the repo's object store without bound.
+    fn apply_checkpoint(
+        &mut self,
+        session_id: &str,
+        turn: usize,
+        event_offset: usize,
+        commit: String,
+        cx: &mut Context<Self>,
+    ) {
+        let session = if self
+            .active
+            .as_ref()
+            .is_some_and(|a| a.meta.id == session_id)
+        {
+            self.active.as_mut().unwrap()
+        } else if self.background.contains_key(session_id) {
+            self.background.get_mut(session_id).unwrap()
+        } else {
             return;
         };
-        let previous_checkpoint_turn = active
+        // A rewind while the capture ran truncated this turn away — its
+        // checkpoint and offset no longer describe the transcript.
+        if session.timeline.entries.last().map(|e| e.turn) != Some(turn) {
+            return;
+        }
+
+        // A previous last turn may have been computed against the worktree. It
+        // now has an immutable checkpoint target instead.
+        let previous_checkpoint_turn = session
             .meta
             .checkpoints
             .iter()
             .filter(|checkpoint| checkpoint.turn < turn)
             .map(|checkpoint| checkpoint.turn)
             .max();
+        if let Some(previous_turn) = previous_checkpoint_turn {
+            let key = (session_id.to_string(), previous_turn);
+            self.turn_net_changes.remove(&key);
+            self.turn_net_changes_loading.remove(&key);
+        }
+        session.meta.checkpoints.push(Checkpoint {
+            turn,
+            commit,
+            event_offset,
+        });
+        session.meta.checkpoints.sort_by_key(|c| c.turn);
         // A second queued send can land in the same open turn — checkpoint once.
-        if active.meta.checkpoints.iter().any(|c| c.turn == turn) {
-            return;
-        }
-        if !is_git_repo(&cwd) {
-            return;
-        }
-        match create_checkpoint(&cwd, session_id, turn) {
-            Ok(commit) => {
-                // A previous last turn may have been computed against the
-                // worktree. It now has an immutable checkpoint target instead.
-                if let Some(previous_turn) = previous_checkpoint_turn {
-                    let key = (session_id.to_string(), previous_turn);
-                    self.turn_net_changes.remove(&key);
-                    self.turn_net_changes_loading.remove(&key);
-                }
-                if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
-                    active.meta.checkpoints.push(Checkpoint {
-                        turn,
-                        commit,
-                        event_offset,
-                    });
-                    let meta = active.meta.clone();
-                    self.persist_meta(&meta, cx);
-                }
-            }
-            Err(err) => log::warn!("failed to create checkpoint: {err}"),
+        session.meta.checkpoints.dedup_by_key(|c| c.turn);
+
+        // Cap retained checkpoints (oldest turns first); their refs are deleted
+        // off-thread below.
+        let excess = session
+            .meta
+            .checkpoints
+            .len()
+            .saturating_sub(MAX_CHECKPOINTS_PER_SESSION);
+        let pruned: Vec<usize> = session
+            .meta
+            .checkpoints
+            .drain(..excess)
+            .map(|c| c.turn)
+            .collect();
+
+        let cwd = session.meta.cwd.clone();
+        let meta = session.meta.clone();
+        self.persist_meta(&meta, cx);
+
+        if !pruned.is_empty() {
+            let session_id = session_id.to_string();
+            cx.background_executor()
+                .spawn(async move {
+                    delete_checkpoint_turns(&cwd, &session_id, &pruned);
+                })
+                .detach();
         }
     }
 
@@ -3679,6 +3817,12 @@ impl AppState {
             active.timeline = timeline;
             active.git_branch = read_git_branch(&active.meta.cwd);
             active.queue.clear();
+            // The transcript the recorded head and any in-flight capture
+            // referred to is gone; the next send records afresh. A capture that
+            // still lands finds a different last turn and drops its result (see
+            // `apply_checkpoint`).
+            active.recorded_undispatched = false;
+            active.awaiting_checkpoint = false;
             active.plan_implemented = false;
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
@@ -3930,6 +4074,8 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -3980,6 +4126,8 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4201,6 +4349,8 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4312,30 +4462,57 @@ impl AppState {
     }
 
     /// Record + dispatch the head of the queue, if the session can take a turn
-    /// right now (live provider, nothing in flight). This is the ONLY place a
-    /// queued message becomes part of the conversation: the user message is
-    /// appended to the JSONL and the pre-turn checkpoint captured here, not when
-    /// the message was queued — so a message dropped from the queue strip never
-    /// touches the transcript.
+    /// right now (live provider, nothing in flight, no checkpoint capture
+    /// pending). This is the ONLY place a queued message becomes part of the
+    /// conversation: the user message is appended to the JSONL and the pre-turn
+    /// checkpoint captured here, not when the message was queued — so a message
+    /// dropped from the queue strip never touches the transcript.
+    ///
+    /// The checkpoint's git work runs on the background executor
+    /// (`start_checkpoint_capture`): this method records the head, marks it
+    /// `recorded_undispatched`, and returns; the capture's completion dispatches
+    /// it. Everything before that point is cheap main-thread bookkeeping, so
+    /// sending stays instantaneous even on a slow disk.
     fn dispatch_next_queued(&mut self, cx: &mut Context<Self>) -> Result<bool, ()> {
         let Some(active) = self.active.as_ref() else {
             return Ok(false);
         };
-        if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
+        if active.turn_in_flight
+            || active.awaiting_checkpoint
+            || !matches!(active.runtime, Runtime::Live(_))
+        {
             return Ok(false);
         }
-        let Some(next) = active.queue.first().cloned() else {
-            return Ok(false);
-        };
         let session_id = active.meta.id.clone();
 
-        // Group B: the JSONL length before this turn's user message — the revert
-        // truncation boundary — captured before the message is appended.
-        let checkpoint_offset = self.store.event_count(&session_id);
-        self.record_user_message(&session_id, &next.text, next.context_len, cx);
-        // Group B: snapshot the pre-turn working tree for this turn's revert.
-        self.capture_checkpoint(&session_id, checkpoint_offset, cx);
-        self.maybe_generate_title(&next.text, &next.attachments, cx);
+        if !active.recorded_undispatched {
+            let Some(next) = active.queue.first().cloned() else {
+                return Ok(false);
+            };
+            // Group B: the JSONL length before this turn's user message — the
+            // revert truncation boundary — captured before the message is
+            // appended. (A newline byte-scan, not a parse: cheap even for a
+            // long session's log.)
+            let checkpoint_offset = self.store.event_count(&session_id);
+            self.record_user_message(&session_id, &next.text, next.context_len, cx);
+            self.maybe_generate_title(&next.text, &next.attachments, cx);
+
+            let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) else {
+                return Ok(false);
+            };
+            active.recorded_undispatched = true;
+
+            // Group B: snapshot the pre-turn working tree for this turn's
+            // revert — off the main thread. One checkpoint per turn: a second
+            // queued send landing in the same open turn skips the capture.
+            let turn = active.timeline.entries.last().map(|e| e.turn);
+            let needs_capture =
+                turn.is_some() && !active.meta.checkpoints.iter().any(|c| Some(c.turn) == turn);
+            if let Some(turn) = turn.filter(|_| needs_capture) {
+                self.start_checkpoint_capture(&session_id, turn, checkpoint_offset, cx);
+                return Ok(true);
+            }
+        }
 
         let Some(active) = self.active.as_mut() else {
             return Ok(false);
@@ -4983,6 +5160,8 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -5911,7 +6090,16 @@ impl AppState {
                 cx,
             );
         }
-        self.sessions = self.store.load_index();
+        // Reflect the upsert in memory instead of reloading the whole index
+        // from disk: `persist_meta` runs on every turn (and every checkpoint),
+        // where re-reading and re-parsing a large sessions.json stalls the UI.
+        // `sessions` stays newest-first, matching `load_index`'s order.
+        match self.sessions.iter_mut().find(|m| m.id == meta.id) {
+            Some(existing) => *existing = meta.clone(),
+            None => self.sessions.push(meta.clone()),
+        }
+        self.sessions
+            .sort_by_key(|m| std::cmp::Reverse(m.updated_at));
         cx.notify();
     }
 
@@ -8334,6 +8522,8 @@ mod tests {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8373,6 +8563,8 @@ mod tests {
             queue: vec!["first".into(), "second".into()],
             next_queue_id: 2,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8426,6 +8618,8 @@ mod tests {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -8633,6 +8827,8 @@ mod tests {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8678,6 +8874,8 @@ mod tests {
             queue: vec!["do it".into()],
             next_queue_id: 1,
             turn_in_flight: false,
+            recorded_undispatched: false,
+            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8819,7 +9017,9 @@ mod tests {
 
     /// Record a user message for a new turn exactly the way `dispatch_next_queued`
     /// does (JSONL offset first, then the message, then the pre-turn checkpoint),
-    /// then let the "agent" reply and finish the turn.
+    /// then let the "agent" reply and finish the turn. The capture itself runs
+    /// synchronously here — the dispatch path runs it on the background
+    /// executor, which a plain `state.update` wouldn't wait for.
     fn fake_turn(
         state: &mut AppState,
         text: &str,
@@ -8829,8 +9029,13 @@ mod tests {
         let id = state.active.as_ref().unwrap().meta.id.clone();
         let offset = state.store.event_count(&id);
         state.record_user_message(&id, text, None, cx);
-        state.capture_checkpoint(&id, offset, cx);
         let turn = state.last_user_turn().unwrap();
+        let cwd = state.active.as_ref().unwrap().meta.cwd.clone();
+        if is_git_repo(&cwd)
+            && let Ok(commit) = create_checkpoint(&cwd, &id, turn)
+        {
+            state.apply_checkpoint(&id, turn, offset, commit, cx);
+        }
         state.record_event(
             &id,
             &AgentEvent::ItemCompleted(ThreadItem {
@@ -8963,6 +9168,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&plain);
     }
 
+    /// Checkpoints are capped: past `MAX_CHECKPOINTS_PER_SESSION` the oldest
+    /// turns lose both the meta entry (no more Revert affordance) and the git
+    /// ref pinning their snapshot (deleted off the main thread).
+    #[gpui::test]
+    fn checkpoints_are_capped_and_old_refs_pruned(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo();
+        let state = scratch_state(repo.clone(), cx);
+        let mut id = String::new();
+
+        state.update(cx, |state, cx| {
+            id = state.active.as_ref().unwrap().meta.id.clone();
+            for turn in 0..MAX_CHECKPOINTS_PER_SESSION + 2 {
+                fake_turn(state, &format!("turn {turn}"), "Done.", cx);
+            }
+            let checkpoints = &state.active.as_ref().unwrap().meta.checkpoints;
+            assert_eq!(checkpoints.len(), MAX_CHECKPOINTS_PER_SESSION);
+            assert_eq!(checkpoints.first().unwrap().turn, 2);
+            assert!(state.turn_has_checkpoint(2) && !state.turn_has_checkpoint(0));
+        });
+
+        // The ref deletions run on the background executor.
+        cx.run_until_parked();
+
+        assert!(!checkpoint_ref_exists(&repo, &id, 0));
+        assert!(!checkpoint_ref_exists(&repo, &id, 1));
+        assert!(checkpoint_ref_exists(&repo, &id, 2));
+        assert!(checkpoint_ref_exists(
+            &repo,
+            &id,
+            MAX_CHECKPOINTS_PER_SESSION + 1
+        ));
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     /// An `ActiveSession` wired to a fake live provider: commands land on the
     /// returned receiver, nothing real is spawned.
     fn fake_live_session(cwd: PathBuf) -> (ActiveSession, async_channel::Receiver<SessionCommand>) {
@@ -9003,6 +9243,10 @@ mod tests {
         let store = SessionStore::open_at(data.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
 
+        // Session A, live (fake provider: commands land on `commands_a`).
+        let (session, commands_a) = fake_live_session(cwd.clone());
+        let (commands_b, receiver_b) = async_channel::unbounded();
+
         state.update(cx, |state, cx| {
             // No real provider may spawn if a start slips through.
             state
@@ -9010,12 +9254,19 @@ mod tests {
                 .provider_mut(ProviderKind::ClaudeCode)
                 .binary_path = Some("/nonexistent/tcode-test-claude".into());
 
-            // Session A, live. Send → the bubble is in the timeline immediately.
-            let (session, commands_a) = fake_live_session(cwd.clone());
-            let id_a = session.meta.id.clone();
+            // Send → the bubble is in the timeline immediately (the pre-turn
+            // checkpoint runs off-thread; the turn command itself follows once
+            // the capture lands).
             state.active = Some(session);
             state.send_turn("first message".into(), Vec::new(), cx);
             assert_eq!(state.last_user_turn(), Some(0));
+        });
+
+        // Let the checkpoint capture land and release the dispatch.
+        cx.run_until_parked();
+
+        state.update(cx, |state, cx| {
+            let id_a = state.active.as_ref().unwrap().meta.id.clone();
             assert!(matches!(
                 commands_a.try_recv(),
                 Ok(SessionCommand::SendTurn { .. })
@@ -9066,9 +9317,16 @@ mod tests {
             assert_eq!(active.queue.len(), 1);
 
             // Provider comes up (simulated — the queue flush on start).
-            let (commands_b, receiver_b) = async_channel::unbounded();
             state.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
             assert_eq!(state.dispatch_next_queued(cx), Ok(true));
+            // The head is recorded but held until the checkpoint capture lands.
+            assert!(receiver_b.try_recv().is_err());
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _cx| {
+            let id_b = state.active.as_ref().unwrap().meta.id.clone();
             assert!(matches!(
                 receiver_b.try_recv(),
                 Ok(SessionCommand::SendTurn { .. })
@@ -9127,6 +9385,10 @@ mod tests {
         let store = SessionStore::open_at(data.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
 
+        // A live session (fake provider: commands land on `commands_a`).
+        let (session, commands_a) = fake_live_session(cwd.clone());
+        let id_a = session.meta.id.clone();
+
         state.update(cx, |state, cx| {
             state
                 .settings
@@ -9134,13 +9396,18 @@ mod tests {
                 .binary_path = Some("/nonexistent/tcode-test-claude".into());
 
             // A live session with a running turn (the overnight workflow).
-            let (session, commands_a) = fake_live_session(cwd.clone());
-            let id_a = session.meta.id.clone();
             state.store.upsert_meta(&session.meta).unwrap();
             state.sessions = state.store.load_index();
             state.active = Some(session);
             state.send_turn("run the long migration".into(), Vec::new(), cx);
             state.send_turn("queued follow-up".into(), Vec::new(), cx);
+        });
+
+        // The pre-turn checkpoint capture lands off-thread and releases the
+        // first dispatch (the follow-up stays queued behind it).
+        cx.run_until_parked();
+
+        state.update(cx, |state, cx| {
             state.on_event(
                 &id_a,
                 AgentEvent::TurnStarted {
@@ -9241,14 +9508,26 @@ mod tests {
         let store = SessionStore::open_at(data.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
 
+        // A live session (fake provider: commands land on `commands`).
+        let (session, commands) = fake_live_session(cwd.clone());
+        let id = session.meta.id.clone();
+
         state.update(cx, |state, cx| {
-            let (session, commands) = fake_live_session(cwd.clone());
-            let id = session.meta.id.clone();
             state.store.upsert_meta(&session.meta).unwrap();
             state.sessions = state.store.load_index();
             state.active = Some(session);
             state.send_turn("one last thing".into(), Vec::new(), cx);
-            let _ = commands.try_recv(); // the SendTurn
+        });
+
+        // The pre-turn checkpoint capture lands off-thread and releases the
+        // dispatch.
+        cx.run_until_parked();
+
+        state.update(cx, |state, cx| {
+            assert!(matches!(
+                commands.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
 
             state.start_draft("proj".into(), cwd.clone(), cx);
             assert!(state.turn_running_for(&id));

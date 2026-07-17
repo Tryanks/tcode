@@ -309,6 +309,19 @@ pub fn delete_all_checkpoint_refs(cwd: &Path, session_id: &str) {
     delete_checkpoint_refs_from(cwd, session_id, 0);
 }
 
+/// Delete the checkpoint refs for the given `turns` of a session (used to cap
+/// how many checkpoints a session keeps). Best-effort: individual deletions
+/// are ignored on error.
+pub fn delete_checkpoint_turns(cwd: &Path, session_id: &str, turns: &[usize]) {
+    for turn in turns {
+        let _ = run_git(
+            cwd,
+            &["update-ref", "-d", &checkpoint_ref(session_id, *turn)],
+            None,
+        );
+    }
+}
+
 /// Whether a checkpoint ref currently exists (test helper).
 #[doc(hidden)]
 pub fn checkpoint_ref_exists(cwd: &Path, session_id: &str, turn: usize) -> bool {
