@@ -31,9 +31,9 @@ use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, T
 use crate::time::now_secs;
 use crate::window_drag_area;
 
-/// Left inset so branding clears the native macOS traffic lights.
+/// Left inset so branding clears the native macOS 26 traffic lights near x=72.
 #[cfg(target_os = "macos")]
-const TRAFFIC_LIGHT_INSET: f32 = 74.;
+const TRAFFIC_LIGHT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
 const TRAFFIC_LIGHT_INSET: f32 = 8.;
 

@@ -2382,7 +2382,7 @@ impl ChatView {
             .flex_shrink_0()
             .h(px(52.))
             .px_4()
-            .when(collapsed, |this| this.pl(px(36.)))
+            .when(collapsed, |this| this.pl(px(40.)))
             .gap_2()
             .items_center();
 
