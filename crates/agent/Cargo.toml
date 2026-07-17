@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 agent-client-protocol = { version = "0.10.2", features = ["unstable"] }
-anyhow = "1"
 async-channel = "2"
 async-trait = "0.1"
 futures-lite = "2"
