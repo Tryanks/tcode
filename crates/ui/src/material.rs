@@ -4,11 +4,12 @@
 //! tier; reading surfaces sit on top of it at near-full opacity so body text
 //! never lands on the raw blur. Semantic colors stay on `cx.theme()` — this
 //! module owns the material tiers, the role-based radius scale, and the few
-//! light effects (faded hairlines, focus glow) the spec defines.
+//! light effects (faded hairlines, the primary-button top light) the spec
+//! defines.
 
 use gpui::{
-    App, BoxShadow, Div, Hsla, IntoElement, ParentElement as _, Pixels, Rgba, Styled as _, div,
-    linear_color_stop, linear_gradient, point, px,
+    App, Div, Hsla, IntoElement, ParentElement as _, Pixels, Rgba, Styled as _, div,
+    linear_color_stop, linear_gradient, px,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -74,17 +75,6 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
             linear_color_stop(clear, 1.),
             linear_color_stop(color, 0.),
         )))
-}
-
-/// The focused composer's blue outer glow (paired with the theme `ring`).
-pub fn focus_glow(cx: &App) -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: cx.theme().primary.opacity(0.25),
-        offset: point(px(0.), px(0.)),
-        blur_radius: px(10.),
-        spread_radius: px(2.),
-        inset: false,
-    }]
 }
 
 /// Primary buttons get a faint top light so they read as physical controls:
