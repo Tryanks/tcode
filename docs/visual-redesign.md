@@ -152,7 +152,7 @@ material.rs 常量，禁止再写魔法数字：
 
 - hover：T2 叠色浮现；禁止 hover 改变布局尺寸。
 - 选中：主色着色（token 表）。
-- focus：仅键盘可聚焦元素 ring；composer 额外 focus_glow。
+- focus：仅键盘可聚焦元素 ring；composer 仅加深中性描边（蓝色 ring + glow 已回退，磨砂画布上太刺眼）。
 - disabled：50% opacity。
 
 ## 8. 排版

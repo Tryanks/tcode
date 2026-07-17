@@ -3233,25 +3233,23 @@ impl Render for Composer {
         );
 
         // The hero input surface (spec §5): 16px composer corners; resting =
-        // hairline `input.border` + `shadow_md`; focused = ring-colored border +
-        // the blue `focus_glow`. Focus is read off the field's own handle.
+        // hairline `input.border` + `shadow_md`. Focus only deepens the border
+        // to a neutral tone — the redesign's blue ring + glow read as garish
+        // against the frosted canvas and were reverted.
         let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
             .w_full()
             .rounded(crate::material::radius_composer())
             .border_1()
             .border_color(if composer_focused {
-                cx.theme().ring
+                cx.theme().foreground.opacity(0.35)
             } else {
                 cx.theme().input
             })
             // White console on paper (T3-grade fill): the glass `background`
             // token would render as a murky translucent wash here.
             .bg(cx.theme().popover)
-            .when(composer_focused, |this| {
-                this.shadow(crate::material::focus_glow(cx))
-            })
-            .when(!composer_focused, |this| this.shadow_md())
+            .shadow_md()
             // ⌘V with image clipboard content, and arrow/Escape trigger-menu
             // navigation (fires after the input's own key actions).
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -3326,13 +3324,17 @@ impl Render for Composer {
             })
             .child(control_row);
 
+        // Mirror the chat timeline's centered content column (same page
+        // padding, same max width) so the composer lines up with the messages
+        // above it instead of stretching edge to edge on wide windows.
         v_flex()
             .relative()
             .flex_shrink_0()
-            .px_4()
+            .w_full()
+            .items_center()
+            .px(px(crate::chat::CONTENT_MIN_PADDING))
             .pt_2()
             .pb_3()
-            .gap_2()
             // Shift+Tab toggles Build ↔ Plan (S1 §4).
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
@@ -3341,16 +3343,22 @@ impl Render for Composer {
                     cx.notify();
                 }
             }))
-            .when_some(approval, |this, request| {
-                this.child(self.render_approval_panel(&request, approval_count, cx))
-            })
-            .when_some(user_input, |this, (request_id, questions)| {
-                this.child(self.render_user_input_panel(request_id, questions, cx))
-            })
-            .children(self.render_trigger_menu(cx))
-            .children(self.render_queue_strip(cx))
-            .child(card)
-            .children(self.render_checkout_row(cx))
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
+                    .gap_2()
+                    .when_some(approval, |this, request| {
+                        this.child(self.render_approval_panel(&request, approval_count, cx))
+                    })
+                    .when_some(user_input, |this, (request_id, questions)| {
+                        this.child(self.render_user_input_panel(request_id, questions, cx))
+                    })
+                    .children(self.render_trigger_menu(cx))
+                    .children(self.render_queue_strip(cx))
+                    .child(card)
+                    .children(self.render_checkout_row(cx)),
+            )
             .children(self.render_image_preview(cx))
     }
 }
