@@ -1389,6 +1389,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tcode-services",
  "tokio",
  "uuid",
 ]
@@ -8122,6 +8123,7 @@ name = "tcode"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "computer-use-mcp",
  "embed-resource",
  "env_logger",
  "gpui",

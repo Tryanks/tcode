@@ -327,6 +327,15 @@ fn main() {
                 }
                 Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
             }
+            match computer_use_mcp::start() {
+                Ok(server) => {
+                    log::info!("computer-use MCP server listening at {}", server.url);
+                    app_state.update(cx, |state, _| {
+                        state.attach_computer_use_mcp(server.url, server.token)
+                    });
+                }
+                Err(err) => log::warn!("computer-use MCP server failed to start: {err}"),
+            }
             // Refresh the model catalogs in the background so the picker shows
             // real, up-to-date models (the persisted cache serves until then).
             app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));

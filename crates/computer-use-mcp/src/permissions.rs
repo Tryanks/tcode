@@ -64,13 +64,13 @@ pub fn relaunch_app() -> std::io::Result<()> {
         .map(std::path::Path::to_path_buf);
     match bundle {
         Some(app) => {
-            std::process::Command::new("open")
+            tcode_services::process::command("open")
                 .arg("-n")
                 .arg(app)
                 .spawn()?;
         }
         None => {
-            std::process::Command::new(exe).spawn()?;
+            tcode_services::process::command(exe).spawn()?;
         }
     }
     Ok(())
@@ -124,7 +124,7 @@ mod imp {
             PermissionKind::ScreenRecording => "Privacy_ScreenCapture",
         };
         let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
-        let _ = std::process::Command::new("open").arg(url).spawn();
+        let _ = tcode_services::process::command("open").arg(url).spawn();
     }
 }
 

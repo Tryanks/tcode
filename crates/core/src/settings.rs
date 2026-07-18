@@ -491,6 +491,14 @@ impl TitleGenerationSettings {
     }
 }
 
+/// Global configuration for desktop computer-use tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerUseSettings {
+    /// Whether newly spawned provider sessions receive the computer-use MCP server.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -542,6 +550,10 @@ pub struct Settings {
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
+    /// Global desktop computer-use feature settings. Absent in legacy files,
+    /// where the feature remains disabled by default.
+    #[serde(default)]
+    pub computer_use: ComputerUseSettings,
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
@@ -859,6 +871,20 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.orchestrate, settings.orchestrate);
+    }
+
+    #[test]
+    fn computer_use_defaults_disabled_and_round_trips() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(!legacy.computer_use.enabled);
+
+        let settings = Settings {
+            computer_use: ComputerUseSettings { enabled: true },
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(back.computer_use.enabled);
     }
 
     #[test]

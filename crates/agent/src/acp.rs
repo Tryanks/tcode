@@ -410,10 +410,14 @@ async fn handshake(
     let caps = init.agent_capabilities.clone();
     // Capability gate: tcode's MCP servers are loopback streamable-HTTP
     // endpoints, so they may only be offered to agents that speak MCP over HTTP.
-    let registrations: Vec<_> = [&opts.mcp_server, &opts.orchestrate_server]
-        .into_iter()
-        .flatten()
-        .collect();
+    let registrations: Vec<_> = [
+        &opts.mcp_server,
+        &opts.orchestrate_server,
+        &opts.computer_use_server,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let mcp_servers = mcp_servers(&registrations, &caps);
     if !registrations.is_empty() && mcp_servers.is_empty() {
         log::info!(
@@ -2261,6 +2265,17 @@ mod tests {
         };
         assert_eq!(mcp_servers(&[&registration, &orchestrate], &caps).len(), 2);
         assert_eq!(mcp_servers(&[&orchestrate], &caps).len(), 1);
+
+        let computer_use = McpRegistration {
+            name: McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
+            url: "http://127.0.0.1:5322/mcp".into(),
+            bearer_token: "computer-token".into(),
+        };
+        let servers = mcp_servers(&[&registration, &orchestrate, &computer_use], &caps);
+        assert_eq!(servers.len(), 3);
+        let value = serde_json::to_value(&servers[2]).unwrap();
+        assert_eq!(value["name"], "tcode_computer_use");
+        assert_eq!(value["headers"][0]["value"], "Bearer computer-token");
     }
 
     #[test]

@@ -405,7 +405,11 @@ async fn run_actor(
     ready: Sender<Result<(), AgentError>>,
 ) {
     // Register tcode's enabled streamable-HTTP MCP servers via `-c` overrides.
-    let mut extra_args = mcp_args(opts.mcp_server.as_ref(), opts.orchestrate_server.as_ref());
+    let mut extra_args = mcp_args(
+        opts.mcp_server.as_ref(),
+        opts.orchestrate_server.as_ref(),
+        opts.computer_use_server.as_ref(),
+    );
     // Any additional launch arguments configured for this provider.
     extra_args.extend(opts.extra_args.iter().cloned());
     let (mut child, mut stdin, lines, mut stderr_tail) =
@@ -538,8 +542,9 @@ async fn run_actor(
 fn mcp_args(
     preview: Option<&crate::McpRegistration>,
     orchestrate: Option<&crate::McpRegistration>,
+    computer_use: Option<&crate::McpRegistration>,
 ) -> Vec<String> {
-    [preview, orchestrate]
+    [preview, orchestrate, computer_use]
         .into_iter()
         .flatten()
         .flat_map(|mcp| ["-c".to_string(), mcp.codex_config_override()])
@@ -2041,14 +2046,20 @@ mod tests {
             url: "http://o".into(),
             bearer_token: "o".into(),
         };
-        assert!(mcp_args(None, None).is_empty());
-        let one = mcp_args(Some(&preview), None);
+        let computer_use = crate::McpRegistration {
+            name: "tcode_computer_use".into(),
+            url: "http://c".into(),
+            bearer_token: "c".into(),
+        };
+        assert!(mcp_args(None, None, None).is_empty());
+        let one = mcp_args(Some(&preview), None, None);
         assert_eq!(one.len(), 2);
         assert!(one[1].starts_with("mcp_servers.tcode_preview="));
-        let both = mcp_args(Some(&preview), Some(&orchestrate));
-        assert_eq!(both.len(), 4);
-        assert!(both[1].starts_with("mcp_servers.tcode_preview="));
-        assert!(both[3].starts_with("mcp_servers.tcode_orchestrate="));
+        let all = mcp_args(Some(&preview), Some(&orchestrate), Some(&computer_use));
+        assert_eq!(all.len(), 6);
+        assert!(all[1].starts_with("mcp_servers.tcode_preview="));
+        assert!(all[3].starts_with("mcp_servers.tcode_orchestrate="));
+        assert!(all[5].starts_with("mcp_servers.tcode_computer_use="));
     }
 
     fn test_actor() -> (Actor, Receiver<AgentEvent>) {
