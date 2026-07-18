@@ -107,11 +107,15 @@ pub struct AppShell {
     right_width: Rc<Cell<Pixels>>,
     /// Whether the open right panel has already been given its width.
     right_sized: bool,
+    /// Stable expanded-sidebar width. The resizable component otherwise scales
+    /// every panel proportionally when the window enters or leaves fullscreen.
+    sidebar_width: Rc<Cell<Pixels>>,
     _subscriptions: Vec<Subscription>,
 }
 
 /// The right panel's default width (`docs/DESIGN.md`).
 const RIGHT_PANEL_WIDTH: f32 = 560.;
+const SIDEBAR_WIDTH: f32 = 255.;
 
 impl AppShell {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -176,6 +180,7 @@ impl AppShell {
             split: cx.new(|_| ResizableState::default()),
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
             right_sized: false,
+            sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             _subscriptions: vec![subscription, event_subscription],
         }
     }
@@ -365,6 +370,18 @@ impl Render for AppShell {
         // and the sidebar is only a panel when it is expanded.
         let right_ix = if collapsed { 1 } else { 2 };
 
+        // gpui-component preserves panel *ratios* when its container changes
+        // width. Fullscreen is a container resize, but the sidebar is a fixed
+        // navigation column: restore its remembered pixel width before layout.
+        if !collapsed {
+            let width = self.sidebar_width.get();
+            self.split.update(cx, |state, cx| {
+                if state.sizes().first().is_some_and(|size| *size != width) {
+                    state.resize_panel(0, width, window, cx);
+                }
+            });
+        }
+
         // Give the right panel its width once the group knows about it (the
         // panel count is synced while the group renders, so this lands on the
         // frame after it opens — the group notifies, so that frame comes).
@@ -409,13 +426,18 @@ impl Render for AppShell {
             );
 
         // Remember a dragged width so re-opening the panel restores it.
-        let remembered = self.right_width.clone();
+        let remembered_right = self.right_width.clone();
+        let remembered_sidebar = self.sidebar_width.clone();
         let group = |id: &'static str| {
             h_resizable(id)
                 .with_state(&self.split)
                 .on_resize(move |state, _, cx| {
-                    if let Some(size) = state.read(cx).sizes().get(right_ix) {
-                        remembered.set(*size);
+                    let sizes = state.read(cx).sizes();
+                    if !collapsed && let Some(size) = sizes.first() {
+                        remembered_sidebar.set(*size);
+                    }
+                    if let Some(size) = sizes.get(right_ix) {
+                        remembered_right.set(*size);
                     }
                 })
         };
@@ -440,7 +462,7 @@ impl Render for AppShell {
                 .child(
                     resizable_panel()
                         .flex_none()
-                        .size(px(255.))
+                        .size(px(SIDEBAR_WIDTH))
                         .size_range(px(220.)..px(380.))
                         .child(self.sidebar.clone()),
                 )
