@@ -1382,6 +1382,7 @@ name = "computer-use-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "core-foundation 0.10.0",
  "core-graphics 0.24.0",
  "log",
@@ -8163,6 +8164,7 @@ version = "0.1.0"
 dependencies = [
  "agent",
  "async-channel",
+ "computer-use-mcp",
  "gpui",
  "log",
  "orchestrate-mcp",
@@ -8207,6 +8209,7 @@ dependencies = [
  "async-channel",
  "base64",
  "chrono",
+ "computer-use-mcp",
  "criterion",
  "gpui",
  "gpui-component",
