@@ -130,9 +130,13 @@ pub fn parse_difft_json(
     let language = parsed.language.clone();
     let status = parsed.status;
     // `split` preserves the final empty line represented by a trailing newline;
-    // difftastic includes that line in `aligned_lines`.
-    let old_lines = old_content.split('\n').collect::<Vec<_>>();
-    let new_lines = new_content.split('\n').collect::<Vec<_>>();
+    // difftastic includes that line in `aligned_lines`. Trailing `\r` is
+    // stripped so CRLF inputs render and slice identically to LF inputs.
+    fn strip_cr(line: &str) -> &str {
+        line.strip_suffix('\r').unwrap_or(line)
+    }
+    let old_lines = old_content.split('\n').map(strip_cr).collect::<Vec<_>>();
+    let new_lines = new_content.split('\n').map(strip_cr).collect::<Vec<_>>();
     let mut lhs_spans: HashMap<usize, Vec<StructuralSpan>> = HashMap::new();
     let mut rhs_spans: HashMap<usize, Vec<StructuralSpan>> = HashMap::new();
     let mut changed_lhs = HashSet::new();

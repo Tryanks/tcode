@@ -1,0 +1,3 @@
+# Recorded difftastic fixtures are byte-exact inputs/outputs of the pinned
+# binary; EOL conversion on Windows checkouts would corrupt them.
+crates/services/tests/fixtures/* -text
