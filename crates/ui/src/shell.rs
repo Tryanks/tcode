@@ -295,6 +295,7 @@ impl Render for AppShell {
         let notification_layer = Root::render_notification_layer(window, cx);
         let route = self.app_state.read(cx).route;
         let palette_open = self.app_state.read(cx).palette_open;
+        let fullscreen = window.is_fullscreen();
         // Focus the palette's search input on the open transition.
         if palette_open && !self.palette_was_open {
             self.palette.update(cx, |p, cx| p.focus(window, cx));
@@ -319,12 +320,21 @@ impl Render for AppShell {
             return div()
                 .id("app-shell")
                 .size_full()
-                .bg(crate::material::content_surface(cx))
-                // T1 paper floats above the glass canvas.
-                .shadow_sm()
+                // Fullscreen flattens the canvas under the paper (see the
+                // workspace root below).
+                .when(fullscreen, |this| {
+                    this.bg(crate::material::opaque_canvas(cx))
+                })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
-                .child(self.settings_page.clone())
+                .child(
+                    div()
+                        .size_full()
+                        .bg(crate::material::content_surface(cx))
+                        // T1 paper floats above the glass canvas.
+                        .shadow_sm()
+                        .child(self.settings_page.clone()),
+                )
                 .child(self.toasts.clone())
                 .children(sheet_layer)
                 .children(dialog_layer)
@@ -441,6 +451,13 @@ impl Render for AppShell {
         div()
             .id("app-shell")
             .size_full()
+            // Fullscreen only: a fullscreen Space has nothing but black behind
+            // the vibrancy material, which muddies the translucent canvas —
+            // cover it with its opaque base. Windowed, paint nothing here:
+            // Root owns the glass canvas (docs/visual-redesign.md §0).
+            .when(fullscreen, |this| {
+                this.bg(crate::material::opaque_canvas(cx))
+            })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
             .child(
