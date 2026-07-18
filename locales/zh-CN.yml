@@ -170,6 +170,12 @@ model_picker:
   no_models: "此提供方暂无可用模型。"
 orchestrate:
   restore_default: "恢复默认"
+  child_approval:
+    title: "子线程审批"
+    description: "派发的子线程遇到权限门槛时由谁来审批。决策层审批会将请求转交主线程模型,由其通过 approve 工具决定;永久允许会在会话内自动批准;手动审批则等待你在子线程中亲自处理。"
+    orchestrator: "决策层审批"
+    always_allow: "永久允许"
+    manual: "手动审批"
   all_models:
     title: "内建 /orchestrate 命令"
     description: "这里控制发送 /orchestrate 时 tcode 注入的内容：当前模型如何理解自己的主决策角色，以及编排 MCP 可以把任务派发给哪些子模型。所有主模型都能使用该命令；没有专属覆盖时会继承通用自我认知。"
