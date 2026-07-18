@@ -23,6 +23,16 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     .into()
 }
 
+/// The canvas flattened to full opacity. Painted under the glass tiers only
+/// while the window is fullscreen: a fullscreen Space has nothing but black
+/// behind the vibrancy material, and the canvas alpha compositing against it
+/// muddies every surface above. Same fallback Windows Acrylic's `FallbackColor`
+/// and macOS "Reduce Transparency" apply. Windowed, the canvas stays
+/// translucent and Root owns it (docs/visual-redesign.md §0).
+pub fn opaque_canvas(cx: &App) -> Hsla {
+    cx.theme().background.opacity(1.)
+}
+
 /// T1 paper: the near-opaque reading plane the chat workspace, right panel and
 /// full-page routes paint over the vibrancy canvas. Warm paper in light mode,
 /// blue-carbon in dark.
