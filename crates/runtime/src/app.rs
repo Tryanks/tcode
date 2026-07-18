@@ -23,8 +23,8 @@ use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, OrchestrateSettings, ProjectSort, ProviderProfile, ProviderSettings,
-    ResolvedProfile, Settings, provider_label,
+    ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProjectSort, ProviderProfile,
+    ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -736,6 +736,23 @@ pub struct AppState {
     /// Per-provider install/auth probe results, driving the Settings → Providers
     /// card status dot + summary line. Absent until the first probe lands.
     pub provider_snapshots: HashMap<ProviderKind, ProviderSnapshot>,
+    /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
+    /// Present only after an app-relaunch triggered by a permission grant; applied
+    /// once by [`AppState::apply_pending_relaunch`] and then cleared.
+    pending_relaunch: Option<tcode_services::relaunch::RelaunchMarker>,
+}
+
+/// Map core's persisted computer-use settings onto the live MCP config type
+/// (kept separate so `core` stays free of the computer-use backend dependency).
+fn computer_use_config(settings: &Settings) -> computer_use_mcp::config::ComputerUseConfig {
+    computer_use_mcp::config::ComputerUseConfig {
+        allow_input: settings.computer_use.allow_input,
+        image_mode: match settings.computer_use.image_mode {
+            ImageMode::Auto => computer_use_mcp::config::ImageMode::Auto,
+            ImageMode::Always => computer_use_mcp::config::ImageMode::Always,
+            ImageMode::Never => computer_use_mcp::config::ImageMode::Never,
+        },
+    }
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -752,6 +769,12 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        // Push the loaded computer-use config to the (already-running) MCP layer
+        // so the tools honor the persisted image-mode / allow-input choices from
+        // the first call, not just after a settings change.
+        computer_use_mcp::config::set(computer_use_config(&settings));
+        // Consume any restart-continuity marker left by a permission grant.
+        let pending_relaunch = tcode_services::relaunch::take(store.root());
         let settings_collapsed = settings.sidebar_collapsed;
         let terminal_preferences_path = store.root().join("terminal-ui.json");
         let terminal_preferences = std::fs::read(&terminal_preferences_path)
@@ -834,6 +857,7 @@ impl AppState {
             debug_provider_expanded: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
+            pending_relaunch,
         }
     }
 
@@ -3274,7 +3298,41 @@ impl AppState {
         }
         let language = settings.language.clone();
         self.settings = settings;
+        // Keep the live computer-use MCP config in step with the persisted
+        // settings on every change (the server outlives any one snapshot).
+        computer_use_mcp::config::set(computer_use_config(&self.settings));
         cx.emit(AppEvent::Effect(RuntimeEffect::ApplyLocale { language }));
+        cx.notify();
+    }
+
+    /// Persist a restart-continuity marker naming the Settings page to reopen and
+    /// the session that is active now. Written *before* a permission grant or an
+    /// explicit relaunch, so an externally-initiated quit reopens cleanly.
+    pub fn write_relaunch_marker(&self, reopen_settings: &str) {
+        let marker = tcode_services::relaunch::RelaunchMarker {
+            reopen_settings: reopen_settings.to_string(),
+            active_session: self.active_session_id().map(str::to_string),
+        };
+        if let Err(err) = tcode_services::relaunch::write(self.store.root(), &marker) {
+            log::warn!("failed to write relaunch marker: {err}");
+        }
+    }
+
+    /// Apply a marker taken at launch: reopen the recorded session and open
+    /// Settings on the recorded page. The page reruns a permission recheck as it
+    /// mounts, so the user immediately sees the post-restart status. No-op when
+    /// there is no marker (the normal launch path).
+    pub fn apply_pending_relaunch(&mut self, cx: &mut Context<Self>) {
+        let Some(marker) = self.pending_relaunch.take() else {
+            return;
+        };
+        if let Some(id) = marker.active_session.as_deref()
+            && self.sessions.iter().any(|meta| meta.id == id)
+        {
+            self.select_session(id, cx);
+        }
+        self.debug_settings_section = Some(marker.reopen_settings);
+        self.route = Route::Settings;
         cx.notify();
     }
 

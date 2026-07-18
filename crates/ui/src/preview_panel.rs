@@ -397,6 +397,20 @@ mod native {
             let key = self.routed_key(&session_id, cx);
             log::info!("preview: handling op {op:?} for session {session_id}");
 
+            // Gate on the Browser settings: a disabled browser rejects every op;
+            // `allow_evaluate` gates only `preview_evaluate`.
+            let browser = self.app_state.read(cx).settings.browser.clone();
+            if !browser.enabled {
+                let _ = reply.try_send(Err(tcode_i18n::tr!("browser.disabled_error").into_owned()));
+                return;
+            }
+            if matches!(&op, PreviewOp::Evaluate { .. }) && !browser.allow_evaluate {
+                let _ = reply.try_send(Err(
+                    tcode_i18n::tr!("browser.evaluate_disabled_error").into_owned()
+                ));
+                return;
+            }
+
             match op {
                 PreviewOp::Open { url } => {
                     self.app_state.update(cx, |state, cx| {
@@ -404,6 +418,14 @@ mod native {
                     });
                     if let Some(url) = url.as_deref() {
                         self.navigate(&key, url, window, cx);
+                    } else if let Some(home) = browser
+                        .home_url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|home| !home.is_empty())
+                    {
+                        // No explicit target: fall back to the configured home URL.
+                        self.navigate(&key, home, window, cx);
                     } else {
                         self.ensure_webview(&key, window, cx);
                         self.sync_visibility(cx);
@@ -592,6 +614,18 @@ mod native {
 
     impl Render for PreviewPanel {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // When the embedded browser is turned off in Settings → Browser, hide
+            // the chrome and webview entirely and show a quiet placeholder.
+            if !self.app_state.read(cx).settings.browser.enabled {
+                return v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .px_8()
+                    .text_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tcode_i18n::tr!("browser.disabled_panel"));
+            }
             let active = self.active_key(cx);
 
             // Honor a queued `--open-preview <url>` navigation once a session exists.

@@ -371,6 +371,11 @@ fn main() {
                     state.debug_provider_expanded = dexp;
                 });
             }
+            // Restart continuity: if this launch follows a permission-grant
+            // relaunch, reopen the recorded session and Settings page. Runs
+            // synchronously before the window (and settings page) is built, so
+            // the page mounts already on the recorded section. No-op otherwise.
+            app_state.update(cx, |state, cx| state.apply_pending_relaunch(cx));
             let debug_seed = debug_compose.is_some()
                 || debug_image.is_some()
                 || debug_cwd.is_some()

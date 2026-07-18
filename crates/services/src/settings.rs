@@ -198,6 +198,7 @@ mod tests {
             provider_update_checks_disabled: true,
             orchestrate: Default::default(),
             computer_use: Default::default(),
+            browser: Default::default(),
             title_generation: Default::default(),
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
