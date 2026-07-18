@@ -46,8 +46,9 @@ const TRAFFIC_LIGHT_INSET: f32 = 8.;
 
 /// Width of the settings left-nav column (matches the sidebar width).
 const NAV_WIDTH: f32 = 255.;
-/// Max width of the settings content column.
-const CONTENT_MAX_WIDTH: f32 = 720.;
+/// Max width of the settings content column — matches the chat timeline column
+/// (`chat::CONTENT_MAX_WIDTH`) so the reading measure is identical across routes.
+const CONTENT_MAX_WIDTH: f32 = 768.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -406,7 +407,9 @@ impl SettingsPage {
                 div().flex_none().child(
                     gpui_component::h_flex()
                         .id("settings-back")
-                        .h(px(44.))
+                        // Mirror the main sidebar footer (the "Settings" entry that
+                        // enters this route): same 40px height, muted leading icon.
+                        .h(px(40.))
                         .items_center()
                         .gap_2()
                         .px_3()
@@ -414,7 +417,11 @@ impl SettingsPage {
                         .hover(|s| s.bg(cx.theme().sidebar_accent))
                         .text_size(px(13.))
                         .text_color(cx.theme().sidebar_foreground)
-                        .child(Icon::new(IconName::ArrowLeft).size_4())
+                        .child(
+                            Icon::new(IconName::ArrowLeft)
+                                .size_4()
+                                .text_color(cx.theme().muted_foreground),
+                        )
                         .child(tcode_i18n::tr!("settings.back"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.app_state
@@ -900,6 +907,11 @@ impl SettingsPage {
         let trigger = self.dropdown_trigger("cu-image-mode-dropdown", label, cx);
         let this = cx.entity();
         let dropdown = Popover::new("cu-image-mode-popover")
+            // T3 overlay contour: one panel surface (popover fill + hairline +
+            // shadow_xl at the 14px overlay radius). The content stays transparent
+            // so the popup is a single card, not a card nested in the panel.
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let this = this.clone();
@@ -942,35 +954,31 @@ impl SettingsPage {
                         })
                         .into_any_element()
                 };
-                crate::material::overlay_contour(
-                    v_flex()
-                        .p_1()
-                        .min_w(px(260.))
-                        .gap_0p5()
-                        .child(option(
-                            ImageMode::Auto,
-                            "computer_use.image_mode.auto",
-                            "computer_use.image_mode.auto_desc",
-                            &this,
-                            cx,
-                        ))
-                        .child(option(
-                            ImageMode::Always,
-                            "computer_use.image_mode.always",
-                            "computer_use.image_mode.always_desc",
-                            &this,
-                            cx,
-                        ))
-                        .child(option(
-                            ImageMode::Never,
-                            "computer_use.image_mode.never",
-                            "computer_use.image_mode.never_desc",
-                            &this,
-                            cx,
-                        )),
-                    cx,
-                )
-                .rounded(crate::material::radius_overlay())
+                v_flex()
+                    .p_1()
+                    .min_w(px(260.))
+                    .gap_0p5()
+                    .child(option(
+                        ImageMode::Auto,
+                        "computer_use.image_mode.auto",
+                        "computer_use.image_mode.auto_desc",
+                        &this,
+                        cx,
+                    ))
+                    .child(option(
+                        ImageMode::Always,
+                        "computer_use.image_mode.always",
+                        "computer_use.image_mode.always_desc",
+                        &this,
+                        cx,
+                    ))
+                    .child(option(
+                        ImageMode::Never,
+                        "computer_use.image_mode.never",
+                        "computer_use.image_mode.never_desc",
+                        &this,
+                        cx,
+                    ))
             });
         self.row_frame(cx)
             .child(self.row_labels(
@@ -1295,6 +1303,9 @@ impl SettingsPage {
 
         let this = cx.entity();
         let dropdown = Popover::new("theme-popover")
+            // Single panel surface at the 14px overlay radius (see image_mode_row).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let this = this.clone();
@@ -1328,35 +1339,31 @@ impl SettingsPage {
                         })
                         .into_any_element()
                 };
-                crate::material::overlay_contour(
-                    v_flex()
-                        .p_1()
-                        .min_w(px(160.))
-                        .gap_0p5()
-                        .child(option(
-                            ThemeMode::System,
-                            tcode_i18n::tr!("settings.theme.system").into_owned().into(),
-                            mode == ThemeMode::System,
-                            &this,
-                            cx,
-                        ))
-                        .child(option(
-                            ThemeMode::Light,
-                            tcode_i18n::tr!("settings.theme.light").into_owned().into(),
-                            mode == ThemeMode::Light,
-                            &this,
-                            cx,
-                        ))
-                        .child(option(
-                            ThemeMode::Dark,
-                            tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
-                            mode == ThemeMode::Dark,
-                            &this,
-                            cx,
-                        )),
-                    cx,
-                )
-                .rounded(crate::material::radius_overlay())
+                v_flex()
+                    .p_1()
+                    .min_w(px(160.))
+                    .gap_0p5()
+                    .child(option(
+                        ThemeMode::System,
+                        tcode_i18n::tr!("settings.theme.system").into_owned().into(),
+                        mode == ThemeMode::System,
+                        &this,
+                        cx,
+                    ))
+                    .child(option(
+                        ThemeMode::Light,
+                        tcode_i18n::tr!("settings.theme.light").into_owned().into(),
+                        mode == ThemeMode::Light,
+                        &this,
+                        cx,
+                    ))
+                    .child(option(
+                        ThemeMode::Dark,
+                        tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
+                        mode == ThemeMode::Dark,
+                        &this,
+                        cx,
+                    ))
             });
 
         self.row_frame(cx)
@@ -1378,11 +1385,13 @@ impl SettingsPage {
         };
         let trigger = self.dropdown_trigger("language-dropdown", label, cx);
         let page = cx.entity();
-        let dropdown =
-            Popover::new("language-popover")
-                .trigger(trigger)
-                .content(move |_, _, cx| {
-                    let option =
+        let dropdown = Popover::new("language-popover")
+            // Single panel surface at the 14px overlay radius (see image_mode_row).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                let option =
                     |value: Option<&'static str>,
                      key: &'static str,
                      cx: &mut Context<gpui_component::popover::PopoverState>| {
@@ -1414,26 +1423,22 @@ impl SettingsPage {
                                 popover.update(cx, |state, cx| state.dismiss(window, cx));
                             })
                     };
-                    crate::material::overlay_contour(
-                        v_flex()
-                            .p_1()
-                            .min_w(px(160.))
-                            .gap_0p5()
-                            .child(option(None, "settings.language.system", cx))
-                            .child(option(
-                                Some(LANGUAGE_ENGLISH),
-                                "settings.language.english",
-                                cx,
-                            ))
-                            .child(option(
-                                Some(LANGUAGE_SIMPLIFIED_CHINESE),
-                                "settings.language.chinese",
-                                cx,
-                            )),
+                v_flex()
+                    .p_1()
+                    .min_w(px(160.))
+                    .gap_0p5()
+                    .child(option(None, "settings.language.system", cx))
+                    .child(option(
+                        Some(LANGUAGE_ENGLISH),
+                        "settings.language.english",
                         cx,
-                    )
-                    .rounded(crate::material::radius_overlay())
-                });
+                    ))
+                    .child(option(
+                        Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                        "settings.language.chinese",
+                        cx,
+                    ))
+            });
         self.row_frame(cx)
             .child(self.row_labels(
                 tcode_i18n::tr!("settings.language.title"),
