@@ -28,8 +28,18 @@ base64 = "0.22"
 tcode-services = { path = "../services" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
 core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["highsierra"] }
+objc2 = "0.6.4"
+objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGImage"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError"] }
+objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"] }
+objc2-screen-capture-kit = { version = "0.3.2", features = [
+    "SCScreenshotManager",
+    "SCShareableContent",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }
