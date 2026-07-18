@@ -61,11 +61,11 @@ impl PtyInfo {
             return None;
         }
         let pid = Pid::from_u32(pid);
-        let refresh = ProcessRefreshKind::new()
+        let refresh = ProcessRefreshKind::nothing()
             .with_cwd(UpdateKind::Always)
             .with_exe(UpdateKind::Always);
         let mut system = System::new();
-        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), refresh);
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), false, refresh);
         let process = system.process(pid)?;
         Some(ProcessInfo {
             name: process.name().to_string_lossy().into_owned(),
