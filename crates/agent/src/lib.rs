@@ -1,7 +1,7 @@
 //! Provider-agnostic agent session layer.
 //!
-//! Each provider module (`codex`, `claude`) spawns its CLI as a child process,
-//! speaks the provider-native protocol over stdio, and normalizes everything
+//! Each native provider module spawns its CLI as a child process,
+//! speaks the provider-native transport, and normalizes everything
 //! into the canonical [`AgentEvent`] stream. The UI only ever sees this module's
 //! types; nothing provider-shaped leaks past this crate except [`ResumeCursor`],
 //! which is intentionally opaque.
@@ -9,6 +9,8 @@
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod opencode;
+pub mod pi;
 mod process;
 mod subagent_tail;
 
@@ -21,6 +23,8 @@ use serde::{Deserialize, Serialize};
 pub enum ProviderKind {
     Codex,
     ClaudeCode,
+    Pi,
+    OpenCode,
     /// Any agent speaking the Agent Client Protocol. Which one is carried
     /// separately ([`SessionOptions::acp`]) so this stays `Copy`: Codex and
     /// Claude Code keep their richer native clients, and ACP covers the rest
@@ -38,8 +42,8 @@ impl ProviderKind {
     /// to queueing.
     pub fn supports_steering(&self) -> bool {
         match self {
-            ProviderKind::ClaudeCode | ProviderKind::Codex => true,
-            ProviderKind::Acp => false,
+            ProviderKind::ClaudeCode | ProviderKind::Codex | ProviderKind::Pi => true,
+            ProviderKind::OpenCode | ProviderKind::Acp => false,
         }
     }
 
@@ -47,15 +51,16 @@ impl ProviderKind {
         match self {
             ProviderKind::Codex => "Codex",
             ProviderKind::ClaudeCode => "Claude Code",
+            ProviderKind::Pi => "pi",
+            ProviderKind::OpenCode => "OpenCode",
             ProviderKind::Acp => "ACP agent",
         }
     }
 }
 
-/// The two registry agents we never surface: they are ACP adapters over the very
-/// CLIs we already integrate natively (with steering, structured questions and
-/// richer tool mapping that ACP cannot express).
-pub const HIDDEN_ACP_AGENT_IDS: [&str; 2] = ["claude-acp", "codex-acp"];
+/// Registry agents we never surface because they duplicate richer native
+/// integrations.
+pub const HIDDEN_ACP_AGENT_IDS: [&str; 4] = ["claude-acp", "codex-acp", "pi-acp", "opencode"];
 
 /// One ACP agent a session can run: its registry identity plus how to launch it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,7 +102,7 @@ pub enum AcpLaunch {
 }
 
 /// Provider-shaped opaque state needed to resume a session later
-/// (Codex: `{"thread_id": ...}`; Claude: `{"session_id": ...}`).
+/// (Codex: `{"thread_id": ...}`; Claude/pi/OpenCode use their native ids).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeCursor(pub serde_json::Value);
 
@@ -134,10 +139,11 @@ pub struct SessionOptions {
     /// into the child's environment, plus the home-directory override. See
     /// [`LaunchEnv`].
     pub launch_env: LaunchEnv,
-    /// Extra CLI arguments appended at spawn (Claude's "Launch arguments").
+    /// Extra CLI arguments appended at spawn for providers whose settings card
+    /// exposes "Launch arguments".
     pub extra_args: Vec<String>,
     /// Which ACP agent to launch. Required when `provider == ProviderKind::Acp`,
-    /// ignored (and `None`) for the native Codex / Claude Code clients.
+    /// ignored (and `None`) for native providers.
     pub acp: Option<AcpAgent>,
 }
 
@@ -149,8 +155,9 @@ pub struct LaunchEnv {
     /// Extra `KEY=VALUE` pairs merged into the child's environment. Later
     /// entries win, and these override anything inherited from the parent.
     pub env: Vec<(String, String)>,
-    /// Home-directory override. Provider-specific: Claude gets `HOME` (which
-    /// relocates `.claude.json` / `.claude`), Codex gets `CODEX_HOME`.
+    /// Home-directory override. Provider-specific: Claude gets `HOME`, Codex
+    /// gets `CODEX_HOME`, and pi gets `PI_CODING_AGENT_DIR`. OpenCode has no
+    /// supported single-directory override, so its value is ignored.
     pub home: Option<PathBuf>,
 }
 
@@ -164,6 +171,8 @@ impl LaunchEnv {
             let key = match provider {
                 ProviderKind::ClaudeCode => Some("HOME"),
                 ProviderKind::Codex => Some("CODEX_HOME"),
+                ProviderKind::Pi => Some("PI_CODING_AGENT_DIR"),
+                ProviderKind::OpenCode => None,
                 // ACP agents carry their own env in the launch recipe; there is
                 // no protocol-level home concept to override.
                 ProviderKind::Acp => None,
@@ -427,8 +436,8 @@ pub struct Attachment {
 }
 
 /// A provider-native command or skill surfaced to the composer's `/` and `$`
-/// menus. Claude contributes its `slash_commands` (as [`ProviderCommandKind::Command`])
-/// and `skills`; Codex contributes `skills/list` entries (as [`ProviderCommandKind::Skill`]).
+/// menus. Each native provider contributes what its command/skill discovery
+/// surface exposes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCommand {
     pub name: String,
@@ -455,7 +464,8 @@ pub enum InteractionMode {
 }
 
 /// Per-turn overrides layered on top of the session's persisted options.
-/// Codex applies these per turn; Claude ignores `effort` (launch-time only).
+/// Codex and OpenCode apply effort/variant per turn; Claude and pi use their
+/// session-level option selection.
 #[derive(Debug, Clone, Default)]
 pub struct TurnOptions {
     pub effort: Option<String>,
@@ -473,6 +483,8 @@ pub async fn list_models(
     match provider {
         ProviderKind::Codex => codex::list_models(binary_path, launch_env).await,
         ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env).await,
+        ProviderKind::Pi => pi::list_models(binary_path, launch_env).await,
+        ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env).await,
         // ACP agents advertise their models over the wire at session start
         // (`AgentEvent::ProviderOptions`), so there is no catalog to pre-fetch.
         ProviderKind::Acp => Ok(Vec::new()),
@@ -486,6 +498,8 @@ pub async fn list_models(
 ///   plus tcode-side ReadOnly filtering (switchable mid-session).
 /// - Codex: approval-policy × sandbox-mode combinations on thread start
 ///   (mid-session switch may require a resume-restart).
+/// - pi: a bundled fail-closed tool-call extension in front of RPC extension UI.
+/// - OpenCode: `OPENCODE_PERMISSION` rules plus permission reply endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
@@ -520,8 +534,8 @@ pub enum AgentError {
 pub enum SessionCommand {
     SendTurn {
         text: String,
-        /// Per-turn overrides (Codex applies per turn; Claude ignores
-        /// `effort`). `None` = use the session's persisted options.
+        /// Per-turn overrides (Codex/OpenCode apply effort per turn; Claude/pi
+        /// use session options). `None` = use the persisted options.
         options: Option<TurnOptions>,
         /// Image attachments carried alongside the text (empty for text-only
         /// turns). Each provider maps these onto its native content blocks.
@@ -558,8 +572,9 @@ pub enum SessionCommand {
         text: String,
         attachments: Vec<Attachment>,
     },
-    /// Switch Build/Plan interaction mode. Codex applies it on the next
-    /// `turn/start`; Claude sends a `set_permission_mode` control request.
+    /// Switch Build/Plan interaction mode. Codex/OpenCode apply it on the next
+    /// turn; Claude sends a `set_permission_mode` control request. pi has no
+    /// native Plan mode.
     SetInteractionMode(InteractionMode),
     /// Set one of the agent's self-described options (see
     /// [`AgentEvent::ProviderOptions`]). ACP routes it to `session/set_mode`,
@@ -595,6 +610,8 @@ pub async fn start_session(
     match provider {
         ProviderKind::Codex => codex::start(opts).await,
         ProviderKind::ClaudeCode => claude::start(opts).await,
+        ProviderKind::Pi => pi::start(opts).await,
+        ProviderKind::OpenCode => opencode::start(opts).await,
         ProviderKind::Acp => acp::start(opts).await,
     }
 }
@@ -704,8 +721,7 @@ pub enum AgentEvent {
         answers: serde_json::Map<String, serde_json::Value>,
     },
     TokenUsage(TokenUsage),
-    /// Provider-native commands / skills discovered for this session (Claude
-    /// `slash_commands` + `skills` from system-init; Codex `skills/list`). The
+    /// Provider-native commands / skills discovered for this session. The
     /// composer's `/` and `$` menus consume these. Session metadata — not folded
     /// into the timeline / persisted to the JSONL log.
     ProviderCommands {

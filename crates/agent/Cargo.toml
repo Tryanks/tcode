@@ -11,10 +11,13 @@ agent-client-protocol = { version = "1.2", features = [
 async-channel = "2"
 futures-lite = "2"
 log = "0.4"
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
 thiserror = "2"
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 env_logger = "0.11"

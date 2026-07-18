@@ -259,7 +259,7 @@ const KIMI_NAME: &str = "Kimi";
 /// Which screen the Add-agent dialog is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PanelView {
-    /// Provider entries (Claude Code / Codex) + the ACP agent marketplace.
+    /// Third-party endpoint entries + the ACP agent marketplace.
     Home,
     /// The third-party Claude Code endpoint form (Kimi preset or custom).
     ThirdParty,

@@ -5,11 +5,9 @@
 //! platform. We mirror zed: fetch it, cache it in the app data dir with a
 //! one-hour TTL, and fall back to the cache (however stale) when offline.
 //!
-//! Two agents are never surfaced: `claude-acp` and `codex-acp` are ACP adapters
-//! over the very CLIs tcode already drives natively (with steering, structured
-//! questions and richer tool payloads that ACP cannot express), so showing them
-//! would only offer users a worse version of what they already have. The filter
-//! is [`agent::HIDDEN_ACP_AGENT_IDS`] and it is enforced in [`visible_agents`].
+//! ACP entries for CLIs tcode already drives natively are never surfaced. The
+//! filter is [`agent::HIDDEN_ACP_AGENT_IDS`] and it is enforced in
+//! [`visible_agents`].
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -122,8 +120,8 @@ struct CachedRegistry {
 // Visibility + platform resolution
 // ---------------------------------------------------------------------------
 
-/// The agents the marketplace may show: everything except the two adapters over
-/// our own native CLIs.
+/// The agents the marketplace may show: everything except adapters over our own
+/// native CLIs.
 pub fn visible_agents(registry: &Registry) -> Vec<&RegistryAgent> {
     registry
         .agents
@@ -527,6 +525,16 @@ mod tests {
           "distribution": { "npx": { "package": "@agentclientprotocol/codex-acp@1.1.2" } }
         },
         {
+          "id": "pi-acp", "name": "pi ACP", "version": "0.0.26",
+          "description": "Adapter over pi",
+          "distribution": { "npx": { "package": "pi-acp@0.0.26" } }
+        },
+        {
+          "id": "opencode", "name": "OpenCode", "version": "1.18.3",
+          "description": "OpenCode ACP server",
+          "distribution": { "binary": {} }
+        },
+        {
           "id": "goose", "name": "goose", "version": "1.14.0", "description": "Block's goose",
           "distribution": {
             "binary": {
@@ -601,7 +609,7 @@ mod tests {
     fn parses_the_registry_schema() {
         let registry = registry();
         assert_eq!(registry.version, "1.0.0");
-        assert_eq!(registry.agents.len(), 5);
+        assert_eq!(registry.agents.len(), 7);
 
         let gemini = &registry.agents[0];
         assert_eq!(gemini.name, "Gemini CLI");
@@ -612,15 +620,14 @@ mod tests {
         assert_eq!(npx.package, "@google/gemini-cli@0.50.0");
         assert_eq!(npx.args, vec!["--acp".to_string()]);
 
-        let goose = &registry.agents[3];
+        let goose = &registry.agents[5];
         let binary = goose.distribution.binary.get("darwin-aarch64").unwrap();
         assert_eq!(binary.cmd, "./goose");
         assert_eq!(binary.env.get("GOOSE_ACP").map(String::as_str), Some("1"));
         assert!(goose.distribution.npx.is_none());
     }
 
-    /// The load-bearing invariant: the two adapters over our own native CLIs are
-    /// never offered in the marketplace.
+    /// Adapters over our own native CLIs are never offered in the marketplace.
     #[test]
     fn the_native_cli_adapters_are_never_visible() {
         let registry = registry();
@@ -644,7 +651,7 @@ mod tests {
     #[test]
     fn a_binary_distribution_wins_over_npx_on_a_supported_platform() {
         let registry = registry();
-        let kilo = &registry.agents[4];
+        let kilo = &registry.agents[6];
         match resolve_recipe(kilo, "darwin-aarch64") {
             Some(Recipe::Binary(binary)) => {
                 assert!(binary.archive.ends_with("kilo-darwin-arm64.zip"));
@@ -665,7 +672,7 @@ mod tests {
     #[test]
     fn an_agent_with_no_build_for_this_platform_does_not_resolve() {
         let registry = registry();
-        let goose = &registry.agents[3];
+        let goose = &registry.agents[5];
         assert!(resolve_recipe(goose, "windows-aarch64").is_none());
         assert!(matches!(
             resolve_recipe(goose, "linux-x86_64"),
@@ -771,7 +778,7 @@ mod tests {
 
         write_cache(&dir, &registry()).unwrap();
         assert!(cache_is_fresh(&dir));
-        assert_eq!(cached(&dir).unwrap().agents.len(), 5);
+        assert_eq!(cached(&dir).unwrap().agents.len(), 7);
 
         // Age it past the TTL: still readable, no longer fresh.
         let path = cache_path(&dir);
@@ -780,7 +787,7 @@ mod tests {
         stale["fetched_at"] = serde_json::json!(now_secs() - CACHE_TTL.as_secs() - 1);
         std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
         assert!(!cache_is_fresh(&dir));
-        assert_eq!(cached(&dir).unwrap().agents.len(), 5);
+        assert_eq!(cached(&dir).unwrap().agents.len(), 7);
         let _ = std::fs::remove_dir_all(dir);
     }
 

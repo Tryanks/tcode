@@ -1,7 +1,7 @@
 //! Live interrupt probe: starts a session, sends a long-running turn, then
 //! interrupts it after a delay and expects `TurnCompleted { status: Interrupted }`.
 //!
-//! Usage: cargo run -p agent --example interrupt_probe -- <codex|claude> [cwd]
+//! Usage: cargo run -p agent --example interrupt_probe -- <codex|claude|pi|opencode> [cwd]
 
 use std::time::Duration;
 
@@ -13,8 +13,10 @@ fn main() {
     let provider = match args.next().as_deref() {
         Some("codex") => ProviderKind::Codex,
         Some("claude") => ProviderKind::ClaudeCode,
+        Some("pi") => ProviderKind::Pi,
+        Some("opencode") => ProviderKind::OpenCode,
         _ => {
-            eprintln!("usage: interrupt_probe <codex|claude> [cwd]");
+            eprintln!("usage: interrupt_probe <codex|claude|pi|opencode> [cwd]");
             std::process::exit(2);
         }
     };

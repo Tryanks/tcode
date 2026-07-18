@@ -1,0 +1,12 @@
+{"type":"agent_start"}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"DO NOT ECHO"}],"timestamp":1}}
+{"type":"message_update","message":{"role":"assistant","responseId":"resp-1","content":[{"type":"thinking","thinking":"Checking"}]},"assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Checking"}}
+{"type":"message_update","message":{"role":"assistant","responseId":"resp-1","content":[{"type":"thinking","thinking":"Checking"},{"type":"text","text":"PONG"}]},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"PONG"}}
+{"type":"message_update","message":{"role":"assistant","responseId":"resp-1"},"assistantMessageEvent":{"type":"toolcall_end","contentIndex":2,"toolCall":{"id":"call-1","name":"bash","arguments":{"command":"printf ok"}}}}
+{"type":"tool_execution_start","toolCallId":"call-1","toolName":"bash","args":{"command":"printf ok"}}
+{"type":"tool_execution_update","toolCallId":"call-1","toolName":"bash","args":{"command":"printf ok"},"partialResult":{"content":[{"type":"text","text":"accumulated\n"}]}}
+{"type":"tool_execution_end","toolCallId":"call-1","result":{"content":[{"type":"text","text":"accumulated\n"}]},"isError":false}
+{"type":"message_end","message":{"role":"assistant","responseId":"resp-1","content":[{"type":"thinking","thinking":"Checking"},{"type":"text","text":"PONG"}],"usage":{"input":12,"output":3,"cacheRead":4,"cacheWrite":0,"totalTokens":19},"stopReason":"stop","timestamp":1}}
+{"type":"turn_end","message":{"role":"assistant","responseId":"resp-1","content":[{"type":"thinking","thinking":"Checking"},{"type":"text","text":"PONG"}],"usage":{"input":12,"output":3,"cacheRead":4,"cacheWrite":0,"totalTokens":19},"stopReason":"stop","timestamp":1},"toolResults":[]}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"agent_settled"}

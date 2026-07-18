@@ -3,6 +3,8 @@
 //! ```text
 //! cargo run -p agent --example read_only_probe -- codex
 //! cargo run -p agent --example read_only_probe -- claude
+//! cargo run -p agent --example read_only_probe -- pi
+//! cargo run -p agent --example read_only_probe -- opencode
 //! ```
 
 use std::time::Duration;
@@ -19,8 +21,10 @@ fn main() {
     let provider = match std::env::args().nth(1).as_deref() {
         Some("codex") => ProviderKind::Codex,
         Some("claude") => ProviderKind::ClaudeCode,
+        Some("pi") => ProviderKind::Pi,
+        Some("opencode") => ProviderKind::OpenCode,
         other => {
-            eprintln!("usage: read_only_probe <codex|claude> (got {other:?})");
+            eprintln!("usage: read_only_probe <codex|claude|pi|opencode> (got {other:?})");
             std::process::exit(2);
         }
     };
@@ -121,6 +125,7 @@ async fn run(provider: ProviderKind) -> i32 {
         && read.approvals == 0
         && match provider {
             ProviderKind::Codex | ProviderKind::ClaudeCode => write.approvals > 0 && !exists,
+            ProviderKind::Pi | ProviderKind::OpenCode => !exists,
             ProviderKind::Acp => unreachable!(),
         };
     let _ = std::fs::remove_dir_all(&cwd);
@@ -231,6 +236,8 @@ fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "opencode",
         ProviderKind::Acp => "acp",
     }
 }

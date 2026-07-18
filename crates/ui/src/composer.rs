@@ -50,6 +50,12 @@ const METER_RED: u32 = 0xEF4444;
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
+const PICKER_PROVIDER_KINDS: [ProviderKind; 4] = [
+    ProviderKind::ClaudeCode,
+    ProviderKind::Codex,
+    ProviderKind::Pi,
+    ProviderKind::OpenCode,
+];
 
 fn normalize_terminal_context_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim_matches('\n').to_string()
@@ -146,6 +152,8 @@ fn provider_short(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "Claude",
         ProviderKind::Codex => "Codex",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "OpenCode",
         ProviderKind::Acp => "ACP",
     }
 }
@@ -401,6 +409,8 @@ fn provider_display_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "Claude",
         ProviderKind::Codex => "Codex",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "OpenCode",
         ProviderKind::Acp => "ACP",
     }
 }
@@ -1198,7 +1208,7 @@ impl Composer {
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist (S1 §2).
         let query = self.model_search.read(cx).value().to_lowercase();
-        let has_favorites = [ProviderKind::Codex, ProviderKind::ClaudeCode]
+        let has_favorites = PICKER_PROVIDER_KINDS
             .into_iter()
             .flat_map(|p| app_state.picker_models(p))
             .any(|m| m.favorite);
@@ -1209,7 +1219,7 @@ impl Composer {
             has_favorites,
         );
         let all_rows: Vec<ModelRow> = match &rail {
-            PickerRail::Favorites => [ProviderKind::Codex, ProviderKind::ClaudeCode]
+            PickerRail::Favorites => PICKER_PROVIDER_KINDS
                 .into_iter()
                 .flat_map(|p| {
                     app_state
@@ -1861,15 +1871,14 @@ impl Composer {
 
     fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
         if turn_running {
-            // Group B: Claude accepts mid-turn user messages as steering, so its
-            // send button stays active while a turn runs (Codex keeps queueing
-            // with only the Stop control).
+            // Providers with native mid-turn steering keep a send button active
+            // beside Stop while a turn runs.
             let steers = self
                 .app_state
                 .read(cx)
                 .active
                 .as_ref()
-                .is_some_and(|a| a.meta.provider == ProviderKind::ClaudeCode);
+                .is_some_and(|a| a.supports_steering());
             let has_text = !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
                 .gap_2()
@@ -3451,11 +3460,11 @@ fn render_model_pane(
         PickerRail::Favorites,
         cx,
     ));
-    // One entry per native profile (Claude group first, then Codex): the two
-    // built-ins plus any user-created third-party profiles. Each is its own rail.
+    // One entry per native profile: every built-in plus any user-created
+    // profiles. Each is its own rail.
     let profile_ids: Vec<String> = {
         let st = app_entity.read(cx);
-        [ProviderKind::ClaudeCode, ProviderKind::Codex]
+        PICKER_PROVIDER_KINDS
             .into_iter()
             .flat_map(|kind| {
                 st.settings
@@ -4098,7 +4107,7 @@ fn render_context_meter_pane(
     }
 
     // "Total processed" — the session-cumulative token count, when the provider
-    // reports it (Codex running total; Claude accumulated per-turn usage).
+    // reports it (a native running total or adapter-side accumulation).
     if let Some(total) = usage.and_then(|u| u.total_processed_tokens) {
         pane = pane.child(
             h_flex()
@@ -4113,9 +4122,7 @@ fn render_context_meter_pane(
         );
     }
 
-    // "<Provider> automatically compacts its context when needed." Both Claude
-    // and Codex compact automatically, so the line always shows for a known
-    // provider.
+    // "<Provider> automatically compacts its context when needed."
     if let Some(provider) = provider {
         pane = pane.child(div().pt_1().text_size(px(11.)).text_color(muted).child(
             tcode_i18n::tr!(
