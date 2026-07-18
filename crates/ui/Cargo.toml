@@ -12,8 +12,8 @@ term = { path = "../term" }
 preview-mcp = { path = "../preview-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 async-channel = "2"
 base64 = "0.22"
 chrono = "0.4"
@@ -25,7 +25,7 @@ rushdown = "0.18.0"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
+gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }
 
