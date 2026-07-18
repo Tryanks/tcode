@@ -226,18 +226,6 @@ jobs:
           set -euo pipefail
           notes_file="$(mktemp)"
           cat > "$notes_file" <<'NOTES'
-          ## Upgrade note: legacy turn checkpoints
-
-          Tcode no longer creates hidden Git checkpoint refs. If you used a build that included
-          turn checkpoints, run this once inside each affected repository to remove the old refs:
-
-          ```sh
-          git for-each-ref --format='delete %(refname)' refs/tcode/checkpoints/ | git update-ref --stdin
-          ```
-
-          This does not change branches, commits, the index, or workspace files. The unreferenced
-          snapshot objects become eligible for Git's normal garbage collection.
-
           ## Platform notes
 
           - **macOS 12+**: these test builds are not signed or notarized. After moving the app to Applications, clear Gatekeeper quarantine with:
