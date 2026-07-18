@@ -1,6 +1,7 @@
 app:
   name: "tcode"
 chat:
+  relayed: "Relayed from %{from} to %{to}"
   new_thread: "New thread"
   no_active_thread: "No active thread"
   work_log: "Work Log"
@@ -414,6 +415,10 @@ palette:
   select: "Enter Select"
   close: "Esc Close"
 composer:
+  relay_title: "Conversation relay"
+  relay_description: "%{to} cannot natively resume this %{from} conversation. tcode will hand off the accumulated context before sending your message."
+  relay_confirm: "Confirm & send"
+  relay_cancel: "Cancel"
   placeholder: "Ask anything, @tag files/folders, $use skills, or / for commands"
   favorites: "Favorites"
   search_models: "Search models..."

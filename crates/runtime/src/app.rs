@@ -21,6 +21,9 @@ use tcode_core::git::{
 use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
 use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
+use tcode_core::relay::{
+    RelayTranscriptOptions, assemble_relay_prompt, has_meaningful_history, render_relay_transcript,
+};
 use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProjectSort, ProviderProfile,
@@ -201,6 +204,9 @@ pub struct QueuedMessage {
     /// as earlier entries are dispatched out from under it.
     pub id: u64,
     pub text: String,
+    /// Provider-only context for the first turn after a relay. The canonical
+    /// user event continues to record only `text`.
+    relay_transcript: Option<String>,
     pub attachments: Vec<Attachment>,
     /// Ultrathink was armed when this message was written. It is a per-send
     /// prompt-prefix mode, so it rides with the message rather than with the
@@ -227,10 +233,15 @@ enum QueuedMessageKind {
 impl QueuedMessage {
     /// The text actually sent to the provider (Ultrathink prefix applied).
     fn wire_text(&self) -> String {
-        if self.ultrathink {
-            format!("Ultrathink:\n{}", self.text)
+        let text = if let Some(transcript) = &self.relay_transcript {
+            assemble_relay_prompt(transcript, &self.text)
         } else {
             self.text.clone()
+        };
+        if self.ultrathink {
+            format!("Ultrathink:\n{text}")
+        } else {
+            text
         }
     }
 }
@@ -240,6 +251,7 @@ impl From<&str> for QueuedMessage {
         QueuedMessage {
             id: 0,
             text: text.to_string(),
+            relay_transcript: None,
             attachments: Vec::new(),
             ultrathink: false,
             context_len: None,
@@ -286,6 +298,9 @@ pub struct ActiveSession {
     /// A draft thread: set up (provider/model/cwd) but not yet persisted or
     /// started. Materialized into a real session on the first send.
     pub draft: bool,
+    /// The provider/model that owns the current native history while the picker
+    /// previews a different provider. Consumed only by a confirmed send.
+    pending_relay: Option<PendingRelay>,
     runtime: Runtime,
     /// The model the live provider process was actually started with. When the
     /// user picks a different model we compare against this to decide whether a
@@ -352,7 +367,19 @@ pub struct ActiveSession {
     _pump: Option<Task<()>>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingRelay {
+    from_provider: ProviderKind,
+    from_model: Option<String>,
+}
+
 impl ActiveSession {
+    fn resume_cursor_for_fresh_provider(&mut self) {
+        self.shutdown_to_idle();
+        self.meta.resume_cursor = None;
+        self.pending_relay = None;
+    }
+
     /// Whether the live provider is running a different model than the one now
     /// selected in `meta.model` (so the next turn must restart the provider).
     fn model_changed_while_live(&self) -> bool {
@@ -485,6 +512,7 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             id,
             text,
+            relay_transcript: None,
             attachments,
             ultrathink,
             context_len,
@@ -512,6 +540,7 @@ impl ActiveSession {
         self.queue.push(QueuedMessage {
             id,
             text,
+            relay_transcript: None,
             attachments: Vec::new(),
             ultrathink: false,
             context_len: None,
@@ -2540,6 +2569,19 @@ impl AppState {
         {
             return;
         }
+        if !active.draft && active.meta.provider != ProviderKind::Acp {
+            let source = active.pending_relay.clone().unwrap_or(PendingRelay {
+                from_provider: active.meta.provider,
+                from_model: active.meta.model.clone(),
+            });
+            if active.pending_relay.is_some() && source.from_provider == ProviderKind::Acp {
+                active.pending_relay = None;
+            } else if has_meaningful_history(&active.timeline) {
+                active.pending_relay = Some(source);
+            } else {
+                active.resume_cursor_for_fresh_provider();
+            }
+        }
         active.meta.provider = ProviderKind::Acp;
         active.meta.acp_agent_id = Some(id.to_string());
         active.meta.model = None;
@@ -2548,6 +2590,10 @@ impl AppState {
         active.provider_commands = provider_commands;
         active.pending_ultrathink = false;
         if active.draft {
+            cx.notify();
+            return;
+        }
+        if active.pending_relay.is_some() {
             cx.notify();
             return;
         }
@@ -3744,6 +3790,7 @@ impl AppState {
             git_branch,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
@@ -3794,6 +3841,7 @@ impl AppState {
             git_branch,
             branches: Vec::new(),
             draft: true,
+            pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
@@ -4015,6 +4063,7 @@ impl AppState {
             git_branch,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
@@ -4066,6 +4115,10 @@ impl AppState {
         attachments: Vec<Attachment>,
         cx: &mut Context<Self>,
     ) {
+        if self.relay_confirmation().is_some() {
+            log::warn!("send deferred until the pending conversation relay is confirmed");
+            return;
+        }
         // Group C: a draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
         if let Some(active) = self.active.as_ref()
@@ -4131,6 +4184,69 @@ impl AppState {
         if should_start {
             self.ensure_started(cx);
         }
+        if dispatch_failed {
+            self.report_error(RuntimeError::ProcessGone, cx);
+        }
+        cx.notify();
+    }
+
+    /// Provider identities for the confirmation dialog, when the current
+    /// selection needs a canonical-timeline handoff before it can be sent.
+    pub fn relay_confirmation(&self) -> Option<(ProviderKind, ProviderKind)> {
+        let active = self.active.as_ref()?;
+        let pending = active.pending_relay.as_ref()?;
+        has_meaningful_history(&active.timeline)
+            .then_some((pending.from_provider, active.meta.provider))
+    }
+
+    /// Confirm the pending provider handoff and send the user's clean message.
+    /// The queue carries the provider-only transcript separately, so replay and
+    /// chat rendering never expose the injected preamble as user-authored text.
+    pub fn confirm_relay_and_send(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(pending) = active.pending_relay.take() else {
+            self.send_turn(text, attachments, cx);
+            return;
+        };
+        let transcript = render_relay_transcript(
+            &active.timeline,
+            RelayTranscriptOptions::new(
+                &active.meta.cwd,
+                pending.from_provider,
+                pending.from_model.as_deref(),
+            ),
+        );
+        let event = AgentEvent::ProviderRelay {
+            from_provider: pending.from_provider,
+            from_model: pending.from_model,
+            to_provider: active.meta.provider,
+            to_model: active.meta.model.clone(),
+        };
+        let session_id = active.meta.id.clone();
+        active.shutdown_to_idle();
+        active.meta.resume_cursor = None;
+        active.meta.updated_at = now_secs();
+        let meta = active.meta.clone();
+
+        self.persist_meta(&meta, cx);
+        self.record_event(&session_id, &event, cx);
+
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.push_queued(text, attachments);
+        if let Some(message) = active.queue.last_mut() {
+            message.relay_transcript = Some(transcript);
+        }
+        let dispatch_failed = self.dispatch_next_queued(cx).is_err();
+        self.ensure_started(cx);
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
@@ -4609,10 +4725,35 @@ impl AppState {
             cx.notify();
             return;
         }
-        // Native provider sessions have provider-specific resume cursors. The
-        // cross-provider rails are useful while composing a new draft, but must
-        // never assign (for example) a Claude model id to a live Codex thread.
+        // Established sessions can preview a different provider, but the
+        // provider-native cursor is retained until the user confirms a relay.
         if active.meta.provider != provider {
+            let source = active.pending_relay.clone().unwrap_or(PendingRelay {
+                from_provider: active.meta.provider,
+                from_model: active.meta.model.clone(),
+            });
+            if active.pending_relay.is_some() && source.from_provider == provider {
+                active.pending_relay = None;
+            } else if has_meaningful_history(&active.timeline) {
+                active.pending_relay = Some(source);
+            } else {
+                active.resume_cursor_for_fresh_provider();
+            }
+            active.meta.provider = provider;
+            active.meta.acp_agent_id = None;
+            active.meta.profile_id = profile_id;
+            active.meta.model = model;
+            active.meta.option_selections.clear();
+            active.provider_commands = store.load_commands(provider, None);
+            active.provider_options.clear();
+            active.pending_ultrathink = false;
+            if active.pending_relay.is_some() {
+                cx.notify();
+                return;
+            }
+            active.meta.updated_at = now_secs();
+            let meta = active.meta.clone();
+            self.persist_meta(&meta, cx);
             return;
         }
         if active.meta.model == model {
@@ -4621,6 +4762,10 @@ impl AppState {
         active.meta.model = model;
         active.meta.option_selections.clear();
         active.pending_ultrathink = false;
+        if active.pending_relay.is_some() {
+            cx.notify();
+            return;
+        }
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
@@ -4812,6 +4957,7 @@ impl AppState {
             git_branch,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Idle,
             live_model: None,
             live_approval_mode: None,
@@ -8611,6 +8757,7 @@ mod tests {
             git_branch: None,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Live(commands),
             live_model: None,
             live_approval_mode: None,
@@ -8650,6 +8797,7 @@ mod tests {
             git_branch: None,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Live(commands),
             live_model: None,
             live_approval_mode: None,
@@ -8703,6 +8851,7 @@ mod tests {
             git_branch: None,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Live(commands),
             live_model: None,
             live_approval_mode: None,
@@ -8974,6 +9123,31 @@ mod tests {
     }
 
     #[test]
+    fn relay_context_rides_only_with_the_first_handoff_message() {
+        let (commands, receiver) = async_channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.push_queued("continue here".into(), Vec::new());
+        active.queue[0].relay_transcript = Some("# prior work".into());
+        active.push_queued("follow up".into(), Vec::new());
+
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        let first = receiver.try_recv().unwrap();
+        let SessionCommand::SendTurn { text, .. } = first else {
+            panic!("expected first send turn");
+        };
+        assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
+        assert!(text.contains("<conversation-transcript>\n# prior work"));
+        assert!(text.contains("<new-user-message>\ncontinue here"));
+
+        active.turn_in_flight = false;
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn { text, .. }) if text == "follow up"
+        ));
+    }
+
+    #[test]
     fn startup_generation_rejects_stale_same_session_attempt() {
         let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
         let mut active = ActiveSession {
@@ -8982,6 +9156,7 @@ mod tests {
             git_branch: None,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Starting { generation: 2 },
             live_model: None,
             live_approval_mode: None,
@@ -9026,6 +9201,7 @@ mod tests {
             git_branch: None,
             branches: Vec::new(),
             draft: false,
+            pending_relay: None,
             runtime: Runtime::Live(commands),
             // Process was started on "opus"; the user has since picked "sonnet".
             live_model: Some("opus".into()),

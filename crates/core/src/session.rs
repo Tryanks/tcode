@@ -240,6 +240,14 @@ pub enum EntryContent {
     },
     #[rustfmt::skip]
     ProviderStartError { error: String },
+    /// A tcode-level conversation handoff, rendered as a divider before the
+    /// first user message sent to the new provider.
+    ProviderRelay {
+        from_provider: agent::ProviderKind,
+        from_model: Option<String>,
+        to_provider: agent::ProviderKind,
+        to_model: Option<String>,
+    },
     /// The provider compacted its context window (a "Context compacted" work-log row).
     ContextCompacted,
 }
@@ -345,6 +353,26 @@ impl Timeline {
     /// Apply one event recorded at `ts` (unix ms). Mutates in place.
     pub fn apply_at(&mut self, ts: Option<u64>, event: &AgentEvent) {
         match event {
+            AgentEvent::ProviderRelay {
+                from_provider,
+                from_model,
+                to_provider,
+                to_model,
+            } => {
+                let turn = self.begin_user_turn(ts);
+                let id = self.synthetic_id("relay");
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::ProviderRelay {
+                        from_provider: *from_provider,
+                        from_model: from_model.clone(),
+                        to_provider: *to_provider,
+                        to_model: to_model.clone(),
+                    },
+                    ts,
+                    turn,
+                }));
+            }
             AgentEvent::SessionStarted {
                 provider_session_id,
                 resume,
@@ -1068,6 +1096,40 @@ mod tests {
                 context_len: None,
             },
         })
+    }
+
+    #[test]
+    fn provider_relay_marker_folds_before_the_next_user_message() {
+        let timeline = Timeline::fold_events([
+            user_msg("u1", "before"),
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            AgentEvent::ProviderRelay {
+                from_provider: agent::ProviderKind::ClaudeCode,
+                from_model: Some("opus".into()),
+                to_provider: agent::ProviderKind::Codex,
+                to_model: Some("gpt-5".into()),
+            },
+            user_msg("u2", "after"),
+        ]);
+
+        assert_eq!(timeline.turns.len(), 2);
+        assert!(matches!(
+            timeline.entries[1].content,
+            EntryContent::ProviderRelay {
+                from_provider: agent::ProviderKind::ClaudeCode,
+                to_provider: agent::ProviderKind::Codex,
+                ..
+            }
+        ));
+        assert_eq!(timeline.entries[1].turn, timeline.entries[2].turn);
+        assert!(matches!(
+            &timeline.entries[2].content,
+            EntryContent::User { text, .. } if text == "after"
+        ));
     }
 
     #[test]
