@@ -35,6 +35,12 @@ pub enum OrchestrateOp {
         parent_id: String,
         thread_id: String,
     },
+    Approve {
+        parent_id: String,
+        thread_id: String,
+        request_id: Option<String>,
+        decision: String,
+    },
 }
 
 #[derive(Debug)]

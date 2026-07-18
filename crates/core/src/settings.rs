@@ -259,6 +259,19 @@ const DEFAULT_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better
 const DEFAULT_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 4, intelligence 7, taste 8. First choice for user-facing work: UI, copy, API design, and anything where taste matters more than grinding depth. Also a strong independent reviewer of plans and implementations.";
 const DEFAULT_FABLE_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 2, intelligence 9, taste 9. Highest-judgment escalation for framing, architecture, ambiguous tradeoffs, taste-critical surfaces, and final review. The scarcest resource in the fleet: dispatch to it only when nothing cheaper is adequate.";
 
+/// Who answers permission requests raised by dispatched child threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildApprovalMode {
+    /// The parent (decision-layer) model answers via the orchestrate `approve` tool.
+    #[default]
+    Orchestrator,
+    /// Auto-approve every child request for the session.
+    AlwaysAllow,
+    /// The user answers in the child's composer (legacy behavior).
+    Manual,
+}
+
 /// Settings for tcode's built-in orchestration layer.
 ///
 /// There is deliberately no main-model allow list. Every model may orchestrate;
@@ -272,6 +285,8 @@ pub struct OrchestrateSettings {
     pub model_identities: Vec<OrchestratorIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_models: Vec<OrchestrateChildModel>,
+    #[serde(default)]
+    pub child_approval: ChildApprovalMode,
 }
 
 fn default_orchestrator_identity() -> String {
@@ -336,6 +351,7 @@ impl Default for OrchestrateSettings {
                     description: DEFAULT_FABLE_CHILD_DEFINITION.into(),
                 },
             ],
+            child_approval: ChildApprovalMode::default(),
         }
     }
 }
@@ -843,6 +859,27 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.orchestrate, settings.orchestrate);
+    }
+
+    #[test]
+    fn orchestrate_child_approval_defaults_and_round_trips() {
+        let legacy: OrchestrateSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.child_approval, ChildApprovalMode::Orchestrator);
+
+        for mode in [ChildApprovalMode::AlwaysAllow, ChildApprovalMode::Manual] {
+            let settings = OrchestrateSettings {
+                child_approval: mode,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&settings).unwrap();
+            assert!(json.contains(match mode {
+                ChildApprovalMode::AlwaysAllow => r#""child_approval":"always_allow""#,
+                ChildApprovalMode::Manual => r#""child_approval":"manual""#,
+                ChildApprovalMode::Orchestrator => unreachable!(),
+            }));
+            let back: OrchestrateSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.child_approval, mode);
+        }
     }
 
     #[test]

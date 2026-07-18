@@ -48,6 +48,13 @@ struct SendParams {
 struct ThreadParams {
     thread_id: String,
 }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ApproveParams {
+    thread_id: String,
+    #[serde(default)]
+    request_id: Option<String>,
+    decision: String,
+}
 
 #[derive(Clone)]
 pub struct OrchestrateTools {
@@ -139,6 +146,23 @@ impl OrchestrateTools {
             .run(OrchestrateOp::Cancel {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
+            })
+            .await)
+    }
+
+    #[tool(
+        description = "Answer a child thread's pending permission approval. decision is one of approve (this request only), approve_for_session (stop asking for similar requests this session), or deny. request_id may be omitted when the child has exactly one pending request."
+    )]
+    async fn approve(
+        &self,
+        Parameters(p): Parameters<ApproveParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .run(OrchestrateOp::Approve {
+                parent_id: self.parent_id.clone(),
+                thread_id: p.thread_id,
+                request_id: p.request_id,
+                decision: p.decision,
             })
             .await)
     }
@@ -250,6 +274,9 @@ mod tests {
             .map(|tool| tool.name.to_string())
             .collect();
         names.sort();
-        assert_eq!(names, ["cancel", "dispatch", "result", "send", "status"]);
+        assert_eq!(
+            names,
+            ["approve", "cancel", "dispatch", "result", "send", "status"]
+        );
     }
 }
