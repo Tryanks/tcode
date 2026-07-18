@@ -654,6 +654,9 @@ impl ProviderCard {
         let app_state = self.app_state.clone();
 
         Popover::new("update-popover")
+            // Single panel surface at the 14px overlay radius; content transparent.
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .trigger(
                 Button::new("update-available")
                     .ghost()
@@ -665,9 +668,10 @@ impl ProviderCard {
                 let app_state = app_state.clone();
                 let command = command.clone();
                 let muted = cx.theme().muted_foreground;
+                // The Popover panel supplies the fill, border, shadow and p_3
+                // padding; the pane itself stays transparent (single surface).
                 let mut pane = v_flex()
                     .w(px(320.))
-                    .p_3()
                     .gap_2()
                     .child(
                         div()
@@ -747,8 +751,7 @@ impl ProviderCard {
                                 ),
                         );
                 }
-                crate::material::overlay_contour(pane, cx)
-                    .rounded(crate::material::radius_overlay())
+                pane
             })
             .into_any_element()
     }

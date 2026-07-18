@@ -204,6 +204,11 @@ impl Render for ProviderModelPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker = cx.entity();
         Popover::new(self.popover_id)
+            // T3 overlay contour: one panel surface (popover fill + hairline +
+            // shadow_xl at the 14px overlay radius). The pane content is transparent
+            // so the popup reads as a single card, matching the composer picker.
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .trigger(self.trigger(cx))
             .content(move |_, _, cx| {
                 let (options, profiles, selected_profile, selected, excluded) = {
@@ -348,21 +353,17 @@ impl Render for ProviderModelPicker {
                     );
                 }
 
-                crate::material::overlay_contour(
-                    v_flex()
-                        .w(px(390.))
-                        .child(tabs)
-                        .child(crate::material::faded_hairline(cx))
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(300.))
-                                .overflow_y_scrollbar()
-                                .child(div().size_full().child(rows)),
-                        ),
-                    cx,
-                )
-                .rounded(crate::material::radius_overlay())
+                v_flex()
+                    .w(px(390.))
+                    .child(tabs)
+                    .child(crate::material::faded_hairline(cx))
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(300.))
+                            .overflow_y_scrollbar()
+                            .child(div().size_full().child(rows)),
+                    )
             })
     }
 }
