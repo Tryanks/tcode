@@ -114,6 +114,9 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   muted bg, 4px radius). Streaming appends via push_str with
   follow-when-near-bottom.
 - User messages: right-aligned bubble, muted bg, radius 12, max-width ~70%.
+- A confirmed provider handoff inserts a subtle centered divider chip before
+  the next user bubble: “Relayed from X to Y”. The injected handoff transcript
+  is provider-only context and never renders as a message or disclosure row.
 - **Disclosure rows** fold injected, non-conversational context out of the
   bubbles into a reusable centered control: a collapsed-by-default row of 12px
   muted `label ›` whose chevron rotates and whose background lifts to accent on
@@ -190,7 +193,13 @@ outside a git repo).
 Model picker popover (~360px, radius 12): left rail = favorites star + provider
 glyphs; search input; rows = model name (✓ current) + provider subtitle, ⌘1…⌘9
 chips, favorite star; footer note when a live session will restart (via resume)
-on model change.
+on model change. Picking a different provider on a thread with at least one
+completed turn defers the switch until send. Send opens a “Conversation relay”
+confirmation; confirming starts that provider fresh and sends a canonical
+timeline transcript (project, original provider/model, turn messages, compact
+work outcomes, and plan/todo state, capped at roughly 60k characters) plus the
+new message. Later messages use the new provider's native cursor. Empty or
+incomplete threads switch silently without a transcript.
 
 Approval panel (above composer): "PENDING APPROVAL" label, summary + count,
 expandable detail (command text / file list), actions Deny / Always allow /

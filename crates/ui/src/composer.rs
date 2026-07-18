@@ -23,6 +23,7 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
     StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
     notification::Notification,
@@ -769,8 +770,6 @@ impl Composer {
         let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
         let text = append_terminal_contexts_to_prompt(prompt_text, &terminal_contexts);
         let text = append_review_comments_to_prompt(&text, &review_comments);
-        self.text_cache.clear_current();
-        input.update(cx, |state, cx| state.set_value("", window, cx));
         // Image-only messages get T3's exact synthetic text. Attachments are
         // persisted on disk (see `add_image_*`); read + base64-encode each one
         // so the provider receives real image content blocks (Group A).
@@ -780,6 +779,71 @@ impl Composer {
             text
         };
         let attachments = self.collect_attachments();
+        if let Some((from, to)) = self.app_state.read(cx).relay_confirmation() {
+            let composer = cx.entity();
+            let input = input.clone();
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let composer = composer.clone();
+                let input = input.clone();
+                let sent_text = sent_text.clone();
+                let attachments = attachments.clone();
+                alert
+                    .title(tcode_i18n::tr!("composer.relay_title"))
+                    .description(tcode_i18n::tr!(
+                        "composer.relay_description",
+                        from = from.display_name(),
+                        to = to.display_name()
+                    ))
+                    .button_props(
+                        DialogButtonProps::default()
+                            .ok_text(tcode_i18n::tr!("composer.relay_confirm"))
+                            .cancel_text(tcode_i18n::tr!("composer.relay_cancel"))
+                            .show_cancel(true),
+                    )
+                    .on_ok(move |_, window, cx| {
+                        composer.update(cx, |composer, cx| {
+                            composer.finish_submit(
+                                &input,
+                                sent_text.clone(),
+                                attachments.clone(),
+                                false,
+                                false,
+                                true,
+                                window,
+                                cx,
+                            );
+                        });
+                        true
+                    })
+            });
+            return;
+        }
+        self.finish_submit(
+            input,
+            sent_text,
+            attachments,
+            orchestrate_text.is_some(),
+            steer,
+            false,
+            window,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_submit(
+        &mut self,
+        input: &Entity<InputState>,
+        sent_text: String,
+        attachments: Vec<Attachment>,
+        orchestrate: bool,
+        steer: bool,
+        relay: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_cache.clear_current();
+        input.update(cx, |state, cx| state.set_value("", window, cx));
         self.pending_images.clear();
         self.image_preview = None;
         self.app_state.update(cx, |state, cx| {
@@ -787,7 +851,9 @@ impl Composer {
                 active.terminal_workspace.contexts.clear();
             }
             state.clear_review_comments();
-            if orchestrate_text.is_some() {
+            if relay {
+                state.confirm_relay_and_send(sent_text, attachments, cx)
+            } else if orchestrate {
                 state.orchestrate_turn(sent_text, attachments, cx)
             } else if steer {
                 state.steer(sent_text, attachments, cx)

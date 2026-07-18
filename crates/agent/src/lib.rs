@@ -623,6 +623,14 @@ pub async fn start_session(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// A tcode-level handoff between providers. This is never emitted by an
+    /// adapter; the runtime persists it before the first relayed user turn.
+    ProviderRelay {
+        from_provider: ProviderKind,
+        from_model: Option<String>,
+        to_provider: ProviderKind,
+        to_model: Option<String>,
+    },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses
     /// [`OptionDescriptor`] so the composer's existing picker renders them

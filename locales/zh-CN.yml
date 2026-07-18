@@ -1,6 +1,7 @@
 app:
   name: "tcode"
 chat:
+  relayed: "已从 %{from} 接力至 %{to}"
   new_thread: "新建对话"
   no_active_thread: "没有活动对话"
   work_log: "工作日志"
@@ -407,6 +408,10 @@ palette:
   select: "Enter 选择"
   close: "Esc 关闭"
 composer:
+  relay_title: "会话接力"
+  relay_description: "%{to} 无法原生恢复此 %{from} 会话。tcode 会先移交累积的上下文，再发送你的消息。"
+  relay_confirm: "确认并发送"
+  relay_cancel: "取消"
   placeholder: "提问、@引用文件/文件夹、$使用技能，或输入 / 执行命令"
   favorites: "收藏"
   search_models: "搜索模型..."
