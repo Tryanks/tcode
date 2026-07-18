@@ -1,0 +1,45 @@
+[package]
+name = "computer-use-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rmcp = { version = "0.15", features = [
+    "macros",
+    "schemars",
+    "server",
+    "transport-streamable-http-server",
+] }
+axum = "0.8"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "macros",
+    "process",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+base64 = "0.22"
+tcode-services = { path = "../services" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+core-foundation = "0.10"
+core-graphics = { version = "0.24", features = ["highsierra"] }
+objc2 = "0.6.4"
+objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGImage"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError"] }
+objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"] }
+objc2-screen-capture-kit = { version = "0.3.2", features = [
+    "SCScreenshotManager",
+    "SCShareableContent",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }

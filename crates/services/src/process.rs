@@ -129,6 +129,7 @@ mod tests {
         let expected = [
             "agent",
             "app",
+            "computer-use-mcp",
             "core",
             "i18n",
             "orchestrate-mcp",

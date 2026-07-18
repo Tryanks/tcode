@@ -23,8 +23,8 @@ use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, OrchestrateSettings, ProjectSort, ProviderProfile, ProviderSettings,
-    ResolvedProfile, Settings, provider_label,
+    ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProjectSort, ProviderProfile,
+    ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -698,6 +698,9 @@ pub struct AppState {
     orchestrate_registrations: HashMap<String, agent::McpRegistration>,
     /// Requests from the orchestrate MCP runtime, pumped on the gpui thread.
     pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
+    /// Process-wide computer-use MCP registration, supplied only to sessions
+    /// while the global computer-use setting is enabled.
+    computer_use_registration: Option<agent::McpRegistration>,
     callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
     /// Live provider approvals for sessions without an authoritative active
@@ -733,6 +736,23 @@ pub struct AppState {
     /// Per-provider install/auth probe results, driving the Settings → Providers
     /// card status dot + summary line. Absent until the first probe lands.
     pub provider_snapshots: HashMap<ProviderKind, ProviderSnapshot>,
+    /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
+    /// Present only after an app-relaunch triggered by a permission grant; applied
+    /// once by [`AppState::apply_pending_relaunch`] and then cleared.
+    pending_relaunch: Option<tcode_services::relaunch::RelaunchMarker>,
+}
+
+/// Map core's persisted computer-use settings onto the live MCP config type
+/// (kept separate so `core` stays free of the computer-use backend dependency).
+fn computer_use_config(settings: &Settings) -> computer_use_mcp::config::ComputerUseConfig {
+    computer_use_mcp::config::ComputerUseConfig {
+        allow_input: settings.computer_use.allow_input,
+        image_mode: match settings.computer_use.image_mode {
+            ImageMode::Auto => computer_use_mcp::config::ImageMode::Auto,
+            ImageMode::Always => computer_use_mcp::config::ImageMode::Always,
+            ImageMode::Never => computer_use_mcp::config::ImageMode::Never,
+        },
+    }
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -749,6 +769,12 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        // Push the loaded computer-use config to the (already-running) MCP layer
+        // so the tools honor the persisted image-mode / allow-input choices from
+        // the first call, not just after a settings change.
+        computer_use_mcp::config::set(computer_use_config(&settings));
+        // Consume any restart-continuity marker left by a permission grant.
+        let pending_relaunch = tcode_services::relaunch::take(store.root());
         let settings_collapsed = settings.sidebar_collapsed;
         let terminal_preferences_path = store.root().join("terminal-ui.json");
         let terminal_preferences = std::fs::read(&terminal_preferences_path)
@@ -812,6 +838,7 @@ impl AppState {
             orchestrate_tokens: None,
             orchestrate_registrations: HashMap::new(),
             orchestrate_requests: None,
+            computer_use_registration: None,
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
             sessions_awaiting_approval: HashMap::new(),
@@ -830,6 +857,7 @@ impl AppState {
             debug_provider_expanded: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
+            pending_relaunch,
         }
     }
 
@@ -868,6 +896,14 @@ impl AppState {
         self.orchestrate_url = Some(server.url);
         self.orchestrate_tokens = Some(server.tokens);
         self.orchestrate_requests = Some(server.requests);
+    }
+
+    pub fn attach_computer_use_mcp(&mut self, url: String, token: String) {
+        self.computer_use_registration = Some(agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
+            url,
+            bearer_token: token,
+        });
     }
 
     /// Pump orchestrator requests through the runtime on the gpui thread.
@@ -3262,7 +3298,41 @@ impl AppState {
         }
         let language = settings.language.clone();
         self.settings = settings;
+        // Keep the live computer-use MCP config in step with the persisted
+        // settings on every change (the server outlives any one snapshot).
+        computer_use_mcp::config::set(computer_use_config(&self.settings));
         cx.emit(AppEvent::Effect(RuntimeEffect::ApplyLocale { language }));
+        cx.notify();
+    }
+
+    /// Persist a restart-continuity marker naming the Settings page to reopen and
+    /// the session that is active now. Written *before* a permission grant or an
+    /// explicit relaunch, so an externally-initiated quit reopens cleanly.
+    pub fn write_relaunch_marker(&self, reopen_settings: &str) {
+        let marker = tcode_services::relaunch::RelaunchMarker {
+            reopen_settings: reopen_settings.to_string(),
+            active_session: self.active_session_id().map(str::to_string),
+        };
+        if let Err(err) = tcode_services::relaunch::write(self.store.root(), &marker) {
+            log::warn!("failed to write relaunch marker: {err}");
+        }
+    }
+
+    /// Apply a marker taken at launch: reopen the recorded session and open
+    /// Settings on the recorded page. The page reruns a permission recheck as it
+    /// mounts, so the user immediately sees the post-restart status. No-op when
+    /// there is no marker (the normal launch path).
+    pub fn apply_pending_relaunch(&mut self, cx: &mut Context<Self>) {
+        let Some(marker) = self.pending_relaunch.take() else {
+            return;
+        };
+        if let Some(id) = marker.active_session.as_deref()
+            && self.sessions.iter().any(|meta| meta.id == id)
+        {
+            self.select_session(id, cx);
+        }
+        self.debug_settings_section = Some(marker.reopen_settings);
+        self.route = Route::Settings;
         cx.notify();
     }
 
@@ -5198,6 +5268,7 @@ impl AppState {
         let launch_env = self.session_launch_env(&meta);
         let preview_registration = self.preview_registration_for(&meta);
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
+        let computer_use_registration = self.computer_use_registration.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
             log::info!(
@@ -5216,6 +5287,7 @@ impl AppState {
                 launch_env,
                 preview_registration,
                 orchestrate_registration,
+                computer_use_registration,
             );
             let result = start_session(meta.provider, opts).await;
             let _ = this.update(cx, |state, cx| {
@@ -5747,7 +5819,7 @@ impl AppState {
         let title_meta = title_session_meta(&self.settings, fallback_meta.cwd);
         let settings = self.settings.clone();
         let launch_env = self.session_launch_env(&title_meta);
-        let options = session_options(&title_meta, &settings, launch_env, None, None);
+        let options = session_options(&title_meta, &settings, launch_env, None, None, None);
         let source = first_message.to_string();
         let attachments = attachments.to_vec();
 
@@ -6348,6 +6420,7 @@ fn session_options(
     launch_env: LaunchEnv,
     mcp_server: Option<agent::McpRegistration>,
     orchestrate_server: Option<agent::McpRegistration>,
+    computer_use_server: Option<agent::McpRegistration>,
 ) -> SessionOptions {
     // A session's binary / launch-args come from its selected profile (built-in
     // or user-created), so a third-party profile can point at its own CLI while
@@ -6376,6 +6449,11 @@ fn session_options(
         mcp_server,
         orchestrate_server: if meta.orchestrate_enabled {
             orchestrate_server
+        } else {
+            None
+        },
+        computer_use_server: if settings.computer_use.enabled {
+            computer_use_server
         } else {
             None
         },
@@ -7684,8 +7762,10 @@ mod tests {
         settings.provider_mut(ProviderKind::ClaudeCode).binary_path =
             Some(PathBuf::from("/custom/claude"));
 
-        let codex_options = session_options(&codex, &settings, LaunchEnv::default(), None, None);
-        let claude_options = session_options(&claude, &settings, LaunchEnv::default(), None, None);
+        let codex_options =
+            session_options(&codex, &settings, LaunchEnv::default(), None, None, None);
+        let claude_options =
+            session_options(&claude, &settings, LaunchEnv::default(), None, None, None);
 
         assert_eq!(
             codex_options.binary_path,
@@ -7714,7 +7794,7 @@ mod tests {
             home: settings.provider(ProviderKind::ClaudeCode).effective_home(),
         };
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-        let opts = session_options(&meta, &settings, launch_env, None, None);
+        let opts = session_options(&meta, &settings, launch_env, None, None, None);
         assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
         assert_eq!(
             opts.launch_env.pairs(ProviderKind::ClaudeCode),
@@ -7733,7 +7813,7 @@ mod tests {
             home: settings.provider(ProviderKind::Codex).effective_home(),
         };
         let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-        let opts = session_options(&meta, &settings, launch_env, None, None);
+        let opts = session_options(&meta, &settings, launch_env, None, None, None);
         assert!(opts.extra_args.is_empty());
         assert_eq!(
             opts.launch_env.pairs(ProviderKind::Codex),
@@ -7874,7 +7954,7 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.kimi.com/coding/")
         );
-        let opts = session_options(&meta, &state.settings, launch_env, None, None);
+        let opts = session_options(&meta, &state.settings, launch_env, None, None, None);
         assert_eq!(opts.binary_path, Some(PathBuf::from("/opt/kimi/claude")));
 
         let _ = std::fs::remove_dir_all(root);
@@ -7889,7 +7969,14 @@ mod tests {
             url: "http://127.0.0.1:7/mcp".into(),
             bearer_token: "tok".into(),
         };
-        let opts = session_options(&meta, &settings, LaunchEnv::default(), Some(reg), None);
+        let opts = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            Some(reg),
+            None,
+            None,
+        );
         let mcp = opts.mcp_server.expect("registration threaded through");
         assert_eq!(mcp.url, "http://127.0.0.1:7/mcp");
         assert_eq!(mcp.bearer_token, "tok");
@@ -7910,6 +7997,7 @@ mod tests {
             LaunchEnv::default(),
             None,
             Some(registration.clone()),
+            None,
         );
         assert!(normal.mcp_server.is_none());
         assert!(normal.orchestrate_server.is_none());
@@ -7921,10 +8009,46 @@ mod tests {
             LaunchEnv::default(),
             None,
             Some(registration),
+            None,
         );
         assert_eq!(
             enabled.orchestrate_server.unwrap().name,
             agent::McpRegistration::SERVER_NAME_ORCHESTRATE
+        );
+    }
+
+    #[test]
+    fn session_options_gates_computer_use_registration_on_global_setting() {
+        let mut settings = Settings::default();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
+        let registration = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
+            url: "http://127.0.0.1:9/mcp".into(),
+            bearer_token: "computer-token".into(),
+        };
+
+        let disabled = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            None,
+            None,
+            Some(registration.clone()),
+        );
+        assert!(disabled.computer_use_server.is_none());
+
+        settings.computer_use.enabled = true;
+        let enabled = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            None,
+            None,
+            Some(registration),
+        );
+        assert_eq!(
+            enabled.computer_use_server.unwrap().name,
+            agent::McpRegistration::SERVER_NAME_COMPUTER_USE
         );
     }
 

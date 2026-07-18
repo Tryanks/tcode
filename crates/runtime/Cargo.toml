@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 agent = { path = "../agent" }
 async-channel = "2"
+computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 log = "0.4"
 orchestrate-mcp = { path = "../orchestrate-mcp" }

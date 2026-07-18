@@ -127,6 +127,9 @@ pub struct SessionOptions {
     /// The tcode orchestrator MCP server, scoped to this parent session by its
     /// bearer token. Only orchestrate-enabled sessions receive it.
     pub orchestrate_server: Option<McpRegistration>,
+    /// The process-wide computer-use MCP server. The runtime supplies it only
+    /// when the global computer-use setting is enabled.
+    pub computer_use_server: Option<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
     /// into the child's environment, plus the home-directory override. See
     /// [`LaunchEnv`].
@@ -189,6 +192,7 @@ pub struct McpRegistration {
 impl McpRegistration {
     pub const SERVER_NAME_PREVIEW: &'static str = "tcode_preview";
     pub const SERVER_NAME_ORCHESTRATE: &'static str = "tcode_orchestrate";
+    pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
 
     /// Claude Code `--mcp-config` JSON: a single `mcpServers` map entry for an
     /// HTTP server carrying the bearer token as an `Authorization` header.

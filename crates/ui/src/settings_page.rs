@@ -16,18 +16,25 @@ use gpui_component::{
     ThemeMode as ComponentThemeMode, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
+    input::{Input, InputEvent, InputState},
     popover::Popover,
     switch::Switch,
     v_flex,
 };
 
+use computer_use_mcp::permissions::{
+    self, PermissionKind, PermissionStatus, open_settings_pane, relaunch_app, request,
+};
 use tcode_runtime::app::AppState;
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::provider_card::ProviderCard;
 use crate::provider_model_picker::ProviderModelPicker;
-use crate::settings::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode};
+use crate::settings::{
+    ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode,
+};
+use crate::shell::Quit;
 use crate::time::now_secs;
 use crate::window_drag_area;
 
@@ -46,6 +53,8 @@ const CONTENT_MAX_WIDTH: f32 = 720.;
 enum Section {
     General,
     Providers,
+    Browser,
+    ComputerUse,
     Orchestrate,
     Archived,
 }
@@ -75,6 +84,14 @@ pub struct SettingsPage {
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     debug_acp_dialog_pending: bool,
     section: Section,
+    /// Editable "Home URL" for the Browser page; committed on change.
+    home_url_input: Entity<InputState>,
+    /// Last-known TCC permission snapshot, refreshed when Computer Use becomes
+    /// visible and on every explicit Recheck / Grant.
+    perm_status: PermissionStatus,
+    /// Whether a Screen Recording grant looks pending-restart (a fresh grant
+    /// only takes effect after tcode relaunches). Drives the restart banner.
+    sr_restart_hint: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -118,9 +135,12 @@ impl SettingsPage {
             }),
         ];
 
-        // Screenshot-only: `--debug-settings-section` opens a specific section.
+        // Screenshot-only / restart-continuity: `--debug-settings-section` (also
+        // reused by the relaunch marker) opens a specific section.
         let section = match app_state.read(cx).debug_settings_section.as_deref() {
             Some("providers") => Section::Providers,
+            Some("browser") => Section::Browser,
+            Some("computer_use") => Section::ComputerUse,
             Some("orchestrate") => Section::Orchestrate,
             Some("archived") => Section::Archived,
             _ => Section::General,
@@ -129,6 +149,22 @@ impl SettingsPage {
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(app_state.clone(), window, cx));
         let debug_acp_dialog_pending = app_state.read(cx).debug_acp_dialog;
+        let home_url_value = app_state
+            .read(cx)
+            .settings
+            .browser
+            .home_url
+            .clone()
+            .unwrap_or_default();
+        let home_url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tcode_i18n::tr!("browser.home_url.placeholder"))
+                .default_value(home_url_value)
+        });
+        // Refresh the TCC snapshot once as the page mounts. When the page is
+        // opened by a post-grant relaunch this is the "automatic recheck" that
+        // surfaces the new status immediately.
+        let perm_status = permissions::check();
         let mut page = Self {
             app_state,
             provider_cards: Vec::new(),
@@ -138,11 +174,27 @@ impl SettingsPage {
             acp_cards: Vec::new(),
             debug_acp_dialog_pending,
             section,
+            home_url_input: home_url_input.clone(),
+            perm_status,
+            sr_restart_hint: false,
             _subscriptions: subscriptions,
         };
+        page._subscriptions
+            .push(cx.subscribe(&home_url_input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.commit_home_url(cx);
+                }
+            }));
         page.build_provider_cards(window, cx);
         page.sync_acp_cards(window, cx);
         page
+    }
+
+    /// Persist the Browser "Home URL" field (empty → `None`).
+    fn commit_home_url(&self, cx: &mut Context<Self>) {
+        let value = self.home_url_input.read(cx).value().trim().to_string();
+        let home_url = (!value.is_empty()).then_some(value);
+        self.update_settings(move |settings| settings.browser.home_url = home_url, cx);
     }
 
     /// (Re)build the provider cards from current settings — also used after
@@ -259,6 +311,11 @@ impl SettingsPage {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = section;
+                    // Refresh the TCC snapshot each time Computer Use becomes
+                    // visible (cheap native calls, event-driven).
+                    if section == Section::ComputerUse {
+                        this.perm_status = permissions::check();
+                    }
                     cx.notify();
                 }))
                 .into_any_element()
@@ -310,6 +367,22 @@ impl SettingsPage {
                         IconName::Bot,
                         tcode_i18n::tr!("settings.providers").into_owned().into(),
                         Section::Providers,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        self,
+                        "settings-nav-browser",
+                        IconName::Globe,
+                        tcode_i18n::tr!("settings.browser").into_owned().into(),
+                        Section::Browser,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        self,
+                        "settings-nav-computer-use",
+                        IconName::LayoutDashboard,
+                        tcode_i18n::tr!("settings.computer_use").into_owned().into(),
+                        Section::ComputerUse,
                         cx,
                     ))
                     .child(nav_item(
@@ -409,6 +482,17 @@ impl SettingsPage {
                         let app_state = page.app_state.clone();
                         page.orchestrate_panel =
                             cx.new(|cx| OrchestrateSettingsPanel::new(app_state, window, cx));
+                        // The Home URL input now holds a stale override.
+                        let home_url = page
+                            .app_state
+                            .read(cx)
+                            .settings
+                            .browser
+                            .home_url
+                            .clone()
+                            .unwrap_or_default();
+                        page.home_url_input
+                            .update(cx, |input, cx| input.set_value(home_url, window, cx));
                     });
                     apply_theme(ThemeMode::System, window, cx);
                     true
@@ -420,6 +504,8 @@ impl SettingsPage {
         let column = match self.section {
             Section::General => self.render_general(cx),
             Section::Providers => self.render_providers(window, cx),
+            Section::Browser => self.render_browser(cx),
+            Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
@@ -719,6 +805,360 @@ impl SettingsPage {
                     true
                 })
         });
+    }
+
+    // -- Computer Use & Browser pages --------------------------------------
+
+    fn render_computer_use(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let settings = self.app_state.read(cx).settings.clone();
+        let rows = vec![
+            self.toggle_row(
+                "cu-enabled",
+                tcode_i18n::tr!("computer_use.enable.title"),
+                tcode_i18n::tr!("computer_use.enable.description"),
+                settings.computer_use.enabled,
+                cx,
+                |s, checked| s.computer_use.enabled = checked,
+            ),
+            self.image_mode_row(settings.computer_use.image_mode, cx),
+            self.toggle_row(
+                "cu-allow-input",
+                tcode_i18n::tr!("computer_use.allow_input.title"),
+                tcode_i18n::tr!("computer_use.allow_input.description"),
+                settings.computer_use.allow_input,
+                cx,
+                |s, checked| s.computer_use.allow_input = checked,
+            ),
+        ];
+        v_flex()
+            .gap(px(24.))
+            .child(
+                v_flex()
+                    .child(self.section_label(tcode_i18n::tr!("computer_use.section"), cx))
+                    .child(self.grouped(rows, cx)),
+            )
+            .child(self.permissions_group(
+                &[
+                    PermissionKind::Accessibility,
+                    PermissionKind::ScreenRecording,
+                ],
+                cx,
+            ))
+    }
+
+    fn render_browser(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let settings = self.app_state.read(cx).settings.clone();
+        let rows = vec![
+            self.toggle_row(
+                "browser-enabled",
+                tcode_i18n::tr!("browser.enable.title"),
+                tcode_i18n::tr!("browser.enable.description"),
+                settings.browser.enabled,
+                cx,
+                |s, checked| s.browser.enabled = checked,
+            ),
+            self.home_url_row(cx),
+            self.toggle_row(
+                "browser-allow-eval",
+                tcode_i18n::tr!("browser.allow_evaluate.title"),
+                tcode_i18n::tr!("browser.allow_evaluate.description"),
+                settings.browser.allow_evaluate,
+                cx,
+                |s, checked| s.browser.allow_evaluate = checked,
+            ),
+        ];
+        v_flex().gap(px(24.)).child(
+            v_flex()
+                .child(self.section_label(tcode_i18n::tr!("browser.section"), cx))
+                .child(self.grouped(rows, cx)),
+        )
+    }
+
+    fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.row_frame(cx)
+            .child(self.row_labels(
+                tcode_i18n::tr!("browser.home_url.title"),
+                tcode_i18n::tr!("browser.home_url.description"),
+                cx,
+            ))
+            .child(
+                div().w(px(240.)).child(
+                    Input::new(&self.home_url_input)
+                        .small()
+                        .rounded(crate::material::radius_input()),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn image_mode_row(&self, mode: ImageMode, cx: &mut Context<Self>) -> AnyElement {
+        let label = match mode {
+            ImageMode::Auto => tcode_i18n::tr!("computer_use.image_mode.auto"),
+            ImageMode::Always => tcode_i18n::tr!("computer_use.image_mode.always"),
+            ImageMode::Never => tcode_i18n::tr!("computer_use.image_mode.never"),
+        };
+        let trigger = self.dropdown_trigger("cu-image-mode-dropdown", label, cx);
+        let this = cx.entity();
+        let dropdown = Popover::new("cu-image-mode-popover")
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                let this = this.clone();
+                let option = |m: ImageMode,
+                              label_key: &'static str,
+                              desc_key: &'static str,
+                              this: &Entity<SettingsPage>,
+                              cx: &mut Context<gpui_component::popover::PopoverState>|
+                 -> AnyElement {
+                    let this = this.clone();
+                    let popover = cx.entity();
+                    gpui_component::h_flex()
+                        .id(label_key)
+                        .w_full()
+                        .px_2()
+                        .py_1p5()
+                        .gap_2()
+                        .items_start()
+                        .rounded(crate::material::radius_button())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .gap_0p5()
+                                .child(div().text_size(px(13.)).child(tcode_i18n::tr!(label_key)))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(tcode_i18n::tr!(desc_key)),
+                                ),
+                        )
+                        .when(m == mode, |d| d.child(Icon::new(IconName::Check).xsmall()))
+                        .on_click(move |_, window, cx| {
+                            this.update(cx, |page, cx| {
+                                page.update_settings(|s| s.computer_use.image_mode = m, cx);
+                            });
+                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                        })
+                        .into_any_element()
+                };
+                crate::material::overlay_contour(
+                    v_flex()
+                        .p_1()
+                        .min_w(px(260.))
+                        .gap_0p5()
+                        .child(option(
+                            ImageMode::Auto,
+                            "computer_use.image_mode.auto",
+                            "computer_use.image_mode.auto_desc",
+                            &this,
+                            cx,
+                        ))
+                        .child(option(
+                            ImageMode::Always,
+                            "computer_use.image_mode.always",
+                            "computer_use.image_mode.always_desc",
+                            &this,
+                            cx,
+                        ))
+                        .child(option(
+                            ImageMode::Never,
+                            "computer_use.image_mode.never",
+                            "computer_use.image_mode.never_desc",
+                            &this,
+                            cx,
+                        )),
+                    cx,
+                )
+                .rounded(crate::material::radius_overlay())
+            });
+        self.row_frame(cx)
+            .child(self.row_labels(
+                tcode_i18n::tr!("computer_use.image_mode.title"),
+                tcode_i18n::tr!("computer_use.image_mode.description"),
+                cx,
+            ))
+            .child(dropdown)
+            .into_any_element()
+    }
+
+    /// The Computer Use "System permissions" group. Non-macOS platforms have
+    /// no TCC, so it shows a quiet note instead.
+    fn permissions_group(&self, kinds: &[PermissionKind], cx: &mut Context<Self>) -> AnyElement {
+        let col = v_flex()
+            .child(self.section_label(tcode_i18n::tr!("computer_use.permissions_section"), cx));
+        if !cfg!(target_os = "macos") {
+            return col
+                .child(
+                    self.group(cx).child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_3()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tcode_i18n::tr!("permissions.unsupported")),
+                    ),
+                )
+                .into_any_element();
+        }
+        let rows: Vec<AnyElement> = kinds
+            .iter()
+            .map(|kind| self.permission_row(*kind, cx))
+            .collect();
+        let mut stack = v_flex().w_full().gap_2().child(self.grouped(rows, cx));
+        // A fresh Screen Recording grant only takes effect after a restart; offer
+        // an explicit relaunch when we've detected one is pending.
+        if self.sr_restart_hint && kinds.contains(&PermissionKind::ScreenRecording) {
+            stack = stack.child(self.restart_banner(cx));
+        }
+        col.child(stack).into_any_element()
+    }
+
+    fn permission_row(&self, kind: PermissionKind, cx: &mut Context<Self>) -> AnyElement {
+        let granted = self.perm_status.granted(kind);
+        let (name_key, why_key, grant_id, recheck_id) = match kind {
+            PermissionKind::Accessibility => (
+                "permissions.accessibility.name",
+                "permissions.accessibility.why",
+                "perm-grant-accessibility",
+                "perm-recheck-accessibility",
+            ),
+            PermissionKind::ScreenRecording => (
+                "permissions.screen_recording.name",
+                "permissions.screen_recording.why",
+                "perm-grant-screen-recording",
+                "perm-recheck-screen-recording",
+            ),
+        };
+        let mut controls = gpui_component::h_flex()
+            .flex_none()
+            .gap_2()
+            .items_center()
+            .child(self.status_chip(granted, cx));
+        if !granted {
+            controls = controls
+                .child(
+                    Button::new(grant_id)
+                        .outline()
+                        .small()
+                        .label(tcode_i18n::tr!("permissions.grant"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.grant_permission(kind, cx);
+                        })),
+                )
+                .child(
+                    Button::new(recheck_id)
+                        .ghost()
+                        .small()
+                        .label(tcode_i18n::tr!("permissions.recheck"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.recheck_permissions(cx);
+                        })),
+                );
+        }
+        self.row_frame(cx)
+            .child(self.row_labels(tcode_i18n::tr!(name_key), tcode_i18n::tr!(why_key), cx))
+            .child(controls)
+            .into_any_element()
+    }
+
+    fn status_chip(&self, granted: bool, cx: &Context<Self>) -> AnyElement {
+        let (bg, fg, label) = if granted {
+            (
+                cx.theme().success.opacity(0.12),
+                cx.theme().success_foreground,
+                tcode_i18n::tr!("permissions.granted"),
+            )
+        } else {
+            (
+                cx.theme().warning.opacity(0.15),
+                cx.theme().warning_foreground,
+                tcode_i18n::tr!("permissions.missing"),
+            )
+        };
+        div()
+            .flex_none()
+            .px_2()
+            .py_0p5()
+            .rounded_full()
+            .bg(bg)
+            .text_size(px(11.))
+            .text_color(fg)
+            .child(label)
+            .into_any_element()
+    }
+
+    fn restart_banner(&self, cx: &mut Context<Self>) -> AnyElement {
+        gpui_component::h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .rounded(crate::material::radius_card())
+            .bg(cx.theme().warning.opacity(0.12))
+            .px_3()
+            .py_2p5()
+            .child(
+                Icon::new(IconName::Info)
+                    .small()
+                    .text_color(cx.theme().warning_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .child(tcode_i18n::tr!("permissions.restart_banner")),
+            )
+            .child(
+                Button::new("perm-relaunch")
+                    .outline()
+                    .small()
+                    .label(tcode_i18n::tr!("permissions.relaunch"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.relaunch(window, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Persist the restart-continuity marker, then fire the OS prompt and open
+    /// the matching System Settings pane. The marker must be written *first*:
+    /// macOS may quit tcode from its own "Quit & Reopen" dialog.
+    fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
+        self.app_state
+            .read(cx)
+            .write_relaunch_marker("computer_use");
+        let _ = request(kind);
+        open_settings_pane(kind);
+        if kind == PermissionKind::ScreenRecording {
+            self.sr_restart_hint = true;
+        }
+        self.perm_status = permissions::check();
+        cx.notify();
+    }
+
+    fn recheck_permissions(&mut self, cx: &mut Context<Self>) {
+        let fresh = permissions::check();
+        // A Screen Recording grant that flips on still needs a restart to take
+        // effect for the running process, so surface the relaunch affordance.
+        if fresh.screen_recording && !self.perm_status.screen_recording {
+            self.sr_restart_hint = true;
+        }
+        self.perm_status = fresh;
+        cx.notify();
+    }
+
+    fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.app_state
+            .read(cx)
+            .write_relaunch_marker("computer_use");
+        if let Err(err) = relaunch_app() {
+            log::warn!("failed to relaunch tcode: {err}");
+            return;
+        }
+        // Quit through the app's existing quit action; the fresh instance
+        // consumes the marker on launch.
+        window.dispatch_action(Box::new(Quit), cx);
     }
 
     // -- row builders -------------------------------------------------------

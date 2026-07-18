@@ -20,6 +20,7 @@ tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 preview-mcp = { path = "../preview-mcp" }
 orchestrate-mcp = { path = "../orchestrate-mcp" }
+computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
