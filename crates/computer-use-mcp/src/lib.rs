@@ -8,6 +8,7 @@
 //! that reports the platform as unsupported.
 
 pub mod backend;
+pub mod config;
 pub mod outline;
 pub mod permissions;
 pub mod state;
