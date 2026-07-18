@@ -581,6 +581,9 @@ impl OrchestrateSettingsPanel {
             );
         let panel = cx.entity();
         let dropdown = Popover::new("orchestrate-child-approval-popover")
+            // Single panel surface at the 14px overlay radius; content transparent.
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let option = |mode: ChildApprovalMode,
@@ -616,38 +619,34 @@ impl OrchestrateSettingsPanel {
                         })
                         .into_any_element()
                 };
-                crate::material::overlay_contour(
-                    v_flex()
-                        .p_1()
-                        .min_w(px(180.))
-                        .gap_0p5()
-                        .child(option(
-                            ChildApprovalMode::Orchestrator,
-                            "orchestrate-child-approval-orchestrator",
-                            tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
-                                .into_owned()
-                                .into(),
-                            cx,
-                        ))
-                        .child(option(
-                            ChildApprovalMode::AlwaysAllow,
-                            "orchestrate-child-approval-always-allow",
-                            tcode_i18n::tr!("orchestrate.child_approval.always_allow")
-                                .into_owned()
-                                .into(),
-                            cx,
-                        ))
-                        .child(option(
-                            ChildApprovalMode::Manual,
-                            "orchestrate-child-approval-manual",
-                            tcode_i18n::tr!("orchestrate.child_approval.manual")
-                                .into_owned()
-                                .into(),
-                            cx,
-                        )),
-                    cx,
-                )
-                .rounded(crate::material::radius_overlay())
+                v_flex()
+                    .p_1()
+                    .min_w(px(180.))
+                    .gap_0p5()
+                    .child(option(
+                        ChildApprovalMode::Orchestrator,
+                        "orchestrate-child-approval-orchestrator",
+                        tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
+                            .into_owned()
+                            .into(),
+                        cx,
+                    ))
+                    .child(option(
+                        ChildApprovalMode::AlwaysAllow,
+                        "orchestrate-child-approval-always-allow",
+                        tcode_i18n::tr!("orchestrate.child_approval.always_allow")
+                            .into_owned()
+                            .into(),
+                        cx,
+                    ))
+                    .child(option(
+                        ChildApprovalMode::Manual,
+                        "orchestrate-child-approval-manual",
+                        tcode_i18n::tr!("orchestrate.child_approval.manual")
+                            .into_owned()
+                            .into(),
+                        cx,
+                    ))
             });
 
         self.group(cx)
