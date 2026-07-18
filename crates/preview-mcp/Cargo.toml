@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rmcp = { version = "0.15", features = [
+rmcp = { version = "2.2", features = [
     "macros",
     "schemars",
     "server",

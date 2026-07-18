@@ -9,7 +9,7 @@ use axum::routing::any;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -315,22 +315,19 @@ impl ComputerUseTools {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for ComputerUseTools {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
                 "Observe and control desktop applications through state-scoped accessibility references."
-                    .into(),
-            ),
-        }
+            )
     }
 }
 
-pub type Service = StreamableHttpService<ComputerUseTools>;
+pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
 pub type Services = HashMap<String, Service>;
 
 pub fn service() -> Service {
@@ -1362,7 +1359,7 @@ mod dispatch {
         text.push_str(&outline::render_folded(&observation.tree));
         let extra = screenshot_for_response
             .map(|png| {
-                Content::image(
+                ContentBlock::image(
                     base64::engine::general_purpose::STANDARD.encode(png),
                     "image/png",
                 )
@@ -1560,24 +1557,24 @@ mod dispatch {
     fn bounded_success(
         owner_state: Option<&str>,
         text: String,
-        mut extra: Vec<Content>,
+        mut extra: Vec<ContentBlock>,
     ) -> CallToolResult {
         let text = crate::state::global()
             .lock()
             .unwrap()
             .bound_model_text(owner_state, text);
-        let mut content = vec![Content::text(text)];
+        let mut content = vec![ContentBlock::text(text)];
         content.append(&mut extra);
         CallToolResult::success(content)
     }
 
     fn backend_error(error: crate::backend::BackendError) -> CallToolResult {
         let text = serde_json::to_string(&error).unwrap_or_else(|_| error.to_string());
-        CallToolResult::error(vec![Content::text(text)])
+        CallToolResult::error(vec![ContentBlock::text(text)])
     }
 
     fn tool_error(message: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(message)])
+        CallToolResult::error(vec![ContentBlock::text(message)])
     }
 }
 
