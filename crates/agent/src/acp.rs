@@ -4,23 +4,27 @@
 //! structured questions and richer tool payloads that ACP cannot carry); this
 //! module covers the rest of the ecosystem through one protocol.
 //!
-//! Shape: one child process per session, JSON-RPC over its stdio, driven by
-//! `agent_client_protocol::ClientSideConnection`. The protocol crate's `Client`
-//! trait is `?Send` (its futures are `!Send`), so the whole connection lives on
-//! a dedicated thread running a `LocalExecutor`; the canonical [`AgentEvent`]
-//! stream and the [`SessionCommand`] channel are the only things that cross the
-//! thread boundary — exactly like `claude.rs` / `codex.rs`.
+//! Shape: one child process per session, JSON-RPC over its stdio, driven by an
+//! `agent_client_protocol::Client` connection builder. The whole connection
+//! lives on a dedicated thread running a `LocalExecutor`; the canonical
+//! [`AgentEvent`] stream and the [`SessionCommand`] channel are the only things
+//! that cross the thread boundary — exactly like `claude.rs` / `codex.rs`.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use acp::{Agent as _, Client};
-use agent_client_protocol as acp;
+use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
 use async_channel::{Receiver, Sender};
-use futures_lite::{AsyncBufReadExt as _, AsyncReadExt as _, StreamExt as _, future};
+use futures_lite::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, StreamExt as _, future};
 use serde_json::{Value, json};
 
 use crate::{
@@ -51,15 +55,17 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 /// flow that otherwise blocks session startup for five minutes).
 const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
+type AcpConnection = sdk::ConnectionTo<sdk::Agent>;
+
 /// Start (or resume) a session with an ACP agent.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let (commands_tx, commands_rx) = async_channel::unbounded();
     let (events_tx, events_rx) = async_channel::unbounded();
     let (ready_tx, ready_rx) = async_channel::bounded(1);
 
-    // A dedicated thread with a single-threaded executor: `acp::Client` is
-    // `#[async_trait(?Send)]`, so none of the connection's futures are `Send`
-    // and they cannot ride on smol's global (work-stealing) executor.
+    // Keep each ACP connection and all of its callbacks on one dedicated
+    // executor thread. The 1.2 SDK requires Send handlers internally, but the
+    // adapter still exposes only channels across this boundary.
     std::thread::Builder::new()
         .name("acp-session".into())
         .spawn(move || {
@@ -155,6 +161,53 @@ fn spawn_agent(
     })
 }
 
+/// Reports an agent closing (or breaking) stdout while still handing the bytes
+/// to the SDK transport. The 1.2 `ByteStreams` component treats a clean EOF as
+/// a completed input stream, so observing it here preserves tcode's immediate
+/// `SessionClosed` behavior instead of leaving the command loop waiting.
+struct ObservedReader<R> {
+    inner: R,
+    done: Sender<String>,
+    reported: bool,
+}
+
+impl<R> ObservedReader<R> {
+    fn new(inner: R, done: Sender<String>) -> Self {
+        Self {
+            inner,
+            done,
+            reported: false,
+        }
+    }
+
+    fn report(&mut self, reason: String) {
+        if !self.reported {
+            self.reported = true;
+            let _ = self.done.try_send(reason);
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ObservedReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(0)) => {
+                self.report("the ACP agent closed its stdio".to_string());
+                Poll::Ready(Ok(0))
+            }
+            Poll::Ready(Err(err)) => {
+                self.report(format!("ACP transport error: {err}"));
+                Poll::Ready(Err(err))
+            }
+            other => other,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Actor
 // ---------------------------------------------------------------------------
@@ -188,7 +241,7 @@ async fn run_actor(
 
     // The agent's stderr is its log channel: keep the tail so a startup failure
     // can be reported in the agent's own words.
-    let stderr_tail: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
     executor
         .spawn({
             let tail = stderr_tail.clone();
@@ -197,7 +250,7 @@ async fn run_actor(
                 let mut lines = futures_lite::io::BufReader::new(stderr).lines();
                 while let Some(Ok(line)) = lines.next().await {
                     log::debug!("acp[{id}] stderr: {line}");
-                    let mut tail = tail.borrow_mut();
+                    let mut tail = tail.lock().unwrap();
                     if tail.len() == 20 {
                         tail.remove(0);
                     }
@@ -207,35 +260,230 @@ async fn run_actor(
         })
         .detach();
 
-    let state = Rc::new(RefCell::new(State::new(opts.cwd.clone())));
+    let state = Arc::new(Mutex::new(State::new(opts.cwd.clone())));
     let client = AcpClient {
         events: events.clone(),
         state: state.clone(),
         cwd: opts.cwd.clone(),
-        executor: executor.clone(),
     };
-
-    let (connection, io_task) = acp::ClientSideConnection::new(client, stdin, stdout, {
-        let executor = executor.clone();
-        move |fut| executor.spawn(fut).detach()
-    });
-    let connection = Rc::new(connection);
     let (io_done_tx, io_done) = async_channel::bounded::<String>(1);
-    executor
-        .spawn(async move {
-            let reason = match io_task.await {
-                Ok(()) => "the ACP agent closed its stdio".to_string(),
-                Err(err) => format!("ACP transport error: {err}"),
-            };
-            let _ = io_done_tx.send(reason).await;
+    let transport = sdk::ByteStreams::new(stdin, ObservedReader::new(stdout, io_done_tx));
+    let session_started = Arc::new(AtomicBool::new(false));
+    let connection_result = sdk::Client
+        .builder()
+        .name(format!("tcode-acp-{}", agent.id))
+        .on_receive_notification(
+            {
+                let client = client.clone();
+                async move |args: acp::SessionNotification, _connection| {
+                    client.session_notification(args).await
+                }
+            },
+            sdk::on_receive_notification!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::RequestPermissionRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.request_permission(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::ReadTextFileRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.read_text_file(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::WriteTextFileRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.write_text_file(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::CreateTerminalRequest, responder, connection| {
+                    let client = client.clone();
+                    let task_connection = connection.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(
+                            client.create_terminal(args, &task_connection).await,
+                        )
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::TerminalOutputRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.terminal_output(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::WaitForTerminalExitRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.wait_for_terminal_exit(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::KillTerminalRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.kill_terminal(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let client = client.clone();
+                async move |args: acp::ReleaseTerminalRequest, responder, connection| {
+                    let client = client.clone();
+                    connection.spawn(async move {
+                        responder.respond_with_result(client.release_terminal(args).await)
+                    })?;
+                    Ok(())
+                }
+            },
+            sdk::on_receive_request!(),
+        )
+        .connect_with(transport, {
+            let session_started = session_started.clone();
+            let stderr_tail = stderr_tail.clone();
+            let actor_events = events.clone();
+            let actor_ready = ready.clone();
+            async move |connection| {
+                connected_actor(
+                    &executor,
+                    connection,
+                    &agent,
+                    &opts,
+                    &commands,
+                    &actor_events,
+                    &actor_ready,
+                    &state,
+                    &stderr_tail,
+                    &io_done,
+                    &session_started,
+                )
+                .await
+            }
         })
-        .detach();
+        .await;
 
-    // --- handshake ---------------------------------------------------------
-    let session = match handshake(&connection, &agent, &opts, &state, &events).await {
-        Ok(session) => session,
-        Err(err) => {
-            let tail = stderr_tail.borrow().join("\n");
+    // The connection closure owns the protocol shutdown; this is the hard
+    // process boundary for both graceful shutdowns and broken transports.
+    let _ = child.kill();
+
+    if !session_started.load(Ordering::Acquire) {
+        if let Err(err) = connection_result {
+            let tail = stderr_tail.lock().unwrap().join("\n");
+            let message = format!("ACP transport error: {}", describe(&err));
+            let message = if tail.trim().is_empty() {
+                message
+            } else {
+                format!("{message}\n{tail}")
+            };
+            let _ = ready.send(Err(AgentError::Protocol(message))).await;
+        }
+        return;
+    }
+
+    let close_reason = match connection_result {
+        Ok(reason) => reason,
+        Err(err) => Some(format!("ACP transport error: {}", describe(&err))),
+    };
+    let close_reason = close_reason.map(|reason| {
+        let tail = stderr_tail.lock().unwrap().join("\n");
+        if tail.trim().is_empty() {
+            reason
+        } else {
+            format!("{reason}\nstderr:\n{tail}")
+        }
+    });
+    let _ = events
+        .send(AgentEvent::SessionClosed {
+            reason: close_reason,
+        })
+        .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connected_actor(
+    executor: &Rc<smol::LocalExecutor<'static>>,
+    connection: AcpConnection,
+    agent: &AcpAgent,
+    opts: &SessionOptions,
+    commands: &Receiver<SessionCommand>,
+    events: &Sender<AgentEvent>,
+    ready: &Sender<Result<(), AgentError>>,
+    state: &Arc<Mutex<State>>,
+    stderr_tail: &Arc<Mutex<Vec<String>>>,
+    io_done: &Receiver<String>,
+    session_started: &AtomicBool,
+) -> Result<Option<String>, acp::Error> {
+    enum Startup {
+        Handshake(Result<Session, AgentError>),
+        Io(String),
+    }
+
+    let startup = future::or(
+        async { Startup::Handshake(handshake(&connection, agent, opts, state, events).await) },
+        async {
+            Startup::Io(
+                io_done
+                    .recv()
+                    .await
+                    .unwrap_or_else(|_| "the ACP agent closed its stdio".to_string()),
+            )
+        },
+    )
+    .await;
+    let session = match startup {
+        Startup::Handshake(Ok(session)) => session,
+        Startup::Handshake(Err(err)) => {
+            let tail = stderr_tail.lock().unwrap().join("\n");
             let err = match (&err, tail.trim().is_empty()) {
                 (AgentError::Protocol(message), false) => {
                     AgentError::Protocol(format!("{message}\n{tail}"))
@@ -243,8 +491,17 @@ async fn run_actor(
                 _ => err,
             };
             let _ = ready.send(Err(err)).await;
-            let _ = child.kill();
-            return;
+            return Ok(None);
+        }
+        Startup::Io(reason) => {
+            let tail = stderr_tail.lock().unwrap().join("\n");
+            let message = if tail.trim().is_empty() {
+                reason
+            } else {
+                format!("{reason}\n{tail}")
+            };
+            let _ = ready.send(Err(AgentError::Protocol(message))).await;
+            return Ok(None);
         }
     };
 
@@ -258,13 +515,12 @@ async fn run_actor(
             model: session.model.clone(),
         })
         .await;
-    emit_provider_options(&state, &events).await;
+    emit_provider_options(state, events).await;
     if ready.send(Ok(())).await.is_err() {
-        let _ = child.kill();
-        return;
+        return Ok(None);
     }
+    session_started.store(true, Ordering::Release);
 
-    // --- command loop ------------------------------------------------------
     let (turn_tx, turn_done) = async_channel::unbounded::<TurnOutcome>();
     let mut turn_id: Option<String> = None;
     let mut turn_seq: u64 = 0;
@@ -297,11 +553,11 @@ async fn run_actor(
             Input::Command(Ok(command)) => {
                 handle_command(
                     command,
-                    &executor,
+                    executor,
                     &connection,
                     &session,
-                    &state,
-                    &events,
+                    state,
+                    events,
                     &turn_tx,
                     &mut turn_id,
                     &mut turn_seq,
@@ -310,34 +566,22 @@ async fn run_actor(
             }
             Input::Turn(outcome) => {
                 let id = turn_id.take().unwrap_or_else(|| outcome.turn_id.clone());
-                finish_turn(&state, &events, &id, outcome).await;
+                finish_turn(state, events, &id, outcome).await;
             }
             Input::Io(reason) => break Some(reason),
         }
     };
 
-    // Best-effort graceful close, then make sure the child is gone.
-    if session.can_close {
+    // Only a live transport can acknowledge a graceful close. A dead stdout
+    // has already ended the session and must not leave us awaiting a response.
+    if close_reason.is_none() && session.can_close {
         let _ = connection
-            .close_session(acp::CloseSessionRequest::new(session.session_id.clone()))
+            .send_request(acp::CloseSessionRequest::new(session.session_id.clone()))
+            .block_task()
             .await;
     }
-    let _ = child.kill();
-    // Every Some(_) reason here is a dead transport (user shutdowns break with
-    // None), so the agent's last stderr lines belong in the message.
-    let close_reason = close_reason.map(|reason| {
-        let tail = stderr_tail.borrow().join("\n");
-        if tail.trim().is_empty() {
-            reason
-        } else {
-            format!("{reason}\nstderr:\n{tail}")
-        }
-    });
-    let _ = events
-        .send(AgentEvent::SessionClosed {
-            reason: close_reason,
-        })
-        .await;
+
+    Ok(close_reason)
 }
 
 /// What `session/new` (or `session/load`) settled on.
@@ -353,10 +597,10 @@ struct TurnOutcome {
 }
 
 async fn handshake(
-    connection: &Rc<acp::ClientSideConnection>,
+    connection: &AcpConnection,
     agent: &AcpAgent,
     opts: &SessionOptions,
-    state: &Rc<RefCell<State>>,
+    state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
 ) -> Result<Session, AgentError> {
     // On a leash: an agent that starts but never answers `initialize` (cline
@@ -366,8 +610,8 @@ async fn handshake(
         async {
             Some(
                 connection
-                    .initialize(
-                        acp::InitializeRequest::new(acp::ProtocolVersion::LATEST)
+                    .send_request(
+                        acp::InitializeRequest::new(ProtocolVersion::LATEST)
                             .client_capabilities(
                                 acp::ClientCapabilities::new()
                                     .fs(acp::FileSystemCapabilities::new()
@@ -380,6 +624,7 @@ async fn handshake(
                                     .title("tcode"),
                             ),
                     )
+                    .block_task()
                     .await,
             )
         },
@@ -440,28 +685,24 @@ async fn handshake(
         .map(str::to_string)
         .filter(|_| caps.load_session);
 
-    let (session_id, mut modes, models, config_options) = match resumed {
+    let (session_id, mut modes, config_options) = match resumed {
         Some(session_id) => {
             // `session/load` replays the whole conversation as `session/update`
             // notifications. Our JSONL log is the authoritative history and the
             // UI has already folded it, so the replay is swallowed (see
             // `State::replaying`); we only want the session live again.
-            state.borrow_mut().replaying = true;
+            state.lock().unwrap().replaying = true;
             let session_id = acp::SessionId::new(session_id);
             let loaded = connection
-                .load_session(
+                .send_request(
                     acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
                         .mcp_servers(mcp_servers.clone()),
                 )
+                .block_task()
                 .await;
-            state.borrow_mut().replaying = false;
+            state.lock().unwrap().replaying = false;
             match loaded {
-                Ok(loaded) => (
-                    session_id,
-                    loaded.modes,
-                    loaded.models,
-                    loaded.config_options,
-                ),
+                Ok(loaded) => (session_id, loaded.modes, loaded.config_options),
                 Err(err) => {
                     log::warn!(
                         "acp[{}]: session/load failed ({}); starting a fresh session",
@@ -475,13 +716,13 @@ async fn handshake(
                         )))
                         .await;
                     let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
-                    (new.session_id, new.modes, new.models, new.config_options)
+                    (new.session_id, new.modes, new.config_options)
                 }
             }
         }
         None => {
             let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
-            (new.session_id, new.modes, new.models, new.config_options)
+            (new.session_id, new.modes, new.config_options)
         }
     };
 
@@ -492,10 +733,11 @@ async fn handshake(
             .is_some_and(|modes| modes.current_mode_id != plan_mode)
     {
         match connection
-            .set_session_mode(acp::SetSessionModeRequest::new(
+            .send_request(acp::SetSessionModeRequest::new(
                 session_id.clone(),
                 plan_mode.clone(),
             ))
+            .block_task()
             .await
         {
             Ok(_) => modes.as_mut().unwrap().current_mode_id = plan_mode,
@@ -515,15 +757,13 @@ async fn handshake(
         }
     }
 
-    let model = models
-        .as_ref()
-        .map(|models| models.current_model_id.0.to_string());
+    let model = config_options.as_deref().and_then(current_model);
     {
-        let mut state = state.borrow_mut();
+        let mut state = state.lock().unwrap();
         state.session_id = Some(session_id.clone());
         state
             .options
-            .ingest(modes.as_ref(), models.as_ref(), config_options.as_deref());
+            .ingest(modes.as_ref(), config_options.as_deref());
     }
 
     Ok(Session {
@@ -542,7 +782,7 @@ fn acp_plan_mode(modes: &acp::SessionModeState) -> Option<acp::SessionModeId> {
 }
 
 async fn new_session(
-    connection: &Rc<acp::ClientSideConnection>,
+    connection: &AcpConnection,
     agent: &AcpAgent,
     opts: &SessionOptions,
     mcp_servers: &[acp::McpServer],
@@ -550,7 +790,7 @@ async fn new_session(
 ) -> Result<acp::NewSessionResponse, AgentError> {
     let request =
         || acp::NewSessionRequest::new(opts.cwd.clone()).mcp_servers(mcp_servers.to_vec());
-    match connection.new_session(request()).await {
+    match connection.send_request(request()).block_task().await {
         Ok(response) => Ok(response),
         Err(err) if is_auth_required(&err) => {
             // The agent wants credentials. Try its own `authenticate` once —
@@ -571,7 +811,8 @@ async fn new_session(
                 async {
                     Some(
                         connection
-                            .authenticate(acp::AuthenticateRequest::new(method_id.clone()))
+                            .send_request(acp::AuthenticateRequest::new(method_id.clone()))
+                            .block_task()
                             .await,
                     )
                 },
@@ -600,17 +841,21 @@ async fn new_session(
                     )));
                 }
             }
-            connection.new_session(request()).await.map_err(|err| {
-                if is_auth_required(&err) {
-                    AgentError::Provider(auth_hint(agent, init))
-                } else {
-                    AgentError::Protocol(format!(
-                        "`{}` could not start a session: {}",
-                        agent.name,
-                        describe(&err)
-                    ))
-                }
-            })
+            connection
+                .send_request(request())
+                .block_task()
+                .await
+                .map_err(|err| {
+                    if is_auth_required(&err) {
+                        AgentError::Provider(auth_hint(agent, init))
+                    } else {
+                        AgentError::Protocol(format!(
+                            "`{}` could not start a session: {}",
+                            agent.name,
+                            describe(&err)
+                        ))
+                    }
+                })
         }
         Err(err) => Err(AgentError::Protocol(format!(
             "`{}` could not start a session: {}",
@@ -707,9 +952,9 @@ pub(crate) fn mcp_servers(
 async fn handle_command(
     command: SessionCommand,
     executor: &Rc<smol::LocalExecutor<'static>>,
-    connection: &Rc<acp::ClientSideConnection>,
+    connection: &AcpConnection,
     session: &Session,
-    state: &Rc<RefCell<State>>,
+    state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
     turn_tx: &Sender<TurnOutcome>,
     turn_id: &mut Option<String>,
@@ -747,7 +992,7 @@ async fn handle_command(
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
             *turn_id = Some(id.clone());
-            state.borrow_mut().turn = Some(id.clone());
+            state.lock().unwrap().turn = Some(id.clone());
             let _ = events
                 .send(AgentEvent::TurnStarted {
                     turn_id: id.clone(),
@@ -762,7 +1007,7 @@ async fn handle_command(
             let turn_tx = turn_tx.clone();
             executor
                 .spawn(async move {
-                    let result = connection.prompt(request).await;
+                    let result = connection.send_request(request).block_task().await;
                     let _ = turn_tx
                         .send(TurnOutcome {
                             turn_id: id,
@@ -780,7 +1025,8 @@ async fn handle_command(
             // `cancelled` first: the protocol requires it, and the agent will
             // not settle the turn otherwise.
             let pending: Vec<Sender<acp::RequestPermissionOutcome>> = state
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .approvals
                 .drain()
                 .map(|(_, responder)| responder)
@@ -791,8 +1037,7 @@ async fn handle_command(
                     .await;
             }
             let _ = connection
-                .cancel(acp::CancelNotification::new(session.session_id.clone()))
-                .await;
+                .send_notification(acp::CancelNotification::new(session.session_id.clone()));
             // The agent still owes us the `session/prompt` response carrying
             // `stopReason: cancelled`; the turn completes when it lands.
         }
@@ -800,13 +1045,14 @@ async fn handle_command(
             request_id,
             decision,
         } => {
-            let responder = state.borrow_mut().approvals.remove(&request_id);
+            let responder = state.lock().unwrap().approvals.remove(&request_id);
             let Some(responder) = responder else {
                 log::warn!("acp: no pending approval {request_id}");
                 return;
             };
             let options = state
-                .borrow()
+                .lock()
+                .unwrap()
                 .approval_options
                 .get(&request_id)
                 .cloned()
@@ -824,7 +1070,7 @@ async fn handle_command(
                 }
             };
             let _ = responder.send(outcome).await;
-            state.borrow_mut().approval_options.remove(&request_id);
+            state.lock().unwrap().approval_options.remove(&request_id);
             let _ = events
                 .send(AgentEvent::ApprovalResolved {
                     request_id,
@@ -833,16 +1079,16 @@ async fn handle_command(
                 .await;
         }
         SessionCommand::SetOption { id, value } => {
-            let Some(origin) = state.borrow().options.origin(&id) else {
+            let Some(origin) = state.lock().unwrap().options.origin(&id) else {
                 log::warn!("acp: unknown option id `{id}`");
                 return;
             };
             match set_option(connection, session, &origin, &value).await {
                 Ok(config_options) => {
                     {
-                        let mut state = state.borrow_mut();
+                        let mut state = state.lock().unwrap();
                         if let Some(options) = config_options.as_deref() {
-                            state.options.ingest(None, None, Some(options));
+                            state.options.ingest(None, Some(options));
                         }
                         state.options.select(&id, value);
                     }
@@ -891,7 +1137,7 @@ async fn handle_command(
 }
 
 async fn set_option(
-    connection: &Rc<acp::ClientSideConnection>,
+    connection: &AcpConnection,
     session: &Session,
     origin: &OptionOrigin,
     value: &Value,
@@ -902,22 +1148,11 @@ async fn set_option(
                 return Err(acp::Error::invalid_params());
             };
             connection
-                .set_session_mode(acp::SetSessionModeRequest::new(
+                .send_request(acp::SetSessionModeRequest::new(
                     session.session_id.clone(),
                     acp::SessionModeId::new(mode),
                 ))
-                .await?;
-            Ok(None)
-        }
-        OptionOrigin::Model => {
-            let Some(model) = value.as_str() else {
-                return Err(acp::Error::invalid_params());
-            };
-            connection
-                .set_session_model(acp::SetSessionModelRequest::new(
-                    session.session_id.clone(),
-                    acp::ModelId::new(model),
-                ))
+                .block_task()
                 .await?;
             Ok(None)
         }
@@ -930,11 +1165,12 @@ async fn set_option(
                 _ => return Err(acp::Error::invalid_params()),
             };
             let response = connection
-                .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
+                .send_request(acp::SetSessionConfigOptionRequest::new(
                     session.session_id.clone(),
                     config_id.clone(),
                     value,
                 ))
+                .block_task()
                 .await?;
             Ok(Some(response.config_options))
         }
@@ -977,17 +1213,17 @@ fn approval_outcome(
 }
 
 async fn finish_turn(
-    state: &Rc<RefCell<State>>,
+    state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
     turn_id: &str,
     outcome: TurnOutcome,
 ) {
     // Flush whatever text was still streaming.
-    let tail = state.borrow_mut().flush_text();
+    let tail = state.lock().unwrap().flush_text();
     for event in tail {
         let _ = events.send(event).await;
     }
-    state.borrow_mut().turn = None;
+    state.lock().unwrap().turn = None;
 
     let (status, message, usage) = match outcome.result {
         Ok(response) => {
@@ -1016,7 +1252,7 @@ async fn finish_turn(
             .await;
     }
     // Fall back to the live context-window figure from `usage_update`.
-    let usage = usage.or_else(|| state.borrow().usage);
+    let usage = usage.or_else(|| state.lock().unwrap().usage);
     let _ = events
         .send(AgentEvent::TurnCompleted {
             turn_id: turn_id.to_string(),
@@ -1064,9 +1300,9 @@ fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<acp::ContentBloc
     blocks
 }
 
-async fn emit_provider_options(state: &Rc<RefCell<State>>, events: &Sender<AgentEvent>) {
+async fn emit_provider_options(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) {
     let (descriptors, selections) = {
-        let state = state.borrow();
+        let state = state.lock().unwrap();
         (state.options.descriptors(), state.options.selections())
     };
     if descriptors.is_empty() {
@@ -1089,11 +1325,10 @@ async fn emit_provider_options(state: &Rc<RefCell<State>>, events: &Sender<Agent
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum OptionOrigin {
     Mode,
-    Model,
     Config(acp::SessionConfigId),
 }
 
-/// The agent's self-described modes / models / config options, mapped onto our
+/// The agent's self-described modes and config options, mapped onto our
 /// [`OptionDescriptor`]s (which the composer's traits picker already renders).
 #[derive(Default)]
 pub(crate) struct OptionRegistry {
@@ -1106,7 +1341,6 @@ impl OptionRegistry {
     fn ingest(
         &mut self,
         modes: Option<&acp::SessionModeState>,
-        models: Option<&acp::SessionModelState>,
         config: Option<&[acp::SessionConfigOption]>,
     ) {
         if let Some(modes) = modes {
@@ -1129,28 +1363,15 @@ impl OptionRegistry {
                 Value::String(modes.current_mode_id.0.to_string()),
             );
         }
-        if let Some(models) = models {
-            self.upsert(
-                OptionDescriptor::Select {
-                    id: MODEL_OPTION_ID.to_string(),
-                    label: "Model".to_string(),
-                    options: models
-                        .available_models
-                        .iter()
-                        .map(|model| SelectOption {
-                            value: model.model_id.0.to_string(),
-                            label: model.name.clone(),
-                            description: model.description.clone(),
-                        })
-                        .collect(),
-                    default_value: Some(models.current_model_id.0.to_string()),
-                },
-                OptionOrigin::Model,
-                Value::String(models.current_model_id.0.to_string()),
-            );
-        }
         for option in config.unwrap_or_default() {
-            let id = format!("{CONFIG_OPTION_PREFIX}{}", option.id.0);
+            // Protocol 1.2 replaced the standalone model state/set-model RPC
+            // with categorized config options. Preserve tcode's canonical ids
+            // while routing both model and config changes through the config RPC.
+            let id = match option.category.as_ref() {
+                Some(acp::SessionConfigOptionCategory::Mode) => MODE_OPTION_ID.to_string(),
+                Some(acp::SessionConfigOptionCategory::Model) => MODEL_OPTION_ID.to_string(),
+                _ => format!("{CONFIG_OPTION_PREFIX}{}", option.id.0),
+            };
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
                     let options = match &select.options {
@@ -1231,6 +1452,21 @@ impl OptionRegistry {
     }
 }
 
+fn current_model(options: &[acp::SessionConfigOption]) -> Option<String> {
+    options.iter().find_map(|option| {
+        if !matches!(
+            option.category,
+            Some(acp::SessionConfigOptionCategory::Model)
+        ) {
+            return None;
+        }
+        match &option.kind {
+            acp::SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
+            _ => None,
+        }
+    })
+}
+
 fn select_option(option: &acp::SessionConfigSelectOption) -> SelectOption {
     SelectOption {
         value: option.value.0.to_string(),
@@ -1279,7 +1515,7 @@ pub(crate) struct State {
     approval_seq: u64,
     text_seq: u64,
     terminal_seq: u64,
-    terminals: HashMap<String, Rc<Terminal>>,
+    terminals: HashMap<String, Arc<Terminal>>,
     usage: Option<TokenUsage>,
     options: OptionRegistry,
 }
@@ -1466,8 +1702,7 @@ impl State {
                 }]
             }
             acp::SessionUpdate::ConfigOptionUpdate(update) => {
-                self.options
-                    .ingest(None, None, Some(&update.config_options));
+                self.options.ingest(None, Some(&update.config_options));
                 vec![AgentEvent::ProviderOptions {
                     descriptors: self.options.descriptors(),
                     selections: self.options.selections(),
@@ -1540,7 +1775,7 @@ impl State {
                 }
                 acp::ToolCallContent::Terminal(terminal) => {
                     if let Some(terminal) = self.terminals.get(terminal.terminal_id.0.as_ref()) {
-                        let output = terminal.output.borrow();
+                        let output = terminal.output.lock().unwrap();
                         if !output.is_empty() {
                             parts.push(output.clone());
                         }
@@ -1566,7 +1801,7 @@ impl State {
         for content in &tool.content {
             if let acp::ToolCallContent::Terminal(terminal) = content
                 && let Some(terminal) = self.terminals.get(terminal.terminal_id.0.as_ref())
-                && let Some(status) = terminal.exit.borrow().as_ref()
+                && let Some(status) = terminal.exit.lock().unwrap().as_ref()
             {
                 return status.exit_code.map(|code| code as i32);
             }
@@ -1855,23 +2090,22 @@ fn map_permission_option(option: &acp::PermissionOption) -> ApprovalOption {
 // The `Client` half of the connection (agent → us)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct AcpClient {
     events: Sender<AgentEvent>,
-    state: Rc<RefCell<State>>,
+    state: Arc<Mutex<State>>,
     cwd: PathBuf,
-    executor: Rc<smol::LocalExecutor<'static>>,
 }
 
-#[async_trait::async_trait(?Send)]
-impl Client for AcpClient {
+impl AcpClient {
     async fn session_notification(&self, args: acp::SessionNotification) -> Result<(), acp::Error> {
         // While `session/load` replays the conversation we already have on disk,
         // swallow everything: our JSONL log is the source of truth and the
         // timeline was folded from it before the process even started.
-        if self.state.borrow().replaying {
+        if self.state.lock().unwrap().replaying {
             return Ok(());
         }
-        let events = self.state.borrow_mut().apply_update(args.update);
+        let events = self.state.lock().unwrap().apply_update(args.update);
         for event in events {
             let _ = self.events.send(event).await;
         }
@@ -1883,7 +2117,7 @@ impl Client for AcpClient {
         args: acp::RequestPermissionRequest,
     ) -> Result<acp::RequestPermissionResponse, acp::Error> {
         let (request_id, turn) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.lock().unwrap();
             state.approval_seq += 1;
             (
                 format!("acp-approval-{}", state.approval_seq),
@@ -1893,7 +2127,7 @@ impl Client for AcpClient {
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);
         let (responder, decided) = async_channel::bounded(1);
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.lock().unwrap();
             state.approvals.insert(request_id.clone(), responder);
             state
                 .approval_options
@@ -1920,7 +2154,7 @@ impl Client for AcpClient {
             .recv()
             .await
             .unwrap_or(acp::RequestPermissionOutcome::Cancelled);
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.approvals.remove(&request_id);
         state.approval_options.remove(&request_id);
         drop(state);
@@ -1931,7 +2165,7 @@ impl Client for AcpClient {
         &self,
         args: acp::ReadTextFileRequest,
     ) -> Result<acp::ReadTextFileResponse, acp::Error> {
-        let path = self.state.borrow().resolve_path(&args.path)?;
+        let path = self.state.lock().unwrap().resolve_path(&args.path)?;
         let content = smol::fs::read_to_string(&path).await.map_err(|err| {
             acp::Error::new(-32603, format!("could not read {}: {err}", path.display()))
         })?;
@@ -1952,7 +2186,7 @@ impl Client for AcpClient {
         &self,
         args: acp::WriteTextFileRequest,
     ) -> Result<acp::WriteTextFileResponse, acp::Error> {
-        let path = self.state.borrow().resolve_path(&args.path)?;
+        let path = self.state.lock().unwrap().resolve_path(&args.path)?;
         if let Some(parent) = path.parent() {
             smol::fs::create_dir_all(parent).await.map_err(|err| {
                 acp::Error::new(
@@ -1970,13 +2204,14 @@ impl Client for AcpClient {
     async fn create_terminal(
         &self,
         args: acp::CreateTerminalRequest,
+        connection: &AcpConnection,
     ) -> Result<acp::CreateTerminalResponse, acp::Error> {
         let cwd = match &args.cwd {
-            Some(cwd) => self.state.borrow().resolve_path(cwd)?,
+            Some(cwd) => self.state.lock().unwrap().resolve_path(cwd)?,
             None => self.cwd.clone(),
         };
         let terminal = Terminal::spawn(
-            &self.executor,
+            connection,
             &args.command,
             &args.args,
             &args.env,
@@ -1985,7 +2220,7 @@ impl Client for AcpClient {
                 .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT),
         )?;
         let id = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.lock().unwrap();
             state.terminal_seq += 1;
             let id = format!("term-{}", state.terminal_seq);
             state.terminals.insert(id.clone(), terminal);
@@ -1999,9 +2234,9 @@ impl Client for AcpClient {
         args: acp::TerminalOutputRequest,
     ) -> Result<acp::TerminalOutputResponse, acp::Error> {
         let terminal = self.terminal(&args.terminal_id)?;
-        let output = terminal.output.borrow().clone();
-        let truncated = *terminal.truncated.borrow();
-        let exit_status = terminal.exit.borrow().clone();
+        let output = terminal.output.lock().unwrap().clone();
+        let truncated = *terminal.truncated.lock().unwrap();
+        let exit_status = terminal.exit.lock().unwrap().clone();
         Ok(acp::TerminalOutputResponse::new(output, truncated).exit_status(exit_status))
     }
 
@@ -2014,7 +2249,8 @@ impl Client for AcpClient {
         let _ = terminal.done.recv().await;
         let exit_status = terminal
             .exit
-            .borrow()
+            .lock()
+            .unwrap()
             .clone()
             .unwrap_or_else(acp::TerminalExitStatus::new);
         Ok(acp::WaitForTerminalExitResponse::new(exit_status))
@@ -2034,7 +2270,8 @@ impl Client for AcpClient {
     ) -> Result<acp::ReleaseTerminalResponse, acp::Error> {
         let terminal = self
             .state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .terminals
             .remove(args.terminal_id.0.as_ref());
         if let Some(terminal) = terminal {
@@ -2042,12 +2279,10 @@ impl Client for AcpClient {
         }
         Ok(acp::ReleaseTerminalResponse::new())
     }
-}
-
-impl AcpClient {
-    fn terminal(&self, id: &acp::TerminalId) -> Result<Rc<Terminal>, acp::Error> {
+    fn terminal(&self, id: &acp::TerminalId) -> Result<Arc<Terminal>, acp::Error> {
         self.state
-            .borrow()
+            .lock()
+            .unwrap()
             .terminals
             .get(id.0.as_ref())
             .cloned()
@@ -2064,23 +2299,23 @@ impl AcpClient {
 /// folded into the owning tool card (`ToolCallContent::Terminal`). Wiring these
 /// into the terminal drawer needs a canonical event the contract does not have.
 struct Terminal {
-    child: RefCell<smol::process::Child>,
-    output: RefCell<String>,
-    truncated: RefCell<bool>,
-    exit: RefCell<Option<acp::TerminalExitStatus>>,
+    child: Mutex<smol::process::Child>,
+    output: Mutex<String>,
+    truncated: Mutex<bool>,
+    exit: Mutex<Option<acp::TerminalExitStatus>>,
     /// Closed (never sent on) once the process has exited.
     done: Receiver<()>,
 }
 
 impl Terminal {
     fn spawn(
-        executor: &Rc<smol::LocalExecutor<'static>>,
+        connection: &AcpConnection,
         command: &str,
         args: &[String],
         env: &[acp::EnvVariable],
         cwd: &Path,
         limit: u64,
-    ) -> Result<Rc<Self>, acp::Error> {
+    ) -> Result<Arc<Self>, acp::Error> {
         let program = crate::resolve_binary(None, command)
             .map_err(|err| acp::Error::new(-32603, err.to_string()))?;
         let mut cmd = crate::process::async_command(&program);
@@ -2099,64 +2334,62 @@ impl Terminal {
         let stderr = child.stderr.take().expect("piped stderr");
         let (done_tx, done) = async_channel::bounded::<()>(1);
 
-        let terminal = Rc::new(Terminal {
-            child: RefCell::new(child),
-            output: RefCell::new(String::new()),
-            truncated: RefCell::new(false),
-            exit: RefCell::new(None),
+        let terminal = Arc::new(Terminal {
+            child: Mutex::new(child),
+            output: Mutex::new(String::new()),
+            truncated: Mutex::new(false),
+            exit: Mutex::new(None),
             done,
         });
 
         // stdout and stderr interleave into one buffer, as they do in a terminal.
-        let streams: [Box<dyn futures_lite::AsyncRead + Unpin>; 2] =
+        let streams: [Box<dyn futures_lite::AsyncRead + Unpin + Send>; 2] =
             [Box::new(stdout), Box::new(stderr)];
         for stream in streams {
-            executor
-                .spawn({
-                    let terminal = terminal.clone();
-                    async move {
-                        let mut stream = stream;
-                        let mut buf = [0u8; 4096];
-                        loop {
-                            match stream.read(&mut buf).await {
-                                Ok(0) | Err(_) => break,
-                                Ok(read) => terminal.append(&buf[..read], limit),
-                            }
-                        }
-                    }
-                })
-                .detach();
-        }
-
-        executor
-            .spawn({
+            connection.spawn({
                 let terminal = terminal.clone();
                 async move {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 4096];
                     loop {
-                        let status = terminal.child.borrow_mut().try_status();
-                        match status {
-                            Ok(Some(status)) => {
-                                *terminal.exit.borrow_mut() = Some(exit_status(&status));
-                                break;
-                            }
-                            Err(err) => {
-                                log::warn!("acp terminal: {err}");
-                                break;
-                            }
-                            Ok(None) => smol::Timer::after(Duration::from_millis(25)).await,
-                        };
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => terminal.append(&buf[..read], limit),
+                        }
                     }
-                    // Closing the channel wakes every `wait_for_exit`.
-                    drop(done_tx);
+                    Ok(())
                 }
-            })
-            .detach();
+            })?;
+        }
+
+        connection.spawn({
+            let terminal = terminal.clone();
+            async move {
+                loop {
+                    let status = terminal.child.lock().unwrap().try_status();
+                    match status {
+                        Ok(Some(status)) => {
+                            *terminal.exit.lock().unwrap() = Some(exit_status(&status));
+                            break;
+                        }
+                        Err(err) => {
+                            log::warn!("acp terminal: {err}");
+                            break;
+                        }
+                        Ok(None) => smol::Timer::after(Duration::from_millis(25)).await,
+                    };
+                }
+                // Closing the channel wakes every `wait_for_exit`.
+                drop(done_tx);
+                Ok(())
+            }
+        })?;
 
         Ok(terminal)
     }
 
     fn append(&self, bytes: &[u8], limit: u64) {
-        let mut output = self.output.borrow_mut();
+        let mut output = self.output.lock().unwrap();
         output.push_str(&String::from_utf8_lossy(bytes));
         let limit = limit as usize;
         if output.len() > limit {
@@ -2166,12 +2399,12 @@ impl Terminal {
                 .find(|index| output.is_char_boundary(*index))
                 .unwrap_or(output.len());
             *output = output[cut..].to_string();
-            *self.truncated.borrow_mut() = true;
+            *self.truncated.lock().unwrap() = true;
         }
     }
 
     fn kill(&self) {
-        let _ = self.child.borrow_mut().kill();
+        let _ = self.child.lock().unwrap().kill();
     }
 }
 
@@ -2664,7 +2897,7 @@ mod tests {
     }
 
     #[test]
-    fn modes_models_and_config_become_provider_options() {
+    fn modes_and_categorized_config_become_provider_options() {
         let mut state = state();
         let modes: acp::SessionModeState = serde_json::from_value(json!({
             "currentModeId": "build",
@@ -2674,12 +2907,15 @@ mod tests {
             ]
         }))
         .unwrap();
-        let models: acp::SessionModelState = serde_json::from_value(json!({
-            "currentModelId": "sonnet",
-            "availableModels": [{ "modelId": "sonnet", "name": "Sonnet" }]
-        }))
-        .unwrap();
         let config: Vec<acp::SessionConfigOption> = serde_json::from_value(json!([
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "sonnet",
+                "options": [{ "value": "sonnet", "name": "Sonnet" }]
+            },
             {
                 "id": "thought_level",
                 "name": "Thinking",
@@ -2694,9 +2930,8 @@ mod tests {
             { "id": "web", "name": "Web search", "type": "boolean", "currentValue": true }
         ]))
         .unwrap();
-        state
-            .options
-            .ingest(Some(&modes), Some(&models), Some(&config));
+        state.options.ingest(Some(&modes), Some(&config));
+        assert_eq!(current_model(&config), Some("sonnet".to_string()));
 
         let descriptors = state.options.descriptors();
         let ids: Vec<&str> = descriptors.iter().map(descriptor_id).collect();
@@ -2710,7 +2945,10 @@ mod tests {
             ]
         );
         assert_eq!(state.options.origin("acp:mode"), Some(OptionOrigin::Mode));
-        assert_eq!(state.options.origin("acp:model"), Some(OptionOrigin::Model));
+        assert_eq!(
+            state.options.origin("acp:model"),
+            Some(OptionOrigin::Config(acp::SessionConfigId::new("model")))
+        );
         assert_eq!(
             state.options.origin("acp:cfg:web"),
             Some(OptionOrigin::Config(acp::SessionConfigId::new("web")))
