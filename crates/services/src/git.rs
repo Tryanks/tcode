@@ -390,7 +390,7 @@ pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 pub fn is_git_repo(cwd: &Path) -> bool {
-    crate::checkpoints::is_git_repo(cwd)
+    run_git(cwd, &["rev-parse", "--is-inside-work-tree"]).is_ok_and(|out| out.trim() == "true")
 }
 
 pub fn read_status(cwd: &Path) -> GitStatus {

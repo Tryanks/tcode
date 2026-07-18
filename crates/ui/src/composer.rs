@@ -638,6 +638,25 @@ impl Composer {
         self.recompute_trigger(cx);
     }
 
+    /// Claude's native conversation rewind returns the selected user prompt.
+    /// Put that provider-owned prefill into the ordinary composer so the user
+    /// can edit or resend it; no inline transcript editor is involved.
+    fn sync_native_rewind_prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefill = self
+            .app_state
+            .update(cx, |state, _| state.take_native_rewind_prefill());
+        let Some(prefill) = prefill else {
+            return;
+        };
+        let cursor = prefill.len();
+        self.input.update(cx, |state, cx| {
+            state.set_value(prefill, window, cx);
+            state.set_selected_range(cursor..cursor, cx);
+            state.focus(window, cx);
+        });
+        self.recompute_trigger(cx);
+    }
+
     /// Apply the one-shot screenshot debug seed (`--debug-compose` / `--debug-image`).
     fn apply_debug_seed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.debug_applied {
@@ -3072,6 +3091,7 @@ impl Render for Composer {
         self.sync_user_input_state(window, cx);
         self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
+        self.sync_native_rewind_prefill(window, cx);
         self.apply_debug_seed(window, cx);
         let (turn_running, approval, approval_count) = {
             let state = self.app_state.read(cx);

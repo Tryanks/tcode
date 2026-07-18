@@ -4,13 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, FileChange, InteractionMode,
-    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
-    ProviderKind, SessionCommand, SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
-    start_session,
+    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, ChangeCompleteness, FileChange,
+    InteractionMode, ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
+    ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions, ThreadItem,
+    TurnOptions, TurnStatus, list_models, start_session,
 };
-#[cfg(test)]
-use gpui::Entity;
 use gpui::{Context, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
@@ -20,12 +18,10 @@ use tcode_core::git::{
     GitAction, GitFileEntry, GitStatus, MenuItem, QuickAction, build_commit_prompt, menu_items,
     quick_action, sanitize_commit_message,
 };
-use tcode_core::project::{Checkpoint, Project, SessionMeta, WorktreeInfo};
+use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
 use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
-use tcode_core::session::{
-    EntryContent, ReviewComment, Timeline, implement_prompt, plan_title, turn_user_event_offset,
-};
+use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
 use tcode_core::settings::{
     EnvVar, OrchestrateSettings, ProjectSort, ProviderProfile, ProviderSettings, ResolvedProfile,
     Settings, provider_label,
@@ -33,12 +29,6 @@ use tcode_core::settings::{
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
-};
-#[cfg(test)]
-use tcode_services::checkpoints::checkpoint_ref_exists;
-use tcode_services::checkpoints::{
-    create_checkpoint, delete_all_checkpoint_refs, delete_checkpoint_refs_from,
-    delete_checkpoint_turns, is_git_repo, net_turn_file_changes, restore_checkpoint,
 };
 use tcode_services::git::{
     CheckoutError, checkout_if_clean, commit_diff_context, create_git_worktree, list_git_branches,
@@ -48,8 +38,6 @@ use tcode_services::git::{
 use tcode_services::import::{
     ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
 };
-#[cfg(test)]
-use tcode_services::process::command;
 use tcode_services::provider_probe::{
     default_program, probe_provider, run_capture, run_capture_env, run_status, which_in_path,
 };
@@ -80,11 +68,6 @@ pub use crate::terminal::{
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
 const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
-
-/// How many pre-turn checkpoints a session keeps. Older checkpoint refs are
-/// deleted (their turns lose the Revert affordance); without a cap the refs —
-/// and the git objects they pin — accumulate for the life of the repo.
-const MAX_CHECKPOINTS_PER_SESSION: usize = 20;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
@@ -338,17 +321,6 @@ pub struct ActiveSession {
     /// Source of [`QueuedMessage::id`]s.
     next_queue_id: u64,
     turn_in_flight: bool,
-    /// The queue head has been recorded to the transcript but not dispatched
-    /// yet — set between `record_user_message` and the successful
-    /// `dispatch_next_pending` when the pre-turn checkpoint runs off the main
-    /// thread. Re-entering `dispatch_next_queued` with this set must not record
-    /// the head a second time.
-    recorded_undispatched: bool,
-    /// A pre-turn checkpoint capture is running on the background executor for
-    /// this session; dispatch of the recorded head resumes when it lands (see
-    /// `finish_checkpoint_capture`). Blocks `dispatch_next_queued` meanwhile so
-    /// a second send can't interleave a record into the same capture window.
-    awaiting_checkpoint: bool,
     /// Provider-native commands / skills discovered at session start (Claude
     /// `slash_commands` + `skills`; Codex `skills/list` + custom prompts).
     /// Seeded from the per-provider cache, then replaced by live updates.
@@ -470,12 +442,6 @@ impl ActiveSession {
     /// Pull a message out of the queue by id (the strip's steer/✕ buttons).
     fn take_queued(&mut self, id: u64) -> Option<QueuedMessage> {
         let index = self.queue.iter().position(|m| m.id == id)?;
-        // Dropping the recorded-but-undispatched head leaves its user message
-        // in the transcript with no turn behind it (harmless — the next send
-        // simply continues), but the next head must be recorded afresh.
-        if index == 0 {
-            self.recorded_undispatched = false;
-        }
         Some(self.queue.remove(index))
     }
 
@@ -573,7 +539,6 @@ impl ActiveSession {
             .map_err(|_| ())?;
         self.queue.remove(0);
         self.turn_in_flight = true;
-        self.recorded_undispatched = false;
         Ok(true)
     }
 
@@ -656,6 +621,13 @@ pub struct AppState {
     /// Right/bottom workspace resources parked by conversation destination.
     /// This mirrors the composer's per-thread/project-draft text cache.
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
+    /// Provider-native rewind requested while a session is live or starting.
+    /// Kept here (rather than in persisted session metadata) because the
+    /// provider response is the only authority that can complete it.
+    pending_native_rewinds: HashMap<String, (String, RewindMode)>,
+    /// One-shot prompt returned by a provider conversation rewind. The composer
+    /// consumes it as an ordinary draft without tcode rewriting history itself.
+    native_rewind_prefills: HashMap<String, String>,
     pub settings: Settings,
     pub smoke: Option<SmokeMode>,
     /// Whether the sidebar is collapsed to an icon strip (ephemeral UI state).
@@ -751,18 +723,10 @@ pub struct AppState {
     /// git status has loaded (clicking the header button cannot be driven
     /// headlessly). Consumed by `ChatView` on its next render.
     pub debug_open_commit_dialog: bool,
-    /// Screenshot-only (`--debug-edit-open`): open the inline "Edit & resend"
-    /// editor on the last user message (hovering a bubble and clicking its action
-    /// row cannot be driven headlessly). Consumed by `ChatView` on its next render.
-    pub debug_edit_open: bool,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// Invalidates working-tree/branch previews on panel open and turn finish.
     pub diff_refresh_generation: u64,
-    /// Lazily computed checkpoint-tree diffs. `None` is a remembered failure
-    /// (missing ref, non-git/replayed cwd); absence means not requested yet.
-    turn_net_changes: HashMap<(String, usize), Option<Vec<FileChange>>>,
-    turn_net_changes_loading: HashSet<(String, usize)>,
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
@@ -815,6 +779,8 @@ impl AppState {
             active: None,
             background: HashMap::new(),
             conversation_ui: HashMap::new(),
+            pending_native_rewinds: HashMap::new(),
+            native_rewind_prefills: HashMap::new(),
             settings,
             smoke: None,
             sidebar_collapsed: settings_collapsed,
@@ -855,11 +821,8 @@ impl AppState {
             next_operation_id: 1,
             git_status_generation: 0,
             debug_open_commit_dialog: false,
-            debug_edit_open: false,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
-            turn_net_changes: HashMap::new(),
-            turn_net_changes_loading: HashSet::new(),
             debug_palette: None,
             debug_settings_section: None,
             debug_acp_search: None,
@@ -2535,18 +2498,18 @@ impl AppState {
         let Some(active) = self.active.as_ref() else {
             return Vec::new();
         };
-        let mut turns: Vec<usize> = Vec::new();
-        for entry in &active.timeline.entries {
-            if let EntryContent::FileChange { changes, .. } = &entry.content
-                && !changes.is_empty()
-                && turns.last() != Some(&entry.turn)
-                && !turns.contains(&entry.turn)
-            {
-                turns.push(entry.turn);
-            }
-        }
-        turns.sort_unstable();
-        turns
+        active
+            .timeline
+            .turns
+            .iter()
+            .enumerate()
+            .filter_map(|(turn, meta)| {
+                meta.changes
+                    .as_ref()
+                    .is_some_and(|changes| !changes.changes.is_empty())
+                    .then_some(turn)
+            })
+            .collect()
     }
 
     /// The turn the diff panel currently shows: the explicit selection when it
@@ -2560,96 +2523,29 @@ impl AppState {
         }
     }
 
-    /// Return a completed net result for the active session/turn. `None` also
-    /// covers pending and unavailable results so callers can use their merged
-    /// per-edit fallback in either state.
-    pub fn turn_net_file_changes(&self, turn: usize) -> Option<Vec<FileChange>> {
-        let session_id = &self.active.as_ref()?.meta.id;
-        self.turn_net_changes
-            .get(&(session_id.clone(), turn))
-            .and_then(|result| result.clone())
-    }
-
-    /// Start the checkpoint diff for a finished turn once. The base is that
-    /// turn's checkpoint and the target is the next recorded checkpoint, or
-    /// the worktree if this is the latest checkpointed turn.
-    pub fn request_turn_net_file_changes(&mut self, turn: usize, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        // A running turn is still producing edits; computing (and permanently
-        // caching) a worktree diff now would freeze a mid-turn snapshot.
-        // Callers keep their per-edit fallback until the turn finishes.
-        if active
+    /// Return the provider-attributed net changes for one turn. This never
+    /// reads Git or the current working tree: exact provider snapshots and the
+    /// structured-operation fallback are folded into the timeline itself.
+    pub fn turn_file_changes(&self, turn: usize) -> Option<Vec<FileChange>> {
+        self.active
+            .as_ref()?
             .timeline
             .turns
-            .get(turn)
-            .is_some_and(|meta| meta.running)
-        {
-            return;
-        }
-        let session_id = active.meta.id.clone();
-        let key = (session_id.clone(), turn);
-        if self.turn_net_changes.contains_key(&key) || self.turn_net_changes_loading.contains(&key)
-        {
-            return;
-        }
+            .get(turn)?
+            .changes
+            .as_ref()
+            .map(|changes| changes.changes.clone())
+    }
 
-        if !active
-            .meta
-            .checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.turn == turn)
-        {
-            self.turn_net_changes.insert(key, None);
-            return;
-        }
-        let target_turn = active
-            .meta
-            .checkpoints
-            .iter()
-            .filter(|checkpoint| checkpoint.turn > turn)
-            .map(|checkpoint| checkpoint.turn)
-            .min();
-        let mut paths = Vec::new();
-        for entry in &active.timeline.entries {
-            if entry.turn != turn {
-                continue;
-            }
-            if let EntryContent::FileChange { changes, .. } = &entry.content {
-                for change in changes {
-                    if !paths.contains(&change.path) {
-                        paths.push(change.path.clone());
-                    }
-                }
-            }
-        }
-        if paths.is_empty() {
-            self.turn_net_changes.insert(key, Some(Vec::new()));
-            return;
-        }
-
-        let cwd = active.meta.cwd.clone();
-        self.turn_net_changes_loading.insert(key.clone());
-        cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
-                net_turn_file_changes(&cwd, &session_id, turn, target_turn, &paths)
-            })
-            .await;
-            let _ = this.update(cx, |state, cx| {
-                // Rewind invalidation removes the loading marker. Do not let an
-                // already-running task repopulate an orphaned turn afterward.
-                if state.turn_net_changes_loading.remove(&key) {
-                    if let Err(err) = &result {
-                        log::debug!("turn net diff unavailable: {err}");
-                    }
-                    state.turn_net_changes.insert(key, result.ok());
-                    state.diff_refresh_generation = state.diff_refresh_generation.wrapping_add(1);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+    pub fn turn_change_completeness(&self, turn: usize) -> Option<ChangeCompleteness> {
+        self.active
+            .as_ref()?
+            .timeline
+            .turns
+            .get(turn)?
+            .changes
+            .as_ref()
+            .map(|changes| changes.completeness)
     }
 
     pub fn diff_panel_open(&self) -> bool {
@@ -3374,9 +3270,9 @@ impl AppState {
         (!others).then_some(worktree)
     }
 
-    /// Permanently delete a thread: stop the provider, close its terminal, remove
-    /// its checkpoint refs, delete meta + JSONL, and (when `remove_worktree`)
-    /// remove the git worktree it was the last user of.
+    /// Permanently delete a thread: stop the provider, close its terminal,
+    /// delete meta + JSONL, and (when `remove_worktree`) remove the git worktree
+    /// it was the last user of.
     pub fn delete_session(
         &mut self,
         session_id: &str,
@@ -3397,22 +3293,17 @@ impl AppState {
             self.write_terminal_preferences();
         }
         self.close_orchestrator_children(session_id);
-        if let Some(meta) = &meta {
-            // Best-effort checkpoint ref cleanup in the session cwd.
-            if is_git_repo(&meta.cwd) {
-                delete_all_checkpoint_refs(&meta.cwd, &meta.id);
-            }
-            if remove_worktree
-                && let Some(worktree) = &meta.worktree
-                && let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd)
-            {
-                self.report_error(
-                    RuntimeError::WorktreeRemove {
-                        error: err.to_string(),
-                    },
-                    cx,
-                );
-            }
+        if let Some(meta) = &meta
+            && remove_worktree
+            && let Some(worktree) = &meta.worktree
+            && let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd)
+        {
+            self.report_error(
+                RuntimeError::WorktreeRemove {
+                    error: err.to_string(),
+                },
+                cx,
+            );
         }
         self.settings.last_visited.remove(session_id);
         if let Err(err) = self.store.remove_session(session_id) {
@@ -3565,357 +3456,6 @@ impl AppState {
                 && m.project_id.as_deref() == Some(project_id)
                 && self.session_unread(&m.id)
         })
-    }
-
-    // -- checkpoints + revert (Group B) -------------------------------------
-
-    /// Snapshot the pre-turn working tree into a hidden git ref so the turn the
-    /// just-recorded user message opened can later be reverted. `event_offset`
-    /// is the JSONL length before that message, used as the revert truncation
-    /// boundary.
-    ///
-    /// The git work (repo check + `add -A` + `write-tree` + …) runs on the
-    /// background executor — on the UI thread it froze every send in a large or
-    /// I/O-starved checkout — while `awaiting_checkpoint` holds the recorded
-    /// head back so the snapshot still precedes any agent file edits.
-    /// `finish_checkpoint_capture` applies the result and releases the turn.
-    fn start_checkpoint_capture(
-        &mut self,
-        session_id: &str,
-        turn: usize,
-        event_offset: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) else {
-            return;
-        };
-        let cwd = active.meta.cwd.clone();
-        active.awaiting_checkpoint = true;
-        let session_id = session_id.to_string();
-        cx.spawn(async move |this, cx| {
-            let git = {
-                let cwd = cwd.clone();
-                let session_id = session_id.clone();
-                unblock(cx.background_executor(), move || {
-                    if !is_git_repo(&cwd) {
-                        return None;
-                    }
-                    match create_checkpoint(&cwd, &session_id, turn) {
-                        Ok(commit) => Some(commit),
-                        Err(err) => {
-                            log::warn!("failed to create checkpoint: {err}");
-                            None
-                        }
-                    }
-                })
-            }
-            .await;
-            let _ = this.update(cx, |state, cx| {
-                state.finish_checkpoint_capture(&session_id, turn, event_offset, git, cx);
-            });
-        })
-        .detach();
-    }
-
-    /// A background checkpoint capture landed: stash the commit on the session
-    /// (unless the timeline moved on — a rewind while capturing truncates both
-    /// the turn and the offset it was taken at), then dispatch the recorded
-    /// head the capture was holding back.
-    fn finish_checkpoint_capture(
-        &mut self,
-        session_id: &str,
-        turn: usize,
-        event_offset: usize,
-        commit: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        // The session may have been parked while the capture ran.
-        let is_active = self
-            .active
-            .as_ref()
-            .is_some_and(|a| a.meta.id == session_id);
-        if is_active {
-            self.active.as_mut().unwrap().awaiting_checkpoint = false;
-            if let Some(commit) = commit {
-                self.apply_checkpoint(session_id, turn, event_offset, commit, cx);
-            }
-            // The recorded head (if still queued) can go out now.
-            if self.dispatch_next_queued(cx).is_err() {
-                self.report_error(RuntimeError::ProcessGone, cx);
-            }
-        } else if self.background.contains_key(session_id) {
-            self.background
-                .get_mut(session_id)
-                .unwrap()
-                .awaiting_checkpoint = false;
-            if let Some(commit) = commit {
-                self.apply_checkpoint(session_id, turn, event_offset, commit, cx);
-            }
-            if let Some(parked) = self.background.get_mut(session_id) {
-                let _ = parked.dispatch_next_pending();
-            }
-        }
-        cx.notify();
-    }
-
-    /// Record a captured checkpoint on the session's meta (active or parked)
-    /// and cap how many checkpoints the session keeps — refs are only ever
-    /// added by turns and never garbage-collected otherwise, so an uncapped
-    /// session grows the repo's object store without bound.
-    fn apply_checkpoint(
-        &mut self,
-        session_id: &str,
-        turn: usize,
-        event_offset: usize,
-        commit: String,
-        cx: &mut Context<Self>,
-    ) {
-        let session = if self
-            .active
-            .as_ref()
-            .is_some_and(|a| a.meta.id == session_id)
-        {
-            self.active.as_mut().unwrap()
-        } else if self.background.contains_key(session_id) {
-            self.background.get_mut(session_id).unwrap()
-        } else {
-            return;
-        };
-        // A rewind while the capture ran truncated this turn away — its
-        // checkpoint and offset no longer describe the transcript.
-        if session.timeline.entries.last().map(|e| e.turn) != Some(turn) {
-            return;
-        }
-
-        // A previous last turn may have been computed against the worktree. It
-        // now has an immutable checkpoint target instead.
-        let previous_checkpoint_turn = session
-            .meta
-            .checkpoints
-            .iter()
-            .filter(|checkpoint| checkpoint.turn < turn)
-            .map(|checkpoint| checkpoint.turn)
-            .max();
-        if let Some(previous_turn) = previous_checkpoint_turn {
-            let key = (session_id.to_string(), previous_turn);
-            self.turn_net_changes.remove(&key);
-            self.turn_net_changes_loading.remove(&key);
-        }
-        session.meta.checkpoints.push(Checkpoint {
-            turn,
-            commit,
-            event_offset,
-        });
-        session.meta.checkpoints.sort_by_key(|c| c.turn);
-        // A second queued send can land in the same open turn — checkpoint once.
-        session.meta.checkpoints.dedup_by_key(|c| c.turn);
-
-        // Cap retained checkpoints (oldest turns first); their refs are deleted
-        // off-thread below.
-        let excess = session
-            .meta
-            .checkpoints
-            .len()
-            .saturating_sub(MAX_CHECKPOINTS_PER_SESSION);
-        let pruned: Vec<usize> = session
-            .meta
-            .checkpoints
-            .drain(..excess)
-            .map(|c| c.turn)
-            .collect();
-
-        let cwd = session.meta.cwd.clone();
-        let meta = session.meta.clone();
-        self.persist_meta(&meta, cx);
-
-        if !pruned.is_empty() {
-            let session_id = session_id.to_string();
-            cx.background_executor()
-                .spawn(async move {
-                    delete_checkpoint_turns(&cwd, &session_id, &pruned);
-                })
-                .detach();
-        }
-    }
-
-    /// Whether the given timeline turn has a checkpoint (its user bubble then
-    /// gets the hover "revert" affordance).
-    pub fn turn_has_checkpoint(&self, turn: usize) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.meta.checkpoints.iter().any(|c| c.turn == turn))
-    }
-
-    /// Rewind the active thread to just before `turn`'s user message: restore the
-    /// worktree from that turn's checkpoint (when there is one), truncate the
-    /// JSONL log at the message, drop the now-orphaned newer checkpoint refs, and
-    /// roll the provider session back to Idle — so the next send resumes from the
-    /// truncated transcript. Blocked while a turn runs.
-    ///
-    /// This is the single rewind mechanism behind both Revert and Edit & resend;
-    /// they differ only in what happens afterwards.
-    ///
-    /// * `Some(true)` — rewound and the worktree was restored from a checkpoint.
-    /// * `Some(false)` — rewound, but the turn has no checkpoint (e.g. a non-git
-    ///   cwd): the transcript was truncated and the files on disk were left as
-    ///   they are. Callers must say so.
-    /// * `None` — nothing happened (no active thread, a turn is running, the turn
-    ///   is unknown, or a git/IO failure — which reports itself).
-    fn rewind_to_turn(&mut self, turn: usize, cx: &mut Context<Self>) -> Option<bool> {
-        let (session_id, cwd, checkpoint) = {
-            let active = self.active.as_ref()?;
-            if active.timeline.turn_running {
-                cx.emit(AppEvent::Error(RuntimeError::CheckpointRevertBlocked));
-                return None;
-            }
-            let checkpoint = active
-                .meta
-                .checkpoints
-                .iter()
-                .find(|c| c.turn == turn)
-                .cloned();
-            (active.meta.id.clone(), active.meta.cwd.clone(), checkpoint)
-        };
-
-        // The truncation boundary: the checkpoint's recorded offset, or — with no
-        // checkpoint — the offset recomputed by replaying the stored log.
-        let event_offset = match &checkpoint {
-            Some(cp) => cp.event_offset,
-            None => turn_user_event_offset(&self.store.read_events(&session_id), turn)?,
-        };
-
-        if let Some(cp) = &checkpoint {
-            if let Err(err) = restore_checkpoint(&cwd, &cp.commit) {
-                self.report_error(RuntimeError::External(err), cx);
-                return None;
-            }
-            delete_checkpoint_refs_from(&cwd, &session_id, turn);
-        }
-        self.turn_net_changes
-            .retain(|(id, cached_turn), _| id != &session_id || *cached_turn < turn);
-        self.turn_net_changes_loading
-            .retain(|(id, cached_turn)| id != &session_id || *cached_turn < turn);
-        if let Err(err) = self.store.truncate_events(&session_id, event_offset) {
-            self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return None;
-        }
-
-        // Re-fold the truncated timeline and roll the session back to idle.
-        let events = self.store.read_events(&session_id);
-        let mut timeline = Timeline::fold_events(events);
-        timeline.mark_idle();
-        if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
-            active.shutdown_to_idle();
-            active.meta.checkpoints.retain(|c| c.turn < turn);
-            active.meta.resume_cursor = None;
-            active.meta.updated_at = now_secs();
-            active.timeline = timeline;
-            active.git_branch = read_git_branch(&active.meta.cwd);
-            active.queue.clear();
-            // The transcript the recorded head and any in-flight capture
-            // referred to is gone; the next send records afresh. A capture that
-            // still lands finds a different last turn and drops its result (see
-            // `apply_checkpoint`).
-            active.recorded_undispatched = false;
-            active.awaiting_checkpoint = false;
-            active.plan_implemented = false;
-            let meta = active.meta.clone();
-            self.persist_meta(&meta, cx);
-        }
-        cx.notify();
-        Some(checkpoint.is_some())
-    }
-
-    /// Revert the active thread to the checkpoint captured before `turn`. Only
-    /// offered for turns that have a checkpoint (the hover affordance is hidden
-    /// otherwise), so this is a no-op without one.
-    pub fn revert_to_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        if !self.turn_has_checkpoint(turn) {
-            return;
-        }
-        if self.rewind_to_turn(turn, cx).is_some() {
-            cx.emit(AppEvent::Notice(RuntimeNotice::CheckpointReverted));
-        }
-    }
-
-    /// Edit & resend a user message: rewind the conversation to the state just
-    /// before it (worktree + transcript + provider session — the same mechanism
-    /// Revert uses), then send `text` as a fresh turn.
-    ///
-    /// Without a checkpoint the transcript is still truncated and the message
-    /// resent, but the files on disk are untouched — the caller is told so with a
-    /// toast rather than silently.
-    pub fn edit_and_resend_turn(&mut self, turn: usize, text: String, cx: &mut Context<Self>) {
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        // An `/orchestrate` turn stored only the user's own words in the bubble
-        // (the injected prefix rode in a `context_len`-annotated message). Resend
-        // it through `orchestrate_turn` so the guidance + configuration prefix is
-        // re-composed from current settings, rather than the plain send path that
-        // would drop it. The edited text is exactly those user words.
-        let was_orchestrate = self.active.as_ref().is_some_and(|active| {
-            active
-                .timeline
-                .entries
-                .iter()
-                .find(|entry| {
-                    entry.turn == turn && matches!(entry.content, EntryContent::User { .. })
-                })
-                .is_some_and(|entry| {
-                    matches!(
-                        entry.content,
-                        EntryContent::User {
-                            context_len: Some(_),
-                            ..
-                        }
-                    )
-                })
-        });
-        let Some(restored) = self.rewind_to_turn(turn, cx) else {
-            return;
-        };
-        if !restored {
-            cx.emit(AppEvent::Notice(RuntimeNotice::EditWithoutCheckpoint));
-        }
-        if was_orchestrate {
-            self.orchestrate_turn(text, Vec::new(), cx);
-        } else {
-            self.send_turn(text, Vec::new(), cx);
-        }
-    }
-
-    /// The last turn in the active timeline that has a user message (the target
-    /// of the `--debug-edit-resend` dev flag).
-    pub fn last_user_turn(&self) -> Option<usize> {
-        self.active
-            .as_ref()?
-            .timeline
-            .entries
-            .iter()
-            .rev()
-            .find_map(|entry| match entry.content {
-                EntryContent::User { .. } => Some(entry.turn),
-                _ => None,
-            })
-    }
-
-    /// Dev flag `--debug-edit-resend "<text>"`: edit & resend the last user
-    /// message of the opened session (the GUI's hover action row cannot be
-    /// clicked headlessly).
-    pub fn debug_edit_resend(&mut self, text: String, cx: &mut Context<Self>) {
-        let Some(turn) = self.last_user_turn() else {
-            log::error!("--debug-edit-resend: the opened session has no user message");
-            return;
-        };
-        log::info!("--debug-edit-resend: editing turn {turn} -> {text:?}");
-        self.edit_and_resend_turn(turn, text, cx);
     }
 
     // -- worktree mode (Group C) --------------------------------------------
@@ -4074,8 +3614,6 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4126,8 +3664,6 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4349,8 +3885,6 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4461,71 +3995,33 @@ impl AppState {
         cx.notify();
     }
 
-    /// Record + dispatch the head of the queue, if the session can take a turn
-    /// right now (live provider, nothing in flight, no checkpoint capture
-    /// pending). This is the ONLY place a queued message becomes part of the
-    /// conversation: the user message is appended to the JSONL and the pre-turn
-    /// checkpoint captured here, not when the message was queued — so a message
-    /// dropped from the queue strip never touches the transcript.
-    ///
-    /// The checkpoint's git work runs on the background executor
-    /// (`start_checkpoint_capture`): this method records the head, marks it
-    /// `recorded_undispatched`, and returns; the capture's completion dispatches
-    /// it. Everything before that point is cheap main-thread bookkeeping, so
-    /// sending stays instantaneous even on a slow disk.
+    /// Dispatch the queue head when the live provider can accept a turn. The
+    /// queue contains only unsent messages: after the command channel accepts
+    /// the turn, the message is removed and recorded as a user bubble in the
+    /// same UI update. File-change attribution is a provider event stream and
+    /// never participates in this state transition.
     fn dispatch_next_queued(&mut self, cx: &mut Context<Self>) -> Result<bool, ()> {
         let Some(active) = self.active.as_ref() else {
             return Ok(false);
         };
-        if active.turn_in_flight
-            || active.awaiting_checkpoint
-            || !matches!(active.runtime, Runtime::Live(_))
-        {
+        if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
         let session_id = active.meta.id.clone();
-
-        if !active.recorded_undispatched {
-            let Some(next) = active.queue.first().cloned() else {
-                return Ok(false);
-            };
-            // Group B: the JSONL length before this turn's user message — the
-            // revert truncation boundary — captured before the message is
-            // appended. (A newline byte-scan, not a parse: cheap even for a
-            // long session's log.)
-            let checkpoint_offset = self.store.event_count(&session_id);
-            self.record_user_message(&session_id, &next.text, next.context_len, cx);
-            self.maybe_generate_title(&next.text, &next.attachments, cx);
-
-            let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) else {
-                return Ok(false);
-            };
-            active.recorded_undispatched = true;
-
-            // Group B: snapshot the pre-turn working tree for this turn's
-            // revert — off the main thread. One checkpoint per turn: a second
-            // queued send landing in the same open turn skips the capture.
-            let turn = active.timeline.entries.last().map(|e| e.turn);
-            let needs_capture =
-                turn.is_some() && !active.meta.checkpoints.iter().any(|c| Some(c.turn) == turn);
-            if let Some(turn) = turn.filter(|_| needs_capture) {
-                self.start_checkpoint_capture(&session_id, turn, checkpoint_offset, cx);
-                return Ok(true);
-            }
-        }
-
-        let Some(active) = self.active.as_mut() else {
+        let Some(next) = active.queue.first().cloned() else {
             return Ok(false);
         };
-        active.dispatch_next_pending()
+        let dispatched = self.active.as_mut().ok_or(())?.dispatch_next_pending()?;
+        if dispatched {
+            self.record_user_message(&session_id, &next.text, next.context_len, cx);
+            self.maybe_generate_title(&next.text, &next.attachments, cx);
+        }
+        Ok(dispatched)
     }
 
     /// A parked session finished a turn: keep working through its queue, and
-    /// shut it down once nothing is left. Mirrors `dispatch_next_queued` with
-    /// two honest omissions — no git checkpoint (the checkpoint boundary needs
-    /// the live timeline, which a parked session doesn't maintain; those turns
-    /// simply have no Revert) and no title adoption (a parked session already
-    /// has its title).
+    /// shut it down once nothing is left. A parked session already has its
+    /// title, so this mirrors `dispatch_next_queued` without title adoption.
     fn on_background_turn_completed(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(parked) = self.background.get_mut(session_id) else {
             return;
@@ -4565,13 +4061,19 @@ impl AppState {
             return;
         }
         let next = parked.queue.first().cloned().unwrap();
-        self.record_user_message(session_id, &next.text, next.context_len, cx);
-        if let Some(parked) = self.background.get_mut(session_id)
-            && parked.dispatch_next_pending().is_err()
+        match self
+            .background
+            .get_mut(session_id)
+            .unwrap()
+            .dispatch_next_pending()
         {
-            // The process is gone; the queue (with its unsent text) survives
-            // for the user to find when they reopen the thread.
-            log::warn!("parked session {session_id}: dispatch failed (process gone)");
+            Ok(true) => self.record_user_message(session_id, &next.text, next.context_len, cx),
+            Ok(false) => {}
+            Err(()) => {
+                // The process is gone; the queue (with its unsent text)
+                // survives for the user to find when they reopen the thread.
+                log::warn!("parked session {session_id}: dispatch failed (process gone)");
+            }
         }
         cx.notify();
     }
@@ -5160,8 +4662,6 @@ impl AppState {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -5498,6 +4998,76 @@ impl AppState {
         self.settings.favorite_models.iter().any(|m| m == model)
     }
 
+    /// Request a provider-owned restore point. No local Git or transcript
+    /// operation is performed: the canonical timeline changes only after the
+    /// provider confirms the native request.
+    pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        if active.meta.provider != ProviderKind::ClaudeCode
+            || active.turn_in_flight
+            || active.timeline.turn_running
+            || !active.queue.is_empty()
+        {
+            self.report_error(RuntimeError::NativeRewindBlocked, cx);
+            return;
+        }
+        let Some(checkpoint_id) = active
+            .timeline
+            .turns
+            .get(turn)
+            .and_then(|turn| turn.provider_checkpoint_id.clone())
+        else {
+            self.report_error(RuntimeError::NativeRewindBlocked, cx);
+            return;
+        };
+        // Claude Code 2.1.214 cannot persist a conversation rewind before the
+        // first assistant anchor. File-only rewind remains valid there.
+        if turn == 0 && mode.includes_conversation() {
+            self.report_error(RuntimeError::NativeRewindBlocked, cx);
+            return;
+        }
+        let session_id = active.meta.id.clone();
+        if self.pending_native_rewinds.contains_key(&session_id) {
+            self.report_error(RuntimeError::NativeRewindBlocked, cx);
+            return;
+        }
+        let live_commands = match &active.runtime {
+            Runtime::Live(commands) => Some(commands.clone()),
+            Runtime::Idle | Runtime::Starting { .. } => None,
+        };
+        self.pending_native_rewinds
+            .insert(session_id.clone(), (checkpoint_id.clone(), mode));
+        if let Some(commands) = live_commands {
+            if commands
+                .try_send(SessionCommand::Rewind {
+                    checkpoint_id,
+                    mode,
+                })
+                .is_err()
+            {
+                self.pending_native_rewinds.remove(&session_id);
+                self.report_error(RuntimeError::ProcessGone, cx);
+            }
+        } else {
+            self.ensure_started(cx);
+        }
+        cx.notify();
+    }
+
+    /// Consume the prompt returned by Claude's native conversation rewind.
+    /// The composer calls this once and owns the visible edit buffer afterward.
+    pub fn take_native_rewind_prefill(&mut self) -> Option<String> {
+        let session_id = self.active_session_id()?.to_owned();
+        self.native_rewind_prefills.remove(&session_id)
+    }
+
+    pub fn native_rewind_pending(&self) -> bool {
+        self.active_session_id()
+            .is_some_and(|id| self.pending_native_rewinds.contains_key(id))
+    }
+
     /// Spawn the provider process for the active session if it isn't running.
     fn ensure_started(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.active_session_id().map(str::to_owned) else {
@@ -5602,16 +5172,44 @@ impl AppState {
                             let active = state.active.as_mut().unwrap();
                             active.runtime = Runtime::Live(commands.clone());
                             active._pump = Some(pump);
-                            if state.dispatch_next_queued(cx).is_err() {
+                            if let Some((checkpoint_id, mode)) =
+                                state.pending_native_rewinds.get(&session_id).cloned()
+                            {
+                                if commands
+                                    .try_send(SessionCommand::Rewind {
+                                        checkpoint_id,
+                                        mode,
+                                    })
+                                    .is_err()
+                                {
+                                    state.pending_native_rewinds.remove(&session_id);
+                                    state.report_error(RuntimeError::ProcessGone, cx);
+                                }
+                            } else if state.dispatch_next_queued(cx).is_err() {
                                 state.report_error(RuntimeError::ProcessGone, cx);
                             }
                         } else {
                             let parked = state.background.get_mut(&session_id).unwrap();
                             parked.runtime = Runtime::Live(commands.clone());
                             parked._pump = Some(pump);
-                            // Work through the parked queue exactly as a
-                            // finished background turn would.
-                            state.on_background_turn_completed(&session_id, cx);
+                            if let Some((checkpoint_id, mode)) =
+                                state.pending_native_rewinds.get(&session_id).cloned()
+                            {
+                                if commands
+                                    .try_send(SessionCommand::Rewind {
+                                        checkpoint_id,
+                                        mode,
+                                    })
+                                    .is_err()
+                                {
+                                    state.pending_native_rewinds.remove(&session_id);
+                                    state.report_error(RuntimeError::ProcessGone, cx);
+                                }
+                            } else {
+                                // Work through the parked queue exactly as a
+                                // finished background turn would.
+                                state.on_background_turn_completed(&session_id, cx);
+                            }
                         }
                         cx.notify();
                     }
@@ -5630,6 +5228,7 @@ impl AppState {
                                 parked.runtime = Runtime::Idle;
                                 parked.turn_in_flight = false;
                             }
+                            state.pending_native_rewinds.remove(&session_id);
                             let error_event = AgentEvent::ProviderStartFailed {
                                 error: err.to_string(),
                             };
@@ -5672,7 +5271,15 @@ impl AppState {
             );
         }
 
+        if let AgentEvent::RewindFailed { error, .. } = &event {
+            self.pending_native_rewinds.remove(session_id);
+            self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
+            cx.notify();
+            return;
+        }
+
         if let AgentEvent::SessionClosed { reason } = &event {
+            self.pending_native_rewinds.remove(session_id);
             self.sessions_awaiting_approval.remove(session_id);
             self.close_orchestrator_children(session_id);
             let is_active = self.active_session_id() == Some(session_id);
@@ -5817,6 +5424,24 @@ impl AppState {
                     self.refresh_git_status(cx);
                 }
             }
+            AgentEvent::RewindCompleted { mode, prefill, .. } => {
+                self.pending_native_rewinds.remove(session_id);
+                if mode.includes_conversation()
+                    && let Some(prefill) = prefill
+                {
+                    self.native_rewind_prefills
+                        .insert(session_id.to_owned(), prefill.clone());
+                }
+                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
+                if let Some(meta) = self.meta_mut(session_id) {
+                    meta.updated_at = now_secs();
+                    let meta = meta.clone();
+                    self.persist_meta(&meta, cx);
+                }
+                cx.emit(AppEvent::Notice(RuntimeNotice::NativeRewindCompleted {
+                    mode: *mode,
+                }));
+            }
             AgentEvent::Error { message, .. } => {
                 cx.emit(AppEvent::Error(RuntimeError::ProviderMessage(
                     message.clone(),
@@ -5886,6 +5511,12 @@ impl AppState {
             if !is_active {
                 self.on_background_turn_completed(session_id, cx);
             }
+        }
+
+        if matches!(event, AgentEvent::RewindCompleted { .. })
+            && self.active_session_id() != Some(session_id)
+        {
+            self.on_background_turn_completed(session_id, cx);
         }
 
         // Smoke-mode automation.
@@ -6091,7 +5722,7 @@ impl AppState {
             );
         }
         // Reflect the upsert in memory instead of reloading the whole index
-        // from disk: `persist_meta` runs on every turn (and every checkpoint),
+        // from disk: `persist_meta` runs on every turn,
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
         match self.sessions.iter_mut().find(|m| m.id == meta.id) {
@@ -6107,6 +5738,8 @@ impl AppState {
         self.persist_terminal_preferences();
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             self.sessions_awaiting_approval.remove(&session_id);
+            self.pending_native_rewinds.remove(&session_id);
+            self.native_rewind_prefills.remove(&session_id);
         }
         if let Some(active) = self.active.take()
             && let Runtime::Live(commands) = active.runtime
@@ -6126,6 +5759,8 @@ impl AppState {
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
         self.conversation_ui.clear();
+        self.pending_native_rewinds.clear();
+        self.native_rewind_prefills.clear();
     }
 
     /// Leave the active session without killing its work: a live session with a
@@ -6139,7 +5774,8 @@ impl AppState {
             return;
         };
         self.park_conversation_ui(&mut active);
-        let has_work = active.turn_in_flight || !active.queue.is_empty();
+        let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
+        let has_work = active.turn_in_flight || !active.queue.is_empty() || native_rewind_pending;
         // Live with work, or still Starting with messages waiting (the start
         // attempt finds and adopts the parked entry when it completes) — both
         // carry state that must not die with a thread switch.
@@ -6160,6 +5796,8 @@ impl AppState {
     /// Shut down and forget a parked session (archive/delete paths).
     fn drop_background(&mut self, session_id: &str) {
         self.sessions_awaiting_approval.remove(session_id);
+        self.pending_native_rewinds.remove(session_id);
+        self.native_rewind_prefills.remove(session_id);
         if let Some(parked) = self.background.remove(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {
@@ -8522,8 +8160,6 @@ mod tests {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8563,8 +8199,6 @@ mod tests {
             queue: vec!["first".into(), "second".into()],
             next_queue_id: 2,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8618,8 +8252,6 @@ mod tests {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -8629,6 +8261,71 @@ mod tests {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
+    }
+
+    #[gpui::test]
+    fn native_rewind_waits_for_provider_confirmation_before_pruning(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-native-rewind-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::ClaudeCode, commands);
+            active.meta.id = "claude-session".into();
+            for index in 1..=2 {
+                active.timeline.apply_at(
+                    Some(index * 10),
+                    &AgentEvent::TurnStarted {
+                        turn_id: format!("turn-{index}"),
+                    },
+                );
+                active.timeline.apply_at(
+                    Some(index * 10 + 1),
+                    &AgentEvent::TurnCheckpoint {
+                        turn_id: format!("turn-{index}"),
+                        checkpoint_id: format!("checkpoint-{index}"),
+                    },
+                );
+                active.timeline.apply_at(
+                    Some(index * 10 + 2),
+                    &AgentEvent::TurnCompleted {
+                        turn_id: format!("turn-{index}"),
+                        status: TurnStatus::Completed,
+                        usage: None,
+                    },
+                );
+            }
+            state.active = Some(active);
+            state.rewind_turn(1, RewindMode::Conversation, cx);
+            assert_eq!(state.active.as_ref().unwrap().timeline.turns.len(), 2);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::Rewind {
+                    checkpoint_id,
+                    mode: RewindMode::Conversation,
+                }) if checkpoint_id == "checkpoint-2"
+            ));
+
+            state.on_event(
+                "claude-session",
+                AgentEvent::RewindCompleted {
+                    checkpoint_id: "checkpoint-2".into(),
+                    mode: RewindMode::Conversation,
+                    prefill: Some("original prompt".into()),
+                },
+                cx,
+            );
+            assert_eq!(state.active.as_ref().unwrap().timeline.turns.len(), 1);
+            assert_eq!(
+                state.take_native_rewind_prefill().as_deref(),
+                Some("original prompt")
+            );
+            assert!(!state.native_rewind_pending());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -8827,8 +8524,6 @@ mod tests {
             queue: Vec::new(),
             next_queue_id: 0,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8874,8 +8569,6 @@ mod tests {
             queue: vec!["do it".into()],
             next_queue_id: 1,
             turn_in_flight: false,
-            recorded_undispatched: false,
-            awaiting_checkpoint: false,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8979,230 +8672,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    // -- rewind: revert / edit & resend --------------------------------------
-
-    /// A scratch git repo with one committed file.
-    fn scratch_repo() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("tcode-rewind-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let git = |args: &[&str]| {
-            command("git")
-                .args(args)
-                .current_dir(&root)
-                .env("GIT_AUTHOR_NAME", "tcode")
-                .env("GIT_AUTHOR_EMAIL", "tcode@localhost")
-                .env("GIT_COMMITTER_NAME", "tcode")
-                .env("GIT_COMMITTER_EMAIL", "tcode@localhost")
-                .output()
-                .unwrap();
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.name", "tcode"]);
-        git(&["config", "user.email", "tcode@localhost"]);
-        std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-q", "-m", "seed"]);
-        root
-    }
-
-    fn scratch_state(cwd: PathBuf, cx: &mut gpui::TestAppContext) -> Entity<AppState> {
-        let data = std::env::temp_dir().join(format!("tcode-rewind-data-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(data).unwrap();
-        let state = cx.new(|_| AppState::new(store));
-        state.update(cx, |state, cx| {
-            state.create_session(ProviderKind::ClaudeCode, cwd, None, None, None, None, cx);
-        });
-        state
-    }
-
-    /// Record a user message for a new turn exactly the way `dispatch_next_queued`
-    /// does (JSONL offset first, then the message, then the pre-turn checkpoint),
-    /// then let the "agent" reply and finish the turn. The capture itself runs
-    /// synchronously here — the dispatch path runs it on the background
-    /// executor, which a plain `state.update` wouldn't wait for.
-    fn fake_turn(
-        state: &mut AppState,
-        text: &str,
-        reply: &str,
-        cx: &mut Context<AppState>,
-    ) -> usize {
-        let id = state.active.as_ref().unwrap().meta.id.clone();
-        let offset = state.store.event_count(&id);
-        state.record_user_message(&id, text, None, cx);
-        let turn = state.last_user_turn().unwrap();
-        let cwd = state.active.as_ref().unwrap().meta.cwd.clone();
-        if is_git_repo(&cwd)
-            && let Ok(commit) = create_checkpoint(&cwd, &id, turn)
-        {
-            state.apply_checkpoint(&id, turn, offset, commit, cx);
-        }
-        state.record_event(
-            &id,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: format!("assistant-{turn}"),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: reply.to_string(),
-                },
-            }),
-            cx,
-        );
-        state.record_event(
-            &id,
-            &AgentEvent::TurnCompleted {
-                turn_id: format!("turn-{turn}"),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            cx,
-        );
-        offset
-    }
-
-    /// Edit & resend rewinds to the state just before the edited message: the
-    /// JSONL is truncated at exactly that message's offset, the worktree is
-    /// restored from the turn's checkpoint (the file the agent created is gone),
-    /// the newer checkpoints are dropped and the provider session is idle — ready
-    /// for the edited text to be sent as a fresh turn.
-    #[gpui::test]
-    fn edit_and_resend_truncates_the_transcript_and_restores_the_checkpoint(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let repo = scratch_repo();
-        let state = scratch_state(repo.clone(), cx);
-
-        state.update(cx, |state, cx| {
-            let id = state.active.as_ref().unwrap().meta.id.clone();
-
-            // Turn 0: the agent creates a file.
-            let offset0 = fake_turn(state, "add a file", "Created agent.txt.", cx);
-            assert_eq!(offset0, 0);
-            std::fs::write(repo.join("agent.txt"), "written by the agent\n").unwrap();
-
-            // Turn 1: a follow-up (its checkpoint therefore contains agent.txt).
-            let offset1 = fake_turn(state, "now rename it", "Renamed it.", cx);
-            let events_before = state.store.event_count(&id);
-            assert!(offset1 > offset0 && events_before > offset1);
-            assert!(state.turn_has_checkpoint(0) && state.turn_has_checkpoint(1));
-            // The recomputed boundary (the no-checkpoint path) agrees with the
-            // one the checkpoint recorded.
-            let events = state.store.read_events(&id);
-            assert_eq!(turn_user_event_offset(&events, 0), Some(offset0));
-            assert_eq!(turn_user_event_offset(&events, 1), Some(offset1));
-
-            // Edit & resend the FIRST message: everything from it onwards goes.
-            let restored = state.rewind_to_turn(0, cx);
-            assert_eq!(restored, Some(true), "the worktree was restored");
-
-            // (a) the transcript is truncated at the edited message's offset...
-            assert_eq!(state.store.event_count(&id), offset0);
-            assert!(state.active.as_ref().unwrap().timeline.entries.is_empty());
-            // (b) ...the worktree is back to the pre-turn snapshot...
-            assert!(!repo.join("agent.txt").exists());
-            assert_eq!(
-                std::fs::read_to_string(repo.join("seed.txt")).unwrap(),
-                "seed\n"
-            );
-            // (c) ...the orphaned checkpoints are gone, and the provider session
-            // is idle so the next send resumes from the truncated transcript.
-            assert!(state.active.as_ref().unwrap().meta.checkpoints.is_empty());
-            assert!(!checkpoint_ref_exists(&repo, &id, 0));
-            assert!(!checkpoint_ref_exists(&repo, &id, 1));
-            assert!(matches!(
-                state.active.as_ref().unwrap().runtime,
-                Runtime::Idle
-            ));
-            assert!(state.active.as_ref().unwrap().meta.resume_cursor.is_none());
-        });
-
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    /// A running turn blocks the rewind (Revert and Edit & resend alike).
-    #[gpui::test]
-    fn rewind_is_blocked_while_a_turn_runs(cx: &mut gpui::TestAppContext) {
-        let repo = scratch_repo();
-        let state = scratch_state(repo.clone(), cx);
-        state.update(cx, |state, cx| {
-            let id = state.active.as_ref().unwrap().meta.id.clone();
-            fake_turn(state, "add a file", "Created it.", cx);
-            let before = state.store.event_count(&id);
-            state.active.as_mut().unwrap().timeline.turn_running = true;
-
-            assert_eq!(state.rewind_to_turn(0, cx), None);
-            assert_eq!(state.store.event_count(&id), before);
-            assert!(state.turn_has_checkpoint(0));
-        });
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
-    /// Outside a git repo there is no checkpoint to restore: the transcript is
-    /// still truncated at the edited message (so the resend really does replace
-    /// it), but the files on disk are left alone — and the caller is told (the
-    /// `Some(false)` that drives the "not reverted" toast).
-    #[gpui::test]
-    fn rewind_without_a_checkpoint_truncates_but_leaves_files(cx: &mut gpui::TestAppContext) {
-        let plain =
-            std::env::temp_dir().join(format!("tcode-rewind-plain-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&plain).unwrap();
-        let state = scratch_state(plain.clone(), cx);
-
-        state.update(cx, |state, cx| {
-            let id = state.active.as_ref().unwrap().meta.id.clone();
-            let offset0 = fake_turn(state, "add a file", "Created agent.txt.", cx);
-            std::fs::write(plain.join("agent.txt"), "written by the agent\n").unwrap();
-            let offset1 = fake_turn(state, "and again", "Done.", cx);
-            assert!(state.active.as_ref().unwrap().meta.checkpoints.is_empty());
-
-            // Rewind to turn 1: the boundary is recomputed by replaying the log.
-            assert_eq!(state.rewind_to_turn(1, cx), Some(false));
-            assert_eq!(state.store.event_count(&id), offset1);
-            assert_eq!(state.last_user_turn(), Some(0));
-
-            // The agent's file survives (nothing to restore from) — hence the
-            // honest toast.
-            assert!(plain.join("agent.txt").exists());
-            let _ = offset0;
-        });
-
-        let _ = std::fs::remove_dir_all(&plain);
-    }
-
-    /// Checkpoints are capped: past `MAX_CHECKPOINTS_PER_SESSION` the oldest
-    /// turns lose both the meta entry (no more Revert affordance) and the git
-    /// ref pinning their snapshot (deleted off the main thread).
-    #[gpui::test]
-    fn checkpoints_are_capped_and_old_refs_pruned(cx: &mut gpui::TestAppContext) {
-        let repo = scratch_repo();
-        let state = scratch_state(repo.clone(), cx);
-        let mut id = String::new();
-
-        state.update(cx, |state, cx| {
-            id = state.active.as_ref().unwrap().meta.id.clone();
-            for turn in 0..MAX_CHECKPOINTS_PER_SESSION + 2 {
-                fake_turn(state, &format!("turn {turn}"), "Done.", cx);
-            }
-            let checkpoints = &state.active.as_ref().unwrap().meta.checkpoints;
-            assert_eq!(checkpoints.len(), MAX_CHECKPOINTS_PER_SESSION);
-            assert_eq!(checkpoints.first().unwrap().turn, 2);
-            assert!(state.turn_has_checkpoint(2) && !state.turn_has_checkpoint(0));
-        });
-
-        // The ref deletions run on the background executor.
-        cx.run_until_parked();
-
-        assert!(!checkpoint_ref_exists(&repo, &id, 0));
-        assert!(!checkpoint_ref_exists(&repo, &id, 1));
-        assert!(checkpoint_ref_exists(&repo, &id, 2));
-        assert!(checkpoint_ref_exists(
-            &repo,
-            &id,
-            MAX_CHECKPOINTS_PER_SESSION + 1
-        ));
-
-        let _ = std::fs::remove_dir_all(&repo);
-    }
-
     /// An `ActiveSession` wired to a fake live provider: commands land on the
     /// returned receiver, nothing real is spawned.
     fn fake_live_session(cwd: PathBuf) -> (ActiveSession, async_channel::Receiver<SessionCommand>) {
@@ -9254,18 +8723,13 @@ mod tests {
                 .provider_mut(ProviderKind::ClaudeCode)
                 .binary_path = Some("/nonexistent/tcode-test-claude".into());
 
-            // Send → the bubble is in the timeline immediately (the pre-turn
-            // checkpoint runs off-thread; the turn command itself follows once
-            // the capture lands).
+            // Send → the provider command and user bubble are committed in the
+            // same dispatch, with no filesystem snapshot barrier in between.
             state.active = Some(session);
             state.send_turn("first message".into(), Vec::new(), cx);
-            assert_eq!(state.last_user_turn(), Some(0));
-        });
-
-        // Let the checkpoint capture land and release the dispatch.
-        cx.run_until_parked();
-
-        state.update(cx, |state, cx| {
+            assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::User { text, .. } if text == "first message")
+            ));
             let id_a = state.active.as_ref().unwrap().meta.id.clone();
             assert!(matches!(
                 commands_a.try_recv(),
@@ -9319,14 +8783,6 @@ mod tests {
             // Provider comes up (simulated — the queue flush on start).
             state.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
             assert_eq!(state.dispatch_next_queued(cx), Ok(true));
-            // The head is recorded but held until the checkpoint capture lands.
-            assert!(receiver_b.try_recv().is_err());
-        });
-
-        cx.run_until_parked();
-
-        state.update(cx, |state, _cx| {
-            let id_b = state.active.as_ref().unwrap().meta.id.clone();
             assert!(matches!(
                 receiver_b.try_recv(),
                 Ok(SessionCommand::SendTurn { .. })
@@ -9401,13 +8857,6 @@ mod tests {
             state.active = Some(session);
             state.send_turn("run the long migration".into(), Vec::new(), cx);
             state.send_turn("queued follow-up".into(), Vec::new(), cx);
-        });
-
-        // The pre-turn checkpoint capture lands off-thread and releases the
-        // first dispatch (the follow-up stays queued behind it).
-        cx.run_until_parked();
-
-        state.update(cx, |state, cx| {
             state.on_event(
                 &id_a,
                 AgentEvent::TurnStarted {
@@ -9517,13 +8966,6 @@ mod tests {
             state.sessions = state.store.load_index();
             state.active = Some(session);
             state.send_turn("one last thing".into(), Vec::new(), cx);
-        });
-
-        // The pre-turn checkpoint capture lands off-thread and releases the
-        // dispatch.
-        cx.run_until_parked();
-
-        state.update(cx, |state, cx| {
             assert!(matches!(
                 commands.try_recv(),
                 Ok(SessionCommand::SendTurn { .. })

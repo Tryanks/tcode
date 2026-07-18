@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus,
-    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
-    UserInputOption, UserInputQuestion,
+    Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
+    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
+    UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
 };
 
 mod developer_instructions;
@@ -1236,6 +1236,19 @@ impl Actor {
                     PendingRequest::Steer(request_id),
                 )
             }
+            SessionCommand::Rewind {
+                checkpoint_id,
+                mode,
+            } => {
+                self.emit(AgentEvent::RewindFailed {
+                    checkpoint_id,
+                    mode,
+                    error: "Codex app-server has no stable native file-and-conversation rewind API"
+                        .into(),
+                })
+                .await;
+                Ok(())
+            }
             SessionCommand::Shutdown => Ok(()),
         }
     }
@@ -1411,6 +1424,34 @@ impl Actor {
                     usage,
                 })
                 .await;
+            }
+            "turn/diff/updated" => {
+                let turn_id = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| self.active_turn.clone())
+                    .unwrap_or_default();
+                let diff = params
+                    .get("diff")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match file_changes_from_unified_diff(diff) {
+                    Ok(changes) => {
+                        self.emit(AgentEvent::TurnChangesUpdated {
+                            turn_id,
+                            changes,
+                            completeness: ChangeCompleteness::Exact,
+                        })
+                        .await;
+                    }
+                    Err(err) => {
+                        self.emit(AgentEvent::Warning(format!(
+                            "Codex supplied an invalid turn diff: {err}"
+                        )))
+                        .await;
+                    }
+                }
             }
             "item/started" | "item/updated" | "item/completed" => {
                 let item_value = params.get("item");
@@ -2386,6 +2427,44 @@ mod tests {
         assert_eq!(usage.used_tokens, Some(120));
         assert_eq!(usage.total_processed_tokens, Some(5000));
         assert_eq!(usage.context_window, Some(200000));
+    }
+
+    #[test]
+    fn turn_diff_notification_maps_to_exact_replacement_snapshot() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("turn-9".into());
+            actor
+                .handle_notification(
+                    "turn/diff/updated",
+                    &json!({
+                        "turnId": "turn-9",
+                        "diff": concat!(
+                            "diff --git a/src/lib.rs b/src/lib.rs\n",
+                            "--- a/src/lib.rs\n",
+                            "+++ b/src/lib.rs\n",
+                            "@@ -1 +1 @@\n",
+                            "-old\n",
+                            "+new\n"
+                        )
+                    }),
+                )
+                .await;
+
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnChangesUpdated {
+                    turn_id,
+                    completeness: ChangeCompleteness::Exact,
+                    changes,
+                } if turn_id == "turn-9"
+                    && changes.len() == 1
+                    && changes[0].path == "src/lib.rs"
+                    && changes[0].kind == FileChangeKind::Modify
+            ));
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]

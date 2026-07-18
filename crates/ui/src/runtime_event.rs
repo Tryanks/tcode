@@ -1,3 +1,4 @@
+use agent::RewindMode;
 use tcode_core::git::GitAction;
 use tcode_runtime::event::{
     GitActionRequest, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice, RuntimeOperationId,
@@ -62,8 +63,8 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::DeleteProject { error } => {
                     tcode_i18n::tr!("errors.delete_project", error = error).into_owned()
                 }
-                RuntimeError::CheckpointRevertBlocked => {
-                    tcode_i18n::tr!("checkpoint.revert_blocked").into_owned()
+                RuntimeError::NativeRewindBlocked => {
+                    tcode_i18n::tr!("chat.rewind_blocked").into_owned()
                 }
                 RuntimeError::PersistEvent { error } => {
                     tcode_i18n::tr!("errors.persist_event", error = error).into_owned()
@@ -112,12 +113,15 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                     tcode_i18n::tr!("notice.update_done", provider = provider.display_name())
                         .into_owned()
                 }
-                RuntimeNotice::CheckpointReverted => {
-                    tcode_i18n::tr!("checkpoint.reverted").into_owned()
-                }
-                RuntimeNotice::EditWithoutCheckpoint => {
-                    tcode_i18n::tr!("chat.edit_no_checkpoint").into_owned()
-                }
+                RuntimeNotice::NativeRewindCompleted { mode } => match mode {
+                    RewindMode::Files => tcode_i18n::tr!("chat.rewind_files_done").into_owned(),
+                    RewindMode::Conversation => {
+                        tcode_i18n::tr!("chat.rewind_conversation_done").into_owned()
+                    }
+                    RewindMode::FilesAndConversation => {
+                        tcode_i18n::tr!("chat.rewind_all_done").into_owned()
+                    }
+                },
                 RuntimeNotice::PlanSaved { file } => {
                     tcode_i18n::tr!("plan.saved_workspace", file = file).into_owned()
                 }
@@ -304,7 +308,7 @@ mod tests {
             RuntimeError::WorktreeRemove { error: "x".into() },
             RuntimeError::DeleteSession { error: "x".into() },
             RuntimeError::DeleteProject { error: "x".into() },
-            RuntimeError::CheckpointRevertBlocked,
+            RuntimeError::NativeRewindBlocked,
             RuntimeError::PersistEvent { error: "x".into() },
             RuntimeError::WorktreeAdd { error: "x".into() },
             RuntimeError::PersistSession { error: "x".into() },
@@ -333,8 +337,9 @@ mod tests {
             RuntimeNotice::UpdateDone {
                 provider: ProviderKind::Acp,
             },
-            RuntimeNotice::CheckpointReverted,
-            RuntimeNotice::EditWithoutCheckpoint,
+            RuntimeNotice::NativeRewindCompleted {
+                mode: RewindMode::FilesAndConversation,
+            },
             RuntimeNotice::PlanSaved {
                 file: "plan.md".into(),
             },

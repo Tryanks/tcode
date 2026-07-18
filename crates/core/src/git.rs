@@ -10,12 +10,11 @@ use std::collections::HashSet;
 
 use agent::FileChange;
 
-/// Collapse per-edit file changes into one approximate change per path.
+/// Collapse structured file-change operations into one change per path.
 ///
-/// This is the non-git fallback used by turn summaries. Concatenating the
-/// fragments makes line statistics additive; it is deliberately only an
-/// approximation because overlapping edits require checkpoint trees to obtain
-/// the real net diff.
+/// Providers without a canonical turn diff use this as a partial summary.
+/// Concatenating fragments preserves every reported operation, but overlapping
+/// edits can make the resulting line statistics non-net.
 pub fn merge_file_changes_by_path<'a>(
     changes: impl IntoIterator<Item = &'a FileChange>,
 ) -> Vec<FileChange> {

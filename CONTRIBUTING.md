@@ -88,19 +88,7 @@ without touching your real threads.
 `--debug-image <path>`, `--debug-live`, `--debug-send <text>`,
 `--debug-palette <query>`,
 `--debug-settings-section <general|providers|orchestrate|archived>`,
-`--debug-queue "msg1|msg2"`, `--debug-edit-open`.
-
-`--debug-edit-resend "<text>"` exercises **Edit & resend** end to end (rewind the
-worktree from the turn's git checkpoint, truncate the transcript, roll the
-provider session back, send a new turn) — something you cannot drive by hovering
-a bubble headlessly:
-
-```sh
-git init /tmp/er
-cargo run -- --smoke "claude|/tmp/er|Create agent.txt containing hello."
-cargo run -- --debug-edit-resend "Create edited.txt containing bye."
-# agent.txt is gone; the transcript starts at the edited message; edited.txt exists.
-```
+`--debug-queue "msg1|msg2"`.
 
 ## Code layout
 

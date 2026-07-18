@@ -33,8 +33,7 @@ use gpui_component::{
 
 use crate::material;
 use crate::plan_panel::PlanPanel;
-use tcode_core::git::merge_file_changes_by_path;
-use tcode_core::session::{EntryContent, ReviewComment, ReviewSide};
+use tcode_core::session::{ReviewComment, ReviewSide};
 use tcode_runtime::app::{AppState, RightTab};
 use tcode_runtime::ui_facade::{
     GitDiffResult, GitDiffScope, load_git_diff, relativize_to_workspace,
@@ -725,15 +724,11 @@ impl DiffPanel {
             let changes = match scope {
                 DiffScope::Turn(turn) => active
                     .timeline
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.turn == turn)
-                    .filter_map(|entry| match &entry.content {
-                        EntryContent::FileChange { changes, .. } => Some(changes.clone()),
-                        _ => None,
-                    })
-                    .flatten()
-                    .collect(),
+                    .turns
+                    .get(turn)
+                    .and_then(|turn| turn.changes.as_ref())
+                    .map(|changes| changes.changes.clone())
+                    .unwrap_or_default(),
                 DiffScope::WorkingTree | DiffScope::Branch => Vec::new(),
             };
             (
@@ -744,16 +739,6 @@ impl DiffPanel {
                 active.meta.cwd.clone(),
             )
         };
-
-        if let DiffScope::Turn(turn) = scope {
-            changes = merge_file_changes_by_path(&changes);
-            if let Some(net_changes) = self.app_state.update(cx, |state, cx| {
-                state.request_turn_net_file_changes(turn, cx);
-                state.turn_net_file_changes(turn)
-            }) {
-                changes = net_changes;
-            }
-        }
 
         if matches!(scope, DiffScope::WorkingTree | DiffScope::Branch) {
             let base = (scope == DiffScope::Branch)

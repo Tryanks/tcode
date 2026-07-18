@@ -29,7 +29,7 @@ squinting at scrollback.
 Tcode is a desktop layer over the agent CLIs already installed on your machine.
 It spawns them, speaks their native protocols, and adds the things a terminal
 can't: threads that persist, rendered diffs, a readable approval panel, and a
-rewind button for when the agent goes the wrong way.
+native provider actions when the underlying CLI exposes them.
 
 It does **not** replace your agent, proxy your API keys, or run a server. Your
 accounts, subscriptions, models and tooling keep working exactly as they do
@@ -41,10 +41,10 @@ today — Tcode just drives them.
 project. Close the app, reopen it, keep talking — the agent resumes where it left
 off.
 
-**Rewind.** Before every turn, Tcode snapshots your working tree into a hidden
-git ref. Agent went sideways? Revert to any earlier message and the files come
-back with it. Or edit that message and resend: the transcript *and* the working
-tree rewind to that point, and the new turn runs from there.
+**Provider-native rewind.** Claude Code sessions expose Claude's own checkpoint
+options for restoring code, conversation, or both. Tcode forwards those native
+operations and records the confirmed result; it does not snapshot your Git
+working tree or synthesize rollback for providers that lack the capability.
 
 **Diffs, not scrollback.** Syntax-highlighted per-turn diffs in a resizable
 split, with a changed-files card on each turn.
