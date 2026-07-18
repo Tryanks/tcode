@@ -7,7 +7,7 @@ edition = "2024"
 agent = { path = "../agent" }
 tcode-core = { path = "../core" }
 base64 = "0.22"
-bzip2 = "0.5"
+bzip2 = "0.6"
 chrono = "0.4"
 dirs = "6"
 flate2 = "1"
