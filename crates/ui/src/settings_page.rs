@@ -59,16 +59,6 @@ enum Section {
     Archived,
 }
 
-impl Section {
-    /// The restart-continuity marker token for the permission-bearing pages.
-    fn relaunch_token(self) -> &'static str {
-        match self {
-            Section::Browser => "browser",
-            _ => "computer_use",
-        }
-    }
-}
-
 /// Apply a settings theme mode to the live window (shared with the palette's
 /// "Toggle theme" action).
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
@@ -96,8 +86,8 @@ pub struct SettingsPage {
     section: Section,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: Entity<InputState>,
-    /// Last-known TCC permission snapshot, refreshed when a permission-bearing
-    /// page becomes visible and on every explicit Recheck / Grant.
+    /// Last-known TCC permission snapshot, refreshed when Computer Use becomes
+    /// visible and on every explicit Recheck / Grant.
     perm_status: PermissionStatus,
     /// Whether a Screen Recording grant looks pending-restart (a fresh grant
     /// only takes effect after tcode relaunches). Drives the restart banner.
@@ -321,9 +311,9 @@ impl SettingsPage {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = section;
-                    // Refresh the TCC snapshot each time a permission-bearing
-                    // page becomes visible (cheap native calls, event-driven).
-                    if matches!(section, Section::Browser | Section::ComputerUse) {
+                    // Refresh the TCC snapshot each time Computer Use becomes
+                    // visible (cheap native calls, event-driven).
+                    if section == Section::ComputerUse {
                         this.perm_status = permissions::check();
                     }
                     cx.notify();
@@ -877,16 +867,11 @@ impl SettingsPage {
                 |s, checked| s.browser.allow_evaluate = checked,
             ),
         ];
-        v_flex()
-            .gap(px(24.))
-            .child(
-                v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("browser.section"), cx))
-                    .child(self.grouped(rows, cx)),
-            )
-            // The preview panel's screenshot tool needs Screen Recording too, so
-            // the Browser page shares the same permission row widget.
-            .child(self.permissions_group(&[PermissionKind::ScreenRecording], cx))
+        v_flex().gap(px(24.)).child(
+            v_flex()
+                .child(self.section_label(tcode_i18n::tr!("browser.section"), cx))
+                .child(self.grouped(rows, cx)),
+        )
     }
 
     fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -997,8 +982,8 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// The shared "System permissions" group used by both permission-bearing
-    /// pages. Non-macOS platforms have no TCC, so it shows a quiet note instead.
+    /// The Computer Use "System permissions" group. Non-macOS platforms have
+    /// no TCC, so it shows a quiet note instead.
     fn permissions_group(&self, kinds: &[PermissionKind], cx: &mut Context<Self>) -> AnyElement {
         let col = v_flex()
             .child(self.section_label(tcode_i18n::tr!("computer_use.permissions_section"), cx));
@@ -1140,8 +1125,9 @@ impl SettingsPage {
     /// the matching System Settings pane. The marker must be written *first*:
     /// macOS may quit tcode from its own "Quit & Reopen" dialog.
     fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        let token = self.section.relaunch_token();
-        self.app_state.read(cx).write_relaunch_marker(token);
+        self.app_state
+            .read(cx)
+            .write_relaunch_marker("computer_use");
         let _ = request(kind);
         open_settings_pane(kind);
         if kind == PermissionKind::ScreenRecording {
@@ -1163,8 +1149,9 @@ impl SettingsPage {
     }
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let token = self.section.relaunch_token();
-        self.app_state.read(cx).write_relaunch_marker(token);
+        self.app_state
+            .read(cx)
+            .write_relaunch_marker("computer_use");
         if let Err(err) = relaunch_app() {
             log::warn!("failed to relaunch tcode: {err}");
             return;

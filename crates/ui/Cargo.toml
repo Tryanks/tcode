@@ -29,6 +29,15 @@ gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2-app-kit = { version = "0.3.2", features = ["NSGraphicsContext", "NSImage", "NSImageRep", "objc2-core-graphics"] }
+objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGImage"] }
+objc2-foundation = { version = "0.3.2", features = ["NSError"] }
+objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"] }
+objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKWebView"] }
+
 [dev-dependencies]
 criterion = "0.7"
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }

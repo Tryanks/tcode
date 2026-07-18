@@ -217,7 +217,7 @@ permissions:
     why: "Read the on-screen accessibility tree and post keyboard and mouse events."
   screen_recording:
     name: "Screen Recording"
-    why: "Capture window screenshots for observations and the preview panel."
+    why: "Capture window screenshots for computer-use observations."
 orchestrate:
   restore_default: "Restore default"
   child_approval:

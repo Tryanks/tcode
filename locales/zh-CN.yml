@@ -217,7 +217,7 @@ permissions:
     why: "读取屏幕上的辅助功能树，并发送键盘和鼠标事件。"
   screen_recording:
     name: "屏幕录制"
-    why: "为观察结果和预览面板截取窗口截图。"
+    why: "为计算机使用观察结果截取窗口截图。"
 orchestrate:
   restore_default: "恢复默认"
   child_approval:

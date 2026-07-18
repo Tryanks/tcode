@@ -63,12 +63,12 @@ install/signing/attribution handling entirely.
 | Permission | Needed for | Check | Request |
 | --- | --- | --- | --- |
 | Accessibility | reading AX trees, posting CGEvents | `AXIsProcessTrusted` | `AXIsProcessTrustedWithOptions(prompt)` |
-| Screen Recording | screenshots (computer use **and** the preview panel's screenshot tool) | `CGPreflightScreenCaptureAccess` | `CGRequestScreenCaptureAccess` |
+| Screen Recording | computer-use screenshots | `CGPreflightScreenCaptureAccess` | `CGRequestScreenCaptureAccess` |
 
 Settings gains two pages:
 
-- **Browser** — enable/disable the embedded preview browser, default home URL, allow-JS-evaluate
-  toggle, plus the Screen Recording permission row (preview screenshots need it too).
+- **Browser** — enable/disable the embedded preview browser, default home URL, and
+  allow-JS-evaluate toggle. Its in-process WKWebView snapshot tool needs no TCC permission.
 - **Computer Use** — master enable toggle, image mode (`auto` / `always` / `never`),
   allow-input-actions toggle (off = observe-only), and one permission row per TCC kind:
   live status, a **Grant** button (fires the TCC prompt and opens the matching
@@ -80,7 +80,7 @@ macOS applies some grants (notably Screen Recording) only after the app restarts
 own "Quit & Reopen" dialog. tcode therefore treats any permission flow as a potential restart:
 
 1. When the user clicks **Grant**, tcode first writes a small `relaunch.json` marker into the
-   data dir: `{ reopen_settings: "computer_use" | "browser", active_session: <id> }`.
+   data dir: `{ reopen_settings: "computer_use", active_session: <id> }`.
 2. Session timelines are already continuously persisted (JSONL + resume cursors), so an
    externally-initiated quit loses nothing.
 3. On startup, a present marker is consumed: the previous active session is reopened, the

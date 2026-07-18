@@ -15,11 +15,6 @@ pub fn open_in_zed(cwd: &Path) -> io::Result<()> {
     tcode_services::desktop::open_in_zed(cwd)
 }
 
-#[cfg(target_os = "macos")]
-pub fn capture_screen_region(region: &str) -> Result<Vec<u8>, String> {
-    tcode_services::desktop::capture_screen_region(region)
-}
-
 pub fn read_file_bytes(path: &Path) -> io::Result<Vec<u8>> {
     tcode_services::user_files::read_bytes(path)
 }
