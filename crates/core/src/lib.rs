@@ -6,5 +6,6 @@ pub mod git;
 pub mod project;
 pub mod provider_models;
 pub mod provider_status;
+pub mod relay;
 pub mod session;
 pub mod settings;

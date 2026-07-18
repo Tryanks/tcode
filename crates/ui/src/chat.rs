@@ -181,6 +181,7 @@ fn plain_text_as_markdown(text: &str) -> String {
 #[derive(Debug)]
 enum Segment<'a> {
     ActivityRun(Vec<&'a TimelineEntry>),
+    Relay(&'a TimelineEntry),
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Error(&'a TimelineEntry),
@@ -262,6 +263,10 @@ fn segment_entries<'a>(
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::User(entry));
             }
+            EntryContent::ProviderRelay { .. } => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::Relay(entry));
+            }
             EntryContent::Assistant { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::Assistant(entry));
@@ -306,6 +311,7 @@ fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             | EntryContent::Reasoning { .. }
             | EntryContent::Error { .. }
             | EntryContent::ProviderStartError { .. } => {}
+            EntryContent::ProviderRelay { .. } => {}
         }
     }
     counts.files = files.len();
@@ -556,6 +562,14 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         }
         EntryContent::Error { message } => message.len().hash(hash),
         EntryContent::ProviderStartError { error } => error.len().hash(hash),
+        EntryContent::ProviderRelay {
+            from_provider,
+            to_provider,
+            ..
+        } => {
+            from_provider.hash(hash);
+            to_provider.hash(hash);
+        }
         EntryContent::ContextCompacted => {}
     }
 }
@@ -826,6 +840,22 @@ impl ChatView {
 
         for (segment_index, segment) in segments.iter().enumerate() {
             match segment {
+                Segment::Relay(entry) => {
+                    let EntryContent::ProviderRelay {
+                        from_provider,
+                        to_provider,
+                        ..
+                    } = entry.content
+                    else {
+                        unreachable!();
+                    };
+                    column = column.child(self.render_relay_divider(
+                        &entry.id,
+                        from_provider,
+                        to_provider,
+                        cx,
+                    ));
+                }
                 Segment::ActivityRun(activities) => {
                     let segment_id = activities[0].id.as_str();
                     column = column.child(self.render_work_log(
@@ -973,6 +1003,41 @@ impl ChatView {
         }
 
         column.into_any_element()
+    }
+
+    fn render_relay_divider(
+        &self,
+        id: &str,
+        from: agent::ProviderKind,
+        to: agent::ProviderKind,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let border = cx.theme().border;
+        let muted = cx.theme().muted_foreground;
+        h_flex()
+            .id(SharedString::from(format!("relay-{id}")))
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(div().h(px(1.)).flex_1().bg(border))
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(border)
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(tcode_i18n::tr!(
+                        "chat.relayed",
+                        from = from.display_name(),
+                        to = to.display_name()
+                    )),
+            )
+            .child(div().h(px(1.)).flex_1().bg(border))
+            .into_any_element()
     }
 
     fn render_native_rewind_button(
