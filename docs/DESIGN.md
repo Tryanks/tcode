@@ -288,6 +288,22 @@ tcode's rule is "finish what you were given, then rest".
 Centered "Pick a thread to continue" (20px semibold) over "Select an existing
 thread or create a new one to get started." (14px muted). No composer rendered.
 
+## Accessibility
+
+Keyboard focus uses one quiet, keyboard-only outline across raw controls: a
+2px outer ring derived from the theme ring token, with theme-specific opacity
+so it remains legible over both paper and carbon surfaces without shifting
+layout. Component-library controls retain their native focus treatment. Hidden
+row actions must enter the normal tab order and reveal themselves when focused,
+not depend on pointer hover.
+
+Interactive surfaces expose the semantic role that matches their behavior
+(button, tab, switch, menu item, option, or terminal) and a localized accessible
+name. Selection, expansion, and toggle state are reported on the owning control.
+Composite menus and listboxes keep keyboard focus in their input or container,
+use menu-item/option descendants, and report the highlighted descendant rather
+than adding every result to the global tab sequence.
+
 ## Verification protocol
 
 For any visual change: `cargo build` (zero warnings) + `cargo test --workspace`
