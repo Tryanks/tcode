@@ -5394,6 +5394,17 @@ impl AppState {
 
         // Session bookkeeping side effects.
         match &event {
+            AgentEvent::TurnStarted { .. } => {
+                if let Some(active) = self
+                    .active
+                    .as_mut()
+                    .filter(|active| active.meta.id == session_id)
+                {
+                    active.turn_in_flight = true;
+                } else if let Some(parked) = self.background.get_mut(session_id) {
+                    parked.turn_in_flight = true;
+                }
+            }
             AgentEvent::SessionStarted { resume, model, .. } => {
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.resume_cursor = Some(resume.clone());

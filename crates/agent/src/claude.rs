@@ -951,16 +951,9 @@ pub(crate) struct Mapper {
     pending_steers: VecDeque<String>,
     /// Once the CLI exposes request checkpoints, never use the legacy fallback.
     saw_requesting: bool,
-    /// Claude may return the turn-level `result` while a Bash command continues
-    /// as a background task. Keep those task ids authoritative so the app does
-    /// not expose a new turn until the command really stops.
-    background_tasks: HashSet<String>,
     /// Bash tasks which were observed in `background_tasks_changed`, retained
     /// until their final notification so the command card can be completed.
     background_task_history: HashSet<String>,
-    /// A successful turn result held while one or more background Bash tasks
-    /// still belong to that turn.
-    pending_turn_completion: Vec<AgentEvent>,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
     native_rewind: bool,
@@ -993,9 +986,7 @@ impl Mapper {
             cumulative_processed: 0,
             pending_steers: VecDeque::new(),
             saw_requesting: false,
-            background_tasks: HashSet::new(),
             background_task_history: HashSet::new(),
-            pending_turn_completion: Vec::new(),
             pending_rewinds: HashMap::new(),
             native_rewind: false,
         }
@@ -1025,6 +1016,15 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
+        id
+    }
+
+    /// Start a turn initiated by the CLI itself (for example, after a background
+    /// task notification). These turns have no user-message rewind checkpoint.
+    fn start_synthesized_turn(&mut self) -> String {
+        self.turn_counter += 1;
+        let id = format!("turn-{}", self.turn_counter);
+        self.current_turn_id = Some(id.clone());
         id
     }
 
@@ -1256,13 +1256,19 @@ impl Mapper {
         }
         match msg.get("type").and_then(Value::as_str) {
             Some("system") => self.on_system(&msg),
-            Some("stream_event") => self.on_stream_event(&msg),
+            Some("stream_event") => {
+                let mut events = self.synthesized_turn_started();
+                events.extend(self.on_stream_event(&msg));
+                events
+            }
             Some("assistant") => {
-                let mut events = if self.saw_requesting {
+                let mut events = self.synthesized_turn_started();
+                let steer_events = if self.saw_requesting {
                     Vec::new()
                 } else {
                     self.accept_pending_steers()
                 };
+                events.extend(steer_events);
                 events.extend(self.on_assistant(&msg));
                 events
             }
@@ -1274,6 +1280,15 @@ impl Mapper {
                 log::debug!("claude: ignoring message type {other:?}");
                 Vec::new()
             }
+        }
+    }
+
+    fn synthesized_turn_started(&mut self) -> Vec<AgentEvent> {
+        if self.session_started && self.current_turn_id.is_none() {
+            let turn_id = self.start_synthesized_turn();
+            vec![AgentEvent::TurnStarted { turn_id }]
+        } else {
+            Vec::new()
         }
     }
 
@@ -1351,7 +1366,7 @@ impl Mapper {
     }
 
     fn on_background_tasks_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
-        let current: HashSet<String> = msg
+        let current = msg
             .get("tasks")
             .and_then(Value::as_array)
             .into_iter()
@@ -1359,10 +1374,9 @@ impl Mapper {
             .filter(|task| task.get("task_type").and_then(Value::as_str) == Some("local_bash"))
             .filter_map(|task| task.get("task_id").and_then(Value::as_str))
             .map(str::to_owned)
-            .collect();
-        self.background_task_history.extend(current.iter().cloned());
-        self.background_tasks = current;
-        self.finish_pending_turn_if_idle()
+            .collect::<HashSet<_>>();
+        self.background_task_history.extend(current);
+        Vec::new()
     }
 
     fn on_task_updated(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1399,14 +1413,11 @@ impl Mapper {
                     .and_then(|task_id| self.task_tools.get(task_id).cloned())
             });
         let Some(tool_use_id) = tool_use_id else {
-            return self.finish_pending_turn_if_idle();
+            return Vec::new();
         };
         let is_background_bash = task_id
             .as_ref()
             .is_some_and(|id| self.background_task_history.remove(id));
-        if let Some(task_id) = &task_id {
-            self.background_tasks.remove(task_id);
-        }
         if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
             self.tail_requests.push(TailRequest::PreferPath {
                 parent_id: tool_use_id.clone(),
@@ -1425,13 +1436,11 @@ impl Mapper {
             .get("summary")
             .and_then(Value::as_str)
             .map(one_line_summary);
-        let mut events = if is_background_bash {
+        if is_background_bash {
             self.complete_background_command(&tool_use_id, status, summary)
         } else {
             self.update_subagent(&tool_use_id, status, summary, false)
-        };
-        events.extend(self.finish_pending_turn_if_idle());
-        events
+        }
     }
 
     fn complete_background_command(
@@ -1462,14 +1471,6 @@ impl Mapper {
                 status,
             },
         })]
-    }
-
-    fn finish_pending_turn_if_idle(&mut self) -> Vec<AgentEvent> {
-        if self.background_tasks.is_empty() {
-            std::mem::take(&mut self.pending_turn_completion)
-        } else {
-            Vec::new()
-        }
     }
 
     fn update_subagent(
@@ -1815,7 +1816,6 @@ impl Mapper {
                         },
                     );
                     if let Some(task_id) = background_task_id {
-                        self.background_tasks.insert(task_id.clone());
                         self.background_task_history.insert(task_id);
                     }
                     ItemContent::CommandExecution {
@@ -2166,12 +2166,7 @@ impl Mapper {
             status,
             usage,
         });
-        if self.background_tasks.is_empty() || status != TurnStatus::Completed {
-            events
-        } else {
-            self.pending_turn_completion = events;
-            Vec::new()
-        }
+        events
     }
 }
 
@@ -3455,7 +3450,7 @@ mod tests {
     }
 
     #[test]
-    fn background_bash_keeps_turn_running_until_task_stops() {
+    fn background_bash_result_completes_turn_immediately() {
         let mut m = Mapper::new();
         let turn_id = m.start_turn();
 
@@ -3504,20 +3499,14 @@ mod tests {
             })
         ));
 
-        // Claude ends its model turn as soon as it launches the process. The
-        // canonical turn must stay open while that process is still listed.
+        // Claude ends its model turn as soon as it launches the process. A
+        // background command must not hold the canonical turn open.
         let result = feed(
             &mut m,
             r#"{"type":"result","subtype":"success","is_error":false}"#,
         );
-        assert!(result.is_empty());
-
-        let finished = feed(
-            &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
-        );
         assert!(matches!(
-            &finished[0],
+            &result[0],
             AgentEvent::TurnCompleted {
                 turn_id: completed,
                 status: TurnStatus::Completed,
@@ -3545,6 +3534,10 @@ mod tests {
             &mut m,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-bg","content":"Command running in background with ID: bg-1"}]},"tool_use_result":{"backgroundTaskId":"bg-1"}}"#,
         );
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_updated","task_id":"bg-1","patch":{"status":"completed"}}"#,
+        );
 
         let finished = feed(
             &mut m,
@@ -3560,6 +3553,139 @@ mod tests {
                 },
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn reinvocation_after_background_task_synthesizes_turn() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"init","session_id":"session-bg","model":"claude-haiku-4-5-20251001"}"#,
+        );
+        let first_turn_id = m.start_turn();
+
+        feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg-bg","content":[{"type":"tool_use","id":"toolu-bg","name":"Bash","input":{"command":"sleep 8 && echo BG_DONE","description":"Launch background sleep command","run_in_background":true}}]}}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"Launch background sleep command"}]}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","description":"Launch background sleep command","task_type":"local_bash"}"#,
+        );
+        feed(
+            &mut m,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu-bg","type":"tool_result","content":"Command running in background with ID: bg-1","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bg-1"}}"#,
+        );
+        let first_result = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Background command launched."}"#,
+        );
+        assert!(matches!(
+            &first_result[0],
+            AgentEvent::TurnCompleted {
+                turn_id,
+                status: TurnStatus::Completed,
+                ..
+            } if turn_id == &first_turn_id
+        ));
+
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+            )
+            .is_empty()
+        );
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"task_updated","task_id":"bg-1","patch":{"status":"completed","end_time":1784396058581}}"#,
+            )
+            .is_empty()
+        );
+        let notification = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"task_notification","task_id":"bg-1","tool_use_id":"toolu-bg","status":"completed","output_file":"/tmp/bg-1.output","summary":"Background command completed (exit code 0)"}"#,
+        );
+        assert_eq!(notification.len(), 1);
+        assert!(matches!(
+            &notification[0],
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    status: ItemStatus::Completed,
+                    exit_code: Some(0),
+                    ..
+                },
+                ..
+            })
+        ));
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"init","session_id":"session-bg","model":"claude-haiku-4-5-20251001"}"#,
+            )
+            .is_empty()
+        );
+
+        let reinvoked = feed(
+            &mut m,
+            r#"{"type":"assistant","message":{"id":"msg-reinvoked","content":[{"type":"text","text":"Background command completed successfully."}]}}"#,
+        );
+        let synthesized_turn_id = match &reinvoked[0] {
+            AgentEvent::TurnStarted { turn_id } => turn_id.clone(),
+            other => panic!("expected synthesized TurnStarted first, got {other:?}"),
+        };
+        assert_ne!(synthesized_turn_id, first_turn_id);
+        assert!(matches!(
+            &reinvoked[1],
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::AssistantMessage { text },
+                ..
+            }) if text == "Background command completed successfully."
+        ));
+
+        let second_result = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Background command completed successfully.","origin":{"kind":"task-notification"}}"#,
+        );
+        assert!(matches!(
+            &second_result[0],
+            AgentEvent::TurnCompleted {
+                turn_id,
+                status: TurnStatus::Completed,
+                ..
+            } if turn_id == &synthesized_turn_id
+        ));
+    }
+
+    #[test]
+    fn unknown_task_notification_without_tool_use_id_does_not_wedge_turn() {
+        let mut m = Mapper::new();
+        let turn_id = m.start_turn();
+
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"task_notification","task_id":"unknown-task","status":"completed"}"#,
+            )
+            .is_empty()
+        );
+        let result = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        );
+        assert!(matches!(
+            &result[0],
+            AgentEvent::TurnCompleted {
+                turn_id: completed,
+                status: TurnStatus::Completed,
+                ..
+            } if completed == &turn_id
         ));
     }
 
