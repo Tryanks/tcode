@@ -11,10 +11,10 @@ use std::{
 use gpui::{
     AnyElement, App, AvailableSpace, Axis, Bounds, Element, ElementId, Entity, FontStyle,
     FontWeight, GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _,
-    IntoElement, LayoutId, Length, ListSizingBehavior, ListState, ObjectFit, Overflow,
-    ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _, Style,
-    StyleRefinement, Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _,
-    px, relative, rems, size,
+    IntoElement, LayoutId, ListSizingBehavior, ListState, ObjectFit, ParentElement as _, Pixels,
+    ScrollHandle, SharedString, StatefulInteractiveElement as _, Style, StyleRefinement,
+    Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px, relative,
+    rems, size,
 };
 use gpui_component::{
     ActiveTheme as _, StyledExt as _, h_flex, highlighter::HighlightTheme, scroll::ScrollableMask,
@@ -142,21 +142,18 @@ pub(super) fn render_root(
     let blocks = children.clone();
     let state = state.clone();
     let style = style.clone();
-    // `Infer` asks its item renderer for min-content width during request-layout.
-    // Pinning each block to the last real parent width prevents those narrow,
-    // wrapped heights from poisoning ListState while this one measuring frame
-    // establishes the exact full document height.
-    div()
-        .id("root")
-        .w_full()
-        .child(
-            gpui::list(list_state, move |ix, window, cx| {
-                render_root_block(&blocks, ix, measurements.width, &state, &style, window, cx)
-            })
-            .with_sizing_behavior(ListSizingBehavior::Infer)
-            .w_full(),
-        )
-        .into_any_element()
+    // `Infer` asks for min-content width during request-layout. Pin the list and
+    // its blocks to the last real parent width so that intrinsic probes cannot
+    // invalidate ListState at a narrow width while this frame measures height.
+    let list = gpui::list(list_state, move |ix, window, cx| {
+        render_root_block(&blocks, ix, measurements.width, &state, &style, window, cx)
+    })
+    .with_sizing_behavior(ListSizingBehavior::Infer)
+    .w_full()
+    .when(measurements.width > px(0.), |list| {
+        list.w(measurements.width)
+    });
+    div().id("root").w_full().child(list).into_any_element()
 }
 
 fn render_root_block(
@@ -966,23 +963,11 @@ fn render_table(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    const DEFAULT_LENGTH: usize = 5;
-
-    let mut col_lens = Vec::new();
+    let mut column_count = 0;
     for row in &table.children {
-        for (ix, cell) in row.children.iter().enumerate() {
-            if col_lens.len() <= ix {
-                col_lens.push(DEFAULT_LENGTH);
-            }
-            col_lens[ix] = col_lens[ix].max(cell.children.text().chars().count());
-        }
+        column_count = column_count.max(row.children.len());
     }
-
-    if matches!(style.table.overflow.x, Some(Overflow::Scroll)) {
-        render_scroll_table(table, col_lens.len(), options, view, style, window, cx)
-    } else {
-        render_wrap_table(table, &col_lens, options, view, style, cx)
-    }
+    render_scroll_table(table, column_count, options, view, style, window, cx)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -997,30 +982,50 @@ fn render_scroll_table(
 ) -> AnyElement {
     const CELL_PAD_PX: f32 = 16.;
     const CELL_MIN_PX: f32 = 48.;
-    const CELL_MAX_PX: f32 = 480.;
 
     let text_style = window.text_style();
     let font_size = text_style.font_size.to_pixels(window.rem_size());
     let mut widths = vec![CELL_MIN_PX; column_count];
-    for row in &table.children {
+    for (row_ix, row) in table.children.iter().enumerate() {
         for (ix, cell) in row.children.iter().enumerate() {
             let Some(slot) = widths.get_mut(ix) else {
                 continue;
             };
-            let mut width = 0_f32;
-            for line in cell.children.text().split('\n') {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
+            let mut width = Pixels::ZERO;
+            let mut line_width = Pixels::ZERO;
+            for child in &cell.children.children {
+                let mut run_style = text_style.clone();
+                if row_ix == 0 {
+                    run_style.font_weight = FontWeight::SEMIBOLD;
                 }
-                let run = text_style.to_run(line.len());
-                let line_width = window
-                    .text_system()
-                    .layout_line(line, font_size, &[run], None)
-                    .width;
-                width = width.max(f32::from(line_width));
+                for (_, mark) in &child.marks {
+                    if mark.bold {
+                        run_style.font_weight = FontWeight::BOLD;
+                    }
+                    if mark.italic {
+                        run_style.font_style = FontStyle::Italic;
+                    }
+                    if mark.code {
+                        run_style.font_family = cx.theme().mono_font_family.clone();
+                    }
+                }
+                for (line_ix, fragment) in child.text.split('\n').enumerate() {
+                    if line_ix > 0 {
+                        width = width.max(line_width);
+                        line_width = Pixels::ZERO;
+                    }
+                    if fragment.is_empty() {
+                        continue;
+                    }
+                    let run = run_style.to_run(fragment.len());
+                    line_width += window
+                        .text_system()
+                        .layout_line(fragment, font_size, &[run], None)
+                        .width;
+                }
             }
-            *slot = slot.max((width + CELL_PAD_PX).clamp(CELL_MIN_PX, CELL_MAX_PX));
+            width = width.max(line_width);
+            *slot = slot.max(f32::from(width) + CELL_PAD_PX);
         }
     }
     let total_width = widths.iter().sum::<f32>();
@@ -1049,7 +1054,6 @@ fn render_scroll_table(
                         .flex_basis(px(widths.get(ix).copied().unwrap_or(CELL_MIN_PX)))
                         .flex_grow(widths.get(ix).copied().unwrap_or(CELL_MIN_PX))
                         .flex_shrink_0()
-                        .overflow_hidden()
                         .whitespace_nowrap()
                         .flex()
                         .px_2()
@@ -1084,6 +1088,19 @@ fn render_scroll_table(
         .use_keyed_state(scroll_key, cx, |_, _| ScrollHandle::default())
         .read(cx)
         .clone();
+    let track = v_flex()
+        .min_w_full()
+        .w(px(total_width))
+        .border_1()
+        .border_color(cx.theme().border)
+        .rounded(cx.theme().radius)
+        .overflow_hidden()
+        .children(rows);
+    #[cfg(test)]
+    let track = {
+        let selector = format!("markdown-table-track-{}", options.path);
+        track.debug_selector(move || selector.clone())
+    };
     div()
         .id(options.path.clone())
         .w_full()
@@ -1096,100 +1113,8 @@ fn render_scroll_table(
             format!("{}-viewport", options.path),
             &scroll,
             &style.table,
-            v_flex()
-                .min_w_full()
-                .w(px(total_width))
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded(cx.theme().radius)
-                .overflow_hidden()
-                .children(rows),
+            track,
         ))
-        .into_any_element()
-}
-
-fn render_wrap_table(
-    table: &Table,
-    col_lens: &[usize],
-    options: &RenderOptions,
-    view: &Entity<MarkdownState>,
-    style: &TextViewStyle,
-    cx: &mut App,
-) -> AnyElement {
-    const MAX_LENGTH: usize = 150;
-
-    let row_count = table.children.len();
-    let rows = table
-        .children
-        .iter()
-        .enumerate()
-        .map(|(row_ix, row)| {
-            div()
-                .id(("table-row", row_ix))
-                .w_full()
-                .flex()
-                .flex_row()
-                .when(row_ix == 0, |this| {
-                    this.bg(cx.theme().tokens.muted)
-                        .font_weight(FontWeight::SEMIBOLD)
-                })
-                .when(row_ix + 1 < row_count, |this| {
-                    this.border_b_1().border_color(cx.theme().border)
-                })
-                .children(row.children.iter().enumerate().map(|(ix, cell)| {
-                    let align = table.column_align(ix);
-                    let len = col_lens
-                        .get(ix)
-                        .copied()
-                        .unwrap_or(MAX_LENGTH)
-                        .min(MAX_LENGTH);
-                    div()
-                        .id(("table-cell", ix))
-                        .overflow_hidden()
-                        .min_w_16()
-                        .w(Length::Definite(relative(len as f32)))
-                        .flex()
-                        .px_2()
-                        .py_1()
-                        .when(align == ColumnumnAlign::Center, |this| this.text_center())
-                        .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .when(align == ColumnumnAlign::Center, |this| {
-                            this.justify_center()
-                        })
-                        .when(align == ColumnumnAlign::Right, |this| this.justify_end())
-                        .when(ix + 1 < row.children.len(), |this| {
-                            this.border_r_1().border_color(cx.theme().border)
-                        })
-                        .refine_style(&style.table_cell)
-                        .child(render_paragraph(
-                            &cell.children,
-                            &format!("{}-{row_ix}-{ix}", options.path),
-                            view,
-                            style,
-                            cx,
-                        ))
-                }))
-        })
-        .collect::<Vec<_>>();
-
-    div()
-        .id(options.path.clone())
-        .w_full()
-        .pb(if options.is_last {
-            rems(0.)
-        } else {
-            style.paragraph_gap
-        })
-        .child(
-            v_flex()
-                .w_full()
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded(cx.theme().radius)
-                .overflow_hidden()
-                .children(rows)
-                .refine_style(&style.table),
-        )
         .into_any_element()
 }
 

@@ -602,7 +602,12 @@ impl MdState {
     fn sync(&mut self, text: String, cx: &mut App) {
         match md_sync(&self.synced, &text) {
             MdSync::Noop => {}
-            MdSync::Push(_) | MdSync::Reset(_) => {
+            MdSync::Push(delta) => {
+                self.state
+                    .update(cx, |state, cx| state.push_str(&delta, cx));
+                self.synced = Arc::from(text);
+            }
+            MdSync::Reset(_) => {
                 self.state.update(cx, |state, cx| state.set_text(&text, cx));
                 self.synced = Arc::from(text);
             }
@@ -789,6 +794,7 @@ impl ChatView {
     /// `pinned` carries the ids of the last user / last assistant message in the
     /// whole timeline: their action rows stay visible instead of waiting for a
     /// hover, so Copy is never invisible-and-hover-only.
+    #[allow(clippy::too_many_arguments)]
     fn render_turn(
         &self,
         index: usize,
@@ -796,6 +802,7 @@ impl ChatView {
         cwd: &Path,
         entries: &[Arc<TimelineEntry>],
         pinned: (Option<&str>, Option<&str>),
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut column = v_flex().w_full().gap_4();
@@ -858,6 +865,7 @@ impl ChatView {
                             *context_len,
                             *steering,
                             pinned.0 == Some(entry.id.as_str()),
+                            window,
                             cx,
                         ));
                     }
@@ -959,6 +967,7 @@ impl ChatView {
                 *context_len,
                 *steering,
                 pinned.0 == Some(entry.id.as_str()),
+                window,
                 cx,
             ));
         }
@@ -1075,6 +1084,7 @@ impl ChatView {
         context_len: Option<usize>,
         steering: Option<SteeringStatus>,
         pinned: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // An `/orchestrate` turn folds an injected context prefix (guidance +
@@ -1085,6 +1095,16 @@ impl ChatView {
             .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
             .map(|len| &text[..len]);
         let visible = user_visible_text(text, context_len);
+        let text_style = window.text_style();
+        let text_width = visible.lines().fold(px(0.), |width, line| {
+            let run = text_style.to_run(line.len());
+            width.max(
+                window
+                    .text_system()
+                    .layout_line(line, px(15.), &[run], None)
+                    .width,
+            )
+        });
 
         let group_key = SharedString::from(format!("user-{entry_id}"));
         let mut actions = h_flex()
@@ -1129,6 +1149,8 @@ impl ChatView {
             .child({
                 let pending = steering == Some(SteeringStatus::Pending);
                 div()
+                    .w(text_width + px(32.))
+                    .flex_none()
                     .max_w_3_4()
                     .px_4()
                     .py_3()
@@ -2718,7 +2740,7 @@ impl Render for ChatView {
         let item_cwd = cwd.clone();
         let timeline = list(
             self.list_state.clone(),
-            cx.processor(move |this, index: usize, _window, cx| {
+            cx.processor(move |this, index: usize, window, cx| {
                 let Some(item) = this.turn_items.get(index) else {
                     return div().into_any_element();
                 };
@@ -2744,6 +2766,7 @@ impl Render for ChatView {
                     &item_cwd,
                     &entries,
                     (last_user_id.as_deref(), last_assistant_id.as_deref()),
+                    window,
                     cx,
                 );
                 h_flex()
