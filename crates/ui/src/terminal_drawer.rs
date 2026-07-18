@@ -10,10 +10,10 @@ use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
-    StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, canvas, div, fill, font, point, prelude::FluentBuilder as _, px, rgb,
-    size,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
+    ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
+    prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _,
@@ -164,7 +164,7 @@ impl TerminalDrawer {
         let app_state_subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
         Self {
             app_state,
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
             cell_width: 7.83,
             cell_height: 17.,
@@ -1276,61 +1276,74 @@ impl Render for TerminalDrawer {
             self.marked_text = None;
         }
 
-        let mut tab_strip = h_flex().min_w_0().gap(px(2.)).overflow_hidden();
+        let mut tab_strip = h_flex()
+            .id("terminal-tab-list")
+            .role(Role::TabList)
+            .aria_label(tcode_i18n::tr!("terminal.tabs"))
+            .min_w_0()
+            .gap(px(2.))
+            .overflow_hidden();
         for (id, label, exited, bell) in &tabs {
             let id = *id;
             let selected = active_id == Some(id);
             let close_id = id;
+            let tab_label = tcode_i18n::tr!("terminal.tab", label = label.clone()).into_owned();
             tab_strip = tab_strip.child(
-                h_flex()
-                    .id(("terminal-tab", id))
-                    .h(px(25.))
-                    .gap(px(2.))
-                    .px_2()
-                    .rounded(material::radius_button())
-                    .cursor_pointer()
-                    .bg(if selected {
-                        cx.theme().list_active
-                    } else {
-                        cx.theme().background.opacity(0.)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.activate_terminal(id, cx));
-                    }))
-                    .child(
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    ("terminal-tab", id),
+                    Role::Tab,
+                    tab_label,
+                    cx,
+                )
+                .aria_selected(selected)
+                .h(px(25.))
+                .gap(px(2.))
+                .px_2()
+                .rounded(material::radius_button())
+                .cursor_pointer()
+                .bg(if selected {
+                    cx.theme().list_active
+                } else {
+                    cx.theme().background.opacity(0.)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.app_state
+                        .update(cx, |state, cx| state.activate_terminal(id, cx));
+                }))
+                .child(
+                    div()
+                        .max_w(px(92.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_size(px(11.))
+                        .text_color(if *exited || !selected {
+                            cx.theme().muted_foreground
+                        } else {
+                            cx.theme().foreground
+                        })
+                        .child(label.clone()),
+                )
+                .when(*bell, |this| {
+                    this.child(
                         div()
-                            .max_w(px(92.))
-                            .overflow_hidden()
-                            .text_ellipsis()
                             .text_size(px(11.))
-                            .text_color(if *exited || !selected {
-                                cx.theme().muted_foreground
-                            } else {
-                                cx.theme().foreground
-                            })
-                            .child(label.clone()),
+                            .text_color(cx.theme().warning)
+                            .child("●"),
                     )
-                    .when(*bell, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().warning)
-                                .child("●"),
-                        )
-                    })
-                    .child(
-                        Button::new(("terminal-tab-close", close_id))
-                            .ghost()
-                            .compact()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .tooltip(tcode_i18n::tr!("terminal.close_tab"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.app_state
-                                    .update(cx, |state, cx| state.close_terminal(close_id, cx));
-                            })),
-                    ),
+                })
+                .child(
+                    Button::new(("terminal-tab-close", close_id))
+                        .ghost()
+                        .compact()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip(tcode_i18n::tr!("terminal.close_tab"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.app_state
+                                .update(cx, |state, cx| state.close_terminal(close_id, cx));
+                        })),
+                ),
             );
         }
 
@@ -1496,12 +1509,18 @@ impl Render for TerminalDrawer {
             .on_action(cx.listener(Self::on_terminal_add_context))
             .child(header)
             .child(
-                div()
-                    .track_focus(&self.focus_handle)
-                    .on_key_down(cx.listener(Self::on_key_down))
-                    .flex_1()
-                    .min_h_0()
-                    .child(body),
+                crate::material::accessible_clickable(
+                    div(),
+                    "terminal-content",
+                    Role::Terminal,
+                    tcode_i18n::tr!("terminal.content"),
+                    cx,
+                )
+                .track_focus(&self.focus_handle)
+                .on_key_down(cx.listener(Self::on_key_down))
+                .flex_1()
+                .min_h_0()
+                .child(body),
             )
     }
 }

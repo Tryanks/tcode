@@ -8,8 +8,8 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme,
@@ -68,6 +68,10 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
         ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, Some(window), cx),
         ThemeMode::System => Theme::sync_system_appearance(Some(window), cx),
     }
+}
+
+fn apply_toggle_value(settings: &mut Settings, checked: bool, mutate: fn(&mut Settings, bool)) {
+    mutate(settings, !checked);
 }
 
 pub struct SettingsPage {
@@ -286,8 +290,8 @@ impl SettingsPage {
             } else {
                 cx.theme().muted_foreground
             };
-            div()
-                .id(id)
+            crate::material::accessible_clickable(div(), id, Role::Tab, label.clone(), cx)
+                .aria_selected(active)
                 .child(
                     gpui_component::h_flex()
                         .h(px(34.))
@@ -349,6 +353,9 @@ impl SettingsPage {
             )
             .child(
                 v_flex()
+                    .id("settings-nav-tabs")
+                    .role(Role::TabList)
+                    .aria_label(tcode_i18n::tr!("settings.title"))
                     .flex_1()
                     .min_h_0()
                     .px_2()
@@ -404,28 +411,33 @@ impl SettingsPage {
             )
             .child(
                 div().flex_none().child(
-                    gpui_component::h_flex()
-                        .id("settings-back")
-                        // Mirror the main sidebar footer (the "Settings" entry that
-                        // enters this route): same 40px height, muted leading icon.
-                        .h(px(40.))
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().sidebar_accent))
-                        .text_size(px(13.))
-                        .text_color(cx.theme().sidebar_foreground)
-                        .child(
-                            Icon::new(IconName::ArrowLeft)
-                                .size_4()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(tcode_i18n::tr!("settings.back"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.app_state
-                                .update(cx, |state, cx| state.close_settings(cx));
-                        })),
+                    crate::material::accessible_clickable(
+                        gpui_component::h_flex(),
+                        "settings-back",
+                        Role::Button,
+                        tcode_i18n::tr!("settings.back"),
+                        cx,
+                    )
+                    // Mirror the main sidebar footer (the "Settings" entry that
+                    // enters this route): same 40px height, muted leading icon.
+                    .h(px(40.))
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().sidebar_accent))
+                    .text_size(px(13.))
+                    .text_color(cx.theme().sidebar_foreground)
+                    .child(
+                        Icon::new(IconName::ArrowLeft)
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(tcode_i18n::tr!("settings.back"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.app_state
+                            .update(cx, |state, cx| state.close_settings(cx));
+                    })),
                 ),
             )
             .into_any_element()
@@ -922,38 +934,47 @@ impl SettingsPage {
                  -> AnyElement {
                     let this = this.clone();
                     let popover = cx.entity();
-                    gpui_component::h_flex()
-                        .id(label_key)
-                        .w_full()
-                        .px_2()
-                        .py_1p5()
-                        .gap_2()
-                        .items_start()
-                        .rounded(crate::material::radius_button())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().accent))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .gap_0p5()
-                                .child(div().text_size(px(13.)).child(tcode_i18n::tr!(label_key)))
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(tcode_i18n::tr!(desc_key)),
-                                ),
-                        )
-                        .when(m == mode, |d| d.child(Icon::new(IconName::Check).xsmall()))
-                        .on_click(move |_, window, cx| {
-                            this.update(cx, |page, cx| {
-                                page.update_settings(|s| s.computer_use.image_mode = m, cx);
-                            });
-                            popover.update(cx, |st, cx| st.dismiss(window, cx));
-                        })
-                        .into_any_element()
+                    crate::material::accessible_clickable(
+                        gpui_component::h_flex(),
+                        label_key,
+                        Role::MenuItem,
+                        tcode_i18n::tr!(label_key),
+                        cx,
+                    )
+                    .aria_selected(m == mode)
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_2()
+                    .items_start()
+                    .rounded(crate::material::radius_button())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().text_size(px(13.)).child(tcode_i18n::tr!(label_key)))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(tcode_i18n::tr!(desc_key)),
+                            ),
+                    )
+                    .when(m == mode, |d| d.child(Icon::new(IconName::Check).xsmall()))
+                    .on_click(move |_, window, cx| {
+                        this.update(cx, |page, cx| {
+                            page.update_settings(|s| s.computer_use.image_mode = m, cx);
+                        });
+                        popover.update(cx, |st, cx| st.dismiss(window, cx));
+                    })
+                    .into_any_element()
                 };
                 v_flex()
+                    .id("cu-image-mode-menu")
+                    .role(Role::Menu)
+                    .aria_label(tcode_i18n::tr!("computer_use.image_mode.title"))
                     .p_1()
                     .min_w(px(260.))
                     .gap_0p5()
@@ -1259,15 +1280,48 @@ impl SettingsPage {
         cx: &mut Context<Self>,
         mutate: fn(&mut Settings, bool),
     ) -> AnyElement {
-        self.row_frame(cx)
-            .child(self.row_labels(title, desc, cx))
-            .child(Switch::new(id).checked(checked).on_click(cx.listener(
-                move |this, checked: &bool, _, cx| {
-                    let checked = *checked;
-                    this.update_settings(|s| mutate(s, checked), cx);
-                },
-            )))
-            .into_any_element()
+        let title = title.into();
+        let desc = desc.into();
+        crate::material::accessible_clickable(
+            self.row_frame(cx),
+            SharedString::from(format!("{id}-row")),
+            Role::Switch,
+            title.clone(),
+            cx,
+        )
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .cursor_pointer()
+        // Handle Space during capture so the native event cannot fall through
+        // to scrolling/text input before the row's synthesized click runs.
+        // Enter continues to use GPUI's standard focused-click behavior.
+        .capture_key_down(
+            cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "space"
+                    && !event.is_held
+                    && !event.keystroke.modifiers.modified()
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.update_settings(
+                        |settings| apply_toggle_value(settings, checked, mutate),
+                        cx,
+                    );
+                }
+            }),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.update_settings(|settings| apply_toggle_value(settings, checked, mutate), cx);
+        }))
+        .child(self.row_labels(title, desc, cx))
+        // gpui-component 0315556's Switch is still mouse-only. It is
+        // intentionally visual here; the semantic row above owns click,
+        // focus, keyboard activation, and the toggled state.
+        .child(Switch::new(id).checked(checked))
+        .into_any_element()
     }
 
     fn dropdown_trigger(
@@ -1309,6 +1363,7 @@ impl SettingsPage {
             .content(move |_, _, cx| {
                 let this = this.clone();
                 let option = |mode: ThemeMode,
+                              id: &'static str,
                               label: SharedString,
                               selected: bool,
                               this: &Entity<SettingsPage>,
@@ -1316,34 +1371,44 @@ impl SettingsPage {
                  -> AnyElement {
                     let this = this.clone();
                     let popover = cx.entity();
-                    gpui_component::h_flex()
-                        .id(label.clone())
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .items_center()
-                        .rounded(crate::material::radius_button())
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().accent))
-                        .child(div().flex_1().child(label.clone()))
-                        .when(selected, |d| d.child(Icon::new(IconName::Check).xsmall()))
-                        .on_click(move |_, window, cx| {
-                            this.update(cx, |page, cx| {
-                                page.update_settings(|s| s.theme_mode = mode, cx);
-                            });
-                            apply_theme(mode, window, cx);
-                            popover.update(cx, |st, cx| st.dismiss(window, cx));
-                        })
-                        .into_any_element()
+                    crate::material::accessible_clickable(
+                        gpui_component::h_flex(),
+                        id,
+                        Role::MenuItem,
+                        label.clone(),
+                        cx,
+                    )
+                    .aria_selected(selected)
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .items_center()
+                    .rounded(crate::material::radius_button())
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().accent))
+                    .child(div().flex_1().child(label.clone()))
+                    .when(selected, |d| d.child(Icon::new(IconName::Check).xsmall()))
+                    .on_click(move |_, window, cx| {
+                        this.update(cx, |page, cx| {
+                            page.update_settings(|s| s.theme_mode = mode, cx);
+                        });
+                        apply_theme(mode, window, cx);
+                        popover.update(cx, |st, cx| st.dismiss(window, cx));
+                    })
+                    .into_any_element()
                 };
                 v_flex()
+                    .id("theme-options-menu")
+                    .role(Role::Menu)
+                    .aria_label(tcode_i18n::tr!("settings.theme.title"))
                     .p_1()
                     .min_w(px(160.))
                     .gap_0p5()
                     .child(option(
                         ThemeMode::System,
+                        "theme-option-system",
                         tcode_i18n::tr!("settings.theme.system").into_owned().into(),
                         mode == ThemeMode::System,
                         &this,
@@ -1351,6 +1416,7 @@ impl SettingsPage {
                     ))
                     .child(option(
                         ThemeMode::Light,
+                        "theme-option-light",
                         tcode_i18n::tr!("settings.theme.light").into_owned().into(),
                         mode == ThemeMode::Light,
                         &this,
@@ -1358,6 +1424,7 @@ impl SettingsPage {
                     ))
                     .child(option(
                         ThemeMode::Dark,
+                        "theme-option-dark",
                         tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
                         mode == ThemeMode::Dark,
                         &this,
@@ -1397,32 +1464,38 @@ impl SettingsPage {
                         let page = page.clone();
                         let popover = cx.entity();
                         let is_selected = selected.as_deref() == value;
-                        gpui_component::h_flex()
-                            .id(key)
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .gap_2()
-                            .items_center()
-                            .rounded(crate::material::radius_button())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().accent))
-                            .child(div().flex_1().child(tcode_i18n::tr!(key)))
-                            .when(is_selected, |d| {
-                                d.child(Icon::new(IconName::Check).xsmall())
-                            })
-                            .on_click(move |_, window, cx| {
-                                page.update(cx, |page, cx| {
-                                    page.update_settings(
-                                        |s| s.language = value.map(str::to_owned),
-                                        cx,
-                                    )
-                                });
-                                popover.update(cx, |state, cx| state.dismiss(window, cx));
-                            })
+                        crate::material::accessible_clickable(
+                            gpui_component::h_flex(),
+                            key,
+                            Role::MenuItem,
+                            tcode_i18n::tr!(key),
+                            cx,
+                        )
+                        .aria_selected(is_selected)
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_center()
+                        .rounded(crate::material::radius_button())
+                        .text_size(px(13.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent))
+                        .child(div().flex_1().child(tcode_i18n::tr!(key)))
+                        .when(is_selected, |d| {
+                            d.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click(move |_, window, cx| {
+                            page.update(cx, |page, cx| {
+                                page.update_settings(|s| s.language = value.map(str::to_owned), cx)
+                            });
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        })
                     };
                 v_flex()
+                    .id("language-options-menu")
+                    .role(Role::Menu)
+                    .aria_label(tcode_i18n::tr!("settings.language.title"))
                     .p_1()
                     .min_w(px(160.))
                     .gap_0p5()
@@ -1486,5 +1559,25 @@ fn humanize_ago(secs: u64) -> String {
         tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
     } else {
         tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessible_toggle_activation_applies_the_inverse_setting_value() {
+        let mut settings = Settings::default();
+
+        apply_toggle_value(&mut settings, false, |settings, value| {
+            settings.word_wrap_diffs = value;
+        });
+        assert!(settings.word_wrap_diffs);
+
+        apply_toggle_value(&mut settings, true, |settings, value| {
+            settings.word_wrap_diffs = value;
+        });
+        assert!(!settings.word_wrap_diffs);
     }
 }

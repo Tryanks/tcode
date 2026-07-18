@@ -19,7 +19,7 @@ use agent::{FileChange, FileChangeKind};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
     IntoElement, ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    MouseMoveEvent, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
     StyledText, Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -1103,8 +1103,8 @@ impl DiffPanel {
                    is_active: bool,
                    cx: &mut Context<Self>|
          -> gpui::Stateful<gpui::Div> {
-            h_flex()
-                .id(id)
+            material::accessible_clickable(h_flex(), id, Role::Tab, label.clone(), cx)
+                .aria_selected(is_active)
                 .h(px(28.))
                 .px_2p5()
                 .gap_1p5()
@@ -1122,6 +1122,9 @@ impl DiffPanel {
         };
 
         h_flex()
+            .id("right-panel-tabs")
+            .role(Role::TabList)
+            .aria_label(tcode_i18n::tr!("diff.panel_tabs"))
             .flex_none()
             .h(px(40.))
             .w_full()
@@ -1242,8 +1245,14 @@ impl DiffPanel {
                     >| {
                         let panel = panel_for.clone();
                         let session = session_for.clone();
-                        h_flex()
-                            .id(id)
+                        material::accessible_clickable(
+                            h_flex(),
+                            id,
+                            Role::MenuItem,
+                            label.clone(),
+                            cx,
+                        )
+                            .aria_selected(selected_scope == Some(scope))
                             .flex_none()
                             .w_full()
                             .px_2()
@@ -1305,44 +1314,52 @@ impl DiffPanel {
                     let panel = panel.clone();
                     let session = session_selector.clone();
                     let is_sel = selected_scope == Some(DiffScope::Turn(turn));
+                    let turn_label: gpui::SharedString =
+                        tcode_i18n::tr!("diff.turn", count = turn + 1)
+                            .into_owned()
+                            .into();
                     list = list.child(
-                        h_flex()
-                            .id(("diff-turn-item", turn))
-                            .flex_none()
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .gap_2()
-                            .items_center()
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(cx.theme().list_hover))
-                            .when(is_sel, |this| this.bg(cx.theme().list_active))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(tcode_i18n::tr!("diff.turn", count = turn + 1)),
-                            )
-                            .when(is_sel, |this| {
-                                this.child(Icon::new(IconName::Check).xsmall())
-                            })
-                            .on_click({
-                                let popover = cx.entity();
-                                move |_, window, cx| {
-                                    panel.update(cx, |this, cx| {
-                                        this.scopes.insert(session.clone(), DiffScope::Turn(turn));
-                                        this.cache = None;
-                                        this.selection = None;
-                                        cx.notify();
-                                    });
-                                    popover.update(cx, |st, cx| st.dismiss(window, cx));
-                                }
-                            }),
+                        material::accessible_clickable(
+                            h_flex(),
+                            ("diff-turn-item", turn),
+                            Role::MenuItem,
+                            turn_label.clone(),
+                            cx,
+                        )
+                        .aria_selected(is_sel)
+                        .flex_none()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_center()
+                        .rounded(px(6.))
+                        .text_size(px(13.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().list_hover))
+                        .when(is_sel, |this| this.bg(cx.theme().list_active))
+                        .child(div().flex_1().child(turn_label))
+                        .when(is_sel, |this| {
+                            this.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click({
+                            let popover = cx.entity();
+                            move |_, window, cx| {
+                                panel.update(cx, |this, cx| {
+                                    this.scopes.insert(session.clone(), DiffScope::Turn(turn));
+                                    this.cache = None;
+                                    this.selection = None;
+                                    cx.notify();
+                                });
+                                popover.update(cx, |st, cx| st.dismiss(window, cx));
+                            }
+                        }),
                     );
                 }
                 div()
                     .id("diff-turn-list")
+                    .role(Role::Menu)
+                    .aria_label(tcode_i18n::tr!("diff.scope_menu"))
                     .min_w(px(190.))
                     .max_h(px(320.))
                     .overflow_y_scroll()
@@ -1480,38 +1497,48 @@ impl DiffPanel {
                             let session = session_base.clone();
                             let chosen = branch.clone();
                             let selected = branch == current;
+                            let accessible_label =
+                                tcode_i18n::tr!("diff.base_branch", branch = branch.clone())
+                                    .into_owned();
                             list = list.child(
-                                h_flex()
-                                    .id(("diff-base-item", branch_index))
-                                    .flex_none()
-                                    .w_full()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded(px(6.))
-                                    .cursor_pointer()
-                                    .hover(|row| row.bg(cx.theme().list_hover))
-                                    .when(selected, |row| row.bg(cx.theme().list_active))
-                                    .child(div().flex_1().child(branch))
-                                    .when(selected, |row| {
-                                        row.child(Icon::new(IconName::Check).xsmall())
-                                    })
-                                    .on_click({
-                                        let popover = cx.entity();
-                                        move |_, window, cx| {
-                                            panel.update(cx, |this, cx| {
-                                                this.bases.insert(session.clone(), chosen.clone());
-                                                this.cache = None;
-                                                this.git_preview = None;
-                                                cx.notify();
-                                            });
-                                            popover
-                                                .update(cx, |state, cx| state.dismiss(window, cx));
-                                        }
-                                    }),
+                                material::accessible_clickable(
+                                    h_flex(),
+                                    ("diff-base-item", branch_index),
+                                    Role::MenuItem,
+                                    accessible_label,
+                                    cx,
+                                )
+                                .aria_selected(selected)
+                                .flex_none()
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .hover(|row| row.bg(cx.theme().list_hover))
+                                .when(selected, |row| row.bg(cx.theme().list_active))
+                                .child(div().flex_1().child(branch))
+                                .when(selected, |row| {
+                                    row.child(Icon::new(IconName::Check).xsmall())
+                                })
+                                .on_click({
+                                    let popover = cx.entity();
+                                    move |_, window, cx| {
+                                        panel.update(cx, |this, cx| {
+                                            this.bases.insert(session.clone(), chosen.clone());
+                                            this.cache = None;
+                                            this.git_preview = None;
+                                            cx.notify();
+                                        });
+                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                    }
+                                }),
                             );
                         }
                         div()
                             .id("diff-base-list")
+                            .role(Role::Menu)
+                            .aria_label(tcode_i18n::tr!("diff.base_branches"))
                             .min_w(px(180.))
                             .max_h(px(280.))
                             .overflow_y_scroll()

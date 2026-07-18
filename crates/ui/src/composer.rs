@@ -16,8 +16,9 @@ use agent::{
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
     EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathBuilder, Pixels, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, canvas, div, img, point, prelude::FluentBuilder as _, px, rgb,
+    ParentElement as _, PathBuilder, Pixels, Render, Role, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, canvas, div, img, point, prelude::FluentBuilder as _, px,
+    rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
@@ -1669,9 +1670,19 @@ impl Composer {
                     MenuIcon::Command => Icon::empty().path("icons/box.svg"),
                     MenuIcon::Skill => Icon::empty().path("icons/ruler.svg"),
                 };
+                let accessible_label = tcode_i18n::tr!(
+                    "composer.trigger_option",
+                    primary = row.primary.clone(),
+                    secondary = row.secondary.clone()
+                )
+                .into_owned();
                 list = list.child(
                     h_flex()
                         .id(("menu-row", index))
+                        .role(Role::ListBoxOption)
+                        .aria_label(accessible_label)
+                        .aria_selected(is_active)
+                        .when(is_active, |row| row.aria_active_descendant())
                         .flex_none()
                         .w_full()
                         .px_2()
@@ -1718,6 +1729,8 @@ impl Composer {
         Some(
             div()
                 .id("composer-trigger-menu")
+                .role(Role::ListBox)
+                .aria_label(tcode_i18n::tr!("composer.trigger_results"))
                 .w_full()
                 .max_h(px(288.))
                 .overflow_y_scroll()
@@ -1958,46 +1971,56 @@ impl Composer {
                     (cx.theme().muted, cx.theme().muted_foreground)
                 };
                 row = row.child(
-                    div()
-                        .id("steer-turn")
-                        .size(px(36.))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(bg)
-                        .cursor_pointer()
-                        .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
-                        .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(
-                                tcode_i18n::tr!("composer.steer_tooltip").into_owned(),
-                            )
-                            .build(window, cx)
-                        })
-                        .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            let input = this.input.clone();
-                            this.submit(&input, false, window, cx);
-                        })),
+                    crate::material::accessible_clickable(
+                        div(),
+                        "steer-turn",
+                        Role::Button,
+                        tcode_i18n::tr!("composer.steer_tooltip"),
+                        cx,
+                    )
+                    .size(px(36.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(bg)
+                    .cursor_pointer()
+                    .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(
+                            tcode_i18n::tr!("composer.steer_tooltip").into_owned(),
+                        )
+                        .build(window, cx)
+                    })
+                    .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let input = this.input.clone();
+                        this.submit(&input, false, window, cx);
+                    })),
                 );
             }
             return row
                 // Circular red-orange stop button.
                 .child(
-                    div()
-                        .id("stop-turn")
-                        .size(px(36.))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgb(STOP_TINT))
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9))
-                        .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.app_state.update(cx, |state, cx| state.interrupt(cx));
-                        })),
+                    crate::material::accessible_clickable(
+                        div(),
+                        "stop-turn",
+                        Role::Button,
+                        tcode_i18n::tr!("composer.stop"),
+                        cx,
+                    )
+                    .size(px(36.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(STOP_TINT))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.9))
+                    .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.app_state.update(cx, |state, cx| state.interrupt(cx));
+                    })),
                 )
                 .into_any_element();
         }
@@ -2024,22 +2047,27 @@ impl Composer {
         } else {
             (cx.theme().muted, cx.theme().muted_foreground)
         };
-        div()
-            .id("send-message")
-            .size(px(36.))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(bg)
-            .cursor_pointer()
-            .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
-            .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
-            .on_click(cx.listener(|this, _, window, cx| {
-                let input = this.input.clone();
-                this.submit(&input, false, window, cx);
-            }))
-            .into_any_element()
+        crate::material::accessible_clickable(
+            div(),
+            "send-message",
+            Role::Button,
+            tcode_i18n::tr!("composer.send"),
+            cx,
+        )
+        .size(px(36.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .cursor_pointer()
+        .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
+        .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
+        .on_click(cx.listener(|this, _, window, cx| {
+            let input = this.input.clone();
+            this.submit(&input, false, window, cx);
+        }))
+        .into_any_element()
     }
 
     /// The composer's primary control: the stop button while a turn runs, the
@@ -2354,49 +2382,55 @@ impl Composer {
 
         let custom_input = self.user_input_custom.clone();
         let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
-        let custom_answer =
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(cx.theme().input)
-                .bg(cx.theme().popover)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&self.user_input_custom).appearance(false)),
+        let custom_answer = h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(cx.theme().input)
+            .bg(cx.theme().popover)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.user_input_custom).appearance(false)),
+            )
+            .child(
+                crate::material::accessible_clickable(
+                    div(),
+                    "ui-custom-answer-submit",
+                    Role::Button,
+                    tcode_i18n::tr!("userinput.submit_custom"),
+                    cx,
                 )
+                .size(px(28.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if custom_has_text {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted
+                })
+                .cursor_pointer()
+                .when(custom_has_text, |this| this.hover(|this| this.opacity(0.9)))
                 .child(
-                    div()
-                        .id("ui-custom-answer-submit")
-                        .size(px(28.))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(if custom_has_text {
-                            cx.theme().primary
+                    Icon::new(IconName::ArrowUp)
+                        .xsmall()
+                        .text_color(if custom_has_text {
+                            cx.theme().primary_foreground
                         } else {
-                            cx.theme().muted
-                        })
-                        .cursor_pointer()
-                        .when(custom_has_text, |this| this.hover(|this| this.opacity(0.9)))
-                        .child(Icon::new(IconName::ArrowUp).xsmall().text_color(
-                            if custom_has_text {
-                                cx.theme().primary_foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            },
-                        ))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.submit_custom_user_input(&custom_input, window, cx);
-                        })),
-                );
+                            cx.theme().muted_foreground
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.submit_custom_user_input(&custom_input, window, cx);
+                })),
+            );
 
         // Actions row: navigation only. Answers submit themselves — a
         // single-select click that completes the set submits it, so the only
@@ -3490,8 +3524,8 @@ fn render_model_pane(
                      cx: &mut Context<PopoverState>|
      -> AnyElement {
         let composer = composer.clone();
-        div()
-            .id(id)
+        crate::material::accessible_clickable(div(), id, Role::Tab, label.clone(), cx)
+            .aria_selected(active)
             .flex_none()
             .size(px(28.))
             .flex()
@@ -3565,6 +3599,8 @@ fn render_model_pane(
     }
     let rail = div()
         .id("model-provider-rail")
+        .role(Role::TabList)
+        .aria_label(tcode_i18n::tr!("composer.model_sources"))
         .flex_none()
         .w(px(44.))
         .h_full()
@@ -3612,6 +3648,8 @@ fn render_model_pane(
         .child(
             div()
                 .id("model-picker-list")
+                .role(Role::ListBox)
+                .aria_label(tcode_i18n::tr!("composer.model_results"))
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
@@ -3688,8 +3726,14 @@ fn render_model_row(
     let app_fav = app_entity.clone();
     let popover_fav = popover.clone();
 
+    let accessible_label =
+        tcode_i18n::tr!("composer.model_option", model = name.clone()).into_owned();
     h_flex()
         .id(("model-row", index))
+        .role(Role::ListBoxOption)
+        .aria_label(accessible_label)
+        .aria_selected(is_current)
+        .when(is_current, |row| row.aria_active_descendant())
         .flex_none()
         .w_full()
         .px_2()
@@ -3752,32 +3796,41 @@ fn render_model_row(
             )
         })
         .child(
-            div()
-                .id(("model-fav", index))
-                .flex_none()
-                .p(px(2.))
-                .rounded(px(4.))
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().accent))
-                .child(
-                    Icon::new(if is_fav {
-                        IconName::StarFill
-                    } else {
-                        IconName::Star
-                    })
-                    .xsmall()
-                    .text_color(if is_fav {
-                        rgb(CLAUDE_BRAND_COLOR).into()
-                    } else {
-                        muted
-                    }),
-                )
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    app_fav.update(cx, |s, cx| s.toggle_favorite_model(&fav_id, cx));
-                    // Refresh the open popover so the star + ordering update.
-                    popover_fav.update(cx, |_, cx| cx.notify());
+            crate::material::accessible_clickable(
+                div(),
+                ("model-fav", index),
+                Role::Button,
+                if is_fav {
+                    tcode_i18n::tr!("composer.remove_favorite")
+                } else {
+                    tcode_i18n::tr!("composer.add_favorite")
+                },
+                cx,
+            )
+            .flex_none()
+            .p(px(2.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().accent))
+            .child(
+                Icon::new(if is_fav {
+                    IconName::StarFill
+                } else {
+                    IconName::Star
+                })
+                .xsmall()
+                .text_color(if is_fav {
+                    rgb(CLAUDE_BRAND_COLOR).into()
+                } else {
+                    muted
                 }),
+            )
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                app_fav.update(cx, |s, cx| s.toggle_favorite_model(&fav_id, cx));
+                // Refresh the open popover so the star + ordering update.
+                popover_fav.update(cx, |_, cx| cx.notify());
+            }),
         )
         .into_any_element()
 }
@@ -3795,15 +3848,31 @@ fn render_permission_pane(
     let muted = cx.theme().muted_foreground;
     let primary = cx.theme().primary;
 
-    let mut list = v_flex().w_full().p_1().gap_0p5();
+    let mut list = v_flex()
+        .id("permission-menu")
+        .role(Role::Menu)
+        .aria_label(tcode_i18n::tr!("approval.choose_mode"))
+        .w_full()
+        .p_1()
+        .gap_0p5();
     for (index, (mode, label, description, icon_path)) in APPROVAL_MODES.iter().enumerate() {
         let mode = *mode;
         let is_current = mode == current;
         let app = app_entity.clone();
         let popover = popover.clone();
+        let accessible_label = tcode_i18n::tr!(
+            "approval.mode_option",
+            label = tcode_i18n::tr!(*label),
+            description = tcode_i18n::tr!(*description)
+        )
+        .into_owned();
         list = list.child(
             h_flex()
                 .id(("permission-row", index))
+                .role(Role::MenuItem)
+                .aria_label(accessible_label)
+                .aria_selected(is_current)
+                .when(is_current, |row| row.aria_active_descendant())
                 .w_full()
                 .px_2()
                 .py_1p5()

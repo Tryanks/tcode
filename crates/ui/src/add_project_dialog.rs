@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, PathPromptOptions, Render, Role, StatefulInteractiveElement as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, StyledExt as _, WindowExt as _,
@@ -201,49 +201,56 @@ impl AddProjectDialog {
                 for (index, recent) in recent.iter().take(RECENT_LIMIT).enumerate() {
                     let selected = recent.clone();
                     let name = directory_name(&recent.path);
+                    let accessible_name =
+                        tcode_i18n::tr!("sidebar.open_recent", name = name.clone()).into_owned();
                     let path = middle_truncate(&recent.path, 76);
                     let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
                     let counts = tool_counts(&recent.threads);
                     rows = rows.child(
-                        v_flex()
-                            .id(format!("recent-directory-{index}"))
-                            .flex_none()
-                            .gap_1()
-                            .px_3()
-                            .py_2()
-                            .rounded(crate::material::radius_card())
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(cx.theme().list_hover))
-                            .on_click(cx.listener(move |dialog, _, window, cx| {
-                                dialog.choose_recent(selected.clone(), window, cx);
-                            }))
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .justify_between()
-                                    .gap_3()
-                                    .child(div().font_bold().child(name))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(ago),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(path),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(counts),
-                            ),
+                        crate::material::accessible_clickable(
+                            v_flex(),
+                            format!("recent-directory-{index}"),
+                            Role::Button,
+                            accessible_name,
+                            cx,
+                        )
+                        .flex_none()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .rounded(crate::material::radius_card())
+                        .text_size(px(13.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(cx.theme().list_hover))
+                        .on_click(cx.listener(move |dialog, _, window, cx| {
+                            dialog.choose_recent(selected.clone(), window, cx);
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_3()
+                                .child(div().font_bold().child(name))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(ago),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(path),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(counts),
+                        ),
                     );
                 }
                 let visible_rows = recent.len().min(RECENT_LIMIT) as f32;

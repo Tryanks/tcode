@@ -12,8 +12,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    App, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Role,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -302,25 +303,32 @@ impl ToastCenter {
         // Expandable detail body ("Show details" / "Hide details").
         if let Some(detail) = toast.detail.clone() {
             let expanded = toast.expanded;
+            let toggle_label = if expanded {
+                tcode_i18n::tr!("toast.hide_details")
+            } else {
+                tcode_i18n::tr!("toast.show_details")
+            };
             card = card.child(
                 v_flex()
                     .gap_1()
                     .child(
-                        div()
-                            .id(("toast-detail-toggle", id as usize))
-                            .flex_none()
-                            .cursor_pointer()
-                            .text_size(px(11.))
-                            .font_medium()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if expanded {
-                                tcode_i18n::tr!("toast.hide_details")
-                            } else {
-                                tcode_i18n::tr!("toast.show_details")
-                            })
-                            .on_click(cx.listener(move |center, _, _, cx| {
-                                center.toggle_expanded(id, cx);
-                            })),
+                        crate::material::accessible_clickable(
+                            div(),
+                            ("toast-detail-toggle", id as usize),
+                            Role::Button,
+                            toggle_label.clone(),
+                            cx,
+                        )
+                        .aria_expanded(expanded)
+                        .flex_none()
+                        .cursor_pointer()
+                        .text_size(px(11.))
+                        .font_medium()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(toggle_label)
+                        .on_click(cx.listener(move |center, _, _, cx| {
+                            center.toggle_expanded(id, cx);
+                        })),
                     )
                     .when(expanded, |this| {
                         this.child(
