@@ -17,7 +17,10 @@
   `NSVisualEffectView`；合成后 alpha < 1 的区域透出桌面毛玻璃。
 - 全窗口仅一层 blur；悬浮层半透明与其下窗口内容做普通 alpha 合成。
 - gpui-component `Root` 用 `colors.background` 涂画布，支持 8 位 hex alpha。
-  **AppShell 不得重复涂 `background`**（已移除）。
+  **AppShell 不得重复涂 `background`**（已移除）——全屏例外：全屏 Space 的
+  vibrancy 背景是纯黑，AppShell 根节点仅在全屏时垫一层不透明基色
+  （`material::opaque_canvas`，把画布 alpha 提到 1），窗口模式仍由 Root 独自涂玻璃。
+  与 Windows Acrylic `FallbackColor`、macOS「降低透明度」同一降级策略。
 - 非 macOS：窗口 Opaque；main.rs 的 `flatten_canvas_for_opaque_window`
   把画布色压平为实色（与 JSON 字面量保持同步）。
 
@@ -25,7 +28,7 @@
 
 | 层 | 用途 | 谁来涂 | 策略 |
 |---|---|---|---|
-| T0 玻璃机壳 | 侧栏、窗口边缘 | Root（`background`） | 唯一刻意透明层 ~78% |
+| T0 玻璃机壳 | 侧栏、窗口边缘 | Root（`background`） | 唯一刻意透明层 ~78%；全屏时压平为实色 |
 | T1 纸面 | 聊天区、右面板、设置页 | shell.rs（`material::content_surface`） | 近实 94-95% |
 | T2 浮起 | 气泡、卡片、输入域 | 组件（muted/secondary 叠色） | 半透明墨色叠加 |
 | T3 悬浮 | popover/menu/dialog/drawer/toast | `popover.background` | ≥97% + 发丝边 + 大软阴影 |

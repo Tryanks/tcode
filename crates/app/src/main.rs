@@ -300,7 +300,8 @@ fn main() {
             // The theme's canvas color is translucent so the macOS vibrancy
             // material shows through (docs/visual-redesign.md). Elsewhere the
             // window is opaque and that alpha would composite against black,
-            // so flatten the canvas onto each mode's solid base first.
+            // so flatten the canvas onto each mode's solid base first. (macOS
+            // fullscreen flattens at paint time instead: material::opaque_canvas.)
             let theme_json: Cow<'_, str> = if vibrancy_enabled() {
                 Cow::Borrowed(TCODE_THEME)
             } else {
