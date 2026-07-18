@@ -114,7 +114,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
     // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
     // headers inside the merged `--mcp-config` JSON.
-    for arg in mcp_args(opts.mcp_server.as_ref(), opts.orchestrate_server.as_ref()) {
+    for arg in mcp_args(
+        opts.mcp_server.as_ref(),
+        opts.orchestrate_server.as_ref(),
+        opts.computer_use_server.as_ref(),
+    ) {
         cmd.arg(arg);
     }
     // Settings → Providers "Launch arguments", appended last so the user can
@@ -255,8 +259,12 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 fn mcp_args(
     preview: Option<&crate::McpRegistration>,
     orchestrate: Option<&crate::McpRegistration>,
+    computer_use: Option<&crate::McpRegistration>,
 ) -> Vec<String> {
-    let registrations: Vec<_> = [preview, orchestrate].into_iter().flatten().collect();
+    let registrations: Vec<_> = [preview, orchestrate, computer_use]
+        .into_iter()
+        .flatten()
+        .collect();
     if registrations.is_empty() {
         Vec::new()
     } else {
@@ -2868,16 +2876,24 @@ mod tests {
             url: "http://o".into(),
             bearer_token: "o".into(),
         };
-        assert!(mcp_args(None, None).is_empty());
-        let one = mcp_args(Some(&preview), None);
+        let computer_use = crate::McpRegistration {
+            name: "tcode_computer_use".into(),
+            url: "http://c".into(),
+            bearer_token: "c".into(),
+        };
+        assert!(mcp_args(None, None, None).is_empty());
+        let one = mcp_args(Some(&preview), None, None);
         assert_eq!(one[0], "--mcp-config");
         let one_json: Value = serde_json::from_str(&one[1]).unwrap();
         assert!(one_json["mcpServers"].get("tcode_preview").is_some());
         assert!(one_json["mcpServers"].get("tcode_orchestrate").is_none());
-        let both_json: Value =
-            serde_json::from_str(&mcp_args(Some(&preview), Some(&orchestrate))[1]).unwrap();
-        assert!(both_json["mcpServers"].get("tcode_preview").is_some());
-        assert!(both_json["mcpServers"].get("tcode_orchestrate").is_some());
+        let all_json: Value = serde_json::from_str(
+            &mcp_args(Some(&preview), Some(&orchestrate), Some(&computer_use))[1],
+        )
+        .unwrap();
+        assert!(all_json["mcpServers"].get("tcode_preview").is_some());
+        assert!(all_json["mcpServers"].get("tcode_orchestrate").is_some());
+        assert!(all_json["mcpServers"].get("tcode_computer_use").is_some());
     }
 
     fn feed(mapper: &mut Mapper, line: &str) -> Vec<AgentEvent> {

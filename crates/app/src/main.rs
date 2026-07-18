@@ -327,6 +327,15 @@ fn main() {
                 }
                 Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
             }
+            match computer_use_mcp::start() {
+                Ok(server) => {
+                    log::info!("computer-use MCP server listening at {}", server.url);
+                    app_state.update(cx, |state, _| {
+                        state.attach_computer_use_mcp(server.url, server.token)
+                    });
+                }
+                Err(err) => log::warn!("computer-use MCP server failed to start: {err}"),
+            }
             // Refresh the model catalogs in the background so the picker shows
             // real, up-to-date models (the persisted cache serves until then).
             app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
@@ -362,6 +371,11 @@ fn main() {
                     state.debug_provider_expanded = dexp;
                 });
             }
+            // Restart continuity: if this launch follows a permission-grant
+            // relaunch, reopen the recorded session and Settings page. Runs
+            // synchronously before the window (and settings page) is built, so
+            // the page mounts already on the recorded section. No-op otherwise.
+            app_state.update(cx, |state, cx| state.apply_pending_relaunch(cx));
             let debug_seed = debug_compose.is_some()
                 || debug_image.is_some()
                 || debug_cwd.is_some()

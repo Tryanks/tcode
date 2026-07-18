@@ -397,6 +397,20 @@ mod native {
             let key = self.routed_key(&session_id, cx);
             log::info!("preview: handling op {op:?} for session {session_id}");
 
+            // Gate on the Browser settings: a disabled browser rejects every op;
+            // `allow_evaluate` gates only `preview_evaluate`.
+            let browser = self.app_state.read(cx).settings.browser.clone();
+            if !browser.enabled {
+                let _ = reply.try_send(Err(tcode_i18n::tr!("browser.disabled_error").into_owned()));
+                return;
+            }
+            if matches!(&op, PreviewOp::Evaluate { .. }) && !browser.allow_evaluate {
+                let _ = reply.try_send(Err(
+                    tcode_i18n::tr!("browser.evaluate_disabled_error").into_owned()
+                ));
+                return;
+            }
+
             match op {
                 PreviewOp::Open { url } => {
                     self.app_state.update(cx, |state, cx| {
@@ -404,6 +418,14 @@ mod native {
                     });
                     if let Some(url) = url.as_deref() {
                         self.navigate(&key, url, window, cx);
+                    } else if let Some(home) = browser
+                        .home_url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|home| !home.is_empty())
+                    {
+                        // No explicit target: fall back to the configured home URL.
+                        self.navigate(&key, home, window, cx);
                     } else {
                         self.ensure_webview(&key, window, cx);
                         self.sync_visibility(cx);
@@ -507,24 +529,25 @@ mod native {
             }
         }
 
-        /// Capture the WebView's on-screen region with `screencapture` (wry exposes
-        /// no capture API) and answer with a base64 PNG. Best-effort geometry: the
-        /// region is the window origin plus the WebView's laid-out bounds.
+        /// Snapshot the native WKWebView in-process and answer with a base64 PNG.
         ///
-        /// macOS only. Windows has no comparable CLI and Wayland forbids screen
-        /// capture outright, so elsewhere the tool reports a normal MCP error
-        /// rather than pretending.
+        /// macOS only. Elsewhere the tool reports a normal MCP error rather than
+        /// pretending to have a portable native-webview snapshot implementation.
         #[cfg(target_os = "macos")]
         fn screenshot(
             &mut self,
             session_id: &str,
             key: &str,
             reply: ReplyTx,
-            window: &mut Window,
+            _window: &mut Window,
             cx: &mut Context<Self>,
         ) {
-            use base64::Engine as _;
+            use block2::RcBlock;
             use gpui::px;
+            use objc2_app_kit::NSImage;
+            use objc2_foundation::NSError;
+            use objc2_web_kit::WKWebView;
+            use wry::WebViewExtMacOS as _;
 
             let visible = {
                 let state = self.app_state.read(cx);
@@ -558,21 +581,28 @@ mod native {
                 let _ = reply.try_send(Err("preview browser has no visible area".into()));
                 return;
             }
-            let window_origin = window.bounds().origin;
-            let region = super::screen_region(window_origin, wv_bounds);
-
-            match tcode_runtime::ui_facade::capture_screen_region(&region) {
-                Ok(bytes) => {
-                    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    let _ = reply.try_send(Ok(PreviewReply::Image {
-                        mime: "image/png".into(),
-                        data_base64,
-                    }));
-                }
-                Err(err) => {
-                    let _ = reply.try_send(Err(err));
-                }
+            let native = view.read(cx).raw().webview();
+            let webview: &WKWebView = &native;
+            let callback_reply = reply.clone();
+            let handler = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+                let result = if let Some(image) = unsafe { image.as_ref() } {
+                    super::snapshot_reply(image)
+                } else if !error.is_null() {
+                    Err("WKWebView snapshot failed".into())
+                } else {
+                    Err("WKWebView snapshot returned no image".into())
+                };
+                let _ = callback_reply.try_send(result);
+            });
+            unsafe {
+                webview.takeSnapshotWithConfiguration_completionHandler(None, &handler);
             }
+
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                let _ = reply.try_send(Err("WKWebView snapshot timed out after 5 seconds".into()));
+            })
+            .detach();
         }
 
         /// See the macOS implementation: screen capture has no portable
@@ -592,6 +622,18 @@ mod native {
 
     impl Render for PreviewPanel {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // When the embedded browser is turned off in Settings → Browser, hide
+            // the chrome and webview entirely and show a quiet placeholder.
+            if !self.app_state.read(cx).settings.browser.enabled {
+                return v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .px_8()
+                    .text_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tcode_i18n::tr!("browser.disabled_panel"));
+            }
             let active = self.active_key(cx);
 
             // Honor a queued `--open-preview <url>` navigation once a session exists.
@@ -798,25 +840,36 @@ mod placeholder {
     }
 }
 
-/// The error `preview_screenshot` reports where screen capture has no reliable
-/// implementation (Windows has no `screencapture` equivalent; Wayland forbids it
-/// outright). Linux has no webview at all, so it never gets this far.
+/// The error `preview_screenshot` reports where native-webview snapshots have no
+/// implementation. Linux has no webview at all, so it never gets this far.
 #[cfg(not(target_os = "linux"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS";
 
-/// Compute a `screencapture -R x,y,w,h` region string from the window origin and
-/// the WebView's window-relative bounds. macOS-only, like its one caller.
 #[cfg(target_os = "macos")]
-fn screen_region(
-    window_origin: gpui::Point<gpui::Pixels>,
-    wv: gpui::Bounds<gpui::Pixels>,
-) -> String {
-    let x = f32::from(window_origin.x + wv.origin.x).round() as i32;
-    let y = f32::from(window_origin.y + wv.origin.y).round() as i32;
-    let w = f32::from(wv.size.width).round() as i32;
-    let h = f32::from(wv.size.height).round() as i32;
-    format!("{x},{y},{w},{h}")
+fn snapshot_reply(image: &objc2_app_kit::NSImage) -> Result<PreviewReply, String> {
+    use base64::Engine as _;
+    use objc2_core_foundation::{CFMutableData, CFString};
+    use objc2_image_io::CGImageDestination;
+
+    let cg_image =
+        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
+            .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
+    let data = CFMutableData::new(None, 0)
+        .ok_or_else(|| "failed to allocate PNG destination data".to_string())?;
+    let png_type = CFString::from_static_str("public.png");
+    let destination = unsafe { CGImageDestination::with_data(&data, &png_type, 1, None) }
+        .ok_or_else(|| "failed to create PNG image destination".to_string())?;
+    unsafe {
+        destination.add_image(&cg_image, None);
+        if !destination.finalize() {
+            return Err("failed to finalize WKWebView snapshot PNG".into());
+        }
+    }
+    Ok(PreviewReply::Image {
+        mime: "image/png".into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(data.to_vec()),
+    })
 }
 
 /// What an automation tool answers when the platform webview cannot be created
@@ -902,23 +955,6 @@ mod tests {
             "leaving Chat unmounts the preview layout"
         );
         assert_eq!(visible_preview_key(None, Route::Chat, false, true), None);
-    }
-
-    /// The capture region is the window origin plus the WebView's own bounds.
-    /// macOS-only, like the `screencapture` shell-out it feeds.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn screen_region_is_the_window_origin_plus_the_webview_bounds() {
-        assert_eq!(
-            screen_region(
-                gpui::point(gpui::px(10.), gpui::px(20.)),
-                gpui::Bounds {
-                    origin: gpui::point(gpui::px(5.), gpui::px(5.)),
-                    size: gpui::size(gpui::px(100.), gpui::px(50.)),
-                }
-            ),
-            "15,25,100,50"
-        );
     }
 
     /// Off macOS (but where a webview exists — i.e. Windows) `preview_screenshot`

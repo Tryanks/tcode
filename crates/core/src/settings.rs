@@ -491,6 +491,79 @@ impl TitleGenerationSettings {
     }
 }
 
+/// When a computer-use observation carries a screenshot alongside the folded
+/// accessibility outline. Mirrors `computer_use_mcp::config::ImageMode`; kept in
+/// core so settings stay GPUI/backend-free and the app maps one to the other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageMode {
+    /// Screenshot only when the outline looks too sparse to act on (default).
+    #[default]
+    Auto,
+    /// Always attach a screenshot.
+    Always,
+    /// Never attach a screenshot (outline only).
+    Never,
+}
+
+/// Global configuration for desktop computer-use tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerUseSettings {
+    /// Whether newly spawned provider sessions receive the computer-use MCP server.
+    #[serde(default)]
+    pub enabled: bool,
+    /// When observations include a screenshot. Absent in legacy files → `auto`.
+    #[serde(default)]
+    pub image_mode: ImageMode,
+    /// When false the tools are observe-only (`act_ui` rejects every action).
+    /// Defaults to TRUE and tolerates an absent field in legacy files.
+    #[serde(default = "default_true")]
+    pub allow_input: bool,
+}
+
+impl Default for ComputerUseSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            image_mode: ImageMode::default(),
+            allow_input: true,
+        }
+    }
+}
+
+/// Settings for the embedded preview browser (Settings → Browser) and the
+/// `tcode_preview` MCP server it backs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSettings {
+    /// Whether the embedded browser and its preview MCP tools are available.
+    /// Defaults to TRUE; absent in legacy files → enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Initial page opened when the preview panel is shown without a target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_url: Option<String>,
+    /// Whether the `preview_evaluate` MCP tool may run JavaScript. Defaults to
+    /// TRUE; absent in legacy files → allowed.
+    #[serde(default = "default_true")]
+    pub allow_evaluate: bool,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            home_url: None,
+            allow_evaluate: true,
+        }
+    }
+}
+
+impl BrowserSettings {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -542,6 +615,14 @@ pub struct Settings {
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
+    /// Global desktop computer-use feature settings. Absent in legacy files,
+    /// where the feature remains disabled by default.
+    #[serde(default)]
+    pub computer_use: ComputerUseSettings,
+    /// Embedded preview browser settings. Skipped when default (like
+    /// `orchestrate`), so legacy files stay clean and load with the defaults.
+    #[serde(default, skip_serializing_if = "BrowserSettings::is_default")]
+    pub browser: BrowserSettings,
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
@@ -859,6 +940,70 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.orchestrate, settings.orchestrate);
+    }
+
+    #[test]
+    fn computer_use_defaults_disabled_and_round_trips() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(!legacy.computer_use.enabled);
+        // New fields tolerate an absent block: image mode auto, input allowed.
+        assert_eq!(legacy.computer_use.image_mode, ImageMode::Auto);
+        assert!(legacy.computer_use.allow_input);
+
+        // A legacy block that predates image_mode / allow_input still defaults
+        // input ON (observe-only is opt-in, never the silent legacy behavior).
+        let partial: Settings =
+            serde_json::from_str(r#"{"computer_use":{"enabled":true}}"#).unwrap();
+        assert!(partial.computer_use.enabled);
+        assert_eq!(partial.computer_use.image_mode, ImageMode::Auto);
+        assert!(partial.computer_use.allow_input);
+
+        let settings = Settings {
+            computer_use: ComputerUseSettings {
+                enabled: true,
+                image_mode: ImageMode::Always,
+                allow_input: false,
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""image_mode":"always""#));
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(back.computer_use.enabled);
+        assert_eq!(back.computer_use.image_mode, ImageMode::Always);
+        assert!(!back.computer_use.allow_input);
+    }
+
+    #[test]
+    fn browser_defaults_enabled_and_round_trips() {
+        // Legacy files (no `browser` key) get the defaults: enabled, no home
+        // URL, evaluate allowed.
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert_eq!(legacy.browser, BrowserSettings::default());
+        assert!(legacy.browser.enabled);
+        assert!(legacy.browser.allow_evaluate);
+        assert_eq!(legacy.browser.home_url, None);
+
+        // A partial block keeps unspecified fields at their (true) defaults.
+        let partial: Settings = serde_json::from_str(r#"{"browser":{"enabled":false}}"#).unwrap();
+        assert!(!partial.browser.enabled);
+        assert!(partial.browser.allow_evaluate);
+
+        // Default browser settings are skipped on serialize, like orchestrate.
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("\"browser\""));
+
+        let settings = Settings {
+            browser: BrowserSettings {
+                enabled: false,
+                home_url: Some("https://example.test".into()),
+                allow_evaluate: false,
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.browser, settings.browser);
     }
 
     #[test]

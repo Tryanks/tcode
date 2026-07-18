@@ -7,6 +7,7 @@ pub mod import;
 pub mod process;
 pub mod provider_auth;
 pub mod provider_probe;
+pub mod relaunch;
 pub mod settings;
 pub mod shell_env;
 pub mod store;

@@ -122,6 +122,8 @@ settings:
   title: "Settings"
   general: "General"
   providers: "Providers"
+  browser: "Browser"
+  computer_use: "Computer Use"
   orchestrate: "Orchestrate"
   archived: "Archived Threads"
   archived_section: "ARCHIVED THREADS"
@@ -168,6 +170,54 @@ settings:
     description: "Choose the provider and model used to name new threads. Title requests always use low reasoning effort."
 model_picker:
   no_models: "No models available for this provider."
+computer_use:
+  section: "COMPUTER USE"
+  enable:
+    title: "Enable computer use"
+    description: "Give provider sessions the desktop computer-use tools (observe and act on other apps via the accessibility tree)."
+  image_mode:
+    title: "Screenshots"
+    description: "When observations include a screenshot alongside the accessibility outline."
+    auto: "Auto"
+    auto_desc: "Only when the outline is too sparse to act on."
+    always: "Always"
+    always_desc: "Attach a screenshot to every observation."
+    never: "Never"
+    never_desc: "Outline only; never capture the screen."
+  allow_input:
+    title: "Allow input actions"
+    description: "When off, the tools are observe-only: clicks, typing, and other actions are rejected."
+  permissions_section: "SYSTEM PERMISSIONS"
+  unsupported: "Computer use is only available on macOS."
+browser:
+  section: "BROWSER"
+  enable:
+    title: "Enable embedded browser"
+    description: "Show the preview panel and expose its browser automation tools to provider sessions."
+  home_url:
+    title: "Home URL"
+    description: "Page opened when the preview panel is shown without a target."
+    placeholder: "https://example.com"
+  allow_evaluate:
+    title: "Allow JavaScript evaluation"
+    description: "Let the preview_evaluate tool run JavaScript in the embedded browser."
+  disabled_panel: "The embedded browser is disabled in Settings → Browser."
+  disabled_error: "The embedded browser is disabled in Settings → Browser."
+  evaluate_disabled_error: "preview_evaluate is disabled in Settings → Browser."
+permissions:
+  granted: "Granted"
+  missing: "Not granted"
+  grant: "Grant"
+  recheck: "Recheck"
+  unsupported: "Only available on macOS."
+  restart_banner: "Screen Recording grants take effect only after tcode restarts."
+  relaunch: "Relaunch tcode"
+  accessibility:
+    name: "Accessibility"
+    why: "Read the on-screen accessibility tree and post keyboard and mouse events."
+  screen_recording:
+    name: "Screen Recording"
+    why: "Capture window screenshots for computer-use observations."
 orchestrate:
   restore_default: "Restore default"
   child_approval:

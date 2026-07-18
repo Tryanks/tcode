@@ -122,6 +122,8 @@ settings:
   title: "设置"
   general: "通用"
   providers: "提供商"
+  browser: "浏览器"
+  computer_use: "电脑操作"
   orchestrate: "Orchestrate"
   archived: "已归档对话"
   archived_section: "已归档对话"
@@ -168,6 +170,54 @@ settings:
     description: "选择负责为新对话命名的提供方和模型。命名请求始终使用 low 推理强度。"
 model_picker:
   no_models: "此提供方暂无可用模型。"
+computer_use:
+  section: "电脑操作"
+  enable:
+    title: "启用电脑操作"
+    description: "为提供方会话提供桌面电脑操作工具（通过辅助功能树观察并操作其他应用）。"
+  image_mode:
+    title: "截图"
+    description: "在观察结果中随辅助功能大纲一并附带截图的时机。"
+    auto: "自动"
+    auto_desc: "仅当大纲信息不足以操作时截图。"
+    always: "始终"
+    always_desc: "为每次观察都附带截图。"
+    never: "从不"
+    never_desc: "仅使用大纲，绝不截屏。"
+  allow_input:
+    title: "允许输入操作"
+    description: "关闭后工具仅用于观察：点击、输入等操作都会被拒绝。"
+  permissions_section: "系统权限"
+  unsupported: "电脑操作仅在 macOS 上可用。"
+browser:
+  section: "浏览器"
+  enable:
+    title: "启用内嵌浏览器"
+    description: "显示预览面板，并向提供方会话开放其浏览器自动化工具。"
+  home_url:
+    title: "主页地址"
+    description: "预览面板在没有指定目标时打开的页面。"
+    placeholder: "https://example.com"
+  allow_evaluate:
+    title: "允许执行 JavaScript"
+    description: "允许 preview_evaluate 工具在内嵌浏览器中运行 JavaScript。"
+  disabled_panel: "内嵌浏览器已在“设置 → 浏览器”中禁用。"
+  disabled_error: "内嵌浏览器已在“设置 → 浏览器”中禁用。"
+  evaluate_disabled_error: "preview_evaluate 已在“设置 → 浏览器”中禁用。"
+permissions:
+  granted: "已授权"
+  missing: "未授权"
+  grant: "去授权"
+  recheck: "重新检查"
+  unsupported: "仅在 macOS 上可用。"
+  restart_banner: "屏幕录制授权需重新启动 tcode 后才会生效。"
+  relaunch: "重新启动 tcode"
+  accessibility:
+    name: "辅助功能"
+    why: "读取屏幕上的辅助功能树，并发送键盘和鼠标事件。"
+  screen_recording:
+    name: "屏幕录制"
+    why: "为计算机使用观察结果截取窗口截图。"
 orchestrate:
   restore_default: "恢复默认"
   child_approval:
