@@ -564,6 +564,21 @@ impl BrowserSettings {
     }
 }
 
+/// Default presentation for the right-side diff panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffViewMode {
+    Line,
+    #[default]
+    Structural,
+}
+
+impl DiffViewMode {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -597,6 +612,10 @@ pub struct Settings {
     /// absent in legacy settings.json files (defaults to off).
     #[serde(default)]
     pub word_wrap_diffs: bool,
+    /// Structural diffs are the default; users can persist the traditional
+    /// line-oriented view when preferred.
+    #[serde(default, skip_serializing_if = "DiffViewMode::is_default")]
+    pub diff_view_mode: DiffViewMode,
     /// When true, the inline archive/delete action skips its confirm dialog.
     /// Stored inverted so legacy files (field absent → false) keep the confirm
     /// dialog on by default. Surfaced as the "Delete confirmation" toggle.
@@ -847,6 +866,21 @@ mod tests {
         assert_eq!(ProjectSort::RecentActivity.next(), ProjectSort::NameAsc);
         assert_eq!(ProjectSort::NameAsc.next(), ProjectSort::RecentActivity);
     }
+
+    #[test]
+    fn structural_diff_is_default_and_line_mode_persists() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert_eq!(legacy.diff_view_mode, DiffViewMode::Structural);
+        let settings = Settings {
+            diff_view_mode: DiffViewMode::Line,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""diff_view_mode":"line""#));
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.diff_view_mode, DiffViewMode::Line);
+    }
+
     #[test]
     fn display_name_falls_back_to_driver_label() {
         let mut settings = Settings::default();
