@@ -18,7 +18,7 @@ use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
-use tcode_core::project::{Checkpoint, WorktreeInfo};
+use tcode_core::project::WorktreeInfo;
 use tcode_core::project::{IndexFile, Project, SessionMeta, migrate_index};
 use tcode_core::session::StoredEvent;
 
@@ -298,64 +298,6 @@ impl SessionStore {
             }
         }
         events
-    }
-
-    /// Count the persisted events for a session (number of JSONL lines). Used
-    /// to record a checkpoint's `event_offset` before a turn's user message is
-    /// appended, so a later revert can truncate deterministically.
-    ///
-    /// This is a byte scan for newlines, NOT a parse: it runs on the UI thread
-    /// at every send, where parsing a long session's whole log (tens of MB)
-    /// would stall. Line count equals event count because `append_event`
-    /// writes exactly one `\n`-terminated line per event. A line corrupted by
-    /// a crash mid-write is counted here but skipped by `read_events`, so a
-    /// revert truncation boundary can sit at most that many events too deep —
-    /// a slightly shallower truncate, never an over-truncate.
-    pub fn event_count(&self, id: &str) -> usize {
-        let path = self.events_path(id);
-        let Ok(file) = File::open(&path) else {
-            return 0;
-        };
-        let mut reader = BufReader::new(file);
-        let mut count = 0;
-        while let Ok(buf) = reader.fill_buf() {
-            if buf.is_empty() {
-                break;
-            }
-            count += buf.iter().filter(|&&b| b == b'\n').count();
-            let len = buf.len();
-            reader.consume(len);
-        }
-        count
-    }
-
-    /// Truncate a session's JSONL log to its first `keep` events, discarding the
-    /// rest (used by revert-to-checkpoint). Rewrites the file atomically. A
-    /// `keep` at or beyond the current length is a no-op.
-    pub fn truncate_events(&self, id: &str, keep: usize) -> std::io::Result<()> {
-        let path = self.events_path(id);
-        let events = self.read_events(id);
-        if keep >= events.len() {
-            return Ok(());
-        }
-        let tmp = path.with_extension("jsonl.tmp");
-        {
-            let mut file = File::create(&tmp)?;
-            for stored in events.iter().take(keep) {
-                let line = match stored.ts {
-                    Some(ts) => serde_json::to_string(&EventEnvelope {
-                        ts,
-                        event: stored.event.clone(),
-                    }),
-                    None => serde_json::to_string(&stored.event),
-                }
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                file.write_all(line.as_bytes())?;
-                file.write_all(b"\n")?;
-            }
-            file.flush()?;
-        }
-        fs::rename(&tmp, &path)
     }
 
     /// Remove a session from the index and delete its event log.
@@ -748,13 +690,11 @@ mod tests {
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
         assert_eq!(meta.archived_at, None);
         assert_eq!(meta.worktree, None);
-        assert!(meta.checkpoints.is_empty());
 
         // Absent fields are skipped on serialize (keeps legacy files clean).
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("archived_at"));
         assert!(!json.contains("worktree"));
-        assert!(!json.contains("checkpoints"));
 
         // A populated meta round-trips every new field.
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt"), None);
@@ -764,46 +704,22 @@ mod tests {
             base: "main".into(),
             branch: "tcode/abc".into(),
         });
-        meta.checkpoints = vec![Checkpoint {
-            turn: 2,
-            commit: "deadbeef".into(),
-            event_offset: 7,
-        }];
         let json = serde_json::to_string(&meta).unwrap();
         let back: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.archived_at, Some(1234));
         assert_eq!(back.worktree, meta.worktree);
-        assert_eq!(back.checkpoints, meta.checkpoints);
     }
 
     #[test]
-    fn truncate_events_keeps_prefix_and_rewrites_log() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let id = "trunc";
-        for turn in 0..4 {
-            store
-                .append_event(
-                    id,
-                    turn as u64,
-                    &AgentEvent::TurnStarted {
-                        turn_id: format!("t{turn}"),
-                    },
-                )
-                .unwrap();
-        }
-        assert_eq!(store.event_count(id), 4);
-
-        // Keeping the first 2 events discards the tail.
-        store.truncate_events(id, 2).unwrap();
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].ts, Some(0));
-        assert_eq!(events[1].ts, Some(1));
-
-        // A keep beyond the length is a no-op.
-        store.truncate_events(id, 10).unwrap();
-        assert_eq!(store.event_count(id), 2);
-        let _ = fs::remove_dir_all(store.root());
+    fn legacy_checkpoint_metadata_is_ignored() {
+        let legacy = serde_json::json!({
+            "id": "s1", "title": "One", "provider": "codex",
+            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10,
+            "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}]
+        });
+        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("checkpoints"));
     }
 
     #[test]

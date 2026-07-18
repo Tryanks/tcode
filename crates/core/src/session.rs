@@ -7,9 +7,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agent::{
-    AgentEvent, ApprovalRequest, DeltaKind, FileChange, ItemContent, ItemStatus, PlanStep,
-    ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
+    AgentEvent, ApprovalRequest, ChangeCompleteness, DeltaKind, FileChange, ItemContent,
+    ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
 };
+
+use crate::git::merge_file_changes_by_path;
 
 /// A local review note attached to a range in the diff panel. These live in
 /// the composer draft until the next send; they are never written to session
@@ -158,6 +160,12 @@ pub struct TimelineEntry {
 /// Per-turn ("Work Log" section) metadata folded from turn lifecycle events.
 #[derive(Debug, Clone, Default)]
 pub struct TurnMeta {
+    /// Provider-native id for this turn, used to attach replacement turn-diff
+    /// snapshots without relying on ambient "current turn" state during replay.
+    pub provider_turn_id: Option<String>,
+    /// Opaque provider-owned restore point for the user message that opened
+    /// this turn. Present only when the provider exposes a native rewind API.
+    pub provider_checkpoint_id: Option<String>,
     /// When the turn began (TurnStarted, or the opening user message).
     pub start_ts: Option<u64>,
     /// When the turn finished (TurnCompleted).
@@ -165,6 +173,10 @@ pub struct TurnMeta {
     pub status: Option<TurnStatus>,
     /// Whether this turn is currently running.
     pub running: bool,
+    /// File changes causally attributed to this turn. Provider-native net
+    /// snapshots replace this wholesale; structured file-operation items form
+    /// a partial fallback without consulting the ambient Git working tree.
+    pub changes: Option<TurnChangeSet>,
 }
 
 impl TurnMeta {
@@ -175,6 +187,12 @@ impl TurnMeta {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TurnChangeSet {
+    pub changes: Vec<FileChange>,
+    pub completeness: ChangeCompleteness,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +297,9 @@ pub struct Timeline {
     current_turn: Option<usize>,
     /// Monotonic counter for synthetic entry ids.
     next_synthetic_id: u64,
+    /// FileChange items known to have completed successfully. The ids rebuild
+    /// deterministically from persisted ItemCompleted events during replay.
+    committed_file_change_items: HashSet<String>,
 }
 
 impl Timeline {
@@ -335,7 +356,7 @@ impl Timeline {
                     self.model = model.clone();
                 }
             }
-            AgentEvent::TurnStarted { .. } => {
+            AgentEvent::TurnStarted { turn_id } => {
                 // Reuse the open turn (typically opened by the user message);
                 // otherwise begin a fresh one.
                 let turn = match self.current_turn {
@@ -347,10 +368,53 @@ impl Timeline {
                 if ts.is_some() {
                     self.turns[turn].start_ts = ts;
                 }
+                self.turns[turn].provider_turn_id = Some(turn_id.clone());
                 self.turns[turn].running = true;
                 self.turn_running = true;
                 self.last_turn_status = None;
             }
+            AgentEvent::TurnChangesUpdated {
+                turn_id,
+                changes,
+                completeness,
+            } => {
+                let turn = self
+                    .turns
+                    .iter()
+                    .position(|turn| turn.provider_turn_id.as_deref() == Some(turn_id.as_str()))
+                    .or(self.current_turn)
+                    .unwrap_or_else(|| self.push_turn(ts));
+                if !turn_id.is_empty() {
+                    self.turns[turn].provider_turn_id = Some(turn_id.clone());
+                }
+                self.turns[turn].changes = Some(TurnChangeSet {
+                    changes: changes.clone(),
+                    completeness: *completeness,
+                });
+            }
+            AgentEvent::TurnCheckpoint {
+                turn_id,
+                checkpoint_id,
+            } => {
+                let turn = self
+                    .turns
+                    .iter()
+                    .position(|turn| turn.provider_turn_id.as_deref() == Some(turn_id.as_str()))
+                    .or(self.current_turn)
+                    .unwrap_or_else(|| self.push_turn(ts));
+                self.turns[turn].provider_turn_id = Some(turn_id.clone());
+                self.turns[turn].provider_checkpoint_id = Some(checkpoint_id.clone());
+            }
+            AgentEvent::RewindCompleted {
+                checkpoint_id,
+                mode,
+                ..
+            } => {
+                if mode.includes_conversation() {
+                    self.rewind_conversation(checkpoint_id);
+                }
+            }
+            AgentEvent::RewindFailed { .. } => {}
             AgentEvent::TurnCompleted { status, usage, .. } => {
                 self.turn_running = false;
                 self.last_turn_status = Some(*status);
@@ -368,9 +432,24 @@ impl Timeline {
                 self.pending_approvals.clear();
                 self.pending_user_input = None;
             }
-            AgentEvent::ItemStarted(item)
-            | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item) => self.upsert_item(ts, item),
+            AgentEvent::ItemStarted(item) | AgentEvent::ItemUpdated(item) => {
+                self.upsert_item(ts, item)
+            }
+            AgentEvent::ItemCompleted(item) => {
+                self.upsert_item(ts, item);
+                if matches!(
+                    &item.content,
+                    ItemContent::FileChange {
+                        status: ItemStatus::Completed,
+                        ..
+                    }
+                ) {
+                    self.committed_file_change_items.insert(item.id.clone());
+                    if let Some(turn) = self.item_turn(&item.id) {
+                        self.refresh_partial_turn_changes(turn);
+                    }
+                }
+            }
             AgentEvent::SteerRequested { request_id, text } => {
                 self.request_steer(ts, request_id, text)
             }
@@ -501,14 +580,58 @@ impl Timeline {
     /// start time (refined later by a TurnStarted event if one arrives).
     fn push_turn(&mut self, start_ts: Option<u64>) -> usize {
         self.turns.push(TurnMeta {
+            provider_turn_id: None,
+            provider_checkpoint_id: None,
             start_ts,
             end_ts: None,
             status: None,
             running: false,
+            changes: None,
         });
         let idx = self.turns.len() - 1;
         self.current_turn = Some(idx);
         idx
+    }
+
+    /// Apply a provider-confirmed conversation rewind. The event log remains
+    /// append-only; replaying this marker produces the provider's authoritative
+    /// active history without tcode rewriting either transcript file.
+    fn rewind_conversation(&mut self, checkpoint_id: &str) {
+        let Some(target_turn) = self
+            .turns
+            .iter()
+            .position(|turn| turn.provider_checkpoint_id.as_deref() == Some(checkpoint_id))
+        else {
+            log::warn!("provider rewind target is absent from the local timeline");
+            return;
+        };
+
+        self.entries.retain(|entry| entry.turn < target_turn);
+        self.children.retain(|_, entries| {
+            entries.retain(|entry| entry.turn < target_turn);
+            !entries.is_empty()
+        });
+        self.truncated_children
+            .retain(|parent_id| self.children.contains_key(parent_id));
+        self.turns.truncate(target_turn);
+        self.current_turn = self.turns.len().checked_sub(1);
+        self.turn_running = false;
+        self.pending_approvals.clear();
+        self.pending_user_input = None;
+        self.proposed_plan = self
+            .proposed_plan
+            .take()
+            .filter(|plan| plan.turn < target_turn);
+        self.plan_steps.clear();
+        self.plan_explanation = None;
+        self.usage = None;
+        self.last_turn_status = self.turns.last().and_then(|turn| turn.status);
+        self.committed_file_change_items.retain(|item_id| {
+            self.entries
+                .iter()
+                .chain(self.children.values().flatten())
+                .any(|entry| entry.id == *item_id)
+        });
     }
 
     /// The current open turn, creating one if none exists.
@@ -536,6 +659,39 @@ impl Timeline {
     fn synthetic_id(&mut self, prefix: &str) -> String {
         self.next_synthetic_id += 1;
         format!("{prefix}-{}", self.next_synthetic_id)
+    }
+
+    fn refresh_partial_turn_changes(&mut self, turn: usize) {
+        if self.turns[turn]
+            .changes
+            .as_ref()
+            .is_some_and(|changes| changes.completeness == ChangeCompleteness::Exact)
+        {
+            return;
+        }
+        let entries = self.entries.iter().chain(self.children.values().flatten());
+        let fragments = entries.filter_map(|entry| {
+            if entry.turn != turn || !self.committed_file_change_items.contains(&entry.id) {
+                return None;
+            }
+            match &entry.content {
+                EntryContent::FileChange { changes } => Some(changes.as_slice()),
+                _ => None,
+            }
+        });
+        let changes = merge_file_changes_by_path(fragments.flatten());
+        self.turns[turn].changes = Some(TurnChangeSet {
+            changes,
+            completeness: ChangeCompleteness::Partial,
+        });
+    }
+
+    fn item_turn(&self, item_id: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .chain(self.children.values().flatten())
+            .find(|entry| entry.id == item_id)
+            .map(|entry| entry.turn)
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
@@ -741,28 +897,6 @@ impl Timeline {
     }
 }
 
-/// The index in a session's stored event log of the event that introduces the
-/// **first user message of `turn`** — i.e. the JSONL truncation boundary for
-/// rewinding the thread to just before that message (revert / edit & resend).
-///
-/// A checkpoint records this offset when it is captured (`Checkpoint::event_offset`);
-/// this recomputes it by replaying the log, which is what makes rewinding work in
-/// a cwd that has no git checkpoints at all. The two agree — see the tests.
-pub fn turn_user_event_offset(events: &[StoredEvent], turn: usize) -> Option<usize> {
-    let mut timeline = Timeline::default();
-    for (index, stored) in events.iter().enumerate() {
-        let before = timeline.entries.len();
-        timeline.apply_at(stored.ts, &stored.event);
-        let opened_turn = timeline.entries[before..]
-            .iter()
-            .any(|entry| matches!(entry.content, EntryContent::User { .. }) && entry.turn == turn);
-        if opened_turn {
-            return Some(index);
-        }
-    }
-    None
-}
-
 /// Extract a plan's title from its markdown: the text of the first ATX heading
 /// (`#`…`######`), else `None` (callers fall back to a localized "Proposed
 /// plan"). Leading `#`s and surrounding whitespace are stripped.
@@ -922,7 +1056,7 @@ fn merge_text(old: String, new: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::{ApprovalDecision, ApprovalKind, FileChangeKind};
+    use agent::{ApprovalDecision, ApprovalKind, FileChangeKind, RewindMode};
     use serde_json::json;
 
     fn user_msg(id: &str, text: &str) -> AgentEvent {
@@ -934,6 +1068,54 @@ mod tests {
                 context_len: None,
             },
         })
+    }
+
+    #[test]
+    fn provider_conversation_rewind_is_an_append_only_timeline_marker() {
+        let mut events = Vec::new();
+        for index in 1..=3 {
+            events.extend([
+                user_msg(&format!("user-{index}"), &format!("prompt {index}")),
+                AgentEvent::TurnStarted {
+                    turn_id: format!("turn-{index}"),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: format!("turn-{index}"),
+                    checkpoint_id: format!("checkpoint-{index}"),
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: format!("turn-{index}"),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            ]);
+        }
+        events.push(AgentEvent::RewindCompleted {
+            checkpoint_id: "checkpoint-2".into(),
+            mode: RewindMode::Conversation,
+            prefill: Some("prompt 2".into()),
+        });
+
+        let mut timeline = Timeline::fold_events(events);
+        assert_eq!(timeline.turns.len(), 1);
+        assert_eq!(timeline.entries.len(), 1);
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::User { text, .. } if text == "prompt 1"
+        ));
+        assert_eq!(
+            timeline.turns[0].provider_checkpoint_id.as_deref(),
+            Some("checkpoint-1")
+        );
+
+        // New work after the marker opens a fresh turn; removed history does
+        // not reappear even though the underlying JSONL remains append-only.
+        timeline.apply_at(None, &user_msg("user-4", "replacement prompt"));
+        assert_eq!(timeline.turns.len(), 2);
+        assert!(matches!(
+            &timeline.entries[1].content,
+            EntryContent::User { text, .. } if text == "replacement prompt"
+        ));
     }
 
     #[test]
@@ -954,6 +1136,162 @@ mod tests {
             &timeline.entries[0].content,
             EntryContent::User { text, .. } if text == "after"
         ));
+    }
+
+    #[test]
+    fn completed_file_operations_form_a_partial_turn_snapshot() {
+        let timeline = Timeline::fold_events([
+            user_msg("user-1", "edit it"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "edit-1".into(),
+                parent_item_id: None,
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "src/lib.rs".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: Some("-old\n+new\n".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+            }),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "subagent-edit".into(),
+                parent_item_id: Some("spawn-1".into()),
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "src/child.rs".into(),
+                        kind: FileChangeKind::Create,
+                        diff: Some("+child\n".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+            }),
+        ]);
+
+        let change_set = timeline.turns[0].changes.as_ref().unwrap();
+        assert_eq!(change_set.completeness, ChangeCompleteness::Partial);
+        assert_eq!(change_set.changes.len(), 2);
+        assert_eq!(change_set.changes[0].path, "src/lib.rs");
+        assert_eq!(change_set.changes[1].path, "src/child.rs");
+    }
+
+    #[test]
+    fn exact_turn_snapshot_replaces_partial_operations_and_survives_late_items() {
+        let mut timeline = Timeline::fold_events([
+            user_msg("user-1", "edit it"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "edit-1".into(),
+                parent_item_id: None,
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "src/lib.rs".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: Some("-intermediate\n+value\n".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+            }),
+        ]);
+
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnChangesUpdated {
+                turn_id: "turn-1".into(),
+                changes: vec![FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some("-before\n+after\n".into()),
+                }],
+                completeness: ChangeCompleteness::Exact,
+            },
+        );
+        timeline.apply_at(
+            None,
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "edit-2".into(),
+                parent_item_id: None,
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "late.txt".into(),
+                        kind: FileChangeKind::Create,
+                        diff: Some("+late\n".into()),
+                    }],
+                    status: ItemStatus::Completed,
+                },
+            }),
+        );
+
+        let change_set = timeline.turns[0].changes.as_ref().unwrap();
+        assert_eq!(change_set.completeness, ChangeCompleteness::Exact);
+        assert_eq!(change_set.changes.len(), 1);
+        assert_eq!(change_set.changes[0].path, "src/lib.rs");
+        assert_eq!(
+            change_set.changes[0].diff.as_deref(),
+            Some("-before\n+after\n")
+        );
+    }
+
+    #[test]
+    fn delayed_turn_snapshot_attaches_by_provider_turn_id() {
+        let mut timeline = Timeline::fold_events([
+            user_msg("user-1", "first"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            user_msg("user-2", "second"),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-2".into(),
+            },
+        ]);
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnChangesUpdated {
+                turn_id: "turn-1".into(),
+                changes: vec![FileChange {
+                    path: "first.txt".into(),
+                    kind: FileChangeKind::Create,
+                    diff: Some("+first\n".into()),
+                }],
+                completeness: ChangeCompleteness::Exact,
+            },
+        );
+
+        assert_eq!(
+            timeline.turns[0].changes.as_ref().unwrap().changes[0].path,
+            "first.txt"
+        );
+        assert!(timeline.turns[1].changes.is_none());
+    }
+
+    #[test]
+    fn failed_file_operations_are_not_attributed() {
+        let timeline = Timeline::fold_events([
+            user_msg("user-1", "edit it"),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "edit-failed".into(),
+                parent_item_id: None,
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: "src/lib.rs".into(),
+                        kind: FileChangeKind::Modify,
+                        diff: None,
+                    }],
+                    status: ItemStatus::Failed,
+                },
+            }),
+        ]);
+        assert!(timeline.turns[0].changes.is_none());
     }
 
     /// Modeled on crates/agent/tests/fixtures/claude/simple_trace.jsonl:

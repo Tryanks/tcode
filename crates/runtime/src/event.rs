@@ -1,6 +1,6 @@
 //! Localization-free runtime events presented by the UI.
 
-use agent::ProviderKind;
+use agent::{ProviderKind, RewindMode};
 use tcode_core::git::GitAction;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,7 +77,7 @@ pub enum RuntimeError {
     WorktreeRemove { error: String },
     DeleteSession { error: String },
     DeleteProject { error: String },
-    CheckpointRevertBlocked,
+    NativeRewindBlocked,
     PersistEvent { error: String },
     WorktreeAdd { error: String },
     PersistSession { error: String },
@@ -103,8 +103,9 @@ pub enum RuntimeNotice {
     UpdateDone {
         provider: ProviderKind,
     },
-    CheckpointReverted,
-    EditWithoutCheckpoint,
+    NativeRewindCompleted {
+        mode: RewindMode,
+    },
     PlanSaved {
         file: String,
     },

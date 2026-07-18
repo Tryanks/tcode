@@ -127,33 +127,35 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   renders as a single "`{title, ≤24 chars…} {state} ›`" row **instead of** a
   bubble. A disclosure row sits where the turn's user bubble would start and
   keeps the 44px/16px turn rhythm. Message actions follow the split: the
-  orchestrate bubble's Copy copies only the visible user text and Edit seeds only
-  it (resending re-routes through `orchestrate_turn`, which re-composes the
-  prefix); callback rows are not bubbles and carry **no** action row (no Copy,
-  Edit, or Revert). Messages logged before the split annotation existed lack it
+  orchestrate bubble's Copy copies only the visible user text; callback rows are
+  not bubbles and carry **no** action row. Messages logged before the split
+  annotation existed lack it
   and render as an ordinary full bubble, exactly as before.
 - **Message actions.** Every message reserves a 24px action row under it (the
   height is always taken, so revealing it never shifts the timeline). It is
   hidden until the message is hovered — except on the newest user and newest
   assistant message, where it stays visible so the actions are reachable without
   hovering. Ghost xsmall buttons, icon + label:
-  - user bubble (right-aligned row): **Copy** · **Edit** · **Revert** — Edit and
-    Revert only on the message that *opened* the turn (a steered message joins a
-    turn already in flight and carries Copy alone), Revert only when the turn has
-    a git checkpoint. Both are disabled with an explaining tooltip while a turn
-    runs.
+  - user bubble (right-aligned row): **Copy**, plus a provider-native rewind
+    menu when that provider supplied a checkpoint for the turn. Claude Code
+    offers **Restore code and conversation**, **Restore conversation**, and
+    **Restore code**; conversation options are unavailable on the first turn
+    because there is no preceding assistant state. Rewind is disabled while a
+    turn or another rewind is active. Steered messages carry Copy alone.
   - assistant message (left-aligned row): **Copy**.
   - Copy puts the message's **raw text** (the markdown source, not the rendered
     document) on the clipboard and flips to "Copied!" for 2s.
-- **Edit & resend.** Edit replaces the bubble with an inline multi-line editor
-  (primary-bordered card, seeded with the original text; Enter resends, Esc
-  cancels; explicit Cancel / Resend buttons and a muted hint row). Resending
-  rewinds the conversation to the state just before that message — the turn's git
-  checkpoint restores the worktree, the JSONL log is truncated at the message and
-  the provider session is rolled back to Idle (the same single mechanism Revert
-  uses) — and then sends the edited text as a fresh turn. Without a checkpoint
-  (e.g. a non-git cwd) the transcript is still truncated and the message resent,
-  and a toast says plainly that files on disk were not reverted.
+- **Provider-native rewind.** Tcode owns no checkpoint store and never truncates
+  its event log. For supported Claude Code versions, replayed user-message UUIDs
+  become opaque turn checkpoints and the menu forwards Claude's native file and
+  conversation rewind controls. Only after the provider confirms the operation
+  does Tcode append a rewind event; the folded timeline then hides the rewound
+  turns. Claude's conversation prefill is placed in the normal composer. File
+  coverage follows Claude Code's own checkpoint semantics (direct file-edit
+  tools, not arbitrary external filesystem writes). Codex currently exposes
+  only a deprecated conversation-only `thread/rollback`, so Tcode intentionally
+  offers no Codex rewind action until a stable native capability can express the
+  requested semantics.
 - **Errors are never truncated or folded away.** A provider/app error renders as
   its own block: a danger-tinted card (10px radius, danger border at 35%, danger
   bg at 6%) with an uppercase 11px ERROR label, a Copy button, and the FULL
@@ -162,10 +164,14 @@ right: two icon buttons (layout placeholder · diff-panel toggle).
   which is exactly how T3 Code ends up showing "Request was abo…" and then
   nothing. A failed provider start additionally leaves the unsent message in the
   queue strip (typed text is never destroyed by a dead process).
-- CHANGED FILES card per turn with file changes: header "CHANGED FILES (N) ·
-  +A -D" + "Collapse all" ghost + "View diff" bordered button; body = directory
-  tree, file rows with right-aligned per-file +a/-d; paths relative to the
-  session cwd.
+- CHANGED FILES card per turn with provider-attributed file changes: Codex uses
+  its replacement `turn/diff/updated` net snapshot; providers without that
+  capability fold only successfully completed structured file-edit operations
+  and label the result **PARTIAL**. Neither path compares ambient workspace
+  state, so external edits are never claimed by the turn. Header "CHANGED FILES
+  (N) · +A -D" + "Collapse all" ghost + "View diff" bordered button; body =
+  directory tree, file rows with right-aligned per-file +a/-d; paths relative to
+  the session cwd.
 - Small muted local-time row after each finished turn.
 - Floating "⌄ Scroll to end" pill when not at bottom.
 

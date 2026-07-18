@@ -870,6 +870,18 @@ async fn handle_command(
             // Build/Plan is a session *mode* in ACP; the traits picker drives it
             // through `SetOption` (`acp:mode`).
         }
+        SessionCommand::Rewind {
+            checkpoint_id,
+            mode,
+        } => {
+            let _ = events
+                .send(AgentEvent::RewindFailed {
+                    checkpoint_id,
+                    mode,
+                    error: "this ACP agent does not advertise a native rewind operation".into(),
+                })
+                .await;
+        }
         SessionCommand::Shutdown => unreachable!("handled by the caller"),
     }
 }
