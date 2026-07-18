@@ -71,6 +71,8 @@ impl SessionStore {
         let name = match provider {
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCode => "claude",
+            ProviderKind::Pi => "pi",
+            ProviderKind::OpenCode => "opencode",
             // ACP agents publish their models over the wire at session start
             // (`AgentEvent::ProviderOptions`), so there is no catalog to cache.
             ProviderKind::Acp => "acp",
@@ -82,6 +84,8 @@ impl SessionStore {
         let name = match provider {
             ProviderKind::Codex => "codex".to_string(),
             ProviderKind::ClaudeCode => "claude".to_string(),
+            ProviderKind::Pi => "pi".to_string(),
+            ProviderKind::OpenCode => "opencode".to_string(),
             ProviderKind::Acp => {
                 let id = acp_agent_id?;
                 // Registry ids are external input and may contain path separators.

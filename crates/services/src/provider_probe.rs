@@ -14,6 +14,8 @@ pub fn default_program(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => "codex".into(),
         ProviderKind::ClaudeCode => "claude".into(),
+        ProviderKind::Pi => "pi".into(),
+        ProviderKind::OpenCode => "opencode".into(),
         // ACP agents carry their own registry launch recipe.
         ProviderKind::Acp => String::new(),
     }
@@ -101,6 +103,10 @@ pub async fn probe_provider(
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_codex_auth)
         }
+        // Both CLIs can aggregate credentials for several upstream model
+        // providers. Installation/version are definitive; auth remains
+        // indeterminate until a session/model query succeeds.
+        ProviderKind::Pi | ProviderKind::OpenCode => None,
         // ACP authentication is surfaced by its session protocol.
         ProviderKind::Acp => None,
     };
@@ -162,6 +168,8 @@ mod tests {
     fn default_programs_cover_native_and_acp() {
         assert_eq!(default_program(ProviderKind::Codex), "codex");
         assert_eq!(default_program(ProviderKind::ClaudeCode), "claude");
+        assert_eq!(default_program(ProviderKind::Pi), "pi");
+        assert_eq!(default_program(ProviderKind::OpenCode), "opencode");
         assert_eq!(default_program(ProviderKind::Acp), "");
     }
 

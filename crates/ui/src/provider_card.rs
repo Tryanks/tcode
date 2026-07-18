@@ -48,8 +48,8 @@ pub struct ProviderCard {
     /// The protocol this card's profile drives (glyph, home labels, third-field
     /// semantics, shared model catalog / status / version are all keyed on it).
     provider: ProviderKind,
-    /// Which profile this card edits. A built-in id (`"claude"` / `"codex"`) for
-    /// the two default cards, or a user profile slug. All config/secret writes
+    /// Which profile this card edits. A built-in native-provider id or a user
+    /// profile slug. All config/secret writes
     /// are keyed on this; catalog/status/version stay keyed on `provider`.
     profile_id: String,
     expanded: bool,
@@ -58,7 +58,7 @@ pub struct ProviderCard {
     display_name: Entity<InputState>,
     binary: Entity<InputState>,
     home: Entity<InputState>,
-    /// Codex: shadow home path. Claude: launch arguments.
+    /// Codex: shadow home path. Other native providers: launch arguments.
     third_field: Entity<InputState>,
     custom_model: Entity<InputState>,
     slug_error: Option<String>,
@@ -108,9 +108,10 @@ impl ProviderCard {
             third_placeholder(provider).to_string(),
             match provider {
                 ProviderKind::Codex => path_string(&settings.shadow_home_path),
-                ProviderKind::ClaudeCode | ProviderKind::Acp => {
-                    settings.launch_args.clone().unwrap_or_default()
-                }
+                ProviderKind::ClaudeCode
+                | ProviderKind::Pi
+                | ProviderKind::OpenCode
+                | ProviderKind::Acp => settings.launch_args.clone().unwrap_or_default(),
             },
             window,
             cx,
@@ -200,10 +201,14 @@ impl ProviderCard {
             move |settings| {
                 settings.display_name = name;
                 settings.binary_path = binary.map(Into::into);
-                settings.home_path = home.map(Into::into);
+                settings.home_path = (provider != ProviderKind::OpenCode)
+                    .then(|| home.map(Into::into))
+                    .flatten();
                 match provider {
                     ProviderKind::Codex => settings.shadow_home_path = third.map(Into::into),
-                    ProviderKind::ClaudeCode => settings.launch_args = third,
+                    ProviderKind::ClaudeCode | ProviderKind::Pi | ProviderKind::OpenCode => {
+                        settings.launch_args = third;
+                    }
                     ProviderKind::Acp => {}
                 }
             },
@@ -1152,16 +1157,18 @@ impl ProviderCard {
                     cx,
                 ),
             )
-            .child(
-                self.field_block(
-                    home_label(provider).into(),
-                    home_help(provider).into(),
-                    Input::new(&self.home)
-                        .rounded(crate::material::radius_input())
-                        .into_any_element(),
-                    cx,
-                ),
-            )
+            .when(provider != ProviderKind::OpenCode, |this| {
+                this.child(
+                    self.field_block(
+                        home_label(provider).into(),
+                        home_help(provider).into(),
+                        Input::new(&self.home)
+                            .rounded(crate::material::radius_input())
+                            .into_any_element(),
+                        cx,
+                    ),
+                )
+            })
             .child(
                 self.field_block(
                     third_label(provider).into(),
@@ -1180,7 +1187,7 @@ impl ProviderCard {
     }
 
     /// A destructive "Delete profile" action, only rendered for user-created
-    /// profiles (built-in Claude/Codex cards can't be deleted).
+    /// profiles (built-in provider cards can't be deleted).
     fn render_delete(&self, cx: &mut Context<Self>) -> AnyElement {
         let profile_id = self.profile_id.clone();
         v_flex()
@@ -1248,6 +1255,8 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
             .path("icons/claude.svg")
             .text_color(rgb(CLAUDE_BRAND_COLOR)),
         ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
+        ProviderKind::Pi => Icon::empty().path("icons/pi.svg"),
+        ProviderKind::OpenCode => Icon::empty().path("icons/opencode.svg"),
         ProviderKind::Acp => Icon::empty(),
     }
 }
@@ -1256,6 +1265,8 @@ fn default_binary_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "opencode",
         // ACP agents are not configured through this card (they have their own
         // marketplace cards); these arms only keep the matches total.
         ProviderKind::Acp => "",
@@ -1266,6 +1277,8 @@ fn home_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "~/.codex",
         ProviderKind::ClaudeCode => "~",
+        ProviderKind::Pi => "~/.pi/agent",
+        ProviderKind::OpenCode => "",
         ProviderKind::Acp => "",
     }
 }
@@ -1273,8 +1286,10 @@ fn home_placeholder(provider: ProviderKind) -> &'static str {
 fn home_label(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => tcode_i18n::tr!("providers.codex_home").into_owned(),
-        ProviderKind::ClaudeCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.claude_home").into_owned()
+        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.claude_home").into_owned(),
+        ProviderKind::Pi => tcode_i18n::tr!("providers.pi_home").into_owned(),
+        ProviderKind::OpenCode | ProviderKind::Acp => {
+            tcode_i18n::tr!("providers.home").into_owned()
         }
     }
 }
@@ -1282,8 +1297,10 @@ fn home_label(provider: ProviderKind) -> String {
 fn home_help(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => tcode_i18n::tr!("providers.codex_home_help").into_owned(),
-        ProviderKind::ClaudeCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.claude_home_help").into_owned()
+        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.claude_home_help").into_owned(),
+        ProviderKind::Pi => tcode_i18n::tr!("providers.pi_home_help").into_owned(),
+        ProviderKind::OpenCode | ProviderKind::Acp => {
+            tcode_i18n::tr!("providers.home_help").into_owned()
         }
     }
 }
@@ -1292,6 +1309,8 @@ fn third_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "~/.codex-t3/personal",
         ProviderKind::ClaudeCode => "e.g. --chrome",
+        ProviderKind::Pi => "e.g. --provider openai-codex",
+        ProviderKind::OpenCode => "e.g. --print-logs",
         ProviderKind::Acp => "",
     }
 }
@@ -1299,18 +1318,20 @@ fn third_placeholder(provider: ProviderKind) -> &'static str {
 fn third_label(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => tcode_i18n::tr!("providers.shadow_home").into_owned(),
-        ProviderKind::ClaudeCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.launch_args").into_owned()
-        }
+        ProviderKind::ClaudeCode
+        | ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Acp => tcode_i18n::tr!("providers.launch_args").into_owned(),
     }
 }
 
 fn third_help(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => tcode_i18n::tr!("providers.shadow_home_help").into_owned(),
-        ProviderKind::ClaudeCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.launch_args_help").into_owned()
-        }
+        ProviderKind::ClaudeCode
+        | ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Acp => tcode_i18n::tr!("providers.launch_args_help").into_owned(),
     }
 }
 
@@ -1318,6 +1339,8 @@ fn custom_model_placeholder(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "gpt-6.7-codex-ultra-preview",
         ProviderKind::ClaudeCode => "claude-sonnet-5",
+        ProviderKind::Pi => "openai-codex/gpt-5.5",
+        ProviderKind::OpenCode => "openai/gpt-5.1-codex",
         ProviderKind::Acp => "",
     }
 }

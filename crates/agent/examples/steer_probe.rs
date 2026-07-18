@@ -5,6 +5,7 @@
 //! ```text
 //! cargo run -p agent --example steer_probe -- claude /tmp
 //! cargo run -p agent --example steer_probe -- codex  /tmp
+//! cargo run -p agent --example steer_probe -- pi     /tmp
 //! ```
 //!
 //! Two things are proven at once:
@@ -42,8 +43,9 @@ fn main() {
     let provider = match args.next().as_deref() {
         Some("claude") => ProviderKind::ClaudeCode,
         Some("codex") => ProviderKind::Codex,
+        Some("pi") => ProviderKind::Pi,
         other => {
-            eprintln!("usage: steer_probe <claude|codex> [cwd]  (got {other:?})");
+            eprintln!("usage: steer_probe <claude|codex|pi> [cwd]  (got {other:?})");
             std::process::exit(2);
         }
     };

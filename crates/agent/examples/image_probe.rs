@@ -71,9 +71,11 @@ fn main() {
     let provider = match args.next().as_deref() {
         Some("claude") => ProviderKind::ClaudeCode,
         Some("codex") => ProviderKind::Codex,
+        Some("pi") => ProviderKind::Pi,
+        Some("opencode") => ProviderKind::OpenCode,
         other => {
             eprintln!(
-                "usage: image_probe <claude|codex> <image-path> [prompt] [cwd]  (got {other:?})"
+                "usage: image_probe <claude|codex|pi|opencode> <image-path> [prompt] [cwd]  (got {other:?})"
             );
             std::process::exit(2);
         }
@@ -81,7 +83,7 @@ fn main() {
     let image_path = match args.next() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: image_probe <claude|codex> <image-path> [prompt] [cwd]");
+            eprintln!("usage: image_probe <claude|codex|pi|opencode> <image-path> [prompt] [cwd]");
             std::process::exit(2);
         }
     };

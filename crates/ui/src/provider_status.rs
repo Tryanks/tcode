@@ -113,6 +113,8 @@ pub fn missing_cli_message(provider: ProviderKind) -> String {
     match provider {
         ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_missing").into_owned(),
         ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.probe.claude_missing").into_owned(),
+        ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_missing").into_owned(),
+        ProviderKind::OpenCode => tcode_i18n::tr!("providers.probe.opencode_missing").into_owned(),
         ProviderKind::Acp => String::new(),
     }
 }
@@ -141,6 +143,10 @@ pub fn unauthenticated_message(provider: ProviderKind) -> String {
         ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_signed_out").into_owned(),
         ProviderKind::ClaudeCode => {
             tcode_i18n::tr!("providers.probe.claude_signed_out").into_owned()
+        }
+        ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_signed_out").into_owned(),
+        ProviderKind::OpenCode => {
+            tcode_i18n::tr!("providers.probe.opencode_signed_out").into_owned()
         }
         ProviderKind::Acp => String::new(),
     }

@@ -2,17 +2,17 @@
 //!
 //! Turn mode:
 //!   cargo run -p agent --example probe -- \
-//!       <codex|claude> "<prompt>" [cwd] [supervised|auto_edits|full_access] \
+//!       <codex|claude|pi|opencode> "<prompt>" [cwd] [supervised|auto_edits|full_access] \
 //!       [--mode plan] [--effort <value>]
 //!
 //! Catalog mode:
-//!   cargo run -p agent --example probe -- --list-models <codex|claude>
+//!   cargo run -p agent --example probe -- --list-models <codex|claude|pi|opencode>
 //!
 //! Turn mode prints every canonical event as one JSON line and auto-approves any
 //! approval request and auto-answers any user-input request with each question's
 //! first option (only run against throwaway directories). `--mode plan` sends the
 //! turn in Plan interaction mode; `--effort` sets a per-turn reasoning effort
-//! (Codex) — Claude ignores per-turn effort (launch-time only).
+//! (Codex/OpenCode) — Claude and pi resolve it as a session option.
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, InteractionMode, OptionSelection, ProviderKind,
@@ -23,11 +23,13 @@ fn parse_provider(arg: Option<&str>) -> ProviderKind {
     match arg {
         Some("codex") => ProviderKind::Codex,
         Some("claude") => ProviderKind::ClaudeCode,
+        Some("pi") => ProviderKind::Pi,
+        Some("opencode") => ProviderKind::OpenCode,
         _ => {
             eprintln!(
-                "usage: probe <codex|claude> <prompt> [cwd] [mode] [--mode plan] [--effort v]"
+                "usage: probe <codex|claude|pi|opencode> <prompt> [cwd] [mode] [--mode plan] [--effort v]"
             );
-            eprintln!("       probe --list-models <codex|claude>");
+            eprintln!("       probe --list-models <codex|claude|pi|opencode>");
             std::process::exit(2);
         }
     }
@@ -88,7 +90,7 @@ fn main() {
     let mut pos = positional.into_iter();
     let provider = parse_provider(pos.next().as_deref());
     let prompt = pos.next().unwrap_or_else(|| {
-        eprintln!("usage: probe <codex|claude> <prompt> [cwd] [mode]");
+        eprintln!("usage: probe <codex|claude|pi|opencode> <prompt> [cwd] [mode]");
         std::process::exit(2);
     });
     let cwd = pos

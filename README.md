@@ -6,7 +6,8 @@
 
 **A native desktop app for the coding agents you already use.**
 
-Claude Code, Codex, and any agent that speaks ACP — one window, one workflow.
+Claude Code, Codex, pi, OpenCode, and any agent that speaks ACP — one window,
+one workflow.
 
 [Download](https://github.com/Tryanks/tcode/releases) ·
 [Getting started](#getting-started) ·
@@ -28,12 +29,12 @@ squinting at scrollback.
 
 Tcode is a desktop layer over the agent CLIs already installed on your machine.
 It spawns them, speaks their native protocols, and adds the things a terminal
-can't: threads that persist, rendered diffs, a readable approval panel, and a
+can't: threads that persist, rendered diffs, a readable approval panel, and
 native provider actions when the underlying CLI exposes them.
 
-It does **not** replace your agent, proxy your API keys, or run a server. Your
-accounts, subscriptions, models and tooling keep working exactly as they do
-today — Tcode just drives them.
+It does **not** replace your agent, proxy your API keys, or run a cloud service.
+Your accounts, subscriptions, models and tooling keep working exactly as they
+do today — Tcode just drives them.
 
 ## What you get
 
@@ -76,10 +77,12 @@ and a live plan/task panel.
 | --- | --- |
 | [Claude Code](https://claude.com/claude-code) | `claude` on your `PATH` |
 | [Codex](https://developers.openai.com/codex/cli) | `codex` on your `PATH` |
+| [pi](https://github.com/earendil-works/pi) | `pi` on your `PATH` |
+| [OpenCode](https://opencode.ai) | `opencode` on your `PATH` |
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
 marketplace backed by the official Agent Client Protocol registry — Gemini CLI,
-Cursor, GitHub Copilot, goose, OpenCode, Qwen Code, Cline and dozens more.
+Cursor, GitHub Copilot, goose, Qwen Code, Cline and dozens more.
 Install one from **Settings → Providers**, or point Tcode at any command that
 speaks ACP.
 
@@ -87,10 +90,8 @@ speaks ACP.
 <img src="docs/images/acp-marketplace.png" width="720" alt="ACP agent marketplace in Settings → Providers">
 </div>
 
-> Claude Code and Codex also have ACP adapters, and Tcode deliberately hides them
-> from the marketplace: the native integrations do strictly more (steering,
-> interactive questions, richer tool rendering), so there is no reason to route
-> them through ACP.
+> ACP entries that duplicate a native integration are deliberately hidden from
+> the marketplace so each CLI has one clear, highest-fidelity path.
 
 ## Getting started
 

@@ -72,7 +72,6 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
 
 pub struct SettingsPage {
     app_state: Entity<AppState>,
-    /// One card per provider, in T3's driver order (Codex, then Claude).
     /// One card per native profile, keyed by profile id (built-in + user).
     provider_cards: Vec<(String, Entity<ProviderCard>)>,
     /// Long-lived state for the modal ACP marketplace and custom form.
@@ -201,7 +200,7 @@ impl SettingsPage {
     /// (Re)build the provider cards from current settings — also used after
     /// "Restore defaults", which invalidates every card's inputs.
     fn build_provider_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Screenshot-only: `--debug-provider-expanded <codex|claude>` opens one
+        // Screenshot-only: `--debug-provider-expanded <profile-id>` opens one
         // card's details (clicking the chevron cannot be driven headlessly).
         let expanded = self.app_state.read(cx).debug_provider_expanded.clone();
         let profiles = self.app_state.read(cx).all_profiles();

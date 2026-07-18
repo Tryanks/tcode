@@ -68,6 +68,12 @@ pub use crate::terminal::{
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
 const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
+    ProviderKind::ClaudeCode,
+    ProviderKind::Codex,
+    ProviderKind::Pi,
+    ProviderKind::OpenCode,
+];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
@@ -675,7 +681,7 @@ pub struct AppState {
     pub debug_acp_search: Option<String>,
     /// Screenshot-only: open the ACP Add agent dialog on the Providers page.
     pub debug_acp_dialog: bool,
-    /// Screenshot-only: which provider card starts expanded (`codex` / `claude`).
+    /// Screenshot-only: built-in provider-profile id whose card starts expanded.
     pub debug_provider_expanded: Option<String>,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
@@ -785,7 +791,7 @@ impl AppState {
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
         let mut model_catalogs = HashMap::new();
-        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+        for provider in NATIVE_PROVIDER_KINDS {
             let cached = store.load_models(provider);
             if !cached.is_empty() {
                 model_catalogs.insert(provider, cached);
@@ -1424,7 +1430,7 @@ impl AppState {
         let mut status = serde_json::json!({
             "thread_id": meta.id,
             "title": meta.title,
-            "provider": match meta.provider { ProviderKind::ClaudeCode => "claude", ProviderKind::Codex => "codex", ProviderKind::Acp => "acp" },
+            "provider": provider_name(meta.provider),
             "state": state,
             "waiting_approval": waiting_approval,
             "approval_request_id": approval_request_id,
@@ -1441,7 +1447,7 @@ impl AppState {
     /// at app start and after a binary-path change). Results update
     /// `model_catalogs` and are persisted so the next launch is instant.
     pub fn refresh_model_catalogs(&mut self, cx: &mut Context<Self>) {
-        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+        for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.settings.provider(provider).binary_path;
             let launch_env = self.launch_env(provider);
             self.models_loading.insert(provider, true);
@@ -1626,17 +1632,19 @@ impl AppState {
     // -- provider profiles (built-in + user-created) ------------------------
     //
     // A *profile* is a named configuration on top of a protocol `ProviderKind`.
-    // The built-in Claude/Codex cards are profiles too (ids "claude"/"codex").
+    // The built-in native-provider cards are profiles too (with stable ids such
+    // as "claude", "codex", "pi", and "opencode").
     // The model catalog, version, and status probe stay keyed by kind and are
     // shared across a kind's profiles; a profile overrides only its card config
     // (env, binary, home, accent, custom/hidden models) and its own secrets.
 
-    /// Every selectable native profile, grouped by kind: Codex (built-in then
-    /// its user profiles), then Claude (built-in then its user profiles). ACP is
-    /// handled separately through the installed-agent list.
+    /// Every selectable native profile, grouped by kind. ACP is handled
+    /// separately through the installed-agent list.
     pub fn all_profiles(&self) -> Vec<ResolvedProfile> {
         let mut out = self.settings.profiles_for_kind(ProviderKind::Codex);
         out.extend(self.settings.profiles_for_kind(ProviderKind::ClaudeCode));
+        out.extend(self.settings.profiles_for_kind(ProviderKind::Pi));
+        out.extend(self.settings.profiles_for_kind(ProviderKind::OpenCode));
         out
     }
 
@@ -1837,10 +1845,11 @@ impl AppState {
 
     /// Probe every provider: is the CLI there, what version, and who is signed
     /// in? Runs the same `--version` call the version check uses, plus the
-    /// provider's own auth surface (`claude auth status --json`; Codex's
-    /// `auth.json`), both under the provider's configured env/home.
+    /// provider's own auth surface where one is unambiguous (`claude auth
+    /// status --json`; Codex's `auth.json`). Multi-provider CLIs report an
+    /// indeterminate auth state until their model/session requests run.
     pub fn refresh_provider_status(&mut self, cx: &mut Context<Self>) {
-        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+        for provider in NATIVE_PROVIDER_KINDS {
             let snapshot = self.provider_snapshots.entry(provider).or_default();
             if snapshot.checking {
                 continue;
@@ -1865,7 +1874,7 @@ impl AppState {
     /// storing results in `provider_versions` and toasting once per provider
     /// that has an update available.
     pub fn check_provider_versions(&mut self, cx: &mut Context<Self>) {
-        for provider in [ProviderKind::ClaudeCode, ProviderKind::Codex] {
+        for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.resolve_provider_binary(provider);
             let status = self.provider_versions.entry(provider).or_default();
             if status.checking {
@@ -6021,6 +6030,7 @@ fn compose_orchestrate_text(
     let base_guidance = match provider {
         ProviderKind::ClaudeCode => FABLE_ORCHESTRATE_GUIDANCE,
         ProviderKind::Codex => CODEX_ORCHESTRATE_GUIDANCE,
+        ProviderKind::Pi | ProviderKind::OpenCode => GENERIC_ORCHESTRATE_GUIDANCE,
         ProviderKind::Acp => GENERIC_ORCHESTRATE_GUIDANCE,
     };
     let configuration = render_orchestrate_configuration(settings, provider, model);
@@ -6058,6 +6068,8 @@ fn render_orchestrate_configuration(
         let provider = match child.provider {
             ProviderKind::Codex => "codex",
             ProviderKind::ClaudeCode => "claude",
+            ProviderKind::Pi => "pi",
+            ProviderKind::OpenCode => "opencode",
             ProviderKind::Acp => "acp",
         };
         let effort = child.effort.as_deref().unwrap_or("provider default");
@@ -6100,9 +6112,11 @@ fn resolve_orchestrate_dispatch(
     let provider = match provider.trim().to_ascii_lowercase().as_str() {
         "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
         "codex" => ProviderKind::Codex,
+        "pi" => ProviderKind::Pi,
+        "opencode" | "open_code" | "open-code" => ProviderKind::OpenCode,
         "acp" => {
             return Err(
-                "ACP child dispatch is not available yet; configure a Codex or Claude child model"
+                "ACP child dispatch is not available yet; configure a native-provider child model"
                     .into(),
             );
         }
@@ -6200,6 +6214,8 @@ fn provider_name(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "opencode",
         ProviderKind::Acp => "acp",
     }
 }
@@ -6458,10 +6474,12 @@ fn session_options(
             None
         },
         launch_env,
-        // Claude's "Launch arguments"; an ACP agent carries its own from the
-        // installed-agent card (Codex has no such field).
+        // Native providers that expose "Launch arguments" use their profile;
+        // an ACP agent carries its own from the installed-agent card.
         extra_args: match meta.provider {
-            ProviderKind::ClaudeCode => provider_settings.extra_args(),
+            ProviderKind::ClaudeCode | ProviderKind::Pi | ProviderKind::OpenCode => {
+                provider_settings.extra_args()
+            }
             ProviderKind::Codex => Vec::new(),
             ProviderKind::Acp => acp_agent
                 .as_ref()
@@ -8853,8 +8871,16 @@ mod tests {
         claude.turn_in_flight = true;
         assert_eq!(claude.route(true), SendRouting::Steer);
 
-        // ACP has no steering method, so a steer must fall back to the queue
-        // rather than silently vanish.
+        let mut pi = live_session(ProviderKind::Pi, commands.clone());
+        pi.turn_in_flight = true;
+        assert_eq!(pi.route(true), SendRouting::Steer);
+
+        // OpenCode and ACP have no steering method, so a steer must fall back
+        // to the queue rather than silently vanish.
+        let mut opencode = live_session(ProviderKind::OpenCode, commands.clone());
+        opencode.turn_in_flight = true;
+        assert_eq!(opencode.route(true), SendRouting::QueueUnsupported);
+
         let mut acp = live_session(ProviderKind::Acp, commands);
         acp.turn_in_flight = true;
         assert_eq!(acp.route(false), SendRouting::Queue);
@@ -8869,8 +8895,7 @@ mod tests {
 
     /// Steering must not disturb the turn bookkeeping: it joins the turn already
     /// in flight, so no queue entry is consumed and no new turn is opened.
-    /// (Both providers were verified live to emit exactly one TurnStarted /
-    /// TurnCompleted across a steered turn — see examples/steer_probe.rs.)
+    /// (See examples/steer_probe.rs for the live protocol probe.)
     #[test]
     fn steering_does_not_disturb_turn_accounting() {
         let (commands, receiver) = async_channel::unbounded();

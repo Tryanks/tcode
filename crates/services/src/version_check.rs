@@ -12,12 +12,15 @@ use std::path::Path;
 use agent::ProviderKind;
 
 /// The npm package name whose published version is the provider's "latest".
-/// `npm view <pkg> version` works for both providers (verified 2026-07); brew's
-/// JSON was unreliable here, so npm is the single source of truth for "latest".
+/// `npm view <pkg> version` works for every native provider (verified 2026-07);
+/// brew's JSON was unreliable here, so npm is the single source of truth for
+/// "latest".
 pub fn npm_package(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "@anthropic-ai/claude-code",
         ProviderKind::Codex => "@openai/codex",
+        ProviderKind::Pi => "@earendil-works/pi-coding-agent",
+        ProviderKind::OpenCode => "opencode-ai",
         // ACP agents ship on their own cadence; no single npm package.
         // ACP agents are versioned by the registry, not by npm: their update
         // path is "install the newer version from the marketplace".
@@ -104,6 +107,8 @@ fn brew_formula(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::ClaudeCode => "claude-code",
         ProviderKind::Codex => "codex",
+        ProviderKind::Pi => "pi-coding-agent",
+        ProviderKind::OpenCode => "opencode",
         ProviderKind::Acp => "",
     }
 }
@@ -112,13 +117,13 @@ fn brew_formula(provider: ProviderKind) -> &'static str {
 /// source, or `None` when we don't know how to update it (an unrecognized
 /// explicit binary path is manual-only, exactly as in T3). Mapping (T3 §3):
 ///
-/// | Source | Codex | Claude |
-/// |---|---|---|
-/// | npm | `npm install -g @openai/codex@latest` | `npm install -g @anthropic-ai/claude-code@latest` |
-/// | Bun | `bun i -g @openai/codex@latest` | `bun i -g @anthropic-ai/claude-code@latest` |
-/// | pnpm | `pnpm add -g @openai/codex@latest` | `pnpm add -g @anthropic-ai/claude-code@latest` |
-/// | Homebrew | `brew upgrade codex` | `brew upgrade claude-code` |
-/// | native | — (no self-update) | `claude update` |
+/// | Source | Codex | Claude | pi | OpenCode |
+/// |---|---|---|---|---|
+/// | npm | `npm install -g @openai/codex@latest` | `npm install -g @anthropic-ai/claude-code@latest` | `npm install -g @earendil-works/pi-coding-agent@latest` | `npm install -g opencode-ai@latest` |
+/// | Bun | `bun i -g @openai/codex@latest` | `bun i -g @anthropic-ai/claude-code@latest` | `bun i -g @earendil-works/pi-coding-agent@latest` | `bun i -g opencode-ai@latest` |
+/// | pnpm | `pnpm add -g @openai/codex@latest` | `pnpm add -g @anthropic-ai/claude-code@latest` | `pnpm add -g @earendil-works/pi-coding-agent@latest` | `pnpm add -g opencode-ai@latest` |
+/// | Homebrew | `brew upgrade codex` | `brew upgrade claude-code` | `brew upgrade pi-coding-agent` | `brew upgrade opencode` |
+/// | native | — (no self-update) | `claude update` | `pi update self` | `opencode upgrade` |
 pub fn update_command(provider: ProviderKind, source: InstallSource) -> Option<Vec<String>> {
     // ACP agents update through the marketplace (Settings → Providers), not a
     // package manager.
@@ -135,6 +140,8 @@ pub fn update_command(provider: ProviderKind, source: InstallSource) -> Option<V
         (_, InstallSource::Bun) => Some(vec![s("bun"), s("i"), s("-g"), pkg()]),
         (_, InstallSource::Pnpm) => Some(vec![s("pnpm"), s("add"), s("-g"), pkg()]),
         (ProviderKind::ClaudeCode, InstallSource::Native) => Some(vec![s("claude"), s("update")]),
+        (ProviderKind::Pi, InstallSource::Native) => Some(vec![s("pi"), s("update"), s("self")]),
+        (ProviderKind::OpenCode, InstallSource::Native) => Some(vec![s("opencode"), s("upgrade")]),
         // Native Codex has no documented self-update subcommand, and an
         // unrecognized path is manual-only (no command to show or run).
         _ => None,
@@ -384,33 +391,62 @@ mod tests {
     fn maps_update_commands_per_source_and_provider() {
         use InstallSource::*;
         use ProviderKind::*;
-        let table: [(ProviderKind, InstallSource, Option<&str>); 12] = [
+        let table: [(ProviderKind, InstallSource, Option<&str>); 28] = [
             (Codex, Npm, Some("npm install -g @openai/codex@latest")),
             (
                 ClaudeCode,
                 Npm,
                 Some("npm install -g @anthropic-ai/claude-code@latest"),
             ),
+            (
+                Pi,
+                Npm,
+                Some("npm install -g @earendil-works/pi-coding-agent@latest"),
+            ),
+            (OpenCode, Npm, Some("npm install -g opencode-ai@latest")),
             (Codex, Bun, Some("bun i -g @openai/codex@latest")),
             (
                 ClaudeCode,
                 Bun,
                 Some("bun i -g @anthropic-ai/claude-code@latest"),
             ),
+            (
+                Pi,
+                Bun,
+                Some("bun i -g @earendil-works/pi-coding-agent@latest"),
+            ),
+            (OpenCode, Bun, Some("bun i -g opencode-ai@latest")),
             (Codex, Pnpm, Some("pnpm add -g @openai/codex@latest")),
             (
                 ClaudeCode,
                 Pnpm,
                 Some("pnpm add -g @anthropic-ai/claude-code@latest"),
             ),
+            (
+                Pi,
+                Pnpm,
+                Some("pnpm add -g @earendil-works/pi-coding-agent@latest"),
+            ),
+            (OpenCode, Pnpm, Some("pnpm add -g opencode-ai@latest")),
             (Codex, Brew, Some("brew upgrade codex")),
             (ClaudeCode, Brew, Some("brew upgrade claude-code")),
+            (Pi, Brew, Some("brew upgrade pi-coding-agent")),
+            (OpenCode, Brew, Some("brew upgrade opencode")),
             (ClaudeCode, Native, Some("claude update")),
+            (Pi, Native, Some("pi update self")),
+            (OpenCode, Native, Some("opencode upgrade")),
             // Native Codex has no documented self-update subcommand.
             (Codex, Native, None),
             // An unrecognized path is manual-only in T3: no command at all.
             (Codex, Unknown, None),
             (ClaudeCode, Unknown, None),
+            (Pi, Unknown, None),
+            (OpenCode, Unknown, None),
+            // ACP agents are updated through their marketplace entry.
+            (Acp, Npm, None),
+            (Acp, Brew, None),
+            (Acp, Native, None),
+            (Acp, Unknown, None),
         ];
         for (provider, source, expected) in table {
             assert_eq!(
