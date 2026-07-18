@@ -8,7 +8,8 @@
 //! defines.
 
 use gpui::{
-    App, Div, Hsla, IntoElement, ParentElement as _, Pixels, Rgba, Styled as _, div,
+    App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
 use gpui_component::ActiveTheme as _;
@@ -106,4 +107,133 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
         .border_1()
         .border_color(cx.theme().border)
         .shadow_xl()
+}
+
+/// Gives a raw clickable surface the same keyboard and accessibility treatment
+/// as the component-library controls. GPUI automatically maps Enter/Space to
+/// `on_click` for a focused clickable div; this helper supplies the tab stop,
+/// semantic role/name, and a keyboard-only outline that remains legible in
+/// both themes without changing layout.
+pub fn accessible_clickable(
+    el: Div,
+    id: impl Into<ElementId>,
+    role: Role,
+    label: impl Into<SharedString>,
+    cx: &App,
+) -> Stateful<Div> {
+    let ring = cx.theme().ring.opacity(if cx.theme().mode.is_dark() {
+        0.72
+    } else {
+        0.58
+    });
+
+    el.tab_index(0)
+        .focus_visible(|style| {
+            style.shadow(vec![
+                BoxShadow::new(px(0.), px(0.), ring).spread_radius(px(2.)),
+            ])
+        })
+        .id(id)
+        .role(role)
+        .aria_label(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        Context, KeyBinding, KeyUpEvent, Keystroke, Render, TestAppContext, VisualTestContext,
+        Window,
+    };
+    use std::{cell::Cell, rc::Rc};
+
+    gpui::actions!(accessible_controls_probe, [FocusNext, FocusPrevious]);
+
+    struct AccessibleControlsProbe {
+        activations: Rc<Cell<[usize; 2]>>,
+    }
+
+    impl AccessibleControlsProbe {
+        fn new(activations: Rc<Cell<[usize; 2]>>, _cx: &mut Context<Self>) -> Self {
+            Self { activations }
+        }
+    }
+
+    impl Render for AccessibleControlsProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let first_activations = self.activations.clone();
+            let second_activations = self.activations.clone();
+
+            div()
+                .key_context("AccessibleControlsProbe")
+                .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+                .on_action(|_: &FocusPrevious, window, cx| window.focus_prev(cx))
+                .child(
+                    accessible_clickable(div().size(px(24.)), "first", Role::Button, "First", cx)
+                        .on_click(move |_, _, _| {
+                            let mut counts = first_activations.get();
+                            counts[0] += 1;
+                            first_activations.set(counts);
+                        }),
+                )
+                .child(
+                    accessible_clickable(div().size(px(24.)), "second", Role::Switch, "Second", cx)
+                        .on_click(move |_, _, _| {
+                            let mut counts = second_activations.get();
+                            counts[1] += 1;
+                            second_activations.set(counts);
+                        }),
+                )
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    fn activate(cx: &mut VisualTestContext, key: &str) {
+        cx.simulate_keystrokes(key);
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse(key).expect("valid activation key"),
+        });
+    }
+
+    #[gpui::test]
+    fn raw_controls_follow_root_tab_order_and_activate_from_the_keyboard(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("tab", FocusNext, Some("AccessibleControlsProbe")),
+                KeyBinding::new("shift-tab", FocusPrevious, Some("AccessibleControlsProbe")),
+            ]);
+        });
+        let activations = Rc::new(Cell::new([0, 0]));
+        let probe_activations = activations.clone();
+        let (_probe, cx) = cx.add_window_view(move |_, cx| {
+            AccessibleControlsProbe::new(probe_activations.clone(), cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        draw(cx);
+
+        // A dependency's `Root` cannot be instantiated with GPUI's macOS mock
+        // window, so bootstrap the first focus exactly as Root's Tab action
+        // does, then exercise real Tab/Shift-Tab key dispatch from there.
+        cx.update(|window, cx| window.focus_next(cx));
+        draw(cx);
+        activate(cx, "enter");
+        assert_eq!(activations.get(), [1, 0]);
+
+        cx.simulate_keystrokes("tab");
+        draw(cx);
+        activate(cx, "space");
+        assert_eq!(activations.get(), [1, 1]);
+
+        cx.simulate_keystrokes("shift-tab");
+        draw(cx);
+        activate(cx, "enter");
+        assert_eq!(activations.get(), [2, 1]);
+    }
 }

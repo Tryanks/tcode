@@ -13,7 +13,7 @@
 use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    KeyDownEvent, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -405,6 +405,10 @@ impl Render for CommandPalette {
                 list_content = list_content.child(
                     h_flex()
                         .id(("palette-row", index))
+                        .role(Role::ListBoxOption)
+                        .aria_label(item.label.clone())
+                        .aria_selected(is_sel)
+                        .when(is_sel, |row| row.aria_active_descendant())
                         .flex_none()
                         .w_full()
                         .h(px(38.))
@@ -475,6 +479,8 @@ impl Render for CommandPalette {
         }
         let list = div()
             .id("palette-list")
+            .role(Role::ListBox)
+            .aria_label(tcode_i18n::tr!("palette.results"))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -553,7 +559,44 @@ impl Focusable for CommandPalette {
 
 #[cfg(test)]
 mod tests {
-    use super::fuzzy_score;
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use tcode_services::store::SessionStore;
+
+    struct PaletteHarness {
+        palette: Entity<CommandPalette>,
+    }
+
+    impl PaletteHarness {
+        fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+            Self {
+                palette: cx.new(|cx| CommandPalette::new(app_state, window, cx)),
+            }
+        }
+    }
+
+    impl Render for PaletteHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    fn dispatch_palette_key(
+        palette: &Entity<CommandPalette>,
+        cx: &mut VisualTestContext,
+        key: &str,
+    ) {
+        let event = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).expect("valid palette key"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.on_key_down(&event, window, cx);
+            });
+        });
+    }
 
     #[test]
     fn empty_query_matches_everything() {
@@ -590,5 +633,53 @@ mod tests {
         // Both "Toggle ..." match; "Open settings" does not.
         assert_eq!(scored.len(), 2);
         assert!(scored[0].1.starts_with("Toggle"));
+    }
+
+    #[gpui::test]
+    fn arrow_keys_move_and_clamp_the_highlight_while_the_query_keeps_focus(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-palette-keyboard-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(root.clone()).expect("open test store");
+        let app_state = cx.new(|_| AppState::new(store));
+        let palette_state = app_state.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            PaletteHarness::new(palette_state.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let palette = cx.update(|_, cx| harness.read(cx).palette.clone());
+        cx.update(|window, cx| {
+            let query = palette.read(cx).query.clone();
+            query.read(cx).focus_handle(cx).focus(window, cx);
+        });
+
+        dispatch_palette_key(&palette, cx, "down");
+        dispatch_palette_key(&palette, cx, "down");
+        cx.update(|window, cx| {
+            let palette = palette.read(cx);
+            assert_eq!(palette.selected, 2);
+            assert!(palette.query.read(cx).focus_handle(cx).is_focused(window));
+        });
+
+        dispatch_palette_key(&palette, cx, "up");
+        dispatch_palette_key(&palette, cx, "up");
+        dispatch_palette_key(&palette, cx, "up");
+        cx.update(|_, cx| assert_eq!(palette.read(cx).selected, 0));
+
+        for _ in 0..10 {
+            dispatch_palette_key(&palette, cx, "down");
+        }
+        cx.update(|_, cx| {
+            let total = palette.update(cx, |palette, cx| palette.flat_items(cx).len());
+            assert_eq!(palette.read(cx).selected, total - 1);
+        });
+
+        drop(palette);
+        drop(app_state);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

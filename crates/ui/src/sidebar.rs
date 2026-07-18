@@ -2,8 +2,8 @@ use std::{borrow::Cow, collections::HashSet};
 
 use gpui::{
     Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
@@ -597,42 +597,47 @@ impl SessionsSidebar {
 
     fn render_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div().flex_none().px_2().pb_1().child(
-            h_flex()
-                .id("sidebar-search")
-                .h(px(32.))
-                .items_center()
-                .gap_2()
-                .px_2()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().sidebar_accent))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state
-                        .update(cx, |state, cx| state.open_palette(cx));
-                }))
-                .child(
-                    Icon::new(IconName::Search)
-                        .small()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("sidebar.search")),
-                )
-                .child(
-                    div()
-                        .px_1()
-                        .py(px(1.))
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .text_color(cx.theme().muted_foreground)
-                        .text_size(px(10.))
-                        .child("⌘K"),
-                ),
+            crate::material::accessible_clickable(
+                h_flex(),
+                "sidebar-search",
+                Role::Button,
+                tcode_i18n::tr!("sidebar.search"),
+                cx,
+            )
+            .h(px(32.))
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().sidebar_accent))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.app_state
+                    .update(cx, |state, cx| state.open_palette(cx));
+            }))
+            .child(
+                Icon::new(IconName::Search)
+                    .small()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tcode_i18n::tr!("sidebar.search")),
+            )
+            .child(
+                div()
+                    .px_1()
+                    .py(px(1.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .text_size(px(10.))
+                    .child("⌘K"),
+            ),
         )
     }
 
@@ -720,75 +725,97 @@ impl SessionsSidebar {
             .iter()
             .any(|meta| !self.app_state.read(cx).turn_running_for(&meta.id));
 
-        let header = h_flex()
-            .id(gpui::SharedString::from(format!(
-                "project-header-{project_id}"
-            )))
-            .group(group_key.clone())
-            .h(px(30.))
+        let header_label =
+            tcode_i18n::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
+        let header = crate::material::accessible_clickable(
+            h_flex(),
+            gpui::SharedString::from(format!("project-header-{project_id}")),
+            Role::Button,
+            header_label,
+            cx,
+        )
+        .aria_expanded(!collapsed)
+        .group(group_key.clone())
+        .h(px(30.))
+        .items_center()
+        .gap_1()
+        .px_2()
+        .rounded(cx.theme().radius)
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().sidebar_accent))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.app_state.update(cx, |state, cx| {
+                state.toggle_project_collapsed(&header_toggle_id, cx);
+            });
+        }))
+        .child(
+            Icon::new(if collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            })
+            .size_4()
+            .text_color(cx.theme().muted_foreground),
+        )
+        .child(
+            Icon::new(IconName::Folder)
+                .size_4()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(
+            truncated_sidebar_label()
+                .text_sm()
+                .font_medium()
+                .text_color(cx.theme().sidebar_foreground)
+                .child(group.project.name.clone()),
+        )
+        // Unread dot when any child thread is unread (hidden on hover so
+        // the "+" can take the slot).
+        .when(has_unread, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .group_hover(group_key.clone(), |s| s.invisible())
+                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
+            )
+        })
+        .child(
+            crate::material::accessible_clickable(
+                h_flex(),
+                gpui::SharedString::from(format!("new-thread-{project_id}")),
+                Role::Button,
+                tcode_i18n::tr!("sidebar.create_thread"),
+                cx,
+            )
+            .size_5()
             .items_center()
-            .gap_1()
-            .px_2()
-            .rounded(cx.theme().radius)
+            .justify_center()
+            .rounded(cx.theme().radius * 0.5)
             .cursor_pointer()
+            // Opacity (rather than `visibility: hidden`) keeps this in Root's
+            // tab-stop registry so keyboard focus can reveal it.
+            .opacity(0.)
+            .group_hover(group_key.clone(), |s| s.opacity(1.))
+            .in_focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
+            .tooltip(|window, cx| {
+                Tooltip::new(tcode_i18n::tr!("sidebar.create_thread").into_owned())
+                    .build(window, cx)
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                let cwd = plus_cwd.clone();
+                let project_id = plus_project_id.clone();
                 this.app_state.update(cx, |state, cx| {
-                    state.toggle_project_collapsed(&header_toggle_id, cx);
+                    state.start_draft(project_id, cwd, cx);
                 });
             }))
             .child(
-                Icon::new(if collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
-                .size_4()
-                .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                Icon::new(IconName::Folder)
-                    .size_4()
+                Icon::new(IconName::Plus)
+                    .xsmall()
                     .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                truncated_sidebar_label()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(group.project.name.clone()),
-            )
-            // Unread dot when any child thread is unread (hidden on hover so
-            // the "+" can take the slot).
-            .when(has_unread, |row| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .group_hover(group_key.clone(), |s| s.invisible())
-                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().primary)),
-                )
-            })
-            .child(
-                div()
-                    .invisible()
-                    .group_hover(group_key.clone(), |s| s.visible())
-                    .child(
-                        Button::new("new-thread")
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(IconName::Plus)
-                            .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                let cwd = plus_cwd.clone();
-                                let project_id = plus_project_id.clone();
-                                this.app_state.update(cx, |state, cx| {
-                                    state.start_draft(project_id, cwd, cx);
-                                });
-                            })),
-                    ),
-            );
+            ),
+        );
         let mut container =
             v_flex()
                 .flex_none()
@@ -824,18 +851,24 @@ impl SessionsSidebar {
             if let Some(toggle_label) = thread_list_toggle_label(total, expanded) {
                 let toggle_id = project_id.clone();
                 container = container.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("show-more-{project_id}")))
-                        .pl(px(30.))
-                        .py_1()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(cx.theme().sidebar_foreground))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_group(&toggle_id, cx);
-                        }))
-                        .child(toggle_label),
+                    crate::material::accessible_clickable(
+                        div(),
+                        gpui::SharedString::from(format!("show-more-{project_id}")),
+                        Role::Button,
+                        toggle_label.clone(),
+                        cx,
+                    )
+                    .aria_expanded(expanded)
+                    .pl(px(30.))
+                    .py_1()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(cx.theme().sidebar_foreground))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_group(&toggle_id, cx);
+                    }))
+                    .child(toggle_label),
                 );
             }
         }
@@ -884,94 +917,104 @@ impl SessionsSidebar {
         let menu_id = session_id.clone();
         let menu_running = working;
 
-        let row = h_flex()
-            .id(gpui::SharedString::from(format!("thread-row-{session_id}")))
-            .group(row_key.clone())
-            .h(px(30.))
-            .items_center()
-            .gap_2()
-            .pl(px(if is_child { 42. } else { 30. }))
-            .pr_2()
-            // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
-            .rounded(px(6.))
-            .cursor_pointer()
-            .when(is_active, |s| s.bg(cx.theme().list_active))
-            .when(!is_active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-            .on_click(cx.listener({
+        let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
+        let row = crate::material::accessible_clickable(
+            h_flex(),
+            gpui::SharedString::from(format!("thread-row-{session_id}")),
+            Role::Button,
+            row_label,
+            cx,
+        )
+        .aria_selected(is_active)
+        .when(has_direct_children, |row| {
+            row.aria_expanded(!children_collapsed)
+        })
+        .group(row_key.clone())
+        .h(px(30.))
+        .items_center()
+        .gap_2()
+        .pl(px(if is_child { 42. } else { 30. }))
+        .pr_2()
+        // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(is_active, |s| s.bg(cx.theme().list_active))
+        .when(!is_active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
+        .on_click(cx.listener({
+            let session_id = session_id.clone();
+            move |this, _, _, cx| {
                 let session_id = session_id.clone();
-                move |this, _, _, cx| {
-                    let session_id = session_id.clone();
-                    toggle_parent_for_row_click(
-                        &mut this.collapsed_parents,
-                        &session_id,
-                        is_active,
-                        has_direct_children,
-                    );
-                    this.app_state.update(cx, |state, cx| {
-                        state.select_session(&session_id, cx);
-                    });
-                    cx.notify();
-                }
-            }))
-            .when(waiting_for_approval, |row| {
-                row.tooltip(|window, cx| {
-                    Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
-                        .build(window, cx)
-                })
+                toggle_parent_for_row_click(
+                    &mut this.collapsed_parents,
+                    &session_id,
+                    is_active,
+                    has_direct_children,
+                );
+                this.app_state.update(cx, |state, cx| {
+                    state.select_session(&session_id, cx);
+                });
+                cx.notify();
+            }
+        }))
+        .when(waiting_for_approval, |row| {
+            row.tooltip(|window, cx| {
+                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
+                    .build(window, cx)
             })
-            .when(waiting_for_approval, |row| {
-                row.child(
-                    h_flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().warning)
-                                .child(tcode_i18n::tr!("sidebar.waiting_approval")),
-                        ),
-                )
-            })
-            .when(working && !waiting_for_approval, |row| {
-                row.child(
-                    h_flex()
-                        .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().success)
-                                .child(tcode_i18n::tr!("sidebar.working")),
-                        ),
-                )
-            })
-            .when(is_child, |row| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child("↳"),
-                )
-            })
-            .when(has_direct_children, |row| {
-                row.child(
-                    Icon::new(if children_collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
+        })
+        .when(waiting_for_approval, |row| {
+            row.child(
+                h_flex()
                     .flex_none()
-                    .size_3()
-                    .text_color(cx.theme().muted_foreground),
-                )
-            });
+                    .items_center()
+                    .gap_1()
+                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().warning)
+                            .child(tcode_i18n::tr!("sidebar.waiting_approval")),
+                    ),
+            )
+        })
+        .when(working && !waiting_for_approval, |row| {
+            row.child(
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().success)
+                            .child(tcode_i18n::tr!("sidebar.working")),
+                    ),
+            )
+        })
+        .when(is_child, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("↳"),
+            )
+        })
+        .when(has_direct_children, |row| {
+            row.child(
+                Icon::new(if children_collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .flex_none()
+                .size_3()
+                .text_color(cx.theme().muted_foreground),
+            )
+        });
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         let row = if let Some(input) = renaming {
@@ -1043,28 +1086,41 @@ impl SessionsSidebar {
                                 .child(ago),
                         )
                         .child(
-                            div()
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .invisible()
-                                .group_hover(row_key.clone(), |s| s.visible())
-                                .child(
-                                    Button::new("archive-thread")
-                                        .ghost()
-                                        .xsmall()
-                                        .compact()
-                                        .icon(
-                                            Icon::empty()
-                                                .path("icons/archive.svg")
-                                                .text_color(cx.theme().muted_foreground),
-                                        )
-                                        .tooltip(tcode_i18n::tr!("sidebar.archive"))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.archive_thread(&archive_id, &title, window, cx);
-                                        })),
-                                ),
+                            crate::material::accessible_clickable(
+                                h_flex(),
+                                gpui::SharedString::from(format!("archive-thread-{session_id}")),
+                                Role::Button,
+                                tcode_i18n::tr!("sidebar.archive"),
+                                cx,
+                            )
+                            .absolute()
+                            .right_0()
+                            .top_0()
+                            .size_5()
+                            .items_center()
+                            .justify_center()
+                            .rounded(cx.theme().radius * 0.5)
+                            .cursor_pointer()
+                            // Keep the archived action registered as a tab stop;
+                            // keyboard focus itself reveals the zero-opacity icon.
+                            .opacity(0.)
+                            .group_hover(row_key.clone(), |s| s.opacity(1.))
+                            .in_focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
+                            .hover(|s| s.bg(cx.theme().sidebar_accent))
+                            .tooltip(|window, cx| {
+                                Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.archive_thread(&archive_id, &title, window, cx);
+                            }))
+                            .child(
+                                Icon::empty()
+                                    .path("icons/archive.svg")
+                                    .xsmall()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
                         ),
                 )
             })
@@ -1108,29 +1164,34 @@ impl SessionsSidebar {
             .flex_none()
             // No full-bleed divider above the footer: whitespace separates it.
             .child(
-                h_flex()
-                    .id("sidebar-settings")
-                    .h(px(40.))
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().sidebar_accent))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.open_settings(cx));
-                    }))
-                    .child(
-                        Icon::new(IconName::Settings)
-                            .size_4()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().sidebar_foreground)
-                            .child(tcode_i18n::tr!("settings.title")),
-                    ),
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "sidebar-settings",
+                    Role::Button,
+                    tcode_i18n::tr!("settings.title"),
+                    cx,
+                )
+                .h(px(40.))
+                .items_center()
+                .gap_2()
+                .px_3()
+                .cursor_pointer()
+                .hover(|s| s.bg(cx.theme().sidebar_accent))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.app_state
+                        .update(cx, |state, cx| state.open_settings(cx));
+                }))
+                .child(
+                    Icon::new(IconName::Settings)
+                        .size_4()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().sidebar_foreground)
+                        .child(tcode_i18n::tr!("settings.title")),
+                ),
             )
     }
 

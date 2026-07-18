@@ -11,8 +11,8 @@ use agent::{ChangeCompleteness, FileChange, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
     InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    list, prelude::FluentBuilder as _, px,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -1100,37 +1100,47 @@ impl ChatView {
                         RewindMode::Files,
                         tcode_i18n::tr!("chat.rewind_files").into_owned(),
                     ));
-                    let mut menu = v_flex().w(px(240.)).p_1().gap_0p5();
+                    let mut menu = crate::material::overlay_contour(
+                        v_flex()
+                            .w(px(240.))
+                            .p_1()
+                            .gap_0p5()
+                            .rounded(crate::material::radius_overlay())
+                            .overflow_hidden(),
+                        cx,
+                    )
+                    .id(("rewind-options", turn))
+                    .role(Role::Menu)
+                    .aria_label(tcode_i18n::tr!("chat.rewind"));
                     for (index, (mode, label)) in modes.into_iter().enumerate() {
                         let app_state = app_state.clone();
                         let popover = popover.clone();
                         menu = menu.child(
-                            h_flex()
-                                .id(("rewind-option", index))
-                                .w_full()
-                                .px_2()
-                                .py_1p5()
-                                .gap_2()
-                                .items_center()
-                                .rounded(px(6.))
-                                .cursor_pointer()
-                                .text_size(px(13.))
-                                .hover(move |style| style.bg(accent))
-                                .child(Icon::new(IconName::Undo).xsmall().text_color(muted))
-                                .child(label)
-                                .on_click(move |_, window, cx| {
-                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                    app_state
-                                        .update(cx, |state, cx| state.rewind_turn(turn, mode, cx));
-                                }),
+                            crate::material::accessible_clickable(
+                                h_flex(),
+                                ("rewind-option", index),
+                                Role::MenuItem,
+                                label.clone(),
+                                cx,
+                            )
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .hover(move |style| style.bg(accent))
+                            .child(Icon::new(IconName::Undo).xsmall().text_color(muted))
+                            .child(label)
+                            .on_click(move |_, window, cx| {
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                app_state.update(cx, |state, cx| state.rewind_turn(turn, mode, cx));
+                            }),
                         );
                     }
-                    crate::material::overlay_contour(
-                        menu.rounded(crate::material::radius_overlay())
-                            .overflow_hidden(),
-                        cx,
-                    )
-                    .into_any_element()
+                    menu.into_any_element()
                 })
                 .into_any_element(),
         )
@@ -1302,22 +1312,28 @@ impl ChatView {
         let expanded = self.expanded.contains(&key);
         let muted = cx.theme().muted_foreground;
         let toggle_key = key.clone();
-        let row = h_flex()
-            .id(SharedString::from(format!("disclosure-{key}")))
-            .gap_1()
-            .items_center()
-            .px_2()
-            .py_0p5()
-            .rounded(px(8.))
-            .text_size(px(13.))
-            .text_color(muted)
-            .cursor_pointer()
-            .hover(|row| row.bg(cx.theme().accent))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_expanded(turn, &toggle_key, cx);
-            }))
-            .child(label)
-            .child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
+        let row = crate::material::accessible_clickable(
+            h_flex(),
+            SharedString::from(format!("disclosure-{key}")),
+            Role::Button,
+            label.clone(),
+            cx,
+        )
+        .aria_expanded(expanded)
+        .gap_1()
+        .items_center()
+        .px_2()
+        .py_0p5()
+        .rounded(px(8.))
+        .text_size(px(13.))
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(|row| row.bg(cx.theme().accent))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.toggle_expanded(turn, &toggle_key, cx);
+        }))
+        .child(label)
+        .child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
 
         let mut block = v_flex().w_full().items_center().gap_1().child(row);
         if expanded {
@@ -1613,29 +1629,33 @@ impl ChatView {
 
             if let Some(toggle_label) = previous_logs_toggle_label(hidden, rows_expanded) {
                 section = section.child(
-                    h_flex()
-                        .id(SharedString::from(format!(
-                            "worklog-more-{index}-{segment_id}"
-                        )))
-                        .gap_1()
-                        .items_center()
-                        .py_0p5()
-                        .text_size(px(13.))
-                        .text_color(muted)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(cx.theme().foreground))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_expanded(index, &rows_key, cx);
-                        }))
-                        .child(
-                            Icon::new(if rows_expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .xsmall(),
-                        )
-                        .child(toggle_label),
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        SharedString::from(format!("worklog-more-{index}-{segment_id}")),
+                        Role::Button,
+                        toggle_label.clone(),
+                        cx,
+                    )
+                    .aria_expanded(rows_expanded)
+                    .gap_1()
+                    .items_center()
+                    .py_0p5()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(cx.theme().foreground))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_expanded(index, &rows_key, cx);
+                    }))
+                    .child(
+                        Icon::new(if rows_expanded {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .xsmall(),
+                    )
+                    .child(toggle_label),
                 );
             }
         }
@@ -1660,35 +1680,39 @@ impl ChatView {
             );
         } else if let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts) {
             section = section.child(
-                h_flex()
-                    .id(SharedString::from(format!(
-                        "worklog-footer-{index}-{segment_id}"
-                    )))
-                    .gap_1()
-                    .items_center()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(cx.theme().foreground))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_expanded(index, &section_key, cx);
-                    }))
-                    .child(label)
-                    .when(subagent_count > 0 && !expanded && !is_last, |row| {
-                        row.child(
-                            div()
-                                .px_2()
-                                .py(px(1.))
-                                .rounded_full()
-                                .bg(cx.theme().muted)
-                                .text_size(px(11.))
-                                .child(tcode_i18n::tr!(
-                                    "chat.subagent_count",
-                                    count = subagent_count
-                                )),
-                        )
-                    })
-                    .child(Icon::new(chevron(expanded)).xsmall()),
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    SharedString::from(format!("worklog-footer-{index}-{segment_id}")),
+                    Role::Button,
+                    label.clone(),
+                    cx,
+                )
+                .aria_expanded(expanded)
+                .gap_1()
+                .items_center()
+                .text_size(px(13.))
+                .text_color(muted)
+                .cursor_pointer()
+                .hover(|s| s.text_color(cx.theme().foreground))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_expanded(index, &section_key, cx);
+                }))
+                .child(label)
+                .when(subagent_count > 0 && !expanded && !is_last, |row| {
+                    row.child(
+                        div()
+                            .px_2()
+                            .py(px(1.))
+                            .rounded_full()
+                            .bg(cx.theme().muted)
+                            .text_size(px(11.))
+                            .child(tcode_i18n::tr!(
+                                "chat.subagent_count",
+                                count = subagent_count
+                            )),
+                    )
+                })
+                .child(Icon::new(chevron(expanded)).xsmall()),
             );
         }
 
@@ -1839,30 +1863,42 @@ impl ChatView {
         let finished = !matches!(status, ItemStatus::InProgress);
         let turn = entry.turn;
         let click_key = key.clone();
-        let mut row = h_flex()
-            .id(SharedString::from(format!("subagent-row-{}", entry.id)))
-            .w_full()
-            .min_w_0()
-            .gap_2()
-            .items_center()
-            .py_0p5()
-            .text_size(px(13.))
-            .cursor_pointer()
-            .hover(|row| row.text_color(cx.theme().foreground))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_expanded(turn, &click_key, cx);
-            }))
-            .child(Icon::new(activity_icon(*status)).xsmall().text_color(muted))
-            .child(div().flex_none().font_medium().child(agent_type.clone()))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .text_color(muted)
-                    .child(one_line(description)),
-            );
+        let row_label = tcode_i18n::tr!(
+            "chat.subagent_row",
+            agent = agent_type.clone(),
+            description = one_line(description)
+        )
+        .into_owned();
+        let mut row = crate::material::accessible_clickable(
+            h_flex(),
+            SharedString::from(format!("subagent-row-{}", entry.id)),
+            Role::Button,
+            row_label,
+            cx,
+        )
+        .aria_expanded(expanded)
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .items_center()
+        .py_0p5()
+        .text_size(px(13.))
+        .cursor_pointer()
+        .hover(|row| row.text_color(cx.theme().foreground))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.toggle_expanded(turn, &click_key, cx);
+        }))
+        .child(Icon::new(activity_icon(*status)).xsmall().text_color(muted))
+        .child(div().flex_none().font_medium().child(agent_type.clone()))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_color(muted)
+                .child(one_line(description)),
+        );
         if finished && let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty())
         {
             row = row.child(
@@ -2411,8 +2447,21 @@ impl ChatView {
             .action
             .map(git_action_icon)
             .unwrap_or_else(|| Icon::empty().path("icons/git-branch.svg"));
-        let mut main = h_flex()
-            .id("git-main")
+        let main_base = if quick.disabled {
+            h_flex()
+                .id("git-main")
+                .role(Role::Button)
+                .aria_label(label.clone())
+        } else {
+            crate::material::accessible_clickable(
+                h_flex(),
+                "git-main",
+                Role::Button,
+                label.clone(),
+                cx,
+            )
+        };
+        let mut main = main_base
             .h_full()
             .px_2()
             .gap_1p5()
@@ -2658,24 +2707,29 @@ impl ChatView {
             .border_color(border)
             .overflow_hidden()
             .child(
-                h_flex()
-                    .id("open-main")
-                    .h_full()
-                    .px_2()
-                    .gap_1p5()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .child(
-                        Icon::new(IconName::ExternalLink)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(tcode_i18n::tr!("chat.open"))
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        open_in_zed(&main_cwd, window, cx);
-                    })),
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "open-main",
+                    Role::Button,
+                    tcode_i18n::tr!("chat.open"),
+                    cx,
+                )
+                .h_full()
+                .px_2()
+                .gap_1p5()
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .hover(|s| s.bg(cx.theme().accent))
+                .child(
+                    Icon::new(IconName::ExternalLink)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(tcode_i18n::tr!("chat.open"))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    open_in_zed(&main_cwd, window, cx);
+                })),
             )
             .child(div().w_px().h(px(16.)).bg(border))
             .child(chevron)
