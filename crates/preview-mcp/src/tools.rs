@@ -13,7 +13,7 @@ use axum::routing::any;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -165,33 +165,30 @@ impl PreviewTools {
             Ok(PreviewReply::Json(value)) => {
                 let text =
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-                CallToolResult::success(vec![Content::text(text)])
+                CallToolResult::success(vec![ContentBlock::text(text)])
             }
             Ok(PreviewReply::Image { mime, data_base64 }) => {
-                CallToolResult::success(vec![Content::image(data_base64, mime)])
+                CallToolResult::success(vec![ContentBlock::image(data_base64, mime)])
             }
-            Err(message) => CallToolResult::error(vec![Content::text(message)]),
+            Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
         }
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for PreviewTools {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
                 "Drive the tcode embedded preview browser: open/navigate URLs, inspect and \
-                 automate the page, and capture screenshots."
-                    .into(),
-            ),
-        }
+                 automate the page, and capture screenshots.",
+            )
     }
 }
 
-pub type Service = StreamableHttpService<PreviewTools>;
+pub type Service = StreamableHttpService<PreviewTools, LocalSessionManager>;
 
 pub struct ServiceEntry {
     pub session_id: String,
