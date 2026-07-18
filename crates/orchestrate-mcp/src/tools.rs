@@ -9,7 +9,7 @@ use axum::routing::any;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -169,27 +169,23 @@ impl OrchestrateTools {
 
     async fn run(&self, op: OrchestrateOp) -> CallToolResult {
         match self.broker.invoke(op).await {
-            Ok(value) => CallToolResult::success(vec![Content::text(value.to_string())]),
-            Err(message) => CallToolResult::error(vec![Content::text(message)]),
+            Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
+            Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
         }
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for OrchestrateTools {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "Dispatch and coordinate work in isolated child tcode threads.".into(),
-            ),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions("Dispatch and coordinate work in isolated child tcode threads.")
     }
 }
 
-pub type Service = StreamableHttpService<OrchestrateTools>;
+pub type Service = StreamableHttpService<OrchestrateTools, LocalSessionManager>;
 pub type Services = HashMap<String, Service>;
 
 pub fn service(broker: Broker, parent_id: String) -> Service {
