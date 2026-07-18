@@ -565,6 +565,13 @@ pub enum SessionCommand {
         id: String,
         value: serde_json::Value,
     },
+    /// Ask the provider to restore one of its own message checkpoints. The
+    /// provider remains the sole owner of both the checkpoint and the restore
+    /// semantics; adapters without a native implementation reject this.
+    Rewind {
+        checkpoint_id: String,
+        mode: RewindMode,
+    },
     Shutdown,
 }
 
@@ -612,6 +619,38 @@ pub enum AgentEvent {
     },
     TurnStarted {
         turn_id: String,
+    },
+    /// The provider's current net file changes for one turn. Unlike the
+    /// per-tool [`ItemContent::FileChange`] stream, this is a replacement
+    /// snapshot: later events with the same `turn_id` supersede earlier ones.
+    /// Providers that supply the exact net result of their tracked mutations
+    /// mark it [`ChangeCompleteness::Exact`]; adapters built from structured
+    /// edit fragments use [`ChangeCompleteness::Partial`].
+    TurnChangesUpdated {
+        turn_id: String,
+        changes: Vec<FileChange>,
+        completeness: ChangeCompleteness,
+    },
+    /// A provider-owned restore point attached to one user turn. The id is
+    /// opaque and must only be returned to the provider that emitted it.
+    TurnCheckpoint {
+        turn_id: String,
+        checkpoint_id: String,
+    },
+    /// The provider successfully applied a native restore operation. A
+    /// conversation restore also returns the selected prompt for composer
+    /// prefill, matching the provider's own edit-after-rewind behavior.
+    RewindCompleted {
+        checkpoint_id: String,
+        mode: RewindMode,
+        prefill: Option<String>,
+    },
+    /// A native restore request was rejected without changing tcode's local
+    /// conversation state.
+    RewindFailed {
+        checkpoint_id: String,
+        mode: RewindMode,
+        error: String,
     },
     TurnCompleted {
         turn_id: String,
@@ -723,6 +762,39 @@ pub enum TurnStatus {
     Interrupted,
 }
 
+/// Provider-native restore scopes. These describe what the upstream agent
+/// changes; tcode never emulates a missing scope with Git or transcript edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindMode {
+    Files,
+    Conversation,
+    FilesAndConversation,
+}
+
+impl RewindMode {
+    pub fn includes_files(self) -> bool {
+        matches!(self, Self::Files | Self::FilesAndConversation)
+    }
+
+    pub fn includes_conversation(self) -> bool {
+        matches!(self, Self::Conversation | Self::FilesAndConversation)
+    }
+}
+
+/// How strongly a provider can attribute a turn's reported file changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeCompleteness {
+    /// The provider supplied the exact turn-scoped net result of the file
+    /// mutations it tracks, rather than inferring it from the ambient working
+    /// tree. Uninstrumented command writes are outside that claim.
+    Exact,
+    /// The listed paths came from structured edit operations, but arbitrary
+    /// commands or external writers may have changed additional files.
+    Partial,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeltaKind {
@@ -819,6 +891,91 @@ pub enum FileChangeKind {
     Modify,
     Delete,
     Rename,
+}
+
+/// Split a provider-supplied, multi-file Git-style unified diff into canonical
+/// file changes. This parses only file boundaries and operation kinds; each
+/// returned change retains its complete diff section for rendering.
+pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, String> {
+    if diff.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") && !current.is_empty() {
+            sections.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() || line.starts_with("diff --git ") {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+    if sections.is_empty() {
+        return Err("turn diff contains no `diff --git` file sections".into());
+    }
+
+    sections
+        .into_iter()
+        .map(|section| {
+            let mut old_path = None;
+            let mut new_path = None;
+            for line in section.lines() {
+                if let Some(path) = line.strip_prefix("rename from ") {
+                    old_path = Some(path.to_string());
+                } else if let Some(path) = line.strip_prefix("rename to ") {
+                    new_path = Some(path.to_string());
+                } else if let Some(path) = line.strip_prefix("--- a/") {
+                    old_path.get_or_insert_with(|| path.to_string());
+                } else if let Some(path) = line.strip_prefix("+++ b/") {
+                    new_path.get_or_insert_with(|| path.to_string());
+                }
+            }
+            if old_path.is_none() || new_path.is_none() {
+                let header = section
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("diff --git a/"))
+                    .ok_or_else(|| "turn diff section has no valid header".to_string())?;
+                if let Some((old, new)) = header.rsplit_once(" b/") {
+                    old_path.get_or_insert_with(|| old.to_string());
+                    new_path.get_or_insert_with(|| new.to_string());
+                }
+            }
+
+            let creates = section
+                .lines()
+                .any(|line| line.starts_with("new file mode ") || line == "--- /dev/null");
+            let deletes = section
+                .lines()
+                .any(|line| line.starts_with("deleted file mode ") || line == "+++ /dev/null");
+            let kind = if creates {
+                FileChangeKind::Create
+            } else if deletes {
+                FileChangeKind::Delete
+            } else if old_path != new_path {
+                FileChangeKind::Rename
+            } else {
+                FileChangeKind::Modify
+            };
+            let path = match kind {
+                FileChangeKind::Delete => old_path,
+                _ => new_path.or(old_path),
+            }
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "turn diff section has no file path".to_string())?;
+
+            Ok(FileChange {
+                path,
+                kind,
+                diff: Some(section),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1227,6 +1384,82 @@ mod pathext_logic_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
+    }
+}
+
+#[cfg(test)]
+mod turn_diff_tests {
+    use super::*;
+
+    #[test]
+    fn splits_multi_file_turn_diff_and_classifies_operations() {
+        let diff = concat!(
+            "diff --git a/src/lib.rs b/src/lib.rs\n",
+            "index 1111111..2222222 100644\n",
+            "--- a/src/lib.rs\n",
+            "+++ b/src/lib.rs\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "diff --git a/new.txt b/new.txt\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/new.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+hello\n",
+            "diff --git a/old.txt b/old.txt\n",
+            "deleted file mode 100644\n",
+            "--- a/old.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-gone\n",
+            "diff --git a/before.rs b/after.rs\n",
+            "similarity index 100%\n",
+            "rename from before.rs\n",
+            "rename to after.rs\n",
+        );
+
+        let changes = file_changes_from_unified_diff(diff).unwrap();
+        assert_eq!(changes.len(), 4);
+        assert_eq!(changes[0].path, "src/lib.rs");
+        assert_eq!(changes[0].kind, FileChangeKind::Modify);
+        assert_eq!(changes[1].path, "new.txt");
+        assert_eq!(changes[1].kind, FileChangeKind::Create);
+        assert_eq!(changes[2].path, "old.txt");
+        assert_eq!(changes[2].kind, FileChangeKind::Delete);
+        assert_eq!(changes[3].path, "after.rs");
+        assert_eq!(changes[3].kind, FileChangeKind::Rename);
+        assert!(changes[0].diff.as_deref().unwrap().contains("-old\n+new"));
+        assert!(!changes[0].diff.as_deref().unwrap().contains("new.txt"));
+    }
+
+    #[test]
+    fn empty_diff_is_an_exact_empty_snapshot_but_malformed_diff_is_rejected() {
+        assert!(file_changes_from_unified_diff("\n").unwrap().is_empty());
+        assert!(file_changes_from_unified_diff("--- a/file\n+++ b/file\n").is_err());
+    }
+
+    #[test]
+    fn turn_change_event_round_trips() {
+        let event = AgentEvent::TurnChangesUpdated {
+            turn_id: "turn-7".into(),
+            changes: vec![FileChange {
+                path: "src/main.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
+            }],
+            completeness: ChangeCompleteness::Exact,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            AgentEvent::TurnChangesUpdated {
+                turn_id,
+                completeness: ChangeCompleteness::Exact,
+                changes,
+            } if turn_id == "turn-7" && changes[0].path == "src/main.rs"
+        ));
     }
 }
 

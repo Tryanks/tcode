@@ -51,19 +51,6 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
-/// One per-turn checkpoint: a hidden git ref capturing the working tree before a
-/// user turn was dispatched (Group B). `turn` is the timeline turn index the
-/// checkpoint belongs to (the user message that starts it); `commit` is the
-/// snapshot commit behind `refs/tcode/checkpoints/<session>/<turn>`;
-/// `event_offset` is the number of JSONL events that existed before this turn's
-/// user message, so a revert can truncate the log deterministically.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Checkpoint {
-    pub turn: usize,
-    pub commit: String,
-    pub event_offset: usize,
-}
-
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -91,10 +78,6 @@ pub struct SessionMeta {
     /// worktree instead of the project checkout. Absent = local checkout. (Group C)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeInfo>,
-    /// Per-turn checkpoints captured before each user turn (Group B). Absent in
-    /// legacy files (defaults to none).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub checkpoints: Vec<Checkpoint>,
     /// The user-facing permission model for this session. Older index files
     /// predate the field; a missing value defaults to `ApprovalMode::default()`
     /// (now `FullAccess`, matching T3).
@@ -144,7 +127,6 @@ impl SessionMeta {
             model,
             archived_at: None,
             worktree: None,
-            checkpoints: Vec::new(),
             approval_mode: ApprovalMode::default(),
             resume_cursor: None,
             imported_from: None,
