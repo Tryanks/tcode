@@ -57,6 +57,8 @@ Canonical values live in `themes/tcode.json` (embedded at build time).
 - Composer: floating card, radius 16, 1px border, subtle shadow; bottom control
   row ≈44px.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
+- Parent thread rows always show a disclosure chevron and total-child badge;
+  when children are active, the badge reads active/total in the success color.
 
 ## Scrolling contract
 

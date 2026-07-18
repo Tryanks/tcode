@@ -54,8 +54,21 @@ fn truncated_sidebar_label() -> gpui::Div {
     div().flex_1().min_w_0().truncate()
 }
 
-fn active_child_count_badge(count: usize, cx: &mut Context<SessionsSidebar>) -> gpui::Div {
+fn child_count_badge(
+    session_id: &str,
+    total: usize,
+    active: usize,
+    cx: &mut Context<SessionsSidebar>,
+) -> gpui::Stateful<gpui::Div> {
+    let label = if active > 0 {
+        format!("{active}/{total}")
+    } else {
+        total.to_string()
+    };
     div()
+        .id(gpui::SharedString::from(format!(
+            "child-count-{session_id}"
+        )))
         .flex_none()
         .min_w(px(18.))
         .px_1()
@@ -65,14 +78,23 @@ fn active_child_count_badge(count: usize, cx: &mut Context<SessionsSidebar>) -> 
         .text_center()
         .text_size(px(10.))
         .font_semibold()
-        .text_color(cx.theme().success)
-        .child(count.to_string())
+        .text_color(if active > 0 {
+            cx.theme().success
+        } else {
+            cx.theme().muted_foreground
+        })
+        .tooltip(move |window, cx| {
+            Tooltip::new(tcode_i18n::tr!("sidebar.child_threads", count = total).into_owned())
+                .build(window, cx)
+        })
+        .child(label)
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ThreadRenderState {
     is_child: bool,
     show_unread: bool,
+    direct_children: usize,
     active_direct_children: usize,
 }
 
@@ -87,6 +109,10 @@ fn derive_thread_render_state(
         .parent_session_id
         .as_ref()
         .is_some_and(|parent_id| sessions.iter().any(|session| session.id == *parent_id));
+    let direct_children = sessions
+        .iter()
+        .filter(|session| session.parent_session_id.as_deref() == Some(meta.id.as_str()))
+        .count();
     let active_direct_children = sessions
         .iter()
         .filter(|session| session.parent_session_id.as_deref() == Some(meta.id.as_str()))
@@ -98,6 +124,7 @@ fn derive_thread_render_state(
         // Orphaned child metadata is still child metadata and must not surface
         // completion unread state as an ordinary-thread blue dot.
         show_unread: meta.parent_session_id.is_none() && unread && !working,
+        direct_children,
         active_direct_children,
     }
 }
@@ -841,13 +868,10 @@ impl SessionsSidebar {
         };
         let is_child = render_state.is_child;
         let show_unread = render_state.show_unread;
+        let direct_children = render_state.direct_children;
         let active_direct_children = render_state.active_direct_children;
-        let has_direct_children = self
-            .app_state
-            .read(cx)
-            .sessions
-            .iter()
-            .any(|session| session.parent_session_id.as_deref() == Some(session_id.as_str()));
+        let has_direct_children = direct_children > 0;
+        let children_collapsed = self.collapsed_parents.contains(&session_id);
 
         // Inline rename takes over the whole row's content area.
         let renaming = self
@@ -935,6 +959,18 @@ impl SessionsSidebar {
                         .text_color(cx.theme().muted_foreground)
                         .child("↳"),
                 )
+            })
+            .when(has_direct_children, |row| {
+                row.child(
+                    Icon::new(if children_collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .flex_none()
+                    .size_3()
+                    .text_color(cx.theme().muted_foreground),
+                )
             });
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
@@ -946,8 +982,13 @@ impl SessionsSidebar {
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
                     .child(Input::new(&input).small()),
             )
-            .when(active_direct_children > 0, |row| {
-                row.child(active_child_count_badge(active_direct_children, cx))
+            .when(has_direct_children, |row| {
+                row.child(child_count_badge(
+                    &session_id,
+                    direct_children,
+                    active_direct_children,
+                    cx,
+                ))
             })
         } else {
             row.when(show_unread, |row| {
@@ -973,8 +1014,13 @@ impl SessionsSidebar {
                     .text_color(cx.theme().sidebar_foreground)
                     .child(meta.title.clone()),
             )
-            .when(active_direct_children > 0, |row| {
-                row.child(active_child_count_badge(active_direct_children, cx))
+            .when(has_direct_children, |row| {
+                row.child(child_count_badge(
+                    &session_id,
+                    direct_children,
+                    active_direct_children,
+                    cx,
+                ))
             })
             .when(!working, |row| {
                 // Right slot: relative time, replaced by an archive button on hover.
@@ -1447,6 +1493,7 @@ mod tests {
             matches!(id, "child-working" | "grandchild-working")
         });
 
+        assert_eq!(state.direct_children, 2);
         assert_eq!(state.active_direct_children, 1);
     }
 

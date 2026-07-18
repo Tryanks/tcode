@@ -85,6 +85,7 @@ sidebar:
   show_more: "Show more"
   show_less: "Show less"
   working: "Working"
+  child_threads: "%{count} child threads"
   waiting_approval: "Approval"
   waiting_approval_tooltip: "Waiting for approval"
   archive: "Archive thread"
