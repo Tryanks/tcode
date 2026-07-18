@@ -13,13 +13,14 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent::{FileChange, FileChangeKind};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
-    ScrollHandle, StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    IntoElement, ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    StyledText, Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -317,6 +318,7 @@ struct RenderedFile {
     added: u32,
     removed: u32,
     rows: Vec<RenderedRow>,
+    split_rows: Vec<PairedRenderedRow>,
 }
 
 #[cfg(test)]
@@ -366,6 +368,7 @@ pub fn pair_split_rows(rows: &[DiffRow]) -> Vec<SplitPair> {
     paired
 }
 
+#[derive(Clone)]
 enum PairedRenderedRow {
     Gap(u32),
     Pair {
@@ -528,12 +531,14 @@ fn render_file(change: &FileChange, cwd: &Path, theme: &HighlightTheme) -> Rende
         });
     }
 
+    let split_rows = pair_rendered_rows(&rows);
     RenderedFile {
         path: display,
         kind: change.kind,
         added: parsed.added,
         removed: parsed.removed,
         rows,
+        split_rows,
     }
 }
 
@@ -549,6 +554,51 @@ struct DiffCache {
     revision: u64,
     dark: bool,
     files: Vec<RenderedFile>,
+    unified_items: Vec<DiffListItem>,
+    split_items: Vec<DiffListItem>,
+    unified_list: ListState,
+    split_list: ListState,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DiffListItem {
+    Header(usize),
+    UnifiedRow { file: usize, row: usize },
+    SplitRow { file: usize, row: usize },
+}
+
+fn build_list_items(files: &[RenderedFile]) -> (Vec<DiffListItem>, Vec<DiffListItem>) {
+    let unified_capacity = files.len() + files.iter().map(|file| file.rows.len()).sum::<usize>();
+    let split_capacity = files.len()
+        + files
+            .iter()
+            .map(|file| file.split_rows.len())
+            .sum::<usize>();
+    let mut unified = Vec::with_capacity(unified_capacity);
+    let mut split = Vec::with_capacity(split_capacity);
+    for (file_index, file) in files.iter().enumerate() {
+        unified.push(DiffListItem::Header(file_index));
+        split.push(DiffListItem::Header(file_index));
+        unified.extend((0..file.rows.len()).map(|row| DiffListItem::UnifiedRow {
+            file: file_index,
+            row,
+        }));
+        split.extend(
+            (0..file.split_rows.len()).map(|row| DiffListItem::SplitRow {
+                file: file_index,
+                row,
+            }),
+        );
+    }
+    (unified, split)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderKey {
+    session: String,
+    scope: DiffScope,
+    revision: u64,
+    dark: bool,
 }
 
 struct GitPreview {
@@ -575,7 +625,6 @@ pub struct DiffPanel {
     app_state: Entity<AppState>,
     /// The Plan/Tasks tab content (the other tab in this right panel).
     plan: Entity<PlanPanel>,
-    vscroll: ScrollHandle,
     /// Soft-wrap toggle for long code lines (the one real toolbar button).
     wrap: bool,
     scopes: HashMap<String, DiffScope>,
@@ -584,6 +633,7 @@ pub struct DiffPanel {
     cache: Option<DiffCache>,
     git_preview: Option<GitPreview>,
     loading_key: Option<(String, DiffScope, Option<String>, u64)>,
+    render_loading_key: Option<RenderKey>,
     selection: Option<CommentSelection>,
     comment_input: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
@@ -594,11 +644,13 @@ impl DiffPanel {
         // Soft-wrap defaults to the user's "Word wrap in diffs" setting.
         let wrap = app_state.read(cx).settings.word_wrap_diffs;
         let plan = cx.new(|cx| PlanPanel::new(app_state.clone(), cx));
-        let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        let subscriptions = vec![cx.observe(&app_state, |this, _, cx| {
+            this.remeasure_lists();
+            cx.notify();
+        })];
         Self {
             app_state,
             plan,
-            vscroll: ScrollHandle::new(),
             wrap,
             scopes: HashMap::new(),
             split: HashMap::new(),
@@ -606,6 +658,7 @@ impl DiffPanel {
             cache: None,
             git_preview: None,
             loading_key: None,
+            render_loading_key: None,
             selection: None,
             comment_input: None,
             _subscriptions: subscriptions,
@@ -618,6 +671,13 @@ impl DiffPanel {
             .copied()
             .or_else(|| state.diff_selected_turn().map(DiffScope::Turn))
             .or(Some(DiffScope::WorkingTree))
+    }
+
+    fn remeasure_lists(&self) {
+        if let Some(cache) = &self.cache {
+            cache.unified_list.remeasure();
+            cache.split_list.remeasure();
+        }
     }
 
     fn request_git_preview(
@@ -662,6 +722,55 @@ impl DiffPanel {
                     });
                     panel.loading_key = None;
                     panel.cache = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn request_rendered_files(
+        &mut self,
+        key: RenderKey,
+        changes: Vec<FileChange>,
+        cwd: PathBuf,
+        theme: Arc<HighlightTheme>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.render_loading_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.cache = None;
+        self.render_loading_key = Some(key.clone());
+        cx.spawn(async move |this, cx| {
+            let (files, unified_items, split_items) =
+                tcode_runtime::blocking::unblock(cx.background_executor(), move || {
+                    let files = changes
+                        .iter()
+                        .map(|change| render_file(change, &cwd, &theme))
+                        .collect::<Vec<_>>();
+                    let (unified_items, split_items) = build_list_items(&files);
+                    (files, unified_items, split_items)
+                })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.render_loading_key.as_ref() == Some(&key) {
+                    let unified_list =
+                        ListState::new(unified_items.len(), ListAlignment::Top, px(180.));
+                    let split_list =
+                        ListState::new(split_items.len(), ListAlignment::Top, px(180.));
+                    panel.cache = Some(DiffCache {
+                        session: key.session.clone(),
+                        scope: key.scope,
+                        revision: key.revision,
+                        dark: key.dark,
+                        files,
+                        unified_items,
+                        split_items,
+                        unified_list,
+                        split_list,
+                    });
+                    panel.render_loading_key = None;
                     cx.notify();
                 }
             });
@@ -758,17 +867,19 @@ impl DiffPanel {
         });
         if fresh {
             let theme = cx.theme().highlight_theme.clone();
-            let files = changes
-                .iter()
-                .map(|c| render_file(c, &cwd, &theme))
-                .collect();
-            self.cache = Some(DiffCache {
-                session,
-                scope,
-                revision,
-                dark,
-                files,
-            });
+            self.request_rendered_files(
+                RenderKey {
+                    session,
+                    scope,
+                    revision,
+                    dark,
+                },
+                changes,
+                cwd,
+                theme,
+                cx,
+            );
+            return false;
         }
         let debug_comment = self.app_state.read(cx).debug_review_comment
             && self.app_state.read(cx).review_comments().is_empty();
@@ -1139,6 +1250,7 @@ impl DiffPanel {
                     .on_click(move |_, _, cx| {
                         panel_split.update(cx, |this, cx| {
                             this.split.insert(session_split.clone(), !split_on);
+                            this.remeasure_lists();
                             cx.notify();
                         });
                     }),
@@ -1153,6 +1265,7 @@ impl DiffPanel {
                     .tooltip(tcode_i18n::tr!("diff.toggle_wrap"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.wrap = !this.wrap;
+                        this.remeasure_lists();
                         cx.notify();
                     })),
             )
@@ -1277,6 +1390,7 @@ impl DiffPanel {
             });
             self.comment_input = None;
         }
+        self.remeasure_lists();
     }
 
     fn review_excerpt(&self, selection: &CommentSelection) -> String {
@@ -1362,55 +1476,44 @@ impl DiffPanel {
             .update(cx, |state, cx| state.add_review_comment(comment, cx));
         self.selection = None;
         self.comment_input = None;
+        self.remeasure_lists();
         cx.notify();
     }
 
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(cache) = self.cache.as_ref() else {
-            if self.loading_key.is_some() {
+            if self.loading_key.is_some() || self.render_loading_key.is_some() {
                 return self.render_status(tcode_i18n::tr!("diff.loading").into_owned(), cx);
             }
             return self.render_empty(cx);
         };
-        let wrap = self.wrap;
         let split = self.split.get(&cache.session).copied().unwrap_or(false);
-
-        let mut content = v_flex().min_w_full().pb_6();
-        for file in &cache.files {
-            content = content.child(self.render_file_header(file, cx));
-            if split {
-                for (index, row) in pair_rendered_rows(&file.rows).into_iter().enumerate() {
-                    content = content.child(match row {
-                        PairedRenderedRow::Gap(gap) => self.render_gap(gap, cx),
-                        PairedRenderedRow::Pair { left, right } => self.render_split_row(
-                            &file.path,
-                            index,
-                            left.as_ref(),
-                            right.as_ref(),
-                            wrap,
-                            cx,
-                        ),
-                    });
-                    content = content.children(self.render_comment_ui(&file.path, index, cx));
-                }
-            } else {
-                for (index, row) in file.rows.iter().enumerate() {
-                    content = content.child(match row {
-                        RenderedRow::Gap(n) => self.render_gap(*n, cx),
-                        RenderedRow::Code {
-                            kind,
-                            old,
-                            new,
-                            text,
-                            runs,
-                        } => self.render_code_row(
-                            &file.path, index, *kind, *old, *new, text, runs, wrap, cx,
-                        ),
-                    });
-                    content = content.children(self.render_comment_ui(&file.path, index, cx));
-                }
-            }
+        let list_state = if split {
+            cache.split_list.clone()
+        } else {
+            cache.unified_list.clone()
+        };
+        let panel = cx.entity();
+        let mut rows = list(list_state, move |index, _, cx| {
+            panel.update(cx, |this, cx| this.render_list_item(index, split, cx))
+        })
+        .flex_1()
+        .min_h_0()
+        .text_size(px(13.))
+        .font_family(cx.theme().mono_font_family.clone());
+        if self.wrap {
+            rows = rows.w_full();
+        } else {
+            rows = rows.with_sizing_behavior(ListSizingBehavior::Infer);
         }
+
+        let viewport = div()
+            .id("diff-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_x_scroll()
+            .child(rows);
+        let mut content = v_flex().size_full().min_h_0().child(viewport);
 
         if let Some(preview) = self
             .git_preview
@@ -1426,19 +1529,65 @@ impl DiffPanel {
             }
         }
 
-        let base = div()
-            .id("diff-body")
-            .flex_1()
-            .min_h_0()
-            .track_scroll(&self.vscroll)
-            .text_size(px(13.))
-            .font_family(cx.theme().mono_font_family.clone());
-        let base = if wrap {
-            base.overflow_y_scroll()
-        } else {
-            base.overflow_scroll()
+        content.into_any_element()
+    }
+
+    fn render_list_item(&self, index: usize, split: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(cache) = self.cache.as_ref() else {
+            return div().into_any_element();
         };
-        base.child(content).into_any_element()
+        let item = if split {
+            cache.split_items.get(index)
+        } else {
+            cache.unified_items.get(index)
+        };
+        let Some(item) = item.copied() else {
+            return div().into_any_element();
+        };
+        match item {
+            DiffListItem::Header(file_index) => {
+                self.render_file_header(&cache.files[file_index], cx)
+            }
+            DiffListItem::UnifiedRow { file, row } => {
+                let file = &cache.files[file];
+                let rendered = match &file.rows[row] {
+                    RenderedRow::Gap(count) => self.render_gap(*count, cx),
+                    RenderedRow::Code {
+                        kind,
+                        old,
+                        new,
+                        text,
+                        runs,
+                    } => self.render_code_row(
+                        &file.path, row, *kind, *old, *new, text, runs, self.wrap, cx,
+                    ),
+                };
+                v_flex()
+                    .min_w_full()
+                    .child(rendered)
+                    .children(self.render_comment_ui(&file.path, row, cx))
+                    .into_any_element()
+            }
+            DiffListItem::SplitRow { file, row } => {
+                let file = &cache.files[file];
+                let rendered = match &file.split_rows[row] {
+                    PairedRenderedRow::Gap(count) => self.render_gap(*count, cx),
+                    PairedRenderedRow::Pair { left, right } => self.render_split_row(
+                        &file.path,
+                        row,
+                        left.as_ref(),
+                        right.as_ref(),
+                        self.wrap,
+                        cx,
+                    ),
+                };
+                v_flex()
+                    .min_w_full()
+                    .child(rendered)
+                    .children(self.render_comment_ui(&file.path, row, cx))
+                    .into_any_element()
+            }
+        }
     }
 
     fn render_file_header(&self, file: &RenderedFile, cx: &mut Context<Self>) -> AnyElement {
@@ -1652,6 +1801,7 @@ impl DiffPanel {
                                             "diff.comment_placeholder"
                                         ))
                                     }));
+                                    this.remeasure_lists();
                                     cx.notify();
                                 })),
                         )
@@ -1884,6 +2034,7 @@ impl Render for DiffPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn parses_bare_create_diff() {
@@ -2013,5 +2164,82 @@ diff --git a/util.py b/util.py
         assert_eq!(second.len(), 2);
         assert!(second[1].left.is_none());
         assert_eq!(second[1].right.as_ref().unwrap().text, "extra");
+    }
+
+    #[test]
+    fn large_diff_builds_virtual_list_models_without_row_elements() {
+        let rows = (1..=5_000)
+            .map(|line| RenderedRow::Code {
+                kind: RowKind::Added,
+                old: None,
+                new: Some(line),
+                text: format!("let value_{line} = {line};"),
+                runs: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let split_rows = pair_rendered_rows(&rows);
+        let files = vec![RenderedFile {
+            path: "src/large.rs".into(),
+            kind: FileChangeKind::Modify,
+            added: 5_000,
+            removed: 0,
+            rows,
+            split_rows,
+        }];
+
+        let (unified, split) = build_list_items(&files);
+
+        assert_eq!(unified.len(), 5_001);
+        assert_eq!(split.len(), 5_001);
+        assert!(matches!(unified[0], DiffListItem::Header(0)));
+        assert!(matches!(
+            unified[5_000],
+            DiffListItem::UnifiedRow {
+                file: 0,
+                row: 4_999
+            }
+        ));
+    }
+
+    #[gpui::test]
+    fn virtual_list_constructs_only_the_large_diff_viewport(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let state = ListState::new(5_001, ListAlignment::Top, px(180.));
+
+        struct TestList {
+            state: ListState,
+            constructions: Arc<AtomicUsize>,
+        }
+        impl Render for TestList {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let observed = self.constructions.clone();
+                list(self.state.clone(), move |_, _, _| {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    div().h(px(18.)).w_full().into_any_element()
+                })
+                .size_full()
+            }
+        }
+        let view_constructions = constructions.clone();
+
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(900.), px(720.)),
+            move |_, cx| {
+                cx.new(|_| TestList {
+                    state,
+                    constructions: view_constructions,
+                })
+                .into_any_element()
+            },
+        );
+
+        let count = constructions.load(Ordering::Relaxed);
+        assert!(
+            count < 100,
+            "expected viewport-only construction for 5,001 items, got {count}"
+        );
     }
 }
