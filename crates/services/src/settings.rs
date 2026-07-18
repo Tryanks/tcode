@@ -193,6 +193,7 @@ mod tests {
             theme_mode: ThemeMode::Dark,
             sidebar_collapsed: true,
             word_wrap_diffs: true,
+            diff_view_mode: Default::default(),
             skip_delete_confirmation: true,
             auto_open_task_panel: true,
             provider_update_checks_disabled: true,

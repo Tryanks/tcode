@@ -3,7 +3,11 @@
 use std::io;
 use std::path::Path;
 
-pub use tcode_services::git::{GitDiffResult, GitDiffScope};
+pub use tcode_services::difftastic::{
+    StructuralError, StructuralFile, StructuralHighlight, StructuralRow, StructuralSide,
+    StructuralSpan, parse_difft_json, run_structural_diff,
+};
+pub use tcode_services::git::{GitDiffResult, GitDiffScope, GitFileContent};
 pub use tcode_services::import::{ExternalThread, RecentDir, SourceTool};
 pub use tcode_services::workspace::PathEntry;
 
