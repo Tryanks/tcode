@@ -2,14 +2,16 @@
 //! allow list. Every main model is eligible; only child dispatch is gated.
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
+    popover::Popover,
     switch::Switch,
     v_flex,
 };
@@ -20,7 +22,8 @@ use tcode_runtime::app::AppState;
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{
-    OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings, provider_label,
+    ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings,
+    provider_label,
 };
 
 struct IdentityRowState {
@@ -548,6 +551,139 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
+    fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.app_state.read(cx).settings.orchestrate.child_approval;
+        let selected_label = match selected {
+            ChildApprovalMode::Orchestrator => {
+                tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
+            }
+            ChildApprovalMode::AlwaysAllow => {
+                tcode_i18n::tr!("orchestrate.child_approval.always_allow")
+            }
+            ChildApprovalMode::Manual => tcode_i18n::tr!("orchestrate.child_approval.manual"),
+        };
+        let trigger = Button::new("orchestrate-child-approval-dropdown")
+            .outline()
+            .compact()
+            .child(
+                h_flex()
+                    .w(px(180.))
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .text_size(px(13.))
+                    .child(selected_label)
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            );
+        let panel = cx.entity();
+        let dropdown = Popover::new("orchestrate-child-approval-popover")
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                let option = |mode: ChildApprovalMode,
+                              id: &'static str,
+                              label: gpui::SharedString,
+                              cx: &mut Context<gpui_component::popover::PopoverState>|
+                 -> AnyElement {
+                    let panel = panel.clone();
+                    let popover = cx.entity();
+                    h_flex()
+                        .id(id)
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_2()
+                        .items_center()
+                        .rounded(crate::material::radius_button())
+                        .text_size(px(13.))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(cx.theme().accent))
+                        .child(div().flex_1().child(label))
+                        .when(mode == selected, |row| {
+                            row.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click(move |_, window, cx| {
+                            panel.update(cx, |panel, cx| {
+                                panel.update_settings(
+                                    |settings| settings.orchestrate.child_approval = mode,
+                                    cx,
+                                );
+                            });
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        })
+                        .into_any_element()
+                };
+                crate::material::overlay_contour(
+                    v_flex()
+                        .p_1()
+                        .min_w(px(180.))
+                        .gap_0p5()
+                        .child(option(
+                            ChildApprovalMode::Orchestrator,
+                            "orchestrate-child-approval-orchestrator",
+                            tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
+                                .into_owned()
+                                .into(),
+                            cx,
+                        ))
+                        .child(option(
+                            ChildApprovalMode::AlwaysAllow,
+                            "orchestrate-child-approval-always-allow",
+                            tcode_i18n::tr!("orchestrate.child_approval.always_allow")
+                                .into_owned()
+                                .into(),
+                            cx,
+                        ))
+                        .child(option(
+                            ChildApprovalMode::Manual,
+                            "orchestrate-child-approval-manual",
+                            tcode_i18n::tr!("orchestrate.child_approval.manual")
+                                .into_owned()
+                                .into(),
+                            cx,
+                        )),
+                    cx,
+                )
+                .rounded(crate::material::radius_overlay())
+            });
+
+        self.group(cx)
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_h(px(56.))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_medium()
+                                    .child(tcode_i18n::tr!("orchestrate.child_approval.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(tcode_i18n::tr!(
+                                        "orchestrate.child_approval.description"
+                                    )),
+                            ),
+                    )
+                    .child(dropdown),
+            )
+            .into_any_element()
+    }
+
     fn section_heading(
         &self,
         title: impl Into<gpui::SharedString>,
@@ -927,6 +1063,7 @@ impl Render for OrchestrateSettingsPanel {
                     .child(tcode_i18n::tr!("settings.orchestrate_section")),
             )
             .child(self.render_intro(cx))
+            .child(self.render_child_approval(cx))
             .child(self.render_identities(cx))
             .child(self.render_children(cx))
     }

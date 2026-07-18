@@ -23,8 +23,8 @@ use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
 use tcode_core::settings::{
-    EnvVar, OrchestrateSettings, ProjectSort, ProviderProfile, ProviderSettings, ResolvedProfile,
-    Settings, provider_label,
+    ChildApprovalMode, EnvVar, OrchestrateSettings, ProjectSort, ProviderProfile, ProviderSettings,
+    ResolvedProfile, Settings, provider_label,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -1243,6 +1243,33 @@ impl AppState {
                 }
                 Ok(serde_json::json!({ "ok": true }))
             }
+            OrchestrateOp::Approve {
+                parent_id,
+                thread_id,
+                request_id,
+                decision,
+            } => {
+                self.require_child(&parent_id, &thread_id)?;
+                let pending = self.pending_approvals_for(&thread_id);
+                let request = match request_id {
+                    Some(request_id) => pending
+                        .into_iter()
+                        .find(|request| request.id == request_id)
+                        .ok_or_else(|| "no pending approval with that request_id".to_string())?,
+                    None => match pending.as_slice() {
+                        [request] => request.clone(),
+                        [] => return Err("no pending approval".into()),
+                        _ => {
+                            return Err("multiple pending approvals; request_id is required".into());
+                        }
+                    },
+                };
+                let decision = resolve_approval_decision(&decision)?;
+                let request_id = request.id;
+                self.respond_session_approval(&thread_id, request_id.clone(), decision)?;
+                cx.notify();
+                Ok(serde_json::json!({ "ok": true, "request_id": request_id }))
+            }
         }
     }
 
@@ -1253,6 +1280,42 @@ impl AppState {
                 meta.id == thread_id && meta.parent_session_id.as_deref() == Some(parent_id)
             })
             .ok_or_else(|| "unknown thread or not a child of this parent".into())
+    }
+
+    fn pending_approvals_for(&self, session_id: &str) -> Vec<agent::ApprovalRequest> {
+        if let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) {
+            let pending = active.timeline.pending_approvals.clone();
+            if !pending.is_empty() {
+                return pending;
+            }
+        }
+        self.sessions_awaiting_approval
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn respond_session_approval(
+        &mut self,
+        session_id: &str,
+        request_id: String,
+        decision: ApprovalDecision,
+    ) -> Result<(), String> {
+        let session = self
+            .active
+            .as_ref()
+            .filter(|session| session.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))
+            .ok_or_else(|| "session is not loaded".to_string())?;
+        let Runtime::Live(commands) = &session.runtime else {
+            return Err("session is not live".into());
+        };
+        commands
+            .try_send(SessionCommand::RespondApproval {
+                request_id,
+                decision,
+            })
+            .map_err(|err| format!("failed to respond to approval: {err}"))
     }
 
     fn ensure_child_loaded(&mut self, thread_id: &str) -> Result<(), String> {
@@ -1319,16 +1382,16 @@ impl AppState {
 
     fn child_status_json(&self, meta: &SessionMeta) -> serde_json::Value {
         let (state, final_message, usage) = self.child_result(meta);
-        let waiting_approval = self
-            .pending_approval_for(&meta.id)
-            .as_ref()
-            .map(approval_request_summary);
+        let pending_approval = self.pending_approval_for(&meta.id);
+        let waiting_approval = pending_approval.as_ref().map(approval_request_summary);
+        let approval_request_id = pending_approval.as_ref().map(|request| request.id.as_str());
         let mut status = serde_json::json!({
             "thread_id": meta.id,
             "title": meta.title,
             "provider": match meta.provider { ProviderKind::ClaudeCode => "claude", ProviderKind::Codex => "codex", ProviderKind::Acp => "acp" },
             "state": state,
             "waiting_approval": waiting_approval,
+            "approval_request_id": approval_request_id,
             "last_output_tail": tail_chars(&final_message, 600),
             "updated_at": meta.updated_at,
         });
@@ -4132,6 +4195,17 @@ impl AppState {
         else {
             return;
         };
+        if self.settings.orchestrate.child_approval == ChildApprovalMode::AlwaysAllow {
+            if let Err(err) = self.respond_session_approval(
+                child_id,
+                request.id.clone(),
+                ApprovalDecision::ApproveForSession,
+            ) {
+                log::warn!("failed to auto-approve child {child_id}: {err}");
+            }
+            cx.notify();
+            return;
+        }
         if !self
             .callback_approval_requests
             .insert((child_id.to_string(), request.id.clone()))
@@ -4139,11 +4213,20 @@ impl AppState {
             return;
         }
         let parent_id = child.parent_session_id.as_deref().unwrap();
-        let text = format!(
-            "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {}.",
-            child.title,
-            approval_request_summary(request)
-        );
+        let text = match self.settings.orchestrate.child_approval {
+            ChildApprovalMode::Orchestrator => format!(
+                "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {} (request_id: {}). You are the approver: decide with the approve tool (decision: approve | approve_for_session | deny); deny anything outside the brief's scope.",
+                child.title,
+                approval_request_summary(request),
+                request.id
+            ),
+            ChildApprovalMode::Manual => format!(
+                "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {}.",
+                child.title,
+                approval_request_summary(request)
+            ),
+            ChildApprovalMode::AlwaysAllow => unreachable!(),
+        };
         self.deliver_orchestrate_callback_to_parent(parent_id, text, cx);
     }
 
@@ -6025,6 +6108,18 @@ fn resolve_dispatch_access(access: Option<&str>) -> Result<ApprovalMode, String>
         "workspace_write" => Ok(ApprovalMode::AutoAcceptEdits),
         _ => Err(format!(
             "unknown access: {access}; expected read_only, workspace_write, or full"
+        )),
+    }
+}
+
+fn resolve_approval_decision(decision: &str) -> Result<ApprovalDecision, String> {
+    let decision = decision.trim();
+    match decision.to_ascii_lowercase().as_str() {
+        "approve" => Ok(ApprovalDecision::Approve),
+        "approve_for_session" => Ok(ApprovalDecision::ApproveForSession),
+        "deny" => Ok(ApprovalDecision::Deny),
+        _ => Err(format!(
+            "unknown decision: {decision}; expected approve, approve_for_session, or deny"
         )),
     }
 }
@@ -7940,6 +8035,8 @@ mod tests {
             };
             assert!(text.starts_with("[orchestrate] thread child"));
             assert!(text.contains("waiting for approval: command `touch blocked`"));
+            assert!(text.contains("request_id: approval-1"));
+            assert!(text.contains("decide with the approve tool"));
             assert!(receiver.try_recv().is_err(), "callback was delivered twice");
 
             let status = state.child_status_json(&child);
@@ -7947,6 +8044,219 @@ mod tests {
                 status["waiting_approval"],
                 serde_json::json!("command `touch blocked`")
             );
+            assert_eq!(
+                status["approval_request_id"],
+                serde_json::json!("approval-1")
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn child_approval_always_allow_responds_without_parent_callback(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-approval-auto-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (parent_commands, parent_receiver) = async_channel::unbounded();
+        let (child_commands, child_receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            state.settings.orchestrate.child_approval = ChildApprovalMode::AlwaysAllow;
+            let mut parent = live_session(ProviderKind::Codex, parent_commands);
+            parent.meta.id = "parent".into();
+            parent.turn_in_flight = true;
+            state.background.insert(parent.meta.id.clone(), parent);
+
+            let mut child = live_session(ProviderKind::Codex, child_commands);
+            child.meta.id = "child".into();
+            child.meta.parent_session_id = Some("parent".into());
+            state.sessions.push(child.meta.clone());
+            state.background.insert(child.meta.id.clone(), child);
+
+            state.on_event(
+                "child",
+                AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: "approval-auto".into(),
+                    turn_id: None,
+                    kind: agent::ApprovalKind::ExecCommand {
+                        command: "touch allowed".into(),
+                        cwd: None,
+                        reason: None,
+                    },
+                    options: Vec::new(),
+                }),
+                cx,
+            );
+
+            assert!(matches!(
+                child_receiver.try_recv(),
+                Ok(SessionCommand::RespondApproval {
+                    request_id,
+                    decision: ApprovalDecision::ApproveForSession,
+                }) if request_id == "approval-auto"
+            ));
+            assert!(
+                parent_receiver.try_recv().is_err(),
+                "always-allow must not notify the parent"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn child_approval_manual_preserves_legacy_notice_without_auto_response(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-approval-manual-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (parent_commands, parent_receiver) = async_channel::unbounded();
+        let (child_commands, child_receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            state.settings.orchestrate.child_approval = ChildApprovalMode::Manual;
+            let mut parent = live_session(ProviderKind::Codex, parent_commands);
+            parent.meta.id = "parent".into();
+            parent.turn_in_flight = true;
+            state.background.insert(parent.meta.id.clone(), parent);
+
+            let mut child = live_session(ProviderKind::Codex, child_commands);
+            child.meta.id = "child".into();
+            child.meta.title = "Manual child".into();
+            child.meta.parent_session_id = Some("parent".into());
+            state.sessions.push(child.meta.clone());
+            state.background.insert(child.meta.id.clone(), child);
+
+            state.on_event(
+                "child",
+                AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: "approval-manual".into(),
+                    turn_id: None,
+                    kind: agent::ApprovalKind::ExecCommand {
+                        command: "touch blocked".into(),
+                        cwd: None,
+                        reason: None,
+                    },
+                    options: Vec::new(),
+                }),
+                cx,
+            );
+
+            let SessionCommand::Steer { text, .. } = parent_receiver.try_recv().unwrap() else {
+                panic!("manual approval notice did not reach the parent")
+            };
+            assert_eq!(
+                text,
+                "[orchestrate] thread child (\"Manual child\") is waiting for approval: command `touch blocked`."
+            );
+            assert!(child_receiver.try_recv().is_err());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn orchestrate_approve_routes_decisions_and_validates_scope(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-approve-op-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut child = live_session(ProviderKind::Codex, commands);
+            child.meta.id = "child".into();
+            child.meta.parent_session_id = Some("parent".into());
+            state.sessions.push(child.meta.clone());
+            state.background.insert(child.meta.id.clone(), child);
+            state.sessions_awaiting_approval.insert(
+                "child".into(),
+                vec![agent::ApprovalRequest {
+                    id: "approval-op".into(),
+                    turn_id: None,
+                    kind: agent::ApprovalKind::ExecCommand {
+                        command: "cargo test".into(),
+                        cwd: None,
+                        reason: None,
+                    },
+                    options: Vec::new(),
+                }],
+            );
+
+            let result = state
+                .handle_orchestrate_op(
+                    orchestrate_mcp::OrchestrateOp::Approve {
+                        parent_id: "parent".into(),
+                        thread_id: "child".into(),
+                        request_id: None,
+                        decision: " APPROVE ".into(),
+                    },
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                result,
+                serde_json::json!({ "ok": true, "request_id": "approval-op" })
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::RespondApproval {
+                    request_id,
+                    decision: ApprovalDecision::Approve,
+                }) if request_id == "approval-op"
+            ));
+
+            let unknown_request = state
+                .handle_orchestrate_op(
+                    orchestrate_mcp::OrchestrateOp::Approve {
+                        parent_id: "parent".into(),
+                        thread_id: "child".into(),
+                        request_id: Some("missing".into()),
+                        decision: "deny".into(),
+                    },
+                    cx,
+                )
+                .unwrap_err();
+            assert_eq!(unknown_request, "no pending approval with that request_id");
+
+            let bad_decision = state
+                .handle_orchestrate_op(
+                    orchestrate_mcp::OrchestrateOp::Approve {
+                        parent_id: "parent".into(),
+                        thread_id: "child".into(),
+                        request_id: Some("approval-op".into()),
+                        decision: "later".into(),
+                    },
+                    cx,
+                )
+                .unwrap_err();
+            assert_eq!(
+                bad_decision,
+                "unknown decision: later; expected approve, approve_for_session, or deny"
+            );
+
+            let non_child = state
+                .handle_orchestrate_op(
+                    orchestrate_mcp::OrchestrateOp::Approve {
+                        parent_id: "other-parent".into(),
+                        thread_id: "child".into(),
+                        request_id: Some("approval-op".into()),
+                        decision: "deny".into(),
+                    },
+                    cx,
+                )
+                .unwrap_err();
+            assert_eq!(non_child, "unknown thread or not a child of this parent");
         });
 
         let _ = std::fs::remove_dir_all(root);

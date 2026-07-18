@@ -170,6 +170,12 @@ model_picker:
   no_models: "No models available for this provider."
 orchestrate:
   restore_default: "Restore default"
+  child_approval:
+    title: "Child approvals"
+    description: "Who answers when a dispatched child thread hits a permission gate. Decision-layer routes the request to the lead model, which answers with the approve tool; Always allow auto-approves for the session; Manual waits for you to answer in the child thread."
+    orchestrator: "Decision-layer approval"
+    always_allow: "Always allow"
+    manual: "Manual approval"
   all_models:
     title: "Built-in /orchestrate command"
     description: "These settings control what tcode injects when you send /orchestrate: how the current model understands its lead role, and which configured child models the orchestration MCP may dispatch work to. Every main model can use the command; models without an override inherit the generic identity."
