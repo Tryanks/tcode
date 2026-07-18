@@ -11,7 +11,7 @@ tcode-runtime = { path = "../runtime" }
 term = { path = "../term" }
 preview-mcp = { path = "../preview-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 async-channel = "2"
 base64 = "0.22"
@@ -20,6 +20,8 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
+rushdown = "0.18.0"
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 gpui-wry = { git = "https://github.com/longbridge/gpui-component" }
@@ -27,5 +29,10 @@ wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }
 
 [dev-dependencies]
+criterion = "0.7"
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
 tcode-services = { path = "../services" }
+
+[[bench]]
+name = "markdown_perf"
+harness = false

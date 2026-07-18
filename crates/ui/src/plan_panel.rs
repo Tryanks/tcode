@@ -15,20 +15,20 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     spinner::Spinner,
-    text::{TextView, TextViewState},
     v_flex,
 };
 
 use tcode_core::session::plan_title;
 use tcode_runtime::app::AppState;
 
+use crate::markdown::{MarkdownState, MarkdownView};
 use crate::material;
 
 pub struct PlanPanel {
     app_state: Entity<AppState>,
     /// Cached markdown state for the proposed-plan body (rebuilt when the text
     /// changes) so streaming/replay reparses cheaply.
-    md: Option<(String, Entity<TextViewState>)>,
+    md: Option<(String, Entity<MarkdownState>)>,
     /// Whether the "Copied!" confirmation is showing (2s).
     copied: bool,
     _copied_task: Option<Task<()>>,
@@ -49,14 +49,14 @@ impl PlanPanel {
         }
     }
 
-    fn sync_markdown(&mut self, markdown: &str, cx: &mut Context<Self>) -> Entity<TextViewState> {
+    fn sync_markdown(&mut self, markdown: &str, cx: &mut Context<Self>) -> Entity<MarkdownState> {
         if let Some((cached, state)) = &self.md
             && cached == markdown
         {
             return state.clone();
         }
         let text = markdown.to_string();
-        let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+        let state = cx.new(|cx| MarkdownState::new(&text, cx));
         self.md = Some((text, state.clone()));
         state
     }
@@ -118,7 +118,7 @@ impl PlanPanel {
                     .w_full()
                     .text_size(px(13.))
                     .line_height(px(20.))
-                    .child(TextView::new(&md_state).selectable(true)),
+                    .child(MarkdownView::new(&md_state).selectable(true)),
             )
             .child(
                 h_flex()

@@ -9,6 +9,8 @@ mod composer_trigger;
 mod context_meter;
 mod diff_panel;
 pub mod git;
+mod highlight;
+pub mod markdown;
 pub mod material;
 mod orchestrate_settings;
 mod palette;

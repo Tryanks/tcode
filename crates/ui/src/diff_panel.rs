@@ -22,17 +22,17 @@ use gpui::{
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Rope, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    highlighter::{HighlightTheme, Language, SyntaxHighlighter},
+    highlighter::HighlightTheme,
     input::{Input, InputState},
     popover::Popover,
     v_flex,
 };
 
-use crate::material;
 use crate::plan_panel::PlanPanel;
+use crate::{highlight, material};
 use tcode_core::session::{ReviewComment, ReviewSide};
 use tcode_runtime::app::{AppState, RightTab};
 use tcode_runtime::ui_facade::{
@@ -262,14 +262,8 @@ fn parse_bare(diff: &str) -> ParsedDiff {
 // Highlighting helpers
 // ---------------------------------------------------------------------------
 
-/// The tree-sitter language name for a file path's extension (falls back to
-/// plain text). Uses gpui-component's [`Language`] extension table.
 fn language_name(path: &str) -> &'static str {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| Language::from_str(ext).name())
-        .unwrap_or("text")
+    highlight::language_name_for_path(path)
 }
 
 /// Highlight `src` (a full reconstructed file side) once and return the token
@@ -279,12 +273,7 @@ fn highlight_source(
     lang: &str,
     theme: &HighlightTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    if src.is_empty() {
-        return Vec::new();
-    }
-    let mut hl = SyntaxHighlighter::new(lang);
-    hl.update(None, &Rope::from_str(src), None);
-    hl.styles(&(0..src.len()), theme)
+    highlight::highlight_source(src, lang, theme)
 }
 
 /// Slice the style spans overlapping `[start, end)` and rebase them to be

@@ -1,0 +1,1 @@
+`syntaxes.bin` is the compiled Sublime-syntax set from [bat v0.26.1](https://github.com/sharkdp/bat) (MIT/Apache-2.0), aggregating community syntax definitions documented in bat's own acknowledgements.
