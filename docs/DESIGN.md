@@ -240,7 +240,8 @@ toggle / text input), hairline separators. General: Language, Theme
 (System/Light/Dark, live), thread-title provider/model, Word wrap in diffs,
 Delete confirmation, task-panel behavior, and provider update checks. The title
 model defaults to Codex `gpt-5.6-luna`; its isolated background request always
-uses `low` reasoning effort. Providers: Claude / Codex configuration.
+uses `low` reasoning effort. Providers: Claude / Codex / pi / OpenCode
+configuration.
 
 Orchestrate begins with an explicit built-in `/orchestrate` explanation. Every
 main model is eligible: the page exposes one multiline generic identity plus

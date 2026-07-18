@@ -39,12 +39,14 @@ impl ProjectSort {
     }
 }
 
-/// The settings-file key for a provider ("codex" / "claude"). Stable: it keys
+/// The stable settings-file key for a provider. It keys
 /// both `settings.json`'s `providers` map and `secrets.json`.
 pub fn provider_key(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "codex",
         ProviderKind::ClaudeCode => "claude",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "opencode",
         // ACP agents are not one provider but many: their per-agent settings
         // live in `Settings::acp_agents`, keyed by registry id. This bucket only
         // ever holds the shared fallbacks (it is never written by the ACP card).
@@ -57,6 +59,8 @@ pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "Codex",
         ProviderKind::ClaudeCode => "Claude",
+        ProviderKind::Pi => "pi",
+        ProviderKind::OpenCode => "OpenCode",
         ProviderKind::Acp => "ACP",
     }
 }
@@ -94,13 +98,15 @@ pub struct ProviderSettings {
     /// Override for the CLI binary (`None` = resolve from PATH).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<PathBuf>,
-    /// Claude: `HOME` override. Codex: `CODEX_HOME`.
+    /// Claude: `HOME`; Codex: `CODEX_HOME`; pi: `PI_CODING_AGENT_DIR`.
+    /// OpenCode ignores this field because it has no single-home override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_path: Option<PathBuf>,
     /// Codex only: account-specific `CODEX_HOME` (takes precedence over `home_path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow_home_path: Option<PathBuf>,
-    /// Claude only: extra CLI arguments appended on session start.
+    /// Native-provider CLI arguments appended on session start (Codex keeps
+    /// its separate shadow-home field in the corresponding card slot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_args: Option<String>,
     /// Model slugs added by hand in the Models section.
@@ -138,7 +144,7 @@ impl Default for ProviderSettings {
 }
 
 impl ProviderSettings {
-    /// Claude's `Launch arguments` field, split on whitespace.
+    /// A native provider's `Launch arguments` field, split on whitespace.
     pub fn extra_args(&self) -> Vec<String> {
         self.launch_args
             .as_deref()
@@ -164,13 +170,14 @@ impl ProviderSettings {
 /// `ProviderKind::ClaudeCode`, each with its own `ANTHROPIC_BASE_URL` /
 /// `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` env and its own isolated home.
 ///
-/// The two *built-in* profiles (Claude Code, Codex) are not stored here — they
+/// The built-in profiles are not stored here — they
 /// remain in [`Settings::providers`] under their [`provider_key`]. Only extra,
 /// user-created profiles live in [`Settings::profiles`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProfile {
     /// The protocol this profile drives. Determines which native adapter
-    /// (`claude` / `codex`) spawns it and how its stdio is normalized.
+    /// (`claude` / `codex` / `pi` / `opencode`) spawns it and how its native
+    /// protocol is normalized.
     pub kind: ProviderKind,
     /// The card configuration (env, binary, home, models, display name, …).
     /// Flattened so a profile's JSON is a superset of a provider card's.
@@ -587,7 +594,7 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Per-provider cards (Settings → Providers), keyed by [`provider_key`].
-    /// These are the two *built-in* profiles (Claude Code, Codex).
+    /// These are the built-in native-provider profiles.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderSettings>,
     /// User-created provider profiles, keyed by a stable slug id. Each carries
@@ -710,9 +717,9 @@ impl Settings {
         provider_key(kind)
     }
 
-    /// Whether `id` names a built-in profile (`"claude"` / `"codex"` / `"acp"`).
+    /// Whether `id` names a built-in provider profile.
     pub fn is_builtin_profile_id(id: &str) -> bool {
-        matches!(id, "claude" | "codex" | "acp")
+        matches!(id, "claude" | "codex" | "pi" | "opencode" | "acp")
     }
 
     /// The protocol kind of a built-in profile id, if it is one. Used to route a
@@ -721,6 +728,8 @@ impl Settings {
         match id {
             "claude" => Some(ProviderKind::ClaudeCode),
             "codex" => Some(ProviderKind::Codex),
+            "pi" => Some(ProviderKind::Pi),
+            "opencode" => Some(ProviderKind::OpenCode),
             "acp" => Some(ProviderKind::Acp),
             _ => None,
         }
@@ -733,6 +742,8 @@ impl Settings {
         for kind in [
             ProviderKind::Codex,
             ProviderKind::ClaudeCode,
+            ProviderKind::Pi,
+            ProviderKind::OpenCode,
             ProviderKind::Acp,
         ] {
             if provider_key(kind) == id {
@@ -889,6 +900,11 @@ mod tests {
             "Claude"
         );
         assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
+        assert_eq!(settings.provider_display_name(ProviderKind::Pi), "pi");
+        assert_eq!(
+            settings.provider_display_name(ProviderKind::OpenCode),
+            "OpenCode"
+        );
         // A blank override is treated as "no override".
         settings.provider_mut(ProviderKind::Codex).display_name = Some("   ".into());
         assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
@@ -1199,8 +1215,18 @@ mod tests {
         assert_eq!(claude_profiles.len(), 2);
         assert_eq!(claude_profiles[0].id, "claude");
         assert_eq!(claude_profiles[1].id, id);
-        // Codex still resolves to exactly its built-in.
+        // Every other native provider still resolves to exactly its built-in.
         assert_eq!(settings.profiles_for_kind(ProviderKind::Codex).len(), 1);
+        assert_eq!(settings.profiles_for_kind(ProviderKind::Pi).len(), 1);
+        assert_eq!(settings.profiles_for_kind(ProviderKind::OpenCode).len(), 1);
+        assert_eq!(
+            settings.resolved_profile("pi").unwrap().kind,
+            ProviderKind::Pi
+        );
+        assert_eq!(
+            settings.resolved_profile("opencode").unwrap().kind,
+            ProviderKind::OpenCode
+        );
 
         // Display names: built-in falls back to label; user shows its name.
         assert_eq!(settings.profile_display_name("claude"), "Claude");
