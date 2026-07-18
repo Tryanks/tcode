@@ -379,6 +379,60 @@ pub async fn run_smoke() -> SmokeRun {
     dispatch::run_smoke().await
 }
 
+/// Hidden CLI-harness entry points. These deliberately deserialize the same
+/// parameter structs and call the same dispatch functions as the MCP router.
+pub async fn debug_find_roots(filter_json: &str) -> Result<CallToolResult, serde_json::Error> {
+    let params = if filter_json.is_empty() {
+        serde_json::from_str("{}")?
+    } else {
+        serde_json::from_str(filter_json)?
+    };
+    Ok(dispatch::find_roots(params).await)
+}
+
+pub async fn debug_observe(root: &str) -> CallToolResult {
+    dispatch::observe_ui(ObserveUiParams {
+        root: (!root.is_empty()).then(|| root.to_string()),
+        mode: Some(ObserveMode::Semantic),
+    })
+    .await
+}
+
+pub async fn debug_search(state_id: &str, text: &str) -> CallToolResult {
+    dispatch::search_ui(SearchUiParams {
+        state_id: state_id.to_string(),
+        text: Some(text.to_string()),
+        role: None,
+    })
+    .await
+}
+
+pub async fn debug_act(params_json: &str) -> Result<CallToolResult, serde_json::Error> {
+    let params = serde_json::from_str(params_json)?;
+    Ok(dispatch::act_ui(params).await)
+}
+
+pub struct DebugScreenshot {
+    pub result: CallToolResult,
+    pub png: Option<Vec<u8>>,
+}
+
+pub async fn debug_screenshot(root: Option<&str>) -> DebugScreenshot {
+    let result = dispatch::observe_ui(ObserveUiParams {
+        root: root.filter(|root| !root.is_empty()).map(str::to_string),
+        mode: Some(ObserveMode::Visual),
+    })
+    .await;
+    let png = result
+        .content
+        .iter()
+        .find_map(|content| content.as_image())
+        .and_then(|image| {
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &image.data).ok()
+        });
+    DebugScreenshot { result, png }
+}
+
 async fn handle(
     State(services): State<Arc<RwLock<Services>>>,
     req: axum::extract::Request,

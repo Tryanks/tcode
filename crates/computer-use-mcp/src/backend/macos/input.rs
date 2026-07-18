@@ -122,11 +122,15 @@ pub(super) fn type_text(text: &str) -> Result<(), BackendError> {
     for chunk in chunks {
         let down = CGEvent::new_keyboard_event(event_source()?, 0, true)
             .map_err(|()| operation("CoreGraphics could not create a Unicode key-down event"))?;
+        down.set_flags(CGEventFlags::CGEventFlagNull);
         down.set_string_from_utf16_unchecked(&chunk);
         down.post(CGEventTapLocation::HID);
         let up = CGEvent::new_keyboard_event(event_source()?, 0, false)
             .map_err(|()| operation("CoreGraphics could not create a Unicode key-up event"))?;
+        up.set_flags(CGEventFlags::CGEventFlagNull);
+        up.set_string_from_utf16_unchecked(&chunk);
         up.post(CGEventTapLocation::HID);
+        std::thread::sleep(Duration::from_millis(5));
     }
     Ok(())
 }
