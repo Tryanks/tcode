@@ -22,7 +22,7 @@ preview-mcp = { path = "../preview-mcp" }
 orchestrate-mcp = { path = "../orchestrate-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-languages"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 env_logger = "0.11"
 log = "0.4"
 

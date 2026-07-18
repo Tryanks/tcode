@@ -275,6 +275,7 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_component::init(cx);
+            tcode_ui::markdown::init(cx);
 
             // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
             // AppShell). `secondary` is gpui's platform modifier: command on

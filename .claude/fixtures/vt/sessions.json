@@ -1,0 +1,26 @@
+{
+  "projects": [
+    {
+      "id": "vt-markdown-project",
+      "name": "tcode-vt-project",
+      "root": "/tmp/tcode-vt-project",
+      "created_at": 1784304000
+    }
+  ],
+  "sessions": [
+    {
+      "id": "vt-markdown-demo",
+      "title": "Markdown visual demo",
+      "provider": "codex",
+      "cwd": "/tmp/tcode-vt-project",
+      "project_id": "vt-markdown-project",
+      "model": null,
+      "approval_mode": "full_access",
+      "resume_cursor": null,
+      "option_selections": [],
+      "interaction_mode": "build",
+      "created_at": 1784304000,
+      "updated_at": 1784304005
+    }
+  ]
+}

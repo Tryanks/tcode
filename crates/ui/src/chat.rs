@@ -21,7 +21,6 @@ use gpui_component::{
     h_flex,
     notification::Notification,
     popover::Popover,
-    text::{TextView, TextViewState},
     tooltip::Tooltip,
     v_flex,
 };
@@ -36,6 +35,7 @@ use tcode_runtime::app::{AppState, RightTab};
 use crate::commit_dialog::CommitDialog;
 use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
+use crate::markdown::{MarkdownState, MarkdownView};
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_millis;
 use crate::window_drag_area;
@@ -87,29 +87,12 @@ fn timeline_overdraw(viewport_height: f32) -> f32 {
     (viewport_height.max(0.) * TIMELINE_OVERDRAW_VIEWPORTS).max(TIMELINE_MIN_OVERDRAW)
 }
 
-/// Markdown state that grows with streaming deltas (stream_markdown pattern).
-///
-/// `TextViewState` keeps two copies of the document: `parsed_content` on the
-/// main thread and a private `content` inside its background parse task. Only
-/// `push_str` updates reach the background task — the initial text (and
-/// `set_text`) are parsed synchronously on the main thread and never sent. The
-/// background task therefore only ever knows the text that was *pushed* into
-/// it, and because every `push_str` result replaces `parsed_content` wholesale,
-/// any text that was seeded (or `set_text`) is dropped the moment the first
-/// delta lands. See the `md_state_*` tests.
-///
-/// So this mirror upholds one invariant: **a state that will ever be grown with
-/// `push_str` is seeded empty and only ever grown with `push_str`** (`can_push`).
-/// Text that cannot be expressed as an append rebuilds the entity instead of
-/// calling `set_text`.
+/// Markdown state mirrored from a timeline entry.
 struct MdState {
-    state: Entity<TextViewState>,
+    state: Entity<MarkdownState>,
     /// The text currently mirrored into `state`. Sharing it lets every
     /// re-render install a Copy handler without cloning a long response.
     synced: Arc<str>,
-    /// Whether `state`'s whole content arrived through `push_str` (i.e. it was
-    /// seeded empty), which is what makes further `push_str` calls sound.
-    can_push: bool,
 }
 
 /// How to bring a mirrored [`MdState`] in line with the timeline's text.
@@ -117,20 +100,19 @@ struct MdState {
 enum MdSync {
     /// Already in sync.
     Noop,
-    /// The text grew by an append: `push_str` this delta.
+    /// The text grew by an append.
     Push(String),
-    /// The text changed in a way `push_str` cannot express (or the state is not
-    /// safe to push into): rebuild the entity from this text.
+    /// The text changed in a way an append cannot express.
     Reset(String),
 }
 
 /// The pure delta/reset decision behind [`MdState::sync`].
-fn md_sync(synced: &str, text: &str, can_push: bool) -> MdSync {
+fn md_sync(synced: &str, text: &str) -> MdSync {
     if synced == text {
         return MdSync::Noop;
     }
     match text.strip_prefix(synced) {
-        Some(delta) if can_push && !delta.is_empty() => MdSync::Push(delta.to_string()),
+        Some(delta) if !delta.is_empty() => MdSync::Push(delta.to_string()),
         _ => MdSync::Reset(text.to_string()),
     }
 }
@@ -610,39 +592,20 @@ fn list_sync(old: &[TurnListItem], new: &[TurnListItem], session_changed: bool) 
 }
 
 impl MdState {
-    /// Mirror `text`. `streaming` marks text that is still being produced (its
-    /// turn is running): it is seeded empty and pushed, so the background parse
-    /// task stays authoritative. Settled text (replay, finished turns) is
-    /// parsed synchronously at construction so the first layout already has the
-    /// right height.
-    fn new(text: &str, streaming: bool, cx: &mut App) -> Self {
-        let state = if streaming {
-            let state = cx.new(|cx| TextViewState::markdown("", cx));
-            if !text.is_empty() {
-                state.update(cx, |state, cx| state.push_str(text, cx));
-            }
-            state
-        } else {
-            cx.new(|cx| TextViewState::markdown(text, cx))
-        };
+    fn new(text: &str, cx: &mut App) -> Self {
         Self {
-            state,
+            state: cx.new(|cx| MarkdownState::new(text, cx)),
             synced: Arc::from(text),
-            // An empty seed leaves the background task's document empty too, so
-            // it stays safe to push into even outside streaming mode.
-            can_push: streaming || text.is_empty(),
         }
     }
 
-    fn sync(&mut self, text: String, streaming: bool, cx: &mut App) {
-        match md_sync(&self.synced, &text, self.can_push) {
+    fn sync(&mut self, text: String, cx: &mut App) {
+        match md_sync(&self.synced, &text) {
             MdSync::Noop => {}
-            MdSync::Push(delta) => {
-                self.state
-                    .update(cx, |state, cx| state.push_str(&delta, cx));
+            MdSync::Push(_) | MdSync::Reset(_) => {
+                self.state.update(cx, |state, cx| state.set_text(&text, cx));
                 self.synced = Arc::from(text);
             }
-            MdSync::Reset(text) => *self = Self::new(&text, streaming, cx),
         }
     }
 }
@@ -709,15 +672,12 @@ impl ChatView {
         this
     }
 
-    /// Mirror timeline markdown text into `TextViewState` entities, growing
-    /// them with `push_str` when possible so streaming reparses incrementally.
+    /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
-        // (id, text, streaming): `streaming` marks text whose turn is still
-        // running, i.e. text that further deltas will grow.
         let (session_key, texts, running, turn_items) = {
             let state = self.app_state.read(cx);
             let session_key = state.active_session_id().map(str::to_string);
-            let mut texts: Vec<(String, String, bool)> = Vec::new();
+            let mut texts: Vec<(String, String)> = Vec::new();
             let mut running = false;
             let mut turn_items = Vec::new();
             if let Some(active) = &state.active {
@@ -733,30 +693,23 @@ impl ChatView {
                     &timeline.children,
                     &self.expanded,
                 );
-                let turn_running =
-                    |turn: usize| timeline.turns.get(turn).is_some_and(|t| t.running);
                 for entry in &timeline.entries {
                     match &entry.content {
                         EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
-                            texts.push((entry.id.clone(), text.clone(), turn_running(entry.turn)));
+                            texts.push((entry.id.clone(), text.clone()));
                         }
                         EntryContent::User {
                             text, context_len, ..
                         } => texts.push((
                             entry.id.clone(),
                             plain_text_as_markdown(user_visible_text(text, *context_len)),
-                            false,
                         )),
                         _ => {}
                     }
                 }
                 // The proposed-plan card renders its markdown too.
                 if let Some(plan) = &timeline.proposed_plan {
-                    texts.push((
-                        format!("plan:{}", plan.item_id),
-                        plan.markdown.clone(),
-                        turn_running(plan.turn),
-                    ));
+                    texts.push((format!("plan:{}", plan.item_id), plan.markdown.clone()));
                 }
             }
             (session_key, texts, running, turn_items)
@@ -792,12 +745,11 @@ impl ChatView {
             }
         }
 
-        for (id, text, streaming) in texts {
+        for (id, text) in texts {
             match self.md_states.get_mut(&id) {
-                Some(md) => md.sync(text, streaming, cx),
+                Some(md) => md.sync(text, cx),
                 None => {
-                    self.md_states
-                        .insert(id, MdState::new(&text, streaming, cx));
+                    self.md_states.insert(id, MdState::new(&text, cx));
                 }
             }
         }
@@ -1148,7 +1100,11 @@ impl ChatView {
 
         let content = self.md_states.get(entry_id).map_or_else(
             || div().child(visible.to_string()).into_any_element(),
-            |md| TextView::new(&md.state).selectable(true).into_any_element(),
+            |md| {
+                MarkdownView::new(&md.state)
+                    .selectable(true)
+                    .into_any_element()
+            },
         );
         let bubble = v_flex()
             .group(group_key.clone())
@@ -1350,7 +1306,9 @@ impl ChatView {
         let (content, copy_text): (AnyElement, Arc<str>) = if let Some(md) = self.md_states.get(id)
         {
             (
-                TextView::new(&md.state).selectable(true).into_any_element(),
+                MarkdownView::new(&md.state)
+                    .selectable(true)
+                    .into_any_element(),
                 md.synced.clone(),
             )
         } else {
@@ -2059,7 +2017,7 @@ impl ChatView {
                 .w_full()
                 .text_size(px(15.))
                 .line_height(px(22.))
-                .child(TextView::new(&md.state).selectable(true))
+                .child(MarkdownView::new(&md.state).selectable(true))
                 .into_any_element()
         } else {
             div()
@@ -3098,18 +3056,189 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload, displayed_error_text,
-        finished_work_log_label, index_turns, list_sync, md_sync, plain_text_as_markdown,
-        previous_logs_toggle_label, segment_entries, timeline_overdraw, turn_work_log_summary,
-        work_log_counts, work_log_summary,
+        ChatView, ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload,
+        displayed_error_text, finished_work_log_label, index_turns, list_sync, md_sync,
+        plain_text_as_markdown, previous_logs_toggle_label, segment_entries, timeline_overdraw,
+        turn_work_log_summary, work_log_counts, work_log_summary,
     };
+    use crate::markdown::MarkdownState;
     use agent::{FileChange, FileChangeKind, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
-    use gpui_component::text::TextViewState;
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     use std::sync::Arc;
     use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
+
+    #[gpui::test]
+    fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{VisualTestContext, point, px, size};
+        use tcode_runtime::app::AppState;
+        use tcode_services::store::SessionStore;
+
+        const DEMO_MARKDOWN: &str = r#"# H1
+
+## H2
+
+This paragraph has **bold**, *italic*, ~~strikethrough~~, and `inline code`.
+
+```rust
+fn main() {
+    let language = "Rust";
+    let message = format!("Hello from {language}!");
+    println!("{message}");
+}
+```
+
+```typescript
+const count: number = 3;
+interface Demo {
+  title: string;
+  enabled: boolean;
+}
+const demo: Demo = { title: "TypeScript", enabled: true };
+```
+
+```python
+def greet(name: str) -> str:
+    message = f"Hello, {name}!"
+    return message
+
+print(greet("Python"))
+```
+
+```go
+package main
+func main() {
+    message := "Hello from Go"
+    println(message)
+}
+```
+
+```toml
+[demo]
+title = "TOML sample"
+enabled = true
+count = 3
+```
+
+```kotlin
+fun main() {
+    val language: String = "Kotlin"
+    println("Hello from $language")
+}
+```
+
+```text
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+| Left | Center | Right |
+| :--- | :----: | ----: |
+| alpha | beta | 100 |
+| gamma | delta | 200 |
+
+| Name | Status | Owner | Description | Count | Notes |
+| :--- | :----: | :--- | :---------- | ----: | :---- |
+| Short | Ready | UI | This deliberately long table cell contains about sixty characters total. | 12 | wraps |
+| Longer component name | Pending | Visual QA | Brief | 3 | compact |
+
+- [x] Render headings
+- [ ] Inspect every pixel
+
+1. Ordered parent
+   - Unordered child
+     1. Nested ordered child
+2. Second ordered item
+
+- Unordered parent
+  - Nested bullet
+    1. Ordered grandchild
+
+> First line of the blockquote.
+> Second line of the blockquote.
+
+Visit [Example](https://example.com) or the bare URL https://tcode.dev for more.
+
+---
+
+This paragraph has a soft
+line break, followed by a hard break.\
+This begins after the hard break."#;
+
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let data_root = std::env::temp_dir().join(format!(
+            "tcode-markdown-outer-list-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(data_root).expect("test session store");
+        let app_state = cx.new(|cx| {
+            let mut state = AppState::new(store);
+            state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
+            let active = state.active.as_mut().expect("active draft");
+            active.timeline.turns = vec![TurnMeta::default()];
+            active.timeline.entries = vec![
+                entry(
+                    "user",
+                    EntryContent::User {
+                        text: "render a long document".into(),
+                        steering: None,
+                        context_len: None,
+                    },
+                ),
+                entry(
+                    "assistant",
+                    EntryContent::Assistant {
+                        text: DEMO_MARKDOWN.into(),
+                    },
+                ),
+            ];
+            state
+        });
+
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(app_state.clone(), window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let outer_list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let max_scroll = outer_list.max_offset_for_scrollbar().y;
+        assert!(
+            max_scroll > px(800.),
+            "long markdown did not contribute its full height to the chat list: {max_scroll:?}"
+        );
+        let scroll_step = px(40.);
+        let steps = (f32::from(max_scroll / 2.) / f32::from(scroll_step)).ceil() as usize;
+        for step in 0..steps {
+            let distance = (scroll_step * (step + 1) as f32).min(max_scroll / 2.);
+            outer_list.set_offset_from_scrollbar(point(px(0.), -(max_scroll - distance)));
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        let viewport = outer_list.viewport_bounds();
+        let middle = cx.debug_bounds("markdown-block-6");
+        assert!(
+            middle.is_some_and(|bounds| bounds.intersects(&viewport)),
+            "middle markdown block did not paint at the chat list's middle offset; bounds={middle:?}, max_scroll={max_scroll:?}, viewport={viewport:?}"
+        );
+        assert!(
+            cx.debug_bounds("markdown-block-18").is_none(),
+            "offscreen tail block was painted; block virtualization did not cull it"
+        );
+    }
 
     fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
         Arc::new(TimelineEntry {
@@ -3776,7 +3905,7 @@ mod tests {
 
         // The rendered document is a different (lossy) string; copying it would
         // be the bug this test exists to prevent.
-        let md = cx.update(|cx| MdState::new(raw, false, cx));
+        let md = cx.update(|cx| MdState::new(raw, cx));
         let rendered = rendered(&md.state, cx);
         assert_ne!(rendered, raw);
         assert!(!rendered.contains("**"));
@@ -3811,30 +3940,22 @@ mod tests {
     fn md_sync_decides_push_reset_and_noop() {
         // Unchanged text does nothing (the streaming hot path: most notifies
         // carry no new text for a given entry).
-        assert_eq!(md_sync("abc", "abc", true), MdSync::Noop);
-        assert_eq!(md_sync("", "", true), MdSync::Noop);
+        assert_eq!(md_sync("abc", "abc"), MdSync::Noop);
+        assert_eq!(md_sync("", ""), MdSync::Noop);
         // An append is a push of just the delta.
-        assert_eq!(md_sync("", "I", true), MdSync::Push("I".into()));
-        assert_eq!(md_sync("I", "I'll go", true), MdSync::Push("'ll go".into()));
-        // Anything that is not an append rebuilds: a rewrite, a shrink, or a
+        assert_eq!(md_sync("", "I"), MdSync::Push("I".into()));
+        assert_eq!(md_sync("I", "I'll go"), MdSync::Push("'ll go".into()));
+        // Anything that is not an append is a reset: a rewrite, a shrink, or a
         // snapshot that replaces the accumulated text.
-        assert_eq!(md_sync("abc", "xbc", true), MdSync::Reset("xbc".into()));
-        assert_eq!(md_sync("abcd", "abc", true), MdSync::Reset("abc".into()));
-        assert_eq!(md_sync("abc", "", true), MdSync::Reset(String::new()));
-        // A state that cannot be pushed into (its content was parsed at
-        // construction, so the background parse task never saw it) always
-        // rebuilds, even for a pure append.
-        assert_eq!(
-            md_sync("I", "I'll go", false),
-            MdSync::Reset("I'll go".into())
-        );
-        assert_eq!(md_sync("abc", "abc", false), MdSync::Noop);
+        assert_eq!(md_sync("abc", "xbc"), MdSync::Reset("xbc".into()));
+        assert_eq!(md_sync("abcd", "abc"), MdSync::Reset("abc".into()));
+        assert_eq!(md_sync("abc", ""), MdSync::Reset(String::new()));
     }
 
-    // -- headless TextViewState mirroring ------------------------------------
+    // -- headless MarkdownState mirroring ------------------------------------
 
     /// The document the widget would actually render.
-    fn rendered(state: &Entity<TextViewState>, cx: &mut TestAppContext) -> String {
+    fn rendered(state: &Entity<MarkdownState>, cx: &mut TestAppContext) -> String {
         state.update(cx, |state, cx| {
             state.select_all(cx);
             state.selected_text()
@@ -3844,6 +3965,7 @@ mod tests {
     #[gpui::test]
     fn plain_text_markdown_escapes_inline_and_block_syntax(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
         let cases = [
             "*not italic* _nor this_ **nor bold**",
             "# not a heading",
@@ -3859,7 +3981,7 @@ mod tests {
 
         for input in cases {
             let markdown = plain_text_as_markdown(input);
-            let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(&markdown, cx)));
+            let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&markdown, cx)));
             assert_eq!(
                 rendered(&state, cx),
                 format!("{input}\n"),
@@ -3871,6 +3993,7 @@ mod tests {
     #[gpui::test]
     fn plain_text_markdown_preserves_lines_and_indentation(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
         let cases = [
             ("line one\nline two", "line one\nline two\n"),
             ("para one\n\npara two", "para one\npara two\n"),
@@ -3883,142 +4006,72 @@ mod tests {
 
         for (input, expected) in cases {
             let markdown = plain_text_as_markdown(input);
-            let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(&markdown, cx)));
+            let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&markdown, cx)));
             assert_eq!(rendered(&state, cx), expected, "input: {input:?}");
         }
     }
 
-    /// Pins the upstream constraint this mirror is built around: a
-    /// `TextViewState` seeded with text and then grown with `push_str` renders
-    /// only the pushed text — the seed is dropped, because the initial parse
-    /// happens on the main thread and never reaches the background parse task
-    /// whose document each `push_str` result replaces `parsed_content` with.
-    ///
-    /// This is what made a streamed "I'll run that command" render as "'ll run
-    /// that command". If this test ever fails, gpui-component fixed it and
-    /// `MdState::can_push` can go away.
     #[gpui::test]
-    fn text_view_state_drops_a_non_empty_seed_on_push(cx: &mut TestAppContext) {
+    fn markdown_state_set_text_renders_the_new_text(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("I", cx)));
-        cx.run_until_parked();
-        state.update(cx, |state, cx| state.push_str("'ll run it.", cx));
-        cx.run_until_parked();
+        cx.update(crate::markdown::init);
+        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Old **value**", cx)));
 
-        assert_eq!(rendered(&state, cx), "'ll run it.\n");
+        state.update(cx, |state, cx| state.set_text("New **value**", cx));
+
+        assert_eq!(rendered(&state, cx), "New value\n");
     }
 
-    /// ...and the same for `set_text`: the background parse task keeps its own
-    /// (delta-only) document, so a later `push_str` resurrects it and throws the
-    /// `set_text` away. Hence [`MdState::sync`] rebuilds instead of calling it.
     #[gpui::test]
-    fn text_view_state_drops_set_text_on_push(cx: &mut TestAppContext) {
+    fn markdown_state_push_str_appends_after_prior_updates(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("", cx)));
-        cx.run_until_parked();
-        state.update(cx, |state, cx| state.push_str("Hello", cx));
-        state.update(cx, |state, cx| state.set_text("Snapshot.", cx));
-        state.update(cx, |state, cx| state.push_str(" More.", cx));
-        cx.run_until_parked();
+        cx.update(crate::markdown::init);
+        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Seed", cx)));
 
-        assert_eq!(rendered(&state, cx), "Hello More.\n");
+        state.update(cx, |state, cx| {
+            state.push_str(" one", cx);
+            state.set_text("Reset", cx);
+            state.push_str(" two", cx);
+        });
+
+        assert_eq!(rendered(&state, cx), "Reset two\n");
     }
 
-    /// Incremental `push_str` from an empty seed is faithful: streaming a
-    /// document in 1/3/7-char chunks parses to exactly what a one-shot parse of
-    /// the same markdown produces (paragraphs, list, fenced code, inline marks).
-    /// This is why the streaming path keeps `push_str` instead of re-`set_text`ing
-    /// the whole message on every delta.
     #[gpui::test]
-    fn push_str_streaming_matches_a_one_shot_parse(cx: &mut TestAppContext) {
+    fn md_state_synced_mirror_tracks_push_and_reset_paths(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let full = "I'll run that now.\n\nThe plan:\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n\nDone — **bold** and `code`.\n";
-        let one_shot = cx.update(|cx| cx.new(|cx| TextViewState::markdown(full, cx)));
-        cx.run_until_parked();
-        let expected = rendered(&one_shot, cx);
+        cx.update(crate::markdown::init);
+        let mut md = cx.update(|cx| MdState::new("Seed", cx));
 
-        for size in [1usize, 3, 7] {
-            let chars: Vec<char> = full.chars().collect();
-            let mut md = cx.update(|cx| MdState::new("", true, cx));
-            let mut text = String::new();
-            for chunk in chars.chunks(size) {
-                text.extend(chunk);
-                let next = text.clone();
-                cx.update(|cx| md.sync(next, true, cx));
-                cx.run_until_parked();
-            }
-            assert_eq!(rendered(&md.state, cx), expected, "chunk size {size}");
-        }
+        assert_eq!(
+            md_sync(&md.synced, "Seed tail"),
+            MdSync::Push(" tail".into())
+        );
+        cx.update(|cx| md.sync("Seed tail".into(), cx));
+        assert_eq!(md.synced.as_ref(), "Seed tail");
+        assert_eq!(rendered(&md.state, cx), "Seed tail\n");
+
+        assert_eq!(
+            md_sync(&md.synced, "Replacement"),
+            MdSync::Reset("Replacement".into())
+        );
+        cx.update(|cx| md.sync("Replacement".into(), cx));
+        assert_eq!(md.synced.as_ref(), "Replacement");
+        assert_eq!(rendered(&md.state, cx), "Replacement\n");
     }
 
-    /// The live streaming path: an assistant entry first appears with its first
-    /// delta and grows. Every character must survive — this is the regression
-    /// for the dropped leading "I" / "Q".
     #[gpui::test]
-    fn md_state_streams_without_dropping_the_first_chunk(cx: &mut TestAppContext) {
+    fn markdown_state_selected_text_works_after_select_all(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let mut md = cx.update(|cx| MdState::new("Q", true, cx));
-        cx.run_until_parked();
+        cx.update(crate::markdown::init);
+        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Some **bold** text", cx)));
 
-        let mut text = String::from("Q");
-        for delta in ["UEUED", "_ONE"] {
-            text.push_str(delta);
-            let next = text.clone();
-            cx.update(|cx| md.sync(next, true, cx));
-            cx.run_until_parked();
-        }
+        state.update(cx, |state, cx| state.select_all(cx));
 
-        assert_eq!(md.synced.as_ref(), "QUEUED_ONE");
-        assert_eq!(rendered(&md.state, cx), "QUEUED_ONE\n");
-    }
-
-    /// A non-append change (a snapshot that rewrites the accumulated text)
-    /// rebuilds the state instead of `set_text`ing it, and further deltas keep
-    /// streaming onto the rebuilt state — no stale text resurfaces, nothing is
-    /// duplicated.
-    #[gpui::test]
-    fn md_state_reset_rebuilds_without_duplicating(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let mut md = cx.update(|cx| MdState::new("First para.", true, cx));
-        cx.run_until_parked();
-
-        // Snapshot rewrites the text (not an append) -> rebuild.
-        cx.update(|cx| md.sync("Rewritten para.".into(), true, cx));
-        cx.run_until_parked();
-        assert!(md.can_push);
-        assert_eq!(rendered(&md.state, cx), "Rewritten para.\n");
-
-        // Streaming resumes on the rebuilt state.
-        cx.update(|cx| md.sync("Rewritten para. Tail.".into(), true, cx));
-        cx.run_until_parked();
-        assert_eq!(rendered(&md.state, cx), "Rewritten para. Tail.\n");
-    }
-
-    /// Settled text (replay / finished turns) is parsed at construction, so it
-    /// is already rendered on the first layout — no empty first frame, which is
-    /// what keeps opening a stored session pinned to the bottom.
-    #[gpui::test]
-    fn md_state_settled_text_parses_synchronously(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let md = cx.update(|cx| MdState::new("Stored reply.", false, cx));
-        // Deliberately no `run_until_parked`: the parse must have happened
-        // during construction.
-        assert!(!md.can_push);
-        assert_eq!(rendered(&md.state, cx), "Stored reply.\n");
-    }
-
-    /// A settled state that unexpectedly grows still renders correctly: it
-    /// cannot be pushed into (the background task never saw its seed), so it
-    /// rebuilds.
-    #[gpui::test]
-    fn md_state_settled_growth_rebuilds(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let mut md = cx.update(|cx| MdState::new("Stored reply.", false, cx));
-        cx.run_until_parked();
-
-        cx.update(|cx| md.sync("Stored reply. And more.".into(), false, cx));
-        cx.run_until_parked();
-        assert_eq!(rendered(&md.state, cx), "Stored reply. And more.\n");
+        assert_eq!(
+            state.read_with(cx, |state, _| state.selected_text()),
+            "Some bold text\n"
+        );
     }
 
     /// The disclosure card's scroll contract: a fixed chrome shell (fill,

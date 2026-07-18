@@ -327,6 +327,9 @@ impl Render for AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
+                // Register first so its bubble-phase handlers run after child
+                // controls and own selection only when the press propagates.
+                .child(crate::markdown::TextSelectionController)
                 .child(
                     div()
                         .size_full()
@@ -460,6 +463,8 @@ impl Render for AppShell {
             })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
+            // Window-level Markdown selection controller (must be first child).
+            .child(crate::markdown::TextSelectionController)
             .child(
                 div()
                     .id("workspace")
