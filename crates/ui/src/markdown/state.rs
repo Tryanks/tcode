@@ -56,7 +56,7 @@ impl MarkdownState {
             return;
         }
         self.text.push_str(text);
-        self.reparse(cx);
+        self.reparse_append(cx);
     }
 
     /// Replace the canonical source and synchronously reparse it.
@@ -66,7 +66,7 @@ impl MarkdownState {
         }
         self.text.clear();
         self.text.push_str(text);
-        self.reparse(cx);
+        self.reparse_reset(cx);
     }
 
     /// Return the currently selected rendered text.
@@ -113,13 +113,43 @@ impl MarkdownState {
         cx.notify();
     }
 
-    fn reparse(&mut self, cx: &mut Context<Self>) {
+    fn prepare_reparse(&mut self, cx: &mut Context<Self>) {
         // Don't interrupt an active drag-selection; the window-level endpoints
         // stay valid for append-only growth and per-inline ranges repaint.
         if !self.is_selecting {
             self.reset_selection();
             window_selection::clear_selection_for_view(self.entity_id, cx);
         }
+    }
+
+    fn reparse_append(&mut self, cx: &mut Context<Self>) {
+        self.prepare_reparse(cx);
+        let parsed = super::parse(&self.text);
+        let old_blocks = root_blocks(&self.parsed);
+        let new_blocks = root_blocks(&parsed);
+        let unchanged = old_blocks
+            .iter()
+            .zip(new_blocks)
+            .take_while(|(old, new)| old == new)
+            .count();
+        let old_count = old_blocks.len();
+        let new_count = new_blocks.len();
+        self.parsed = parsed;
+
+        if unchanged < old_count || unchanged < new_count {
+            // An append can only affect the old trailing block and blocks added
+            // after it. Preserve the measured prefix and invalidate that suffix.
+            self.list_state
+                .splice(unchanged..old_count, new_count - unchanged);
+            // `splice` creates unmeasured items but does not re-arm measure_all.
+            self.list_state.remeasure_items(unchanged..new_count);
+            self.measured_content_height = None;
+        }
+        cx.notify();
+    }
+
+    fn reparse_reset(&mut self, cx: &mut Context<Self>) {
+        self.prepare_reparse(cx);
         self.parsed = super::parse(&self.text);
         let block_count = root_block_count(&self.parsed);
         // Even an edit that preserves the number of root blocks can change
@@ -238,6 +268,11 @@ impl MarkdownState {
     pub(super) fn source(&self) -> &str {
         &self.text
     }
+
+    #[cfg(test)]
+    pub(super) fn has_measured_block(&self, index: usize) -> bool {
+        self.list_state.bounds_for_item(index).is_some()
+    }
 }
 
 fn with_trailing_newline(mut text: String) -> String {
@@ -251,6 +286,13 @@ fn root_block_count(node: &BlockNode) -> usize {
     match node {
         BlockNode::Root { children, .. } => children.len(),
         _ => 1,
+    }
+}
+
+fn root_blocks(node: &BlockNode) -> &[BlockNode] {
+    match node {
+        BlockNode::Root { children, .. } => children,
+        _ => std::slice::from_ref(node),
     }
 }
 

@@ -291,6 +291,56 @@ mod tests {
     }
 
     #[gpui::test]
+    fn streamed_append_preserves_earlier_block_measurements(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) =
+            cx.add_window_view(|_, cx| TestRoot::new("stable block\n\nstreaming block", cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(view.read_with(cx, |root, cx| {
+            root.markdown.read(cx).has_measured_block(0)
+        }));
+        view.update(cx, |root, cx| {
+            root.markdown.update(cx, |markdown, cx| {
+                markdown.push_str(" delta", cx);
+                assert!(markdown.has_measured_block(0));
+                assert!(!markdown.has_measured_block(1));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn wide_table_keeps_its_intrinsic_width_inside_viewport(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TestRoot::new(
+                "| column | value |\n| --- | --- |\n| this-cell-is-deliberately-much-wider-than-the-markdown-viewport | another-wide-value |",
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let track = cx
+            .debug_bounds("markdown-table-track-root-0")
+            .expect("table track was painted");
+        assert!(
+            track.size.width > px(320.),
+            "wide table collapsed to viewport width {:?}",
+            track.size.width
+        );
+    }
+
+    #[gpui::test]
     fn clipped_markdown_cannot_start_selection(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(crate::markdown::init);
