@@ -2,6 +2,7 @@
 
 pub mod acp_registry;
 pub mod desktop;
+pub mod difftastic;
 pub mod git;
 pub mod import;
 pub mod process;

@@ -35,9 +35,11 @@ use gpui_component::{
 use crate::plan_panel::PlanPanel;
 use crate::{highlight, material};
 use tcode_core::session::{ReviewComment, ReviewSide};
+use tcode_core::settings::DiffViewMode;
 use tcode_runtime::app::{AppState, RightTab};
 use tcode_runtime::ui_facade::{
-    GitDiffResult, GitDiffScope, load_git_diff, relativize_to_workspace,
+    GitDiffResult, GitDiffScope, GitFileContent, StructuralFile, StructuralHighlight,
+    StructuralSide, load_git_diff, relativize_to_workspace, run_structural_diff,
 };
 
 // ---------------------------------------------------------------------------
@@ -372,8 +374,8 @@ pub fn pair_split_rows(rows: &[DiffRow]) -> Vec<SplitPair> {
 enum PairedRenderedRow {
     Gap(u32),
     Pair {
-        left: Option<RenderedRow>,
-        right: Option<RenderedRow>,
+        left: Option<(usize, RenderedRow)>,
+        right: Option<(usize, RenderedRow)>,
     },
 }
 
@@ -391,8 +393,8 @@ fn pair_rendered_rows(rows: &[RenderedRow]) -> Vec<PairedRenderedRow> {
                 ..
             } => {
                 output.push(PairedRenderedRow::Pair {
-                    left: Some(rows[index].clone()),
-                    right: Some(rows[index].clone()),
+                    left: Some((index, rows[index].clone())),
+                    right: Some((index, rows[index].clone())),
                 });
                 index += 1;
             }
@@ -411,29 +413,31 @@ fn pair_rendered_rows(rows: &[RenderedRow]) -> Vec<PairedRenderedRow> {
                 }
                 let removed = rows[start..index]
                     .iter()
+                    .enumerate()
                     .filter(|row| {
                         matches!(
-                            row,
+                            row.1,
                             RenderedRow::Code {
                                 kind: RowKind::Removed,
                                 ..
                             }
                         )
                     })
-                    .cloned()
+                    .map(|(offset, row)| (start + offset, row.clone()))
                     .collect::<Vec<_>>();
                 let added = rows[start..index]
                     .iter()
+                    .enumerate()
                     .filter(|row| {
                         matches!(
-                            row,
+                            row.1,
                             RenderedRow::Code {
                                 kind: RowKind::Added,
                                 ..
                             }
                         )
                     })
-                    .cloned()
+                    .map(|(offset, row)| (start + offset, row.clone()))
                     .collect::<Vec<_>>();
                 for offset in 0..removed.len().max(added.len()) {
                     output.push(PairedRenderedRow::Pair {
@@ -542,6 +546,94 @@ fn render_file(change: &FileChange, cwd: &Path, theme: &HighlightTheme) -> Rende
     }
 }
 
+fn structural_style(kind: StructuralHighlight, theme: &HighlightTheme) -> HighlightStyle {
+    let key = match kind {
+        StructuralHighlight::Delimiter => "punctuation",
+        StructuralHighlight::Normal | StructuralHighlight::Unknown => "variable",
+        StructuralHighlight::String => "string",
+        StructuralHighlight::Type => "type",
+        StructuralHighlight::Comment => "comment",
+        StructuralHighlight::Keyword => "keyword",
+        StructuralHighlight::TreeSitterError => "error",
+    };
+    theme.style(key).unwrap_or_default()
+}
+
+fn structural_runs(
+    side: &StructuralSide,
+    theme: &HighlightTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    side.spans
+        .iter()
+        .filter(|span| {
+            span.start < span.end
+                && span.end <= side.text.len()
+                && side.text.is_char_boundary(span.start)
+                && side.text.is_char_boundary(span.end)
+        })
+        .map(|span| {
+            (
+                span.start..span.end,
+                structural_style(span.highlight, theme),
+            )
+        })
+        .collect()
+}
+
+fn render_structural_file(
+    change: &FileChange,
+    structural: &StructuralFile,
+    cwd: &Path,
+    theme: &HighlightTheme,
+) -> RenderedFile {
+    let mut rows = Vec::new();
+    let mut added = 0;
+    let mut removed = 0;
+    for row in &structural.rows {
+        if !row.changed
+            && let (Some(lhs), Some(rhs)) = (&row.lhs, &row.rhs)
+        {
+            rows.push(RenderedRow::Code {
+                kind: RowKind::Context,
+                old: Some(lhs.line_number),
+                new: Some(rhs.line_number),
+                text: rhs.text.clone(),
+                runs: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(lhs) = &row.lhs {
+            removed += 1;
+            rows.push(RenderedRow::Code {
+                kind: RowKind::Removed,
+                old: Some(lhs.line_number),
+                new: None,
+                text: lhs.text.clone(),
+                runs: structural_runs(lhs, theme),
+            });
+        }
+        if let Some(rhs) = &row.rhs {
+            added += 1;
+            rows.push(RenderedRow::Code {
+                kind: RowKind::Added,
+                old: None,
+                new: Some(rhs.line_number),
+                text: rhs.text.clone(),
+                runs: structural_runs(rhs, theme),
+            });
+        }
+    }
+    let split_rows = pair_rendered_rows(&rows);
+    RenderedFile {
+        path: relativize_to_workspace(&change.path, cwd),
+        kind: change.kind,
+        added,
+        removed,
+        rows,
+        split_rows,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Panel entity
 // ---------------------------------------------------------------------------
@@ -553,11 +645,13 @@ struct DiffCache {
     scope: DiffScope,
     revision: u64,
     dark: bool,
+    mode: DiffViewMode,
     files: Vec<RenderedFile>,
     unified_items: Vec<DiffListItem>,
     split_items: Vec<DiffListItem>,
     unified_list: ListState,
     split_list: ListState,
+    structural_unavailable: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -599,6 +693,7 @@ struct RenderKey {
     scope: DiffScope,
     revision: u64,
     dark: bool,
+    mode: DiffViewMode,
 }
 
 struct GitPreview {
@@ -733,6 +828,7 @@ impl DiffPanel {
         &mut self,
         key: RenderKey,
         changes: Vec<FileChange>,
+        contents: Vec<GitFileContent>,
         cwd: PathBuf,
         theme: Arc<HighlightTheme>,
         cx: &mut Context<Self>,
@@ -742,15 +838,40 @@ impl DiffPanel {
         }
         self.cache = None;
         self.render_loading_key = Some(key.clone());
+        let worker_mode = key.mode;
         cx.spawn(async move |this, cx| {
-            let (files, unified_items, split_items) =
+            let (files, unified_items, split_items, structural_unavailable) =
                 tcode_runtime::blocking::unblock(cx.background_executor(), move || {
+                    let mut structural_unavailable = false;
                     let files = changes
                         .iter()
-                        .map(|change| render_file(change, &cwd, &theme))
+                        .map(|change| {
+                            if worker_mode == DiffViewMode::Structural {
+                                let content =
+                                    contents.iter().find(|content| content.path == change.path);
+                                if let Some((old, new)) = content.and_then(|content| {
+                                    Some((content.old.as_deref()?, content.new.as_deref()?))
+                                }) {
+                                    match run_structural_diff(Path::new(&change.path), old, new) {
+                                        Ok(structural) => {
+                                            return render_structural_file(
+                                                change,
+                                                &structural,
+                                                &cwd,
+                                                &theme,
+                                            );
+                                        }
+                                        Err(_) => structural_unavailable = true,
+                                    }
+                                } else {
+                                    structural_unavailable = true;
+                                }
+                            }
+                            render_file(change, &cwd, &theme)
+                        })
                         .collect::<Vec<_>>();
                     let (unified_items, split_items) = build_list_items(&files);
-                    (files, unified_items, split_items)
+                    (files, unified_items, split_items, structural_unavailable)
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
@@ -764,11 +885,13 @@ impl DiffPanel {
                         scope: key.scope,
                         revision: key.revision,
                         dark: key.dark,
+                        mode: key.mode,
                         files,
                         unified_items,
                         split_items,
                         unified_list,
                         split_list,
+                        structural_unavailable,
                     });
                     panel.render_loading_key = None;
                     cx.notify();
@@ -808,7 +931,7 @@ impl DiffPanel {
             }
         }
         let dark = cx.theme().mode.is_dark();
-        let (session, scope, revision, mut changes, cwd) = {
+        let (session, scope, revision, mode, mut changes, cwd) = {
             let state = self.app_state.read(cx);
             let Some(active) = state.active.as_ref() else {
                 self.cache = None;
@@ -833,10 +956,12 @@ impl DiffPanel {
                 session,
                 scope,
                 state.diff_refresh_generation,
+                state.settings.diff_view_mode,
                 changes,
                 active.meta.cwd.clone(),
             )
         };
+        let mut contents = Vec::new();
 
         if matches!(scope, DiffScope::WorkingTree | DiffScope::Branch) {
             let base = (scope == DiffScope::Branch)
@@ -860,10 +985,15 @@ impl DiffPanel {
                 return false;
             };
             changes = preview.result.changes.clone();
+            contents = preview.result.contents.clone();
         }
 
         let fresh = self.cache.as_ref().is_none_or(|c| {
-            c.session != session || c.scope != scope || c.revision != revision || c.dark != dark
+            c.session != session
+                || c.scope != scope
+                || c.revision != revision
+                || c.dark != dark
+                || c.mode != mode
         });
         if fresh {
             let theme = cx.theme().highlight_theme.clone();
@@ -873,8 +1003,10 @@ impl DiffPanel {
                     scope,
                     revision,
                     dark,
+                    mode,
                 },
                 changes,
+                contents,
                 cwd,
                 theme,
                 cx,
@@ -1224,6 +1356,12 @@ impl DiffPanel {
 
         let wrap_on = self.wrap;
         let split_on = self.split.get(&session).copied().unwrap_or(false);
+        let view_mode = self.app_state.read(cx).settings.diff_view_mode;
+        let next_view_mode = match view_mode {
+            DiffViewMode::Line => DiffViewMode::Structural,
+            DiffViewMode::Structural => DiffViewMode::Line,
+        };
+        let app_state = self.app_state.clone();
         let panel_split = cx.entity();
         let session_split = session.clone();
         let mut toolbar = h_flex()
@@ -1235,6 +1373,29 @@ impl DiffPanel {
             .items_center()
             .child(selector)
             .child(div().flex_1())
+            .child(
+                Button::new("diff-view-mode")
+                    .ghost()
+                    .small()
+                    .compact()
+                    .label(match view_mode {
+                        DiffViewMode::Line => tcode_i18n::tr!("diff.line_view"),
+                        DiffViewMode::Structural => tcode_i18n::tr!("diff.structural_view"),
+                    })
+                    .tooltip(match next_view_mode {
+                        DiffViewMode::Line => tcode_i18n::tr!("diff.switch_to_line_view"),
+                        DiffViewMode::Structural => {
+                            tcode_i18n::tr!("diff.switch_to_structural_view")
+                        }
+                    })
+                    .on_click(move |_, _, cx| {
+                        app_state.update(cx, |state, cx| {
+                            let mut settings = state.settings.clone();
+                            settings.diff_view_mode = next_view_mode;
+                            state.update_settings(settings, cx);
+                        });
+                    }),
+            )
             .child(
                 Button::new("diff-view-split")
                     .ghost()
@@ -1515,6 +1676,13 @@ impl DiffPanel {
             .child(rows);
         let mut content = v_flex().size_full().min_h_0().child(viewport);
 
+        if cache.mode == DiffViewMode::Structural && cache.structural_unavailable {
+            content = content.child(self.render_notice(
+                tcode_i18n::tr!("diff.structural_unavailable").into_owned(),
+                cx,
+            ));
+        }
+
         if let Some(preview) = self
             .git_preview
             .as_ref()
@@ -1574,17 +1742,32 @@ impl DiffPanel {
                     PairedRenderedRow::Gap(count) => self.render_gap(*count, cx),
                     PairedRenderedRow::Pair { left, right } => self.render_split_row(
                         &file.path,
-                        row,
                         left.as_ref(),
                         right.as_ref(),
                         self.wrap,
                         cx,
                     ),
                 };
+                let comment_rows = match &file.split_rows[row] {
+                    PairedRenderedRow::Gap(_) => Vec::new(),
+                    PairedRenderedRow::Pair { left, right } => {
+                        let mut indices = left
+                            .iter()
+                            .map(|(index, _)| *index)
+                            .chain(right.iter().map(|(index, _)| *index))
+                            .collect::<Vec<_>>();
+                        indices.sort_unstable();
+                        indices.dedup();
+                        indices
+                            .into_iter()
+                            .flat_map(|index| self.render_comment_ui(&file.path, index, cx))
+                            .collect()
+                    }
+                };
                 v_flex()
                     .min_w_full()
                     .child(rendered)
-                    .children(self.render_comment_ui(&file.path, row, cx))
+                    .children(comment_rows)
                     .into_any_element()
             }
         }
@@ -1815,29 +1998,30 @@ impl DiffPanel {
     fn render_split_row(
         &self,
         file: &str,
-        row_index: usize,
-        left: Option<&RenderedRow>,
-        right: Option<&RenderedRow>,
+        left: Option<&(usize, RenderedRow)>,
+        right: Option<&(usize, RenderedRow)>,
         wrap: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cell = |row: Option<&RenderedRow>, side: ReviewSide, cx: &mut Context<Self>| {
-            let Some(RenderedRow::Code {
-                kind,
-                old,
-                new,
-                text,
-                runs,
-            }) = row
-            else {
-                return div().flex_1().min_w_0().min_h(px(18.)).into_any_element();
+        let cell =
+            |row: Option<&(usize, RenderedRow)>, side: ReviewSide, cx: &mut Context<Self>| {
+                let row_index = row.map(|(index, _)| *index).unwrap_or_default();
+                let Some(RenderedRow::Code {
+                    kind,
+                    old,
+                    new,
+                    text,
+                    runs,
+                }) = row.map(|(_, row)| row)
+                else {
+                    return div().flex_1().min_w_0().min_h(px(18.)).into_any_element();
+                };
+                let line = match side {
+                    ReviewSide::Old => *old,
+                    ReviewSide::New => *new,
+                };
+                self.render_split_cell(file, row_index, *kind, line, side, text, runs, wrap, cx)
             };
-            let line = match side {
-                ReviewSide::Old => *old,
-                ReviewSide::New => *new,
-            };
-            self.render_split_cell(file, row_index, *kind, line, side, text, runs, wrap, cx)
-        };
         h_flex()
             .min_w_full()
             .items_stretch()
@@ -2241,5 +2425,38 @@ diff --git a/util.py b/util.py
             count < 100,
             "expected viewport-only construction for 5,001 items, got {count}"
         );
+    }
+
+    #[test]
+    fn recorded_structural_fixture_maps_to_native_rows() {
+        let before = include_str!("../../services/tests/fixtures/difftastic_0_69_0_before.rs");
+        let after = include_str!("../../services/tests/fixtures/difftastic_0_69_0_after.rs");
+        let json = include_str!("../../services/tests/fixtures/difftastic_0_69_0_rust.json");
+        let structural = tcode_runtime::ui_facade::parse_difft_json(json, before, after).unwrap();
+        let change = FileChange {
+            path: "/workspace/example.rs".into(),
+            kind: FileChangeKind::Modify,
+            diff: None,
+        };
+        let theme = HighlightTheme::default_dark();
+
+        let rendered =
+            render_structural_file(&change, &structural, Path::new("/workspace"), &theme);
+
+        assert_eq!(rendered.path, "example.rs");
+        assert_eq!((rendered.added, rendered.removed), (4, 4));
+        assert_eq!(rendered.rows.len(), 12);
+        assert_eq!(rendered.split_rows.len(), 8);
+        let first = rendered.rows.first().unwrap();
+        assert!(matches!(
+            first,
+            RenderedRow::Code {
+                kind: RowKind::Removed,
+                old: Some(1),
+                new: None,
+                runs,
+                ..
+            } if !runs.is_empty()
+        ));
     }
 }

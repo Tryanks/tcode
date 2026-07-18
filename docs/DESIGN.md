@@ -200,13 +200,24 @@ are **one** resizable group: nesting a second group inside the chat panel does n
 shrink the chat — the right panel is painted over it and the timeline and composer
 are clipped mid-word. The chat column reflows; it never clips.
 
-Details: tab strip ("Diff" + "+"
-no-op) with expand/close cluster; toolbar "Turn N ⌄" selector + wrap toggle
-(+ no-op split/whitespace/¶ icons); body per file: header row (icon, relative
-path, "new" badge for creates, +N/-M) then unified diff: dual line-number
-gutters (11px mono muted), 12px mono content, syntax highlighting by extension,
-add/remove row tints + left accent bars, "N unmodified lines" muted separator
-rows between hunks.
+Details: tab strip ("Diff" + "+" no-op) with expand/close cluster; toolbar
+"Turn N ⌄" selector, persisted Structural/Line mode, unified/split layout, and
+wrap toggle (+ no-op whitespace/¶ icons). Structural is the default and uses
+the bundled, version-pinned difftastic 0.69.0 JSON interface against complete
+old/new file contents. Missing, incompatible, failed, invalid, or timed-out
+difftastic runs fall back per file to the line diff and show a small
+"Structural diff unavailable" notice; historical turn diffs also fall back
+because their stored patches may be truncated and cannot reconstruct complete
+inputs. Working-tree inputs are HEAD vs disk, and branch inputs are merge-base
+vs HEAD. Structural results are cached by content and tool version.
+
+The body is a variable-height virtual GPUI list. Git loading, patch parsing,
+source reconstruction, syntax highlighting, structural subprocesses, and row
+model construction run on background executors; the render path constructs only
+the visible file headers and rows. Each file header shows icon, relative path,
+operation badge, and +N/-M totals. Rows retain dual line-number gutters, mono
+content, syntax/novel-span highlighting, add/remove tints and accent bars, soft
+wrapping, split pairing, selection, and inline review comments.
 
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the

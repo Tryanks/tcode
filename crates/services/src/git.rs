@@ -28,10 +28,20 @@ pub enum GitDiffScope {
 #[derive(Default, Debug, Clone)]
 pub struct GitDiffResult {
     pub changes: Vec<FileChange>,
+    pub contents: Vec<GitFileContent>,
     pub truncated: bool,
     pub error: Option<String>,
     pub branches: Vec<String>,
     pub default_base: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GitFileContent {
+    pub path: String,
+    pub kind: FileChangeKind,
+    /// `None` means the content could not be read (binary, missing, or Git error).
+    pub old: Option<String>,
+    pub new: Option<String>,
 }
 
 fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
@@ -135,8 +145,8 @@ fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
 
 pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> GitDiffResult {
     let (branches, default_base) = git_branches(cwd);
-    let args = match scope {
-        GitDiffScope::WorkingTree => working_tree_diff_args(),
+    let (args, old_ref, new_ref) = match scope {
+        GitDiffScope::WorkingTree => (working_tree_diff_args(), "HEAD".to_string(), None),
         GitDiffScope::Branch => {
             let base = base.or(default_base.as_deref()).unwrap_or("HEAD");
             let merge_base = match git_output(cwd, &merge_base_args(base)) {
@@ -160,7 +170,11 @@ pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> Git
                     };
                 }
             };
-            branch_diff_args(&merge_base)
+            (
+                branch_diff_args(&merge_base),
+                merge_base,
+                Some("HEAD".to_string()),
+            )
         }
     };
     let output = match git_output(cwd, &args) {
@@ -214,13 +228,74 @@ pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> Git
         }
     }
     let raw = String::from_utf8_lossy(&raw);
+    let changes = split_git_patch(&raw, cwd);
+    let contents = load_file_contents(cwd, &changes, &old_ref, new_ref.as_deref());
     GitDiffResult {
-        changes: split_git_patch(&raw, cwd),
+        changes,
+        contents,
         truncated,
         error: None,
         branches,
         default_base,
     }
+}
+
+fn load_file_contents(
+    cwd: &Path,
+    changes: &[FileChange],
+    old_ref: &str,
+    new_ref: Option<&str>,
+) -> Vec<GitFileContent> {
+    changes
+        .iter()
+        .map(|change| {
+            let old_path = patch_side_path(change, "--- a/").or_else(|| relative_path(change, cwd));
+            let new_path = patch_side_path(change, "+++ b/").or_else(|| relative_path(change, cwd));
+            let old = if change.kind == FileChangeKind::Create {
+                Some(String::new())
+            } else {
+                old_path.and_then(|path| git_show_text(cwd, old_ref, &path))
+            };
+            let new = if change.kind == FileChangeKind::Delete {
+                Some(String::new())
+            } else if let Some(new_ref) = new_ref {
+                new_path.and_then(|path| git_show_text(cwd, new_ref, &path))
+            } else {
+                new_path.and_then(|path| std::fs::read_to_string(cwd.join(path)).ok())
+            };
+            GitFileContent {
+                path: change.path.clone(),
+                kind: change.kind,
+                old,
+                new,
+            }
+        })
+        .collect()
+}
+
+fn relative_path(change: &FileChange, cwd: &Path) -> Option<String> {
+    Path::new(&change.path)
+        .strip_prefix(cwd)
+        .ok()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn patch_side_path(change: &FileChange, prefix: &str) -> Option<String> {
+    change
+        .diff
+        .as_deref()?
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .map(str::to_string)
+}
+
+fn git_show_text(cwd: &Path, revision: &str, path: &str) -> Option<String> {
+    let output = git_output(cwd, &["show".into(), format!("{revision}:{path}")]).ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
 }
 
 /// Read the current git branch (or short detached-HEAD sha) for `cwd`, if it is
@@ -622,12 +697,33 @@ mod tests {
         assert!(working.changes.iter().any(|change| {
             change.path.ends_with("untracked.txt") && change.kind == FileChangeKind::Create
         }));
+        let tracked = working
+            .contents
+            .iter()
+            .find(|content| content.path.ends_with("tracked.txt"))
+            .unwrap();
+        assert_eq!(tracked.old.as_deref(), Some("before\n"));
+        assert_eq!(tracked.new.as_deref(), Some("after\n"));
+        let untracked = working
+            .contents
+            .iter()
+            .find(|content| content.path.ends_with("untracked.txt"))
+            .unwrap();
+        assert_eq!(untracked.old.as_deref(), Some(""));
+        assert_eq!(untracked.new.as_deref(), Some("new\n"));
 
         git(&["add", "."]);
         git(&["commit", "-m", "feature changes"]);
         let branch = load_git_diff(&root, GitDiffScope::Branch, Some(&base));
         assert!(branch.error.is_none());
         assert_eq!(branch.changes.len(), 2);
+        let tracked = branch
+            .contents
+            .iter()
+            .find(|content| content.path.ends_with("tracked.txt"))
+            .unwrap();
+        assert_eq!(tracked.old.as_deref(), Some("before\n"));
+        assert_eq!(tracked.new.as_deref(), Some("after\n"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
