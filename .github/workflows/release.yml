@@ -51,43 +51,31 @@ jobs:
             target: aarch64-apple-darwin
             platform: macos
             arch: arm64
-            difft_asset: difft-aarch64-apple-darwin.tar.gz
-            difft_sha256: c958b87885a5825a356c5899ac7ecdd752a7942084199f2be4bc0bf8c9de8e33
           - label: macOS x64
             os: macos-26
             target: x86_64-apple-darwin
             platform: macos
             arch: x64
-            difft_asset: difft-x86_64-apple-darwin.tar.gz
-            difft_sha256: 5f5487e7a6e817194a1cef297d2ffb300454371635a4cde865087dbc064730a2
           - label: Windows x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             platform: windows
             arch: x64
-            difft_asset: difft-x86_64-pc-windows-msvc.zip
-            difft_sha256: a5adbf57eb1b923b62d1c3596c4f827df143f5b52cfba48bb9e83f41dea90c02
           - label: Windows arm64
             os: windows-2022
             target: aarch64-pc-windows-msvc
             platform: windows
             arch: arm64
-            difft_asset: difft-aarch64-pc-windows-msvc.zip
-            difft_sha256: fa709e803088b54774adf0111409483ee5edfbbc1f9dcc5610e81e4ed3841e53
           - label: Linux x64
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: x64
-            difft_asset: difft-x86_64-unknown-linux-gnu.tar.gz
-            difft_sha256: 038db96a0e8fce69f2554e33e04ff75fbf6f96ea45cb4edb9ed6203a2c4750ff
           - label: Linux arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux
             arch: arm64
-            difft_asset: difft-aarch64-unknown-linux-gnu.tar.gz
-            difft_sha256: abd2f42d2afd424312b4862aa7c7bb0320447670ae22fabcc5159db03e2dccbd
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -126,31 +114,6 @@ jobs:
               libgtk-3-dev libwebkit2gtk-4.1-dev
           fi
 
-      - name: Download and verify difftastic 0.69.0
-        shell: bash
-        env:
-          DIFFT_ASSET: ${{ matrix.difft_asset }}
-          DIFFT_SHA256: ${{ matrix.difft_sha256 }}
-        run: |
-          set -euo pipefail
-          url="https://github.com/Wilfred/difftastic/releases/download/0.69.0/${DIFFT_ASSET}"
-          curl --fail --location --retry 3 --output "$DIFFT_ASSET" "$url"
-          actual="$(openssl dgst -sha256 "$DIFFT_ASSET" | awk '{print $NF}')"
-          test "$actual" = "$DIFFT_SHA256"
-          mkdir .difftastic
-          # Windows assets are zip archives; Git-bash GNU tar cannot read them.
-          case "$DIFFT_ASSET" in
-            *.zip)
-              if command -v unzip >/dev/null 2>&1; then
-                unzip -q "$DIFFT_ASSET" -d .difftastic
-              else
-                7z x -y "-o.difftastic" "$DIFFT_ASSET" >/dev/null
-              fi
-              ;;
-            *) tar -xf "$DIFFT_ASSET" -C .difftastic ;;
-          esac
-          test -f ".difftastic/${{ matrix.platform == 'windows' && 'difft.exe' || 'difft' }}"
-
       - name: Build release binary
         shell: bash
         run: |
@@ -167,15 +130,11 @@ jobs:
           app="dist/Tcode.app"
           mkdir -p \
             "$app/Contents/MacOS" \
-            "$app/Contents/Resources/bin" \
-            "$app/Contents/Resources/THIRD_PARTY_LICENSES" \
+            "$app/Contents/Resources" \
             dmg-root
           cp "target/${{ matrix.target }}/release/tcode" "$app/Contents/MacOS/tcode"
-          cp .difftastic/difft "$app/Contents/Resources/bin/difft"
-          cp THIRD_PARTY_LICENSES/difftastic.txt \
-            "$app/Contents/Resources/THIRD_PARTY_LICENSES/difftastic.txt"
           cp assets/icons/app/tcode.icns "$app/Contents/Resources/tcode.icns"
-          chmod +x "$app/Contents/MacOS/tcode" "$app/Contents/Resources/bin/difft"
+          chmod +x "$app/Contents/MacOS/tcode"
           cat > "$app/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -211,9 +170,6 @@ jobs:
           $stage = "dist\tcode-$env:VERSION-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\tcode.exe" "$stage\tcode.exe"
-          Copy-Item ".difftastic\difft.exe" "$stage\difft.exe"
-          New-Item -ItemType Directory -Force -Path "$stage\THIRD_PARTY_LICENSES" | Out-Null
-          Copy-Item "THIRD_PARTY_LICENSES\difftastic.txt" "$stage\THIRD_PARTY_LICENSES\difftastic.txt"
           @"
           Tcode $env:VERSION
 
@@ -230,17 +186,12 @@ jobs:
           stage="dist/tcode-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p \
             "$stage/bin" \
-            "$stage/libexec/tcode" \
             "$stage/share/applications" \
-            "$stage/share/licenses/tcode" \
             "$stage/share/icons/hicolor/1024x1024/apps"
           cp "target/${{ matrix.target }}/release/tcode" "$stage/bin/tcode"
-          cp .difftastic/difft "$stage/libexec/tcode/difft"
-          cp THIRD_PARTY_LICENSES/difftastic.txt \
-            "$stage/share/licenses/tcode/difftastic.txt"
           cp assets/icons/app/tcode.png \
             "$stage/share/icons/hicolor/1024x1024/apps/com.tryanks.tcode.png"
-          chmod +x "$stage/bin/tcode" "$stage/libexec/tcode/difft"
+          chmod +x "$stage/bin/tcode"
           cat > "$stage/share/applications/com.tryanks.tcode.desktop" <<DESKTOP
           [Desktop Entry]
           Type=Application
