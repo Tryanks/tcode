@@ -138,7 +138,17 @@ jobs:
           actual="$(openssl dgst -sha256 "$DIFFT_ASSET" | awk '{print $NF}')"
           test "$actual" = "$DIFFT_SHA256"
           mkdir .difftastic
-          tar -xf "$DIFFT_ASSET" -C .difftastic
+          # Windows assets are zip archives; Git-bash GNU tar cannot read them.
+          case "$DIFFT_ASSET" in
+            *.zip)
+              if command -v unzip >/dev/null 2>&1; then
+                unzip -q "$DIFFT_ASSET" -d .difftastic
+              else
+                7z x -y "-o.difftastic" "$DIFFT_ASSET" >/dev/null
+              fi
+              ;;
+            *) tar -xf "$DIFFT_ASSET" -C .difftastic ;;
+          esac
           test -f ".difftastic/${{ matrix.platform == 'windows' && 'difft.exe' || 'difft' }}"
 
       - name: Build release binary
