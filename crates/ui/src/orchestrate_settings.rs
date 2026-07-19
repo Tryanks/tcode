@@ -713,20 +713,17 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    /// One grouped-list container: popover fill, a single hairline border,
-    /// input-radius corners, no shadow.
+    /// One grouped-list container: a floating card in chat's composer-console
+    /// idiom — popover fill, a hairline border, card-radius corners and a soft
+    /// shadow (docs/visual-redesign.md §5.5, 2026-07 revision). Shared with the
+    /// General/Providers surfaces via `material::floating_card`.
     fn group(&self, cx: &Context<Self>) -> gpui::Div {
-        v_flex()
-            .w_full()
-            .rounded(crate::material::radius_input())
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .overflow_hidden()
+        crate::material::floating_card(v_flex().w_full(), cx).overflow_hidden()
     }
 
-    /// Assemble rows into a group, split by inset hairlines (indented past the
-    /// row's left padding, never after the last row).
+    /// Assemble rows into a group, split by faint inset hairlines (indented past
+    /// the row's left padding, dropped to 60%, never after the last row) — these
+    /// are dense editable rows that need a visible boundary.
     fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
         let mut group = self.group(cx);
         let last = rows.len().saturating_sub(1);
@@ -737,7 +734,7 @@ impl OrchestrateSettingsPanel {
                     div()
                         .w_full()
                         .pl_3()
-                        .child(div().w_full().h(px(1.)).bg(cx.theme().border)),
+                        .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
                 );
             }
         }

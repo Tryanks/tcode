@@ -123,10 +123,21 @@ material.rs 常量，禁止再写魔法数字：
 
 ## 5.5 修订版组件准则（2026-07 用户验收后追加，优先级高于下文冲突条款）
 
-- **设置类界面 = macOS System Settings 分组语法**：一个分组一个圆角容器
-  （popover 填充 + 发丝边 + 10px 圆角、无阴影），行与行用**内缩发丝线**分隔，
-  行本身透明无卡片；组间 20-24px 留白 + 组外 11px 大写标题。
-  ❌ 禁止成片的灰色 T2 平板卡无间隔堆叠（AI slop）。
+- **设置类界面 = 对话的浮起卡片语法**（2026-07 第三轮用户反馈修订,取代此前
+  System Settings 条款）：设置分组不再是扁平无阴影的 System-Settings 盒子——
+  用户验收认为那仍读作"另一套设计语言"。改为与 chat 的 composer 控制台／卡片
+  同一套 surface/depth 词汇：每个分组是一张**浮起卡片**（`material::floating_card`：
+  `popover` 填充 + 发丝边 `border` + `radius_card` 12px 圆角 + `shadow_md` 柔和阴影），
+  像 chat 的卡片一样真正浮在 T1 纸面上。行与行**优先用留白分隔、不画线**（对话即
+  以间距而非导轨分隔内容）；只有确实密集的列表（Providers、Orchestrate 可编辑行）
+  才用**最淡的内缩发丝线**（`border` 60%）。组间 20-24px 留白 + 组外 11px 大写标题。
+  ❌ 仍禁止成片的灰色 T2 平板卡无间隔堆叠（AI slop）——浮起卡片是白／popover 实底、
+  有真实景深，不是灰平板。
+- **窗口材质跨路由不变**：chat↔settings 导航必须保持同一套 T0 玻璃模糊 + 半透纸面
+  合成，仅内容变化。settings 路由不得在导航栏／内容之下铺任何不透明整窗层
+  （历史 bug：shell 在设置页整窗涂 `content_surface`，导致左侧 nav 坐在实底纸上而非
+  玻璃画布，材质在导航瞬间翻转）。settings nav 用与主侧栏相同的半透 `sidebar` token
+  直接坐在画布上；内容列用 `content_surface` + `shadow_sm` 浮起，与 chat 列一致。
 - **changed-files/diff 清单 = 安静清单**：与正文列对齐、无容器无导轨，
   小型大写标题行 + hover 着色的文件行。导轨语言只属于**状态性**事件
   （错误/成功/工具日志）与 toast。

@@ -328,6 +328,12 @@ impl Render for AppShell {
             .update(cx, |preview, cx| preview.sync_visibility(cx));
 
         // The full-page settings route replaces the chat workspace entirely.
+        // It composes exactly like the chat workspace below — Root owns the
+        // translucent glass canvas; the settings page paints its own nav
+        // (translucent `sidebar`) and content paper (`content_surface`) so the
+        // window material is byte-identical across navigation. Painting an
+        // opaque paper across the whole window here (behind the nav) is what
+        // made settings feel like "a different app".
         if route == Route::Settings {
             return div()
                 .id("app-shell")
@@ -344,10 +350,11 @@ impl Render for AppShell {
                 .child(crate::markdown::TextSelectionController)
                 .child(
                     div()
+                        .id("workspace")
+                        .flex_1()
                         .size_full()
-                        .bg(crate::material::content_surface(cx))
-                        // T1 paper floats above the glass canvas.
-                        .shadow_sm()
+                        .min_h_0()
+                        .overflow_hidden()
                         .child(self.settings_page.clone()),
                 )
                 .child(self.toasts.clone())
