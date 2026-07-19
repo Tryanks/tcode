@@ -89,6 +89,7 @@ fn main() {
         handle
             .commands
             .send(SessionCommand::SendTurn {
+                delivery_id: 0,
                 text: first.into(),
                 options: None,
                 attachments: Vec::new(),

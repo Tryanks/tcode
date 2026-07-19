@@ -285,6 +285,7 @@ impl OpenCodeActor {
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
         match command {
             SessionCommand::SendTurn {
+                delivery_id,
                 text,
                 options,
                 attachments,
@@ -319,6 +320,7 @@ impl OpenCodeActor {
                         "OpenCode prompt_async returned unexpected HTTP {status}"
                     ));
                 }
+                self.emit(AgentEvent::TurnAccepted { delivery_id }).await;
                 Ok(())
             }
             SessionCommand::Interrupt => {

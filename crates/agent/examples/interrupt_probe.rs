@@ -45,6 +45,7 @@ fn main() {
         handle
             .commands
             .send(SessionCommand::SendTurn {
+                delivery_id: 0,
                 text: "Count from 1 to 500 slowly, one number per line, \
                        thinking carefully about each number."
                     .into(),
