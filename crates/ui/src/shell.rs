@@ -110,6 +110,11 @@ pub struct AppShell {
     /// Stable expanded-sidebar width. The resizable component otherwise scales
     /// every panel proportionally when the window enters or leaves fullscreen.
     sidebar_width: Rc<Cell<Pixels>>,
+    /// Viewport width last seen by render; a change arms the restore below.
+    last_viewport_width: Option<Pixels>,
+    /// Keep restoring the sidebar width until the panel reports it, then stop
+    /// so the restore never fights an in-progress drag.
+    sidebar_restore_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -181,6 +186,8 @@ impl AppShell {
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
             right_sized: false,
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
+            last_viewport_width: None,
+            sidebar_restore_pending: false,
             _subscriptions: vec![subscription, event_subscription],
         }
     }
@@ -372,14 +379,32 @@ impl Render for AppShell {
 
         // gpui-component preserves panel *ratios* when its container changes
         // width. Fullscreen is a container resize, but the sidebar is a fixed
-        // navigation column: restore its remembered pixel width before layout.
-        if !collapsed {
+        // navigation column: restore its remembered pixel width when the window
+        // width changes. Only then — an every-frame restore would snap the
+        // panel back mid-drag (`on_resize` records the width only on mouse-up).
+        // The rescale lands on the frame where the group measures its new
+        // container, which can trail the viewport change — so keep restoring
+        // until the width matches, then stop.
+        let viewport_width = window.viewport_size().width;
+        if self.last_viewport_width != Some(viewport_width) {
+            self.last_viewport_width = Some(viewport_width);
+            self.sidebar_restore_pending = true;
+        }
+        if self.sidebar_restore_pending && !collapsed {
             let width = self.sidebar_width.get();
-            self.split.update(cx, |state, cx| {
-                if state.sizes().first().is_some_and(|size| *size != width) {
-                    state.resize_panel(0, width, window, cx);
-                }
-            });
+            let restored = self
+                .split
+                .update(cx, |state, cx| match state.sizes().first() {
+                    Some(size) if *size != width => {
+                        state.resize_panel(0, width, window, cx);
+                        false
+                    }
+                    Some(_) => true,
+                    None => false,
+                });
+            if restored {
+                self.sidebar_restore_pending = false;
+            }
         }
 
         // Give the right panel its width once the group knows about it (the
