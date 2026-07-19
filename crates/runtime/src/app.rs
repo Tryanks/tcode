@@ -3698,6 +3698,40 @@ impl AppState {
             .count()
     }
 
+    /// Number of active or parked sessions that still own live work: a turn in
+    /// flight, an unacknowledged delivery, queued messages, or provider
+    /// background tasks. Quitting stops all of it, so the quit guard must gate
+    /// on this rather than on turns alone.
+    pub fn working_sessions_count(&self) -> usize {
+        fn works(
+            turn_in_flight: bool,
+            delivery: bool,
+            queued: bool,
+            background_tasks: usize,
+        ) -> bool {
+            turn_in_flight || delivery || queued || background_tasks > 0
+        }
+        usize::from(self.active.as_ref().is_some_and(|s| {
+            works(
+                s.turn_in_flight,
+                s.delivery_in_flight.is_some(),
+                !s.queue.is_empty(),
+                s.background_task_count,
+            )
+        })) + self
+            .background
+            .values()
+            .filter(|s| {
+                works(
+                    s.turn_in_flight,
+                    s.delivery_in_flight.is_some(),
+                    !s.queue.is_empty(),
+                    s.background_task_count,
+                )
+            })
+            .count()
+    }
+
     /// Record that a thread has been visited now (clears its unread dot).
     fn mark_visited(&mut self, session_id: &str) {
         self.settings
@@ -9099,6 +9133,55 @@ mod tests {
 
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
         assert!(state.active.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The quit guard gates on working sessions: a session whose turn has
+    /// completed but which still owns provider background tasks must count as
+    /// working, or quitting silently kills those tasks.
+    #[test]
+    fn background_tasks_alone_count_as_working() {
+        let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        let (commands, _receiver) = async_channel::unbounded();
+        state.active = Some(ActiveSession {
+            meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
+            timeline: Timeline::default(),
+            git_branch: None,
+            branches: Vec::new(),
+            draft: false,
+            pending_relay: None,
+            runtime: Runtime::Live(commands),
+            live_model: None,
+            live_approval_mode: None,
+            live_option_selections: Vec::new(),
+            pending_ultrathink: false,
+            pending_context_len: None,
+            plan_implemented: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            preparing_worktree: false,
+            queue: Vec::new(),
+            next_queue_id: 0,
+            delivery_in_flight: None,
+            turn_in_flight: false,
+            background_task_count: 2,
+            provider_commands: Vec::new(),
+            provider_options: Vec::new(),
+            diff_open: false,
+            diff_expanded: false,
+            diff_selected_turn: None,
+            right_tab: RightTab::default(),
+            auto_open_suppressed: false,
+            terminal_workspace: TerminalWorkspace::default(),
+            _pump: None,
+        });
+
+        assert_eq!(state.turns_in_flight_count(), 0);
+        assert_eq!(state.working_sessions_count(), 1);
+
+        state.active.as_mut().unwrap().background_task_count = 0;
+        assert_eq!(state.working_sessions_count(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
 
