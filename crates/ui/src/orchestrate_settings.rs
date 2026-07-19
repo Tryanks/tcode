@@ -562,8 +562,10 @@ impl OrchestrateSettingsPanel {
             }
             ChildApprovalMode::Manual => tcode_i18n::tr!("orchestrate.child_approval.manual"),
         };
+        // Ghost, not outline: a quiet resting trigger that only tints on hover,
+        // consistent with the General page dropdowns and the composer picker.
         let trigger = Button::new("orchestrate-child-approval-dropdown")
-            .outline()
+            .ghost()
             .compact()
             .child(
                 h_flex()
@@ -967,26 +969,22 @@ impl OrchestrateSettingsPanel {
                                             .child(subtitle),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .rounded_full()
-                                    .when(profile.enabled, |status| {
-                                        status
-                                            .bg(cx.theme().success.opacity(0.12))
-                                            .text_color(cx.theme().success_foreground)
-                                    })
-                                    .when(!profile.enabled, |status| {
-                                        status
-                                            .bg(cx.theme().muted)
-                                            .text_color(cx.theme().muted_foreground)
-                                    })
-                                    .text_size(px(11.))
-                                    .child(if profile.enabled {
-                                        tcode_i18n::tr!("orchestrate.children.enabled")
-                                    } else {
-                                        tcode_i18n::tr!("orchestrate.children.disabled")
-                                    }),
-                            )
+                            .child({
+                                let (bg, fg) = if profile.enabled {
+                                    (
+                                        cx.theme().success.opacity(0.12),
+                                        cx.theme().success_foreground,
+                                    )
+                                } else {
+                                    (cx.theme().muted, cx.theme().muted_foreground)
+                                };
+                                let label = if profile.enabled {
+                                    tcode_i18n::tr!("orchestrate.children.enabled")
+                                } else {
+                                    tcode_i18n::tr!("orchestrate.children.disabled")
+                                };
+                                crate::material::semantic_chip(label, bg, fg)
+                            })
                             .child(
                                 Switch::new(("orchestrate-child-enabled", index))
                                     .checked(profile.enabled)

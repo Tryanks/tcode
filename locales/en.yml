@@ -145,6 +145,9 @@ settings:
   restore_description: "Reset language, theme, thread-title model, diff, provider, and orchestrate settings to their defaults. Your projects and conversations will not be changed."
   cancel: "Cancel"
   general_section: "GENERAL"
+  appearance_section: "APPEARANCE"
+  conversation_section: "CONVERSATION"
+  workspace_section: "WORKSPACE"
   providers_section: "PROVIDERS"
   orchestrate_section: "ORCHESTRATE"
   language:

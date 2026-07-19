@@ -594,13 +594,19 @@ impl ProviderCard {
             ),
             StatusDot::Amber => (cx.theme().muted, muted),
         };
+        // A compact metadata chip in chat's idiom (11px, tinted fill, pill
+        // radius, tight padding) that hugs its content — not a full-width
+        // green/orange bar that reads as web-form validation.
         let mut line = h_flex()
-            .flex_wrap()
+            .flex_none()
             .items_center()
             .gap_1()
+            .px_2()
+            .py(px(1.))
             .rounded_full()
             .bg(status_bg)
-            .text_size(px(13.))
+            .text_size(px(11.))
+            .font_medium()
             .text_color(status_fg);
 
         match &summary.email {
@@ -646,7 +652,9 @@ impl ProviderCard {
         if !summary.detail.is_empty() {
             line = line.child(div().child(format!("· {}", summary.detail)));
         }
-        line.into_any_element()
+        // Row wrapper so the chip left-aligns and hugs its content instead of
+        // being stretched to the column width by the surrounding v_flex.
+        h_flex().w_full().min_w_0().child(line).into_any_element()
     }
 
     /// The update-available icon + its popover (T3 §3).
@@ -1237,15 +1245,7 @@ impl Render for ProviderCard {
 // ---------------------------------------------------------------------------
 
 fn tag(label: String, background: gpui::Hsla, foreground: gpui::Hsla) -> AnyElement {
-    div()
-        .flex_none()
-        .px_1()
-        .rounded_full()
-        .bg(background)
-        .text_size(px(11.))
-        .text_color(foreground)
-        .child(label)
-        .into_any_element()
+    crate::material::semantic_chip(label, background, foreground).into_any_element()
 }
 
 /// The provider's glyph (the same asset the composer's picker rail uses).

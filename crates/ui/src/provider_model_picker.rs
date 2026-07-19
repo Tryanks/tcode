@@ -11,8 +11,12 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, button::Button, h_flex,
-    popover::Popover, scroll::ScrollableElement as _, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    popover::Popover,
+    scroll::ScrollableElement as _,
+    v_flex,
 };
 
 use agent::{OptionDescriptor, ProviderKind};
@@ -181,7 +185,11 @@ impl ProviderModelPicker {
                         (kind, "", None)
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
-                Button::new(self.trigger_id).outline().compact().child(
+                // Ghost, not outline: a quiet resting trigger (glyph + value +
+                // muted chevron) that only tints on hover, matching the
+                // composer's model picker. The "Add" variant stays an outlined
+                // action button.
+                Button::new(self.trigger_id).ghost().compact().child(
                     h_flex()
                         .w(px(230.))
                         .items_center()
