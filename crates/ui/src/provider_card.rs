@@ -1,20 +1,19 @@
-//! One Settings → Providers card (T3's `ProviderInstanceCard`).
+//! One Settings → Providers list row.
 //!
-//! Collapsed: driver glyph + status dot, name, `v<version>`, an update icon when
-//! a newer CLI exists, the status summary line, then a chevron + enable switch.
-//! Expanded (T3's order): Display name → Accent color → Environment variables →
-//! driver fields → Models.
+//! A compact, non-expanding row: driver glyph + status dot, name, `v<version>`,
+//! an update icon when a newer CLI exists, the status summary line, a gear button
+//! and the enable switch. The row body and the gear both open the per-profile
+//! settings [`ProviderDialog`], a transactional modal form.
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
     popover::Popover,
     switch::Switch,
     v_flex,
@@ -23,47 +22,23 @@ use gpui_component::{
 use agent::ProviderKind;
 use tcode_runtime::app::AppState;
 
-use crate::provider_models::{
-    ResolvedModel, model_capability_label, move_target, reorder, slug_error_message, validate_slug,
-};
+use crate::provider_dialog::ProviderDialog;
 use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
-use crate::settings::{ACCENT_PRESETS, EnvVar, ProviderSettings};
 
 /// Claude's official Clay brand color from Anthropic's media resources.
 pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
 
-/// One environment-variable row's live inputs.
-struct EnvRowState {
-    name: Entity<InputState>,
-    value: Entity<InputState>,
-    sensitive: bool,
-    /// A sensitive row whose value is already stored in `secrets.json`. Its
-    /// value is never read back, so the input shows the "Stored secret"
-    /// placeholder until the user types a replacement.
-    stored: bool,
-}
-
 pub struct ProviderCard {
     app_state: Entity<AppState>,
-    /// The protocol this card's profile drives (glyph, home labels, third-field
-    /// semantics, shared model catalog / status / version are all keyed on it).
+    /// The protocol this card's profile drives (glyph, shared model catalog /
+    /// status / version are all keyed on it).
     provider: ProviderKind,
-    /// Which profile this card edits. A built-in native-provider id or a user
-    /// profile slug. All config/secret writes
-    /// are keyed on this; catalog/status/version stay keyed on `provider`.
+    /// Which profile this row represents: a built-in native-provider id or a
+    /// user profile slug. Status/config/secret lookups key on this.
     profile_id: String,
-    expanded: bool,
     /// Whether the account email in the summary line is revealed.
     email_revealed: bool,
-    display_name: Entity<InputState>,
-    binary: Entity<InputState>,
-    home: Entity<InputState>,
-    /// Codex: shadow home path. Other native providers: launch arguments.
-    third_field: Entity<InputState>,
-    custom_model: Entity<InputState>,
-    slug_error: Option<String>,
-    env_rows: Vec<EnvRowState>,
-    _subscriptions: Vec<Subscription>,
+    _subscription: Subscription,
 }
 
 impl ProviderCard {
@@ -71,407 +46,56 @@ impl ProviderCard {
         app_state: Entity<AppState>,
         provider: ProviderKind,
         profile_id: impl Into<String>,
-        expanded: bool,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let profile_id = profile_id.into();
-        let settings = app_state.read(cx).profile_settings(&profile_id);
-        let text_input =
-            |placeholder: String, value: String, window: &mut Window, cx: &mut Context<Self>| {
-                cx.new(|cx| {
-                    let mut input = InputState::new(window, cx).placeholder(placeholder);
-                    input.set_value(value, window, cx);
-                    input
-                })
-            };
-
-        let display_name = text_input(
-            crate::settings::provider_label(provider).to_string(),
-            settings.display_name.clone().unwrap_or_default(),
-            window,
-            cx,
-        );
-        let binary = text_input(
-            default_binary_name(provider).to_string(),
-            path_string(&settings.binary_path),
-            window,
-            cx,
-        );
-        let home = text_input(
-            home_placeholder(provider).to_string(),
-            path_string(&settings.home_path),
-            window,
-            cx,
-        );
-        let third_field = text_input(
-            third_placeholder(provider).to_string(),
-            match provider {
-                ProviderKind::Codex => path_string(&settings.shadow_home_path),
-                ProviderKind::ClaudeCode
-                | ProviderKind::Pi
-                | ProviderKind::OpenCode
-                | ProviderKind::Acp => settings.launch_args.clone().unwrap_or_default(),
-            },
-            window,
-            cx,
-        );
-        let custom_model = text_input(
-            custom_model_placeholder(provider).to_string(),
-            String::new(),
-            window,
-            cx,
-        );
-
-        let mut subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
-        for input in [&display_name, &binary, &home, &third_field] {
-            subscriptions.push(cx.subscribe(input, |this, _, event, cx| match event {
-                InputEvent::Change => this.commit_fields(cx),
-                // Re-running the CLI is deferred until the field is committed,
-                // so we don't spawn a probe on every keystroke.
-                InputEvent::Blur | InputEvent::PressEnter { .. } => {
-                    this.commit_fields(cx);
-                    let provider = this.provider;
-                    this.app_state
-                        .update(cx, |state, cx| state.reload_provider(provider, cx));
-                }
-                _ => {}
-            }));
-        }
-        subscriptions.push(
-            cx.subscribe_in(&custom_model, window, |this, _, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.add_custom_model(window, cx);
-                }
-            }),
-        );
-
-        let mut card = Self {
+        let subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
+        Self {
             app_state,
             provider,
-            profile_id,
-            expanded,
+            profile_id: profile_id.into(),
             email_revealed: false,
-            display_name,
-            binary,
-            home,
-            third_field,
-            custom_model,
-            slug_error: None,
-            env_rows: Vec::new(),
-            _subscriptions: subscriptions,
-        };
-        card.rebuild_env_rows(&settings, window, cx);
-        card
+            _subscription: subscription,
+        }
     }
 
-    // -- persistence --------------------------------------------------------
-
-    fn settings(&self, cx: &App) -> ProviderSettings {
-        self.app_state.read(cx).profile_settings(&self.profile_id)
-    }
-
-    fn update(&self, mutate: impl FnOnce(&mut ProviderSettings), cx: &mut Context<Self>) {
-        let profile_id = self.profile_id.clone();
-        self.app_state.update(cx, |state, cx| {
-            state.update_profile_settings(&profile_id, mutate, cx);
-        });
-    }
-
-    /// Whether this card edits a user-created profile (offer Delete + a distinct
-    /// name field) rather than a built-in one.
-    fn is_user_profile(&self) -> bool {
-        !tcode_core::settings::Settings::is_builtin_profile_id(&self.profile_id)
-    }
-
-    fn reload(&self, cx: &mut Context<Self>) {
+    /// Open the per-profile settings modal (the transactional editor).
+    fn open_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let app_state = self.app_state.clone();
         let provider = self.provider;
-        self.app_state
-            .update(cx, |state, cx| state.reload_provider(provider, cx));
-    }
-
-    /// Write the four text fields back into settings (called on every keystroke).
-    fn commit_fields(&self, cx: &mut Context<Self>) {
-        let name = trimmed(&self.display_name, cx);
-        let binary = trimmed(&self.binary, cx);
-        let home = trimmed(&self.home, cx);
-        let third = trimmed(&self.third_field, cx);
-        let provider = self.provider;
-        self.update(
-            move |settings| {
-                settings.display_name = name;
-                settings.binary_path = binary.map(Into::into);
-                settings.home_path = (provider != ProviderKind::OpenCode)
-                    .then(|| home.map(Into::into))
-                    .flatten();
-                match provider {
-                    ProviderKind::Codex => settings.shadow_home_path = third.map(Into::into),
-                    ProviderKind::ClaudeCode | ProviderKind::Pi | ProviderKind::OpenCode => {
-                        settings.launch_args = third;
-                    }
-                    ProviderKind::Acp => {}
-                }
-            },
-            cx,
-        );
-    }
-
-    // -- environment variables ---------------------------------------------
-
-    /// Rebuild the env-row inputs from persisted settings (on construction and
-    /// after an add/remove).
-    fn rebuild_env_rows(
-        &mut self,
-        settings: &ProviderSettings,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.env_rows.clear();
-        let mut subscriptions = Vec::new();
-        for var in &settings.env {
-            let name = cx.new(|cx| {
-                let mut input = InputState::new(window, cx)
-                    .placeholder(tcode_i18n::tr!("providers.env.name_placeholder"));
-                input.set_value(var.name.clone(), window, cx);
-                input
-            });
-            // A stored secret is never returned to the app: its input starts
-            // empty behind the "Stored secret" placeholder.
-            let stored = var.sensitive
-                && self
-                    .app_state
-                    .read(cx)
-                    .launch_env_for_profile(&self.profile_id)
-                    .env
-                    .iter()
-                    .any(|(key, _)| key == &var.name);
-            let value = cx.new(|cx| {
-                let placeholder = if stored {
-                    tcode_i18n::tr!("providers.env.stored_secret")
-                } else {
-                    tcode_i18n::tr!("providers.env.value_placeholder")
-                };
-                let mut input = InputState::new(window, cx)
-                    .placeholder(placeholder)
-                    .masked(var.sensitive);
-                input.set_value(
-                    if var.sensitive {
-                        String::new()
-                    } else {
-                        var.value.clone()
-                    },
-                    window,
-                    cx,
-                );
-                input
-            });
-            for input in [&name, &value] {
-                subscriptions.push(cx.subscribe(input, |this, _, event, cx| match event {
-                    InputEvent::Change => this.commit_env(cx),
-                    InputEvent::Blur | InputEvent::PressEnter { .. } => {
-                        this.commit_env(cx);
-                        this.reload(cx);
-                    }
-                    _ => {}
-                }));
-            }
-            self.env_rows.push(EnvRowState {
-                name,
-                value,
-                sensitive: var.sensitive,
-                stored,
-            });
-        }
-        self._subscriptions.extend(subscriptions);
-    }
-
-    /// Persist the env rows: plaintext values inline, sensitive values into
-    /// `secrets.json` (leaving the settings value empty).
-    fn commit_env(&mut self, cx: &mut Context<Self>) {
-        let mut vars: Vec<EnvVar> = Vec::new();
-        let mut secrets: Vec<(String, Option<String>)> = Vec::new();
-        for row in &self.env_rows {
-            let name = row.name.read(cx).value().trim().to_string();
-            let value = row.value.read(cx).value().to_string();
-            if name.is_empty() {
-                // Keep the (empty) row in the UI, but never persist a nameless
-                // variable — it cannot be passed to a child anyway.
-                vars.push(EnvVar {
-                    name,
-                    value: String::new(),
-                    sensitive: row.sensitive,
-                });
-                continue;
-            }
-            if row.sensitive {
-                // An empty input means "leave the stored secret as it is"
-                // (nothing was typed to replace it).
-                if !value.is_empty() {
-                    secrets.push((name.clone(), Some(value)));
-                }
-                vars.push(EnvVar {
-                    name,
-                    value: String::new(),
-                    sensitive: true,
-                });
-            } else {
-                vars.push(EnvVar {
-                    name,
-                    value,
-                    sensitive: false,
-                });
-            }
-        }
-        let persisted: Vec<EnvVar> = vars
-            .iter()
-            .filter(|var| !var.name.is_empty())
-            .cloned()
-            .collect();
-        self.update(move |settings| settings.env = persisted, cx);
         let profile_id = self.profile_id.clone();
-        self.app_state.update(cx, |state, cx| {
-            for (name, value) in &secrets {
-                state.set_profile_secret(&profile_id, name, value.as_deref(), cx);
-            }
+        let title = self.app_state.read(cx).profile_display_name(&profile_id);
+        let dialog = cx.new(|cx| {
+            ProviderDialog::new(app_state.clone(), provider, profile_id.clone(), window, cx)
         });
-        // The rows whose secret we just wrote now render as "stored".
-        for row in self.env_rows.iter_mut() {
-            if row.sensitive && !row.value.read(cx).value().is_empty() {
-                row.stored = true;
-            }
-        }
-    }
-
-    fn add_env_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut settings = self.settings(cx);
-        // T3: new variables default to sensitive.
-        settings.env.push(EnvVar {
-            name: String::new(),
-            value: String::new(),
-            sensitive: true,
+        window.open_dialog(cx, move |dlg, window, cx| {
+            let content = dialog.clone();
+            dlg.title(title.clone())
+                .w(px(560.))
+                // Opaque panel over the library's translucent default.
+                .bg(cx.theme().popover)
+                .shadow_xl()
+                .content(move |content_el, _window, _cx| content_el.child(content.clone()))
+                .footer(crate::provider_dialog::render_footer(&dialog, window, cx))
         });
-        let env = settings.env.clone();
-        self.update(move |s| s.env = env, cx);
-        let settings = self.settings(cx);
-        self.rebuild_env_rows(&settings, window, cx);
-        cx.notify();
-    }
-
-    fn remove_env_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut settings = self.settings(cx);
-        if index >= settings.env.len() {
-            return;
-        }
-        let removed = settings.env.remove(index);
-        let env = settings.env.clone();
-        self.update(move |s| s.env = env, cx);
-        if removed.sensitive && !removed.name.is_empty() {
-            let profile_id = self.profile_id.clone();
-            self.app_state.update(cx, |state, cx| {
-                state.set_profile_secret(&profile_id, &removed.name, None, cx);
-            });
-        }
-        let settings = self.settings(cx);
-        self.rebuild_env_rows(&settings, window, cx);
-        self.reload(cx);
-        cx.notify();
-    }
-
-    fn toggle_env_sensitive(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let mut settings = self.settings(cx);
-        let Some(var) = settings.env.get_mut(index) else {
-            return;
-        };
-        let name = var.name.clone();
-        let becoming_sensitive = !var.sensitive;
-        var.sensitive = becoming_sensitive;
-        // A value that was plaintext moves into secrets.json (and vice versa the
-        // value is simply dropped: we cannot read a stored secret back out).
-        let plaintext = std::mem::take(&mut var.value);
-        let env = settings.env.clone();
-        self.update(move |s| s.env = env, cx);
-        if !name.is_empty() {
-            let profile_id = self.profile_id.clone();
-            let secret = becoming_sensitive
-                .then_some(plaintext)
-                .filter(|v| !v.is_empty());
-            self.app_state.update(cx, |state, cx| {
-                state.set_profile_secret(&profile_id, &name, secret.as_deref(), cx);
-            });
-        }
-        let settings = self.settings(cx);
-        self.rebuild_env_rows(&settings, window, cx);
-        self.reload(cx);
-        cx.notify();
-    }
-
-    // -- models -------------------------------------------------------------
-
-    fn add_custom_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = self.custom_model.read(cx).value().to_string();
-        let settings = self.settings(cx);
-        let catalog = self.app_state.read(cx).models_for(self.provider).to_vec();
-        match validate_slug(&raw, &catalog, &settings) {
-            Ok(slug) => {
-                self.slug_error = None;
-                self.update(move |s| s.custom_models.push(slug), cx);
-                self.custom_model
-                    .update(cx, |state, cx| state.set_value("", window, cx));
-            }
-            Err(err) => self.slug_error = Some(slug_error_message(&err)),
-        }
-        cx.notify();
-    }
-
-    fn move_model(&self, rows: &[ResolvedModel], index: usize, up: bool, cx: &mut Context<Self>) {
-        let Some(target) = move_target(rows, index, up) else {
-            return;
-        };
-        let order = reorder(rows, index, target);
-        self.update(move |s| s.model_order = order, cx);
-    }
-
-    fn toggle_hidden(&self, id: &str, cx: &mut Context<Self>) {
-        let id = id.to_string();
-        self.update(
-            move |settings| {
-                if let Some(pos) = settings.hidden_models.iter().position(|m| m == &id) {
-                    settings.hidden_models.remove(pos);
-                } else {
-                    settings.hidden_models.push(id);
-                }
-            },
-            cx,
-        );
-    }
-
-    fn remove_custom_model(&self, id: &str, cx: &mut Context<Self>) {
-        let id = id.to_string();
-        self.update(
-            move |settings| {
-                settings.custom_models.retain(|m| m != &id);
-                settings.hidden_models.retain(|m| m != &id);
-                settings.model_order.retain(|m| m != &id);
-            },
-            cx,
-        );
     }
 
     // -- rendering ----------------------------------------------------------
 
-    /// The collapsed header: glyph + dot, name, version, update icon, summary,
-    /// chevron, enable switch.
+    /// The row: glyph + dot, name, version, update icon, summary, gear, switch.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
         let provider = self.provider;
-        // Name + enabled come from this profile's card; the status/version/probe
-        // is shared across all profiles of the kind (same CLI).
+        // Name, enabled state, and probe result all belong to this profile;
+        // update-check versions remain shared by protocol kind.
         let name = state.profile_display_name(&self.profile_id);
         let enabled = state.profile_settings(&self.profile_id).enabled;
-        let summary =
-            crate::provider_status::summarize(provider, state.provider_snapshot(provider), enabled);
+        let summary = crate::provider_status::summarize(
+            provider,
+            state.profile_snapshot(&self.profile_id),
+            enabled,
+        );
         let version = state
-            .provider_snapshot(provider)
+            .profile_snapshot(&self.profile_id)
             .and_then(|s| s.version.clone())
             .or_else(|| {
                 state
@@ -511,7 +135,7 @@ impl ProviderCard {
                     .bg(dot_color),
             );
 
-        let mut title = h_flex()
+        let title = h_flex()
             .gap_2()
             .items_center()
             .child(div().text_size(px(15.)).font_semibold().child(name.clone()))
@@ -524,17 +148,19 @@ impl ProviderCard {
                         .child(format!("v{}", version.trim_start_matches('v'))),
                 )
             });
-        if update_available {
-            title = title.child(self.render_update_popover(cx));
-        }
 
-        h_flex()
-            .w_full()
-            .min_h(px(44.))
-            .px_3()
-            .py_3()
+        // The row body (glyph + text) is the primary "configure" affordance;
+        // the update popover, gear and switch trail it as their own controls.
+        let body = h_flex()
+            .id(gpui::SharedString::from(format!(
+                "configure-{}",
+                self.profile_id
+            )))
+            .flex_1()
+            .min_w_0()
             .gap_3()
             .items_center()
+            .cursor_pointer()
             .child(div().flex_none().child(glyph))
             .child(
                 v_flex()
@@ -544,19 +170,34 @@ impl ProviderCard {
                     .child(title)
                     .child(self.render_summary_line(&summary, cx)),
             )
+            .tooltip({
+                let name = name.clone();
+                move |window, cx| {
+                    let label =
+                        tcode_i18n::tr!("providers.configure", name = name.clone()).into_owned();
+                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                }
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));
+
+        h_flex()
+            .w_full()
+            .min_h(px(44.))
+            .px_3()
+            .py_3()
+            .gap_3()
+            .items_center()
+            .child(body)
+            .when(update_available, |this| {
+                this.child(self.render_update_popover(cx))
+            })
             .child(
-                Button::new("toggle-details")
+                Button::new("configure-profile")
                     .ghost()
                     .xsmall()
-                    .icon(IconName::ChevronDown)
-                    .tooltip(tcode_i18n::tr!(
-                        "providers.toggle_details",
-                        name = name.clone()
-                    ))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.expanded = !this.expanded;
-                        cx.notify();
-                    })),
+                    .icon(IconName::Settings)
+                    .tooltip(tcode_i18n::tr!("providers.configure", name = name.clone()))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx))),
             )
             .child(
                 Switch::new("enable-provider")
@@ -564,8 +205,15 @@ impl ProviderCard {
                     .tooltip(tcode_i18n::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let checked = *checked;
-                        this.update(move |settings| settings.enabled = checked, cx);
-                        this.reload(cx);
+                        this.app_state.update(cx, |state, cx| {
+                            let profile_id = this.profile_id.clone();
+                            state.update_profile_settings(
+                                &profile_id,
+                                move |settings| settings.enabled = checked,
+                                cx,
+                            );
+                            state.reload_provider(this.provider, cx);
+                        });
                     })),
             )
             .into_any_element()
@@ -657,7 +305,7 @@ impl ProviderCard {
         h_flex().w_full().min_w_0().child(line).into_any_element()
     }
 
-    /// The update-available icon + its popover (T3 §3).
+    /// The update-available icon + its popover.
     fn render_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
         let provider = self.provider;
@@ -768,485 +416,18 @@ impl ProviderCard {
             })
             .into_any_element()
     }
-
-    /// A labelled expanded-card block: label, control, muted help text.
-    fn field_block(
-        &self,
-        label: SharedString,
-        help: SharedString,
-        control: AnyElement,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        v_flex()
-            .w_full()
-            .px_4()
-            .py_3()
-            .gap_1p5()
-            .child(div().text_size(px(13.)).font_medium().child(label))
-            .child(control)
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(help),
-            )
-            .into_any_element()
-    }
-
-    fn render_accent(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.settings(cx).accent_color;
-        let mut swatches = h_flex().gap_2().items_center();
-        for (index, preset) in ACCENT_PRESETS.iter().enumerate() {
-            let hex = (*preset).to_string();
-            let selected = current.as_deref() == Some(*preset);
-            let value = u32::from_str_radix(preset.trim_start_matches('#'), 16).unwrap_or(0);
-            swatches = swatches.child(
-                div()
-                    .id(("accent", index))
-                    .size(px(22.))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .bg(rgb(value))
-                    .when(selected, |s| {
-                        s.border_2().border_color(cx.theme().foreground)
-                    })
-                    .tooltip({
-                        let hex = hex.clone();
-                        move |window, cx| {
-                            let label =
-                                tcode_i18n::tr!("providers.accent_select", color = hex.clone())
-                                    .into_owned();
-                            gpui_component::tooltip::Tooltip::new(label).build(window, cx)
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let hex = hex.clone();
-                        this.update(move |settings| settings.accent_color = Some(hex), cx);
-                    })),
-            );
-        }
-        swatches = swatches.child(
-            Button::new("accent-clear")
-                .ghost()
-                .xsmall()
-                .icon(IconName::CircleX)
-                .tooltip(tcode_i18n::tr!("providers.accent_clear"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.update(|settings| settings.accent_color = None, cx);
-                })),
-        );
-        swatches.into_any_element()
-    }
-
-    fn render_env(&self, cx: &mut Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let mut block = v_flex().w_full().px_4().py_3().gap_2().child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_medium()
-                        .child(tcode_i18n::tr!("providers.env.title")),
-                )
-                .child(
-                    Button::new("env-add")
-                        .outline()
-                        .xsmall()
-                        .icon(IconName::Plus)
-                        .label(tcode_i18n::tr!("providers.env.add"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.add_env_row(window, cx);
-                        })),
-                ),
-        );
-
-        if self.env_rows.is_empty() {
-            block = block.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(tcode_i18n::tr!("providers.env.empty_help")),
-            );
-        } else {
-            for (index, row) in self.env_rows.iter().enumerate() {
-                block =
-                    block.child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(div().flex_1().min_w_0().child(
-                                Input::new(&row.name).rounded(crate::material::radius_input()),
-                            ))
-                            .child(div().flex_1().min_w_0().child(
-                                Input::new(&row.value).rounded(crate::material::radius_input()),
-                            ))
-                            .child(
-                                Switch::new(("env-sensitive", index))
-                                    .checked(row.sensitive)
-                                    .tooltip(tcode_i18n::tr!("providers.env.sensitive"))
-                                    .on_click(cx.listener(move |this, _: &bool, window, cx| {
-                                        this.toggle_env_sensitive(index, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("env-remove", index))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Delete)
-                                    .tooltip(tcode_i18n::tr!("providers.env.remove"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.remove_env_row(index, window, cx);
-                                    })),
-                            ),
-                    );
-            }
-        }
-        block
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(tcode_i18n::tr!("providers.env.security_help")),
-            )
-            .into_any_element()
-    }
-
-    fn render_models(&self, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.app_state.read(cx);
-        let rows = state.resolved_models_for_profile(&self.profile_id);
-        let muted = cx.theme().muted_foreground;
-
-        let mut block =
-            v_flex()
-                .w_full()
-                .px_4()
-                .py_3()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_medium()
-                        .child(tcode_i18n::tr!("providers.models.title")),
-                )
-                .child(div().pb_1().text_size(px(13.)).text_color(muted).child(
-                    if rows.len() == 1 {
-                        tcode_i18n::tr!("providers.models.count_one", count = 1).into_owned()
-                    } else {
-                        tcode_i18n::tr!("providers.models.count", count = rows.len()).into_owned()
-                    },
-                ));
-
-        for (index, row) in rows.iter().enumerate() {
-            block = block.child(self.render_model_row(&rows, index, row, cx));
-        }
-
-        // Custom-model input + validation copy.
-        block = block.child(
-            h_flex()
-                .w_full()
-                .pt_2()
-                .gap_2()
-                .items_center()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(&self.custom_model).rounded(crate::material::radius_input()),
-                    ),
-                )
-                .child(
-                    Button::new("add-custom-model")
-                        .outline()
-                        .small()
-                        .icon(IconName::Plus)
-                        .label(tcode_i18n::tr!("providers.models.add"))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.add_custom_model(window, cx)),
-                        ),
-                ),
-        );
-        if let Some(error) = &self.slug_error {
-            block = block.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().danger_foreground)
-                    .child(error.clone()),
-            );
-        }
-        block.into_any_element()
-    }
-
-    fn render_model_row(
-        &self,
-        rows: &[ResolvedModel],
-        index: usize,
-        row: &ResolvedModel,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let name = row.name.clone();
-        let hidden = row.hidden;
-        let capabilities = row
-            .capabilities
-            .iter()
-            .copied()
-            .map(model_capability_label)
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let rows_up = rows.to_vec();
-        let rows_down = rows.to_vec();
-        let can_up = move_target(rows, index, true).is_some();
-        let can_down = move_target(rows, index, false).is_some();
-
-        let mut tags = h_flex().gap_1().items_center();
-        if row.custom {
-            tags = tags.child(tag(
-                tcode_i18n::tr!("providers.models.custom").into_owned(),
-                cx.theme().info.opacity(0.12),
-                cx.theme().info_foreground,
-            ));
-        }
-        if hidden {
-            tags = tags.child(tag(
-                tcode_i18n::tr!("providers.models.hidden").into_owned(),
-                cx.theme().warning.opacity(0.12),
-                cx.theme().warning_foreground,
-            ));
-        }
-
-        let fav_id = row.id.clone();
-        let is_fav = row.favorite;
-        let app_state = self.app_state.clone();
-        let hide_id = row.id.clone();
-        let remove_id = row.id.clone();
-        let custom = row.custom;
-
-        h_flex()
-            .w_full()
-            .py_1()
-            .gap_2()
-            .items_center()
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1p5()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .when(hidden, |d| d.text_color(muted))
-                            .child(name.clone()),
-                    )
-                    .when(!capabilities.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .id(("model-info", index))
-                                .flex_none()
-                                .child(Icon::new(IconName::Info).xsmall().text_color(muted))
-                                .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(capabilities.clone())
-                                        .build(window, cx)
-                                }),
-                        )
-                    })
-                    .child(tags),
-            )
-            .child(
-                Button::new(("model-fav", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(if is_fav {
-                        IconName::StarFill
-                    } else {
-                        IconName::Star
-                    })
-                    .tooltip(if is_fav {
-                        tcode_i18n::tr!("providers.models.unfavorite")
-                    } else {
-                        tcode_i18n::tr!("providers.models.favorite")
-                    })
-                    .on_click(move |_, _, cx| {
-                        app_state.update(cx, |state, cx| state.toggle_favorite_model(&fav_id, cx));
-                    }),
-            )
-            .child(
-                Button::new(("model-up", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::ArrowUp)
-                    .disabled(!can_up)
-                    .tooltip(tcode_i18n::tr!("providers.models.move_up"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.move_model(&rows_up, index, true, cx);
-                    })),
-            )
-            .child(
-                Button::new(("model-down", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::ArrowDown)
-                    .disabled(!can_down)
-                    .tooltip(tcode_i18n::tr!("providers.models.move_down"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.move_model(&rows_down, index, false, cx);
-                    })),
-            )
-            .child(
-                Button::new(("model-hide", index))
-                    .ghost()
-                    .xsmall()
-                    .icon(if hidden {
-                        IconName::Eye
-                    } else {
-                        IconName::EyeOff
-                    })
-                    .tooltip(if hidden {
-                        tcode_i18n::tr!("providers.models.show")
-                    } else {
-                        tcode_i18n::tr!("providers.models.hide")
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_hidden(&hide_id, cx))),
-            )
-            .when(custom, |this| {
-                this.child(
-                    Button::new(("model-remove", index))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Delete)
-                        .tooltip(tcode_i18n::tr!("providers.models.remove"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.remove_custom_model(&remove_id, cx);
-                        })),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn render_details(&self, cx: &mut Context<Self>) -> AnyElement {
-        let provider = self.provider;
-        v_flex()
-            .w_full()
-            .child(
-                self.field_block(
-                    tcode_i18n::tr!("providers.display_name")
-                        .into_owned()
-                        .into(),
-                    tcode_i18n::tr!("providers.display_name_help")
-                        .into_owned()
-                        .into(),
-                    Input::new(&self.display_name)
-                        .rounded(crate::material::radius_input())
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .child(self.field_block(
-                tcode_i18n::tr!("providers.accent").into_owned().into(),
-                tcode_i18n::tr!("providers.accent_help").into_owned().into(),
-                self.render_accent(cx),
-                cx,
-            ))
-            .child(self.render_env(cx))
-            .child(
-                self.field_block(
-                    tcode_i18n::tr!("providers.binary_path").into_owned().into(),
-                    tcode_i18n::tr!(
-                        "providers.binary_path_help",
-                        name = crate::settings::provider_label(provider)
-                    )
-                    .into_owned()
-                    .into(),
-                    Input::new(&self.binary)
-                        .rounded(crate::material::radius_input())
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .when(provider != ProviderKind::OpenCode, |this| {
-                this.child(
-                    self.field_block(
-                        home_label(provider).into(),
-                        home_help(provider).into(),
-                        Input::new(&self.home)
-                            .rounded(crate::material::radius_input())
-                            .into_any_element(),
-                        cx,
-                    ),
-                )
-            })
-            .child(
-                self.field_block(
-                    third_label(provider).into(),
-                    third_help(provider).into(),
-                    Input::new(&self.third_field)
-                        .rounded(crate::material::radius_input())
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .child(self.render_models(cx))
-            .when(self.is_user_profile(), |this| {
-                this.child(self.render_delete(cx))
-            })
-            .into_any_element()
-    }
-
-    /// A destructive "Delete profile" action, only rendered for user-created
-    /// profiles (built-in provider cards can't be deleted).
-    fn render_delete(&self, cx: &mut Context<Self>) -> AnyElement {
-        let profile_id = self.profile_id.clone();
-        v_flex()
-            .w_full()
-            .px_4()
-            .py_3()
-            .child(
-                Button::new("delete-profile")
-                    .danger()
-                    .small()
-                    .icon(IconName::Delete)
-                    .label(tcode_i18n::tr!("providers.delete_profile").into_owned())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let profile_id = profile_id.clone();
-                        this.app_state
-                            .update(cx, |state, cx| state.delete_profile(&profile_id, cx));
-                    })),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A row inside the providers group — the group owns the fill and border;
-        // the expanded editor nests under the row, set off by an inset hairline.
-        v_flex()
-            .w_full()
-            .child(self.render_header(cx))
-            .when(self.expanded, |this| {
-                this.child(
-                    v_flex()
-                        .w_full()
-                        .child(
-                            div()
-                                .pl_4()
-                                .child(div().w_full().h(px(1.)).bg(cx.theme().border)),
-                        )
-                        .child(self.render_details(cx)),
-                )
-            })
+        // A row inside the providers group — the group owns the fill and border.
+        v_flex().w_full().child(self.render_header(cx))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Copy + helpers
+// Shared glyph
 // ---------------------------------------------------------------------------
-
-fn tag(label: String, background: gpui::Hsla, foreground: gpui::Hsla) -> AnyElement {
-    crate::material::semantic_chip(label, background, foreground).into_any_element()
-}
 
 /// The provider's glyph (the same asset the composer's picker rail uses).
 pub fn provider_glyph(provider: ProviderKind) -> Icon {
@@ -1259,101 +440,4 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
         ProviderKind::OpenCode => Icon::empty().path("icons/opencode.svg"),
         ProviderKind::Acp => Icon::empty(),
     }
-}
-
-fn default_binary_name(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "codex",
-        ProviderKind::ClaudeCode => "claude",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "opencode",
-        // ACP agents are not configured through this card (they have their own
-        // marketplace cards); these arms only keep the matches total.
-        ProviderKind::Acp => "",
-    }
-}
-
-fn home_placeholder(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "~/.codex",
-        ProviderKind::ClaudeCode => "~",
-        ProviderKind::Pi => "~/.pi/agent",
-        ProviderKind::OpenCode => "",
-        ProviderKind::Acp => "",
-    }
-}
-
-fn home_label(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.codex_home").into_owned(),
-        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.claude_home").into_owned(),
-        ProviderKind::Pi => tcode_i18n::tr!("providers.pi_home").into_owned(),
-        ProviderKind::OpenCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.home").into_owned()
-        }
-    }
-}
-
-fn home_help(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.codex_home_help").into_owned(),
-        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.claude_home_help").into_owned(),
-        ProviderKind::Pi => tcode_i18n::tr!("providers.pi_home_help").into_owned(),
-        ProviderKind::OpenCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.home_help").into_owned()
-        }
-    }
-}
-
-fn third_placeholder(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "~/.codex-t3/personal",
-        ProviderKind::ClaudeCode => "e.g. --chrome",
-        ProviderKind::Pi => "e.g. --provider openai-codex",
-        ProviderKind::OpenCode => "e.g. --print-logs",
-        ProviderKind::Acp => "",
-    }
-}
-
-fn third_label(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.shadow_home").into_owned(),
-        ProviderKind::ClaudeCode
-        | ProviderKind::Pi
-        | ProviderKind::OpenCode
-        | ProviderKind::Acp => tcode_i18n::tr!("providers.launch_args").into_owned(),
-    }
-}
-
-fn third_help(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.shadow_home_help").into_owned(),
-        ProviderKind::ClaudeCode
-        | ProviderKind::Pi
-        | ProviderKind::OpenCode
-        | ProviderKind::Acp => tcode_i18n::tr!("providers.launch_args_help").into_owned(),
-    }
-}
-
-fn custom_model_placeholder(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "gpt-6.7-codex-ultra-preview",
-        ProviderKind::ClaudeCode => "claude-sonnet-5",
-        ProviderKind::Pi => "openai-codex/gpt-5.5",
-        ProviderKind::OpenCode => "openai/gpt-5.1-codex",
-        ProviderKind::Acp => "",
-    }
-}
-
-fn path_string(path: &Option<std::path::PathBuf>) -> String {
-    path.as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default()
-}
-
-/// An input's trimmed value, or `None` when it is empty (T3: an empty field
-/// removes the override).
-fn trimmed(input: &Entity<InputState>, cx: &App) -> Option<String> {
-    let value = input.read(cx).value().trim().to_string();
-    (!value.is_empty()).then_some(value)
 }

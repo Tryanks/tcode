@@ -127,7 +127,9 @@ impl ProviderModelPicker {
     fn options(&self, cx: &App) -> Vec<ModelOption> {
         let state = self.app_state.read(cx);
         let mut options = Vec::new();
-        for profile in state.all_profiles() {
+        // Only enabled profiles are offered for new selections; a disabled
+        // profile stays configurable in Settings but never reaches the picker.
+        for profile in state.enabled_profiles() {
             let catalog = state.models_for(profile.kind);
             let profile_id =
                 (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
@@ -185,6 +187,7 @@ impl ProviderModelPicker {
                         (kind, "", None)
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
+                let glyph = tinted_glyph(self.app_state.read(cx), provider, profile_id);
                 // Ghost, not outline: a quiet resting trigger (glyph + value +
                 // muted chevron) that only tints on hover, matching the
                 // composer's model picker. The "Add" variant stays an outlined
@@ -195,7 +198,7 @@ impl ProviderModelPicker {
                         .items_center()
                         .gap_2()
                         .text_size(px(13.))
-                        .child(provider_glyph(provider).small())
+                        .child(glyph.small())
                         .child(div().flex_1().min_w_0().child(display))
                         .child(
                             Icon::new(IconName::ChevronDown)
@@ -223,12 +226,13 @@ impl Render for ProviderModelPicker {
                     let picker = picker.read(cx);
                     (
                         picker.options(cx),
-                        picker.app_state.read(cx).all_profiles(),
+                        picker.app_state.read(cx).enabled_profiles(),
                         picker.selected_profile.clone(),
                         picker.selected.clone(),
                         picker.excluded.clone(),
                     )
                 };
+                let app_state = picker.read(cx).app_state.clone();
                 // A deleted profile falls back to the first tab (built-ins
                 // always exist, so the list is never empty).
                 let current_profile = if profiles.iter().any(|p| p.id == selected_profile) {
@@ -280,7 +284,14 @@ impl Render for ProviderModelPicker {
                                 .rounded(crate::material::radius_button())
                                 .cursor_pointer()
                                 .hover(|style| style.bg(cx.theme().accent))
-                                .child(provider_glyph(option.provider).small())
+                                .child(
+                                    tinted_glyph(
+                                        app_state.read(cx),
+                                        option.provider,
+                                        option.profile_id.as_deref(),
+                                    )
+                                    .small(),
+                                )
                                 .child(
                                     v_flex()
                                         .flex_1()
@@ -349,7 +360,9 @@ impl Render for ProviderModelPicker {
                             .cursor_pointer()
                             .when(is_selected, |tab| tab.bg(cx.theme().accent).font_medium())
                             .hover(|tab| tab.bg(cx.theme().accent))
-                            .child(provider_glyph(kind).xsmall())
+                            .child(
+                                tinted_glyph(app_state.read(cx), kind, Some(&profile.id)).xsmall(),
+                            )
                             .child(div().text_size(px(13.)).child(label))
                             .on_click(move |_, _, cx| {
                                 picker.update(cx, |picker, cx| {
@@ -373,6 +386,20 @@ impl Render for ProviderModelPicker {
                             .child(div().size_full().child(rows)),
                     )
             })
+    }
+}
+
+/// The provider glyph tinted with the profile's own accent (falling back to the
+/// kind's built-in card accent), matching the composer's picker rail.
+fn tinted_glyph(state: &AppState, provider: ProviderKind, profile_id: Option<&str>) -> Icon {
+    let glyph = provider_glyph(provider);
+    let accent = match profile_id {
+        Some(id) => state.profile_accent(id),
+        None => state.provider_accent(provider),
+    };
+    match accent {
+        Some(accent) => glyph.text_color(accent),
+        None => glyph,
     }
 }
 

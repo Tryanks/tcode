@@ -808,9 +808,9 @@ pub struct AppState {
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
-    /// Per-provider install/auth probe results, driving the Settings → Providers
+    /// Per-profile install/auth probe results, driving the Settings → Providers
     /// card status dot + summary line. Absent until the first probe lands.
-    pub provider_snapshots: HashMap<ProviderKind, ProviderSnapshot>,
+    pub provider_snapshots: HashMap<String, ProviderSnapshot>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
     /// Present only after an app-relaunch triggered by a permission grant; applied
     /// once by [`AppState::apply_pending_relaunch`] and then cleared.
@@ -1566,13 +1566,19 @@ impl AppState {
         self.provider_versions.get(&provider)
     }
 
-    /// Resolve the binary path for a provider: the settings override, else a
-    /// PATH lookup of the bare command name.
+    /// Resolve the binary path for a built-in provider profile.
     fn resolve_provider_binary(&self, provider: ProviderKind) -> Option<PathBuf> {
-        self.settings
-            .provider(provider)
+        self.resolve_profile_binary(Settings::builtin_profile_id(provider))
+    }
+
+    /// Resolve the binary path for a profile: its settings override, else a
+    /// PATH lookup of the protocol's bare command name.
+    fn resolve_profile_binary(&self, profile_id: &str) -> Option<PathBuf> {
+        let profile = self.settings.resolved_profile(profile_id)?;
+        profile
+            .settings
             .binary_path
-            .or_else(|| which_in_path(&default_program(provider)))
+            .or_else(|| which_in_path(&default_program(profile.kind)))
     }
 
     // -- per-provider configuration (Settings → Providers) ------------------
@@ -1705,9 +1711,9 @@ impl AppState {
     // A *profile* is a named configuration on top of a protocol `ProviderKind`.
     // The built-in native-provider cards are profiles too (with stable ids such
     // as "claude", "codex", "pi", and "opencode").
-    // The model catalog, version, and status probe stay keyed by kind and are
-    // shared across a kind's profiles; a profile overrides only its card config
-    // (env, binary, home, accent, custom/hidden models) and its own secrets.
+    // The model catalog and update-check version stay keyed by kind; status
+    // probes and card config (env, binary, home, accent, custom/hidden models)
+    // are profile-specific, as are secrets.
 
     /// Every selectable native profile, grouped by kind. ACP is handled
     /// separately through the installed-agent list.
@@ -1716,6 +1722,23 @@ impl AppState {
         out.extend(self.settings.profiles_for_kind(ProviderKind::ClaudeCode));
         out.extend(self.settings.profiles_for_kind(ProviderKind::Pi));
         out.extend(self.settings.profiles_for_kind(ProviderKind::OpenCode));
+        out
+    }
+
+    /// Every native profile enabled for new sessions (its card's switch on).
+    /// The new-session model/profile pickers iterate this; the Settings page
+    /// still lists every profile through [`Self::all_profiles`].
+    pub fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
+        let mut out = self.settings.enabled_profiles_for_kind(ProviderKind::Codex);
+        out.extend(
+            self.settings
+                .enabled_profiles_for_kind(ProviderKind::ClaudeCode),
+        );
+        out.extend(self.settings.enabled_profiles_for_kind(ProviderKind::Pi));
+        out.extend(
+            self.settings
+                .enabled_profiles_for_kind(ProviderKind::OpenCode),
+        );
         out
     }
 
@@ -1896,8 +1919,12 @@ impl AppState {
 
     // -- provider status snapshots (Settings → Providers card) --------------
 
+    pub fn profile_snapshot(&self, id: &str) -> Option<&ProviderSnapshot> {
+        self.provider_snapshots.get(id)
+    }
+
     pub fn provider_snapshot(&self, provider: ProviderKind) -> Option<&ProviderSnapshot> {
-        self.provider_snapshots.get(&provider)
+        self.profile_snapshot(Settings::builtin_profile_id(provider))
     }
 
     /// The most recent probe time across providers (the section's "Checked …").
@@ -1914,25 +1941,30 @@ impl AppState {
             || self.provider_versions.values().any(|s| s.checking)
     }
 
-    /// Probe every provider: is the CLI there, what version, and who is signed
+    /// Probe every provider profile: is the CLI there, what version, and who is signed
     /// in? Runs the same `--version` call the version check uses, plus the
     /// provider's own auth surface where one is unambiguous (`claude auth
     /// status --json`; Codex's `auth.json`). Multi-provider CLIs report an
     /// indeterminate auth state until their model/session requests run.
     pub fn refresh_provider_status(&mut self, cx: &mut Context<Self>) {
-        for provider in NATIVE_PROVIDER_KINDS {
-            let snapshot = self.provider_snapshots.entry(provider).or_default();
+        for profile in self.all_profiles() {
+            let profile_id = profile.id;
+            let provider = profile.kind;
+            let snapshot = self
+                .provider_snapshots
+                .entry(profile_id.clone())
+                .or_default();
             if snapshot.checking {
                 continue;
             }
             snapshot.checking = true;
-            let binary = self.resolve_provider_binary(provider);
-            let launch_env = self.launch_env(provider);
+            let binary = self.resolve_profile_binary(&profile_id);
+            let launch_env = self.launch_env_for_profile(&profile_id);
             cx.spawn(async move |this, cx| {
                 let snapshot = probe_provider(provider, binary, launch_env).await;
-                log::info!("probe {provider:?} -> {snapshot:?}");
+                log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 let _ = this.update(cx, |state, cx| {
-                    state.provider_snapshots.insert(provider, snapshot);
+                    state.provider_snapshots.insert(profile_id, snapshot);
                     cx.notify();
                 });
             })
@@ -2133,6 +2165,31 @@ impl AppState {
         picker_models(
             self.catalog_for_profile(id),
             &self.profile_settings(id),
+            &self.settings.favorite_models,
+        )
+    }
+
+    /// The model catalog backing a profile, owned (the provider dialog resolves
+    /// draft custom/hidden edits against it before Save; favorites stay live).
+    pub fn profile_catalog(&self, id: &str) -> Vec<ModelSpec> {
+        self.catalog_for_profile(id).to_vec()
+    }
+
+    /// Resolve a profile's Settings-card model list against a *draft* custom /
+    /// hidden set (what the provider dialog edits before Save). Favorites are
+    /// read live, matching the dialog's live favorite toggling.
+    pub fn draft_models_for_profile(
+        &self,
+        id: &str,
+        custom_models: &[String],
+        hidden_models: &[String],
+    ) -> Vec<ResolvedModel> {
+        let mut settings = self.profile_settings(id);
+        settings.custom_models = custom_models.to_vec();
+        settings.hidden_models = hidden_models.to_vec();
+        resolve_models(
+            self.catalog_for_profile(id),
+            &settings,
             &self.settings.favorite_models,
         )
     }
@@ -8133,7 +8190,7 @@ mod tests {
         claude.home_path = Some(PathBuf::from("/tmp/claude-home"));
         claude.launch_args = Some("--chrome --verbose".into());
         let codex = settings.provider_mut(ProviderKind::Codex);
-        codex.shadow_home_path = Some(PathBuf::from("/tmp/codex-shadow"));
+        codex.home_path = Some(PathBuf::from("/tmp/codex-shadow"));
 
         let launch_env = LaunchEnv {
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
@@ -8153,7 +8210,7 @@ mod tests {
             ]
         );
 
-        // Codex takes its shadow home as CODEX_HOME, and has no launch args.
+        // Codex takes its home as CODEX_HOME, and has no launch args.
         let launch_env = LaunchEnv {
             env: Vec::new(),
             home: settings.provider(ProviderKind::Codex).effective_home(),
@@ -8206,6 +8263,76 @@ mod tests {
                 ("PLAIN".to_string(), "visible".to_string()),
                 ("ANTHROPIC_API_KEY".to_string(), "sk-x".to_string()),
             ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_snapshots_are_isolated_by_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-profile-snapshot-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        state.provider_snapshots.insert(
+            "claude".into(),
+            ProviderSnapshot {
+                version: Some("1.0.0".into()),
+                ..ProviderSnapshot::default()
+            },
+        );
+        state.provider_snapshots.insert(
+            "kimi".into(),
+            ProviderSnapshot {
+                version: Some("2.0.0".into()),
+                ..ProviderSnapshot::default()
+            },
+        );
+
+        assert_eq!(
+            state
+                .profile_snapshot("kimi")
+                .and_then(|snapshot| snapshot.version.as_deref()),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            state
+                .profile_snapshot("claude")
+                .and_then(|snapshot| snapshot.version.as_deref()),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            state
+                .provider_snapshot(ProviderKind::ClaudeCode)
+                .and_then(|snapshot| snapshot.version.as_deref()),
+            Some("1.0.0")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_binary_override_wins_over_path_lookup() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-profile-binary-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+        state.settings.profiles.insert(
+            "kimi".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    binary_path: Some(PathBuf::from("/opt/kimi/claude")),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+
+        assert_eq!(
+            state.resolve_profile_binary("kimi"),
+            Some(PathBuf::from("/opt/kimi/claude"))
         );
         let _ = std::fs::remove_dir_all(root);
     }

@@ -72,14 +72,7 @@ pub fn resolve_models(
             capabilities: Vec::new(),
         });
     }
-    let rank = |id: &str| {
-        settings
-            .model_order
-            .iter()
-            .position(|model| model == id)
-            .unwrap_or(usize::MAX)
-    };
-    rows.sort_by_key(|row| rank(&row.id));
+    // Favorites float to the top; everything else keeps its catalog order.
     rows.sort_by_key(|row| !row.favorite);
     rows
 }
@@ -93,23 +86,6 @@ pub fn picker_models(
         .into_iter()
         .filter(|row| !row.hidden)
         .collect()
-}
-
-pub fn move_target(rows: &[ResolvedModel], index: usize, up: bool) -> Option<usize> {
-    let row = rows.get(index)?;
-    let candidate = if up { index.checked_sub(1)? } else { index + 1 };
-    let neighbour = rows.get(candidate)?;
-    (neighbour.favorite == row.favorite).then_some(candidate)
-}
-
-pub fn reorder(rows: &[ResolvedModel], from: usize, to: usize) -> Vec<String> {
-    let mut ids: Vec<_> = rows.iter().map(|row| row.id.clone()).collect();
-    if from >= ids.len() || to >= ids.len() {
-        return ids;
-    }
-    let id = ids.remove(from);
-    ids.insert(to, id);
-    ids
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,19 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_order_wins_over_catalog_order() {
-        let settings = ProviderSettings {
-            model_order: vec!["haiku".into(), "opus".into()],
-            ..Default::default()
-        };
-        let rows = resolve_models(&catalog(), &settings, &[]);
-        assert_eq!(
-            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["haiku", "opus", "sonnet"]
-        );
-    }
-
-    #[test]
     fn hidden_models_stay_in_settings_but_leave_the_picker() {
         let settings = ProviderSettings {
             hidden_models: vec!["sonnet".into()],
@@ -237,45 +200,18 @@ mod tests {
     }
 
     #[test]
-    fn hidden_order_custom_and_favorites_compose() {
+    fn hidden_custom_and_favorites_compose() {
         let settings = ProviderSettings {
             custom_models: vec!["claude-sonnet-5".into()],
             hidden_models: vec!["opus".into()],
-            model_order: vec!["claude-sonnet-5".into(), "haiku".into()],
             ..Default::default()
         };
         let rows = picker_models(&catalog(), &settings, &["haiku".into()]);
+        // Favorite floats up; the rest keep catalog order (custom slugs last);
+        // hidden `opus` is filtered from the picker.
         assert_eq!(
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["haiku", "claude-sonnet-5", "sonnet"]
-        );
-    }
-
-    #[test]
-    fn moves_stay_inside_the_favorite_group() {
-        let rows = resolve_models(&catalog(), &ProviderSettings::default(), &["opus".into()]);
-        assert_eq!(move_target(&rows, 0, true), None);
-        assert_eq!(move_target(&rows, 0, false), None);
-        assert_eq!(move_target(&rows, 1, true), None);
-        assert_eq!(move_target(&rows, 1, false), Some(2));
-        assert_eq!(move_target(&rows, 2, true), Some(1));
-        assert_eq!(move_target(&rows, 2, false), None);
-    }
-
-    #[test]
-    fn reorder_rewrites_the_full_id_sequence() {
-        let rows = resolve_models(&catalog(), &ProviderSettings::default(), &[]);
-        assert_eq!(reorder(&rows, 2, 1), ["opus", "haiku", "sonnet"]);
-        let settings = ProviderSettings {
-            model_order: reorder(&rows, 2, 1),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_models(&catalog(), &settings, &[])
-                .iter()
-                .map(|row| row.id.as_str())
-                .collect::<Vec<_>>(),
-            ["opus", "haiku", "sonnet"]
+            ["haiku", "sonnet", "claude-sonnet-5"]
         );
     }
 

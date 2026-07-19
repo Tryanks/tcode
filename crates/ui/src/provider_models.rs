@@ -1,8 +1,8 @@
 //! Provider model presentation with core-owned semantics and localized copy.
 
 pub use tcode_core::provider_models::{
-    MAX_SLUG_LEN, ModelCapability, ResolvedModel, SlugError, move_target, picker_models, reorder,
-    resolve_models, validate_slug,
+    MAX_SLUG_LEN, ModelCapability, ResolvedModel, SlugError, picker_models, resolve_models,
+    validate_slug,
 };
 
 pub fn model_capability_label(capability: ModelCapability) -> String {
