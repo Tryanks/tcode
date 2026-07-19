@@ -341,6 +341,81 @@ mod tests {
     }
 
     #[gpui::test]
+    fn wide_table_track_contains_the_last_cell(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let header = (0..20).map(|ix| format!("column-{ix}")).collect::<Vec<_>>();
+        let separator = vec!["---"; header.len()];
+        let values = (0..header.len())
+            .map(|ix| format!("value-{ix}"))
+            .collect::<Vec<_>>();
+        let markdown = format!(
+            "| {} |\n| {} |\n| {} |",
+            header.join(" | "),
+            separator.join(" | "),
+            values.join(" | ")
+        );
+        let (_, cx) = cx.add_window_view(|_, cx| TestRoot::new(&markdown, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let track = cx
+            .debug_bounds("markdown-table-track-root-0")
+            .expect("table track was painted");
+        let last_cell = cx
+            .debug_bounds("markdown-table-cell-0-19")
+            .expect("last table cell was painted");
+        assert_eq!(
+            last_cell.right() + px(1.),
+            track.right(),
+            "last cell {:?} did not end at the track's inner right edge {:?}",
+            last_cell,
+            track
+        );
+    }
+
+    #[gpui::test]
+    fn streaming_table_growth_updates_track_width(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) =
+            cx.add_window_view(|_, cx| TestRoot::new("| column |\n| --- |\n| streaming", cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let initial_width = cx
+            .debug_bounds("markdown-table-track-root-0")
+            .expect("initial table track was painted")
+            .size
+            .width;
+
+        view.update(cx, |root, cx| {
+            root.markdown.update(cx, |markdown, cx| {
+                markdown.push_str("-cell-that-grows-much-wider |", cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let grown_width = cx
+            .debug_bounds("markdown-table-track-root-0")
+            .expect("grown table track was painted")
+            .size
+            .width;
+
+        assert!(
+            grown_width > initial_width,
+            "streamed table width stayed at {initial_width:?} instead of growing: {grown_width:?}"
+        );
+    }
+
+    #[gpui::test]
     fn clipped_markdown_cannot_start_selection(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(crate::markdown::init);
