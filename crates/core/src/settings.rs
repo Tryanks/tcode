@@ -102,11 +102,7 @@ pub struct ProviderSettings {
     /// OpenCode ignores this field because it has no single-home override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_path: Option<PathBuf>,
-    /// Codex only: account-specific `CODEX_HOME` (takes precedence over `home_path`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shadow_home_path: Option<PathBuf>,
-    /// Native-provider CLI arguments appended on session start (Codex keeps
-    /// its separate shadow-home field in the corresponding card slot).
+    /// Native-provider CLI arguments appended on session start (ignored for Codex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_args: Option<String>,
     /// Model slugs added by hand in the Models section.
@@ -115,10 +111,6 @@ pub struct ProviderSettings {
     /// Model ids hidden from the composer's model picker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_models: Vec<String>,
-    /// Explicit ordering (ids listed here come first, in this order; anything
-    /// else keeps its catalog order behind them).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_order: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -134,11 +126,9 @@ impl Default for ProviderSettings {
             env: Vec::new(),
             binary_path: None,
             home_path: None,
-            shadow_home_path: None,
             launch_args: None,
             custom_models: Vec::new(),
             hidden_models: Vec::new(),
-            model_order: Vec::new(),
         }
     }
 }
@@ -153,11 +143,9 @@ impl ProviderSettings {
     }
 
     /// The home directory this provider's children should run against
-    /// (`shadow_home_path` wins for Codex; `None` = inherit).
+    /// (`None` = inherit).
     pub fn effective_home(&self) -> Option<PathBuf> {
-        self.shadow_home_path
-            .clone()
-            .or_else(|| self.home_path.clone())
+        self.home_path.clone()
     }
 }
 
@@ -763,6 +751,16 @@ impl Settings {
         out
     }
 
+    /// Like [`Self::profiles_for_kind`], but only the profiles whose `enabled`
+    /// switch is on. This is what the new-session model/profile pickers iterate;
+    /// a disabled profile stays configurable in Settings but is not offered.
+    pub fn enabled_profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
+        self.profiles_for_kind(kind)
+            .into_iter()
+            .filter(|profile| profile.settings.enabled)
+            .collect()
+    }
+
     /// A profile's card title: its display-name override, else — for built-ins —
     /// the driver label, else the id. Used by the sidebar / picker / status row.
     pub fn profile_display_name(&self, id: &str) -> String {
@@ -900,13 +898,54 @@ mod tests {
     }
 
     #[test]
-    fn shadow_home_wins_over_home() {
+    fn effective_home_reads_home_path() {
         let settings = ProviderSettings {
             home_path: Some(PathBuf::from("/a")),
-            shadow_home_path: Some(PathBuf::from("/b")),
             ..ProviderSettings::default()
         };
-        assert_eq!(settings.effective_home(), Some(PathBuf::from("/b")));
+        assert_eq!(settings.effective_home(), Some(PathBuf::from("/a")));
+        assert_eq!(ProviderSettings::default().effective_home(), None);
+    }
+
+    #[test]
+    fn enabled_profiles_for_kind_drops_disabled_profiles() {
+        let mut settings = Settings::default();
+        // The built-in Claude profile is enabled; add one enabled and one
+        // disabled user profile of the same kind.
+        settings.profiles.insert(
+            "on".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    enabled: true,
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        settings.profiles.insert(
+            "off".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    enabled: false,
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        let ids: Vec<_> = settings
+            .enabled_profiles_for_kind(ProviderKind::ClaudeCode)
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        assert_eq!(ids, ["claude", "on"]);
+        // Disabling the built-in removes it from the enabled set too.
+        settings.provider_mut(ProviderKind::ClaudeCode).enabled = false;
+        let ids: Vec<_> = settings
+            .enabled_profiles_for_kind(ProviderKind::ClaudeCode)
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        assert_eq!(ids, ["on"]);
     }
 
     #[test]

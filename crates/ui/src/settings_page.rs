@@ -189,7 +189,7 @@ impl SettingsPage {
                     this.commit_home_url(cx);
                 }
             }));
-        page.build_provider_cards(window, cx);
+        page.build_provider_cards(cx);
         page.sync_acp_cards(window, cx);
         page
     }
@@ -202,20 +202,16 @@ impl SettingsPage {
     }
 
     /// (Re)build the provider cards from current settings — also used after
-    /// "Restore defaults", which invalidates every card's inputs.
-    fn build_provider_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Screenshot-only: `--debug-provider-expanded <profile-id>` opens one
-        // card's details (clicking the chevron cannot be driven headlessly).
-        let expanded = self.app_state.read(cx).debug_provider_expanded.clone();
+    /// "Restore defaults", which invalidates the cards' cached settings.
+    fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
         let profiles = self.app_state.read(cx).all_profiles();
         self.provider_cards = profiles
             .into_iter()
             .map(|profile| {
                 let app_state = self.app_state.clone();
-                let open = expanded.as_deref() == Some(profile.id.as_str());
                 let kind = profile.kind;
                 let id = profile.id.clone();
-                let card = cx.new(|cx| ProviderCard::new(app_state, kind, id, open, window, cx));
+                let card = cx.new(|cx| ProviderCard::new(app_state, kind, id, cx));
                 (profile.id, card)
             })
             .collect();
@@ -503,8 +499,8 @@ impl SettingsPage {
                 )
                 .on_ok(move |_, window, cx| {
                     app_state.update(cx, |state, cx| state.reset_settings(cx));
-                    // Every provider card's inputs now hold stale overrides.
-                    page.update(cx, |page, cx| page.build_provider_cards(window, cx));
+                    // The profile set may have changed; rebuild the rows.
+                    page.update(cx, |page, cx| page.build_provider_cards(cx));
                     page.update(cx, |page, cx| {
                         let app_state = page.app_state.clone();
                         page.orchestrate_panel =
@@ -652,7 +648,7 @@ impl SettingsPage {
             .map(|(id, _)| id.clone())
             .collect();
         if current_ids != card_ids {
-            self.build_provider_cards(window, cx);
+            self.build_provider_cards(cx);
         }
         let state = self.app_state.read(cx);
         let checked_at = state.providers_checked_at();
@@ -706,8 +702,8 @@ impl SettingsPage {
                 })),
         );
 
-        // Native providers form one grouped list; each card renders as a row
-        // (its expanded editor nests under the row via an inset hairline).
+        // Native providers form one grouped list; each card is a compact row
+        // whose gear / body click opens the per-profile settings dialog.
         let provider_rows: Vec<AnyElement> = self
             .provider_cards
             .iter()

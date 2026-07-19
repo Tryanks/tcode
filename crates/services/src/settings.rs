@@ -168,11 +168,9 @@ mod tests {
                 ],
                 binary_path: Some(PathBuf::from("/opt/tools/codex")),
                 home_path: Some(PathBuf::from("/tmp/codex-home")),
-                shadow_home_path: Some(PathBuf::from("/tmp/codex-shadow")),
                 launch_args: None,
                 custom_models: vec!["gpt-6.7-codex".into()],
                 hidden_models: vec!["gpt-5".into()],
-                model_order: vec!["gpt-6".into(), "gpt-5".into()],
             },
         );
         providers.insert(

@@ -3560,15 +3560,15 @@ fn render_model_pane(
         PickerRail::Favorites,
         cx,
     ));
-    // One entry per native profile: every built-in plus any user-created
-    // profiles. Each is its own rail.
+    // One entry per *enabled* native profile: every built-in plus any
+    // user-created profiles whose switch is on. Each is its own rail.
     let profile_ids: Vec<String> = {
         let st = app_entity.read(cx);
         PICKER_PROVIDER_KINDS
             .into_iter()
             .flat_map(|kind| {
                 st.settings
-                    .profiles_for_kind(kind)
+                    .enabled_profiles_for_kind(kind)
                     .into_iter()
                     .map(|profile| profile.id)
             })

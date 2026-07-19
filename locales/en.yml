@@ -144,6 +144,7 @@ settings:
   restore_title: "Restore default settings?"
   restore_description: "Reset language, theme, thread-title model, diff, provider, and orchestrate settings to their defaults. Your projects and conversations will not be changed."
   cancel: "Cancel"
+  save: "Save"
   general_section: "GENERAL"
   appearance_section: "APPEARANCE"
   conversation_section: "CONVERSATION"
@@ -315,10 +316,16 @@ providers:
   updating: "Updating"
   update_manual: "or, update manually using"
   copy_command: "Copy command"
-  # Expanded card fields (T3 §4)
+  # Per-profile settings dialog (opened from a provider row's gear).
+  configure: "Configure %{name}"
+  dialog:
+    identity: "IDENTITY"
+    connection: "CONNECTION"
   display_name: "Display name"
   display_name_help: "Optional label shown in the provider list."
   delete_profile: "Delete profile"
+  delete_confirm_title: "Delete this profile?"
+  delete_confirm_body: "Its settings and stored secrets are removed. Sessions still using it fall back to the built-in provider."
   third_party:
     section: "Connect a provider"
     claude_title: "Claude Code"
@@ -358,8 +365,6 @@ providers:
   pi_home_help: "Custom pi agent directory. Keeps sessions, auth, models, prompts, and extensions separate."
   home: "Provider home path"
   home_help: "Custom home or data directory used by this provider instance."
-  shadow_home: "Shadow home path"
-  shadow_home_help: "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME."
   launch_args: "Launch arguments"
   launch_args_help: "Additional CLI arguments passed on session start."
   models:
@@ -371,8 +376,6 @@ providers:
     hidden: "hidden"
     favorite: "Add to favorites"
     unfavorite: "Remove from favorites"
-    move_up: "Move up"
-    move_down: "Move down"
     hide: "Hide from picker"
     show: "Show in picker"
     remove: "Remove custom model"
