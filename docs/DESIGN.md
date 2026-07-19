@@ -212,19 +212,12 @@ shrink the chat — the right panel is painted over it and the timeline and comp
 are clipped mid-word. The chat column reflows; it never clips.
 
 Details: tab strip ("Diff" + "+" no-op) with expand/close cluster; toolbar
-"Turn N ⌄" selector, persisted Structural/Line mode, unified/split layout, and
-wrap toggle (+ no-op whitespace/¶ icons). Structural is the default and uses
-the bundled, version-pinned difftastic 0.69.0 JSON interface against complete
-old/new file contents. Missing, incompatible, failed, invalid, or timed-out
-difftastic runs fall back per file to the line diff and show a small
-"Structural diff unavailable" notice; historical turn diffs also fall back
-because their stored patches may be truncated and cannot reconstruct complete
-inputs. Working-tree inputs are HEAD vs disk, and branch inputs are merge-base
-vs HEAD. Structural results are cached by content and tool version.
+"Turn N ⌄" selector, unified/split layout, and wrap toggle (+ no-op
+whitespace/¶ icons).
 
 The body is a variable-height virtual GPUI list. Git loading, patch parsing,
-source reconstruction, syntax highlighting, structural subprocesses, and row
-model construction run on background executors; the render path constructs only
+syntax highlighting, and row model construction run on background executors;
+the render path constructs only
 the visible file headers and rows. Each file header shows icon, relative path,
 operation badge, and +N/-M totals. Rows retain dual line-number gutters, mono
 content, syntax/novel-span highlighting, add/remove tints and accent bars, soft
