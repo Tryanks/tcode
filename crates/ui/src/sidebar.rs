@@ -793,10 +793,12 @@ impl SessionsSidebar {
             .rounded(cx.theme().radius * 0.5)
             .cursor_pointer()
             // Opacity (rather than `visibility: hidden`) keeps this in Root's
-            // tab-stop registry so keyboard focus can reveal it.
+            // tab-stop registry so keyboard focus can reveal it. `focus`, not
+            // `in_focus`: a click-focused ancestor row would otherwise pin the
+            // control visible.
             .opacity(0.)
             .group_hover(group_key.clone(), |s| s.opacity(1.))
-            .in_focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
+            .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
             .tooltip(|window, cx| {
                 Tooltip::new(tcode_i18n::tr!("sidebar.create_thread").into_owned())
@@ -1102,10 +1104,12 @@ impl SessionsSidebar {
                             .rounded(cx.theme().radius * 0.5)
                             .cursor_pointer()
                             // Keep the archived action registered as a tab stop;
-                            // keyboard focus itself reveals the zero-opacity icon.
+                            // the icon reveals only when the button itself is
+                            // focused (`in_focus` would pin it visible while the
+                            // click-focused row stays selected).
                             .opacity(0.)
                             .group_hover(row_key.clone(), |s| s.opacity(1.))
-                            .in_focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
+                            .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
                             .hover(|s| s.bg(cx.theme().sidebar_accent))
                             .tooltip(|window, cx| {
                                 Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
