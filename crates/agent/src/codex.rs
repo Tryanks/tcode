@@ -2413,15 +2413,27 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err = smol::block_on(list_models(
-            Some(bin),
-            LaunchEnv {
-                env: Vec::new(),
-                home: None,
-            },
-        ))
-        .unwrap_err();
-        let message = err.to_string();
+        // Concurrently-forked test children can hold the freshly written
+        // script's fd open, making exec fail with ETXTBSY on Linux — retry
+        // until the spawn reaches the script's own failure.
+        let mut attempts = 0;
+        let message = loop {
+            let err = smol::block_on(list_models(
+                Some(bin.clone()),
+                LaunchEnv {
+                    env: Vec::new(),
+                    home: None,
+                },
+            ))
+            .unwrap_err();
+            let message = err.to_string();
+            if message.contains("Text file busy") && attempts < 20 {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                continue;
+            }
+            break message;
+        };
         assert!(message.contains("Cannot find module"), "{message}");
         assert!(message.contains("exit status: 1"), "{message}");
         let _ = std::fs::remove_dir_all(dir);
