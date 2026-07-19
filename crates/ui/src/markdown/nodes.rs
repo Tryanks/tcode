@@ -61,7 +61,7 @@ impl BlockNode {
                 .join("\n"),
             Self::Paragraph(paragraph) => paragraph.text(),
             Self::Heading { children, .. } => children.text(),
-            Self::CodeBlock(code) => code.code.to_string(),
+            Self::CodeBlock(code) => rendered_code_text(&code.code),
             Self::Table(table) => table
                 .children
                 .iter()
@@ -79,11 +79,55 @@ impl BlockNode {
     }
 
     pub(super) fn selected_text(&self) -> String {
+        // Paint-time ranges are authoritative at the two drag boundaries, but
+        // an intervening leaf may be clipped or virtualized and have no range.
+        // Recover those leaves from the render IR in document order.
+        let mut leaves = Vec::new();
+        self.collect_text_leaves(&mut leaves);
+        let selections = leaves
+            .iter()
+            .map(|leaf| leaf.selected_leaf_text())
+            .collect::<Vec<_>>();
+        let Some(first) = selections.iter().position(|text| !text.is_empty()) else {
+            return String::new();
+        };
+        let last = selections
+            .iter()
+            .rposition(|text| !text.is_empty())
+            .unwrap_or(first);
+
+        (first..=last)
+            .map(|ix| {
+                if ix == first || ix == last {
+                    selections[ix].clone()
+                } else {
+                    leaves[ix].text()
+                }
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn collect_text_leaves<'a>(&'a self, leaves: &mut Vec<&'a BlockNode>) {
         match self {
             Self::Root { children, .. }
             | Self::Blockquote { children, .. }
             | Self::List { children, .. }
-            | Self::ListItem { children, .. } => join_selected(children.iter()),
+            | Self::ListItem { children, .. } => {
+                for child in children {
+                    child.collect_text_leaves(leaves);
+                }
+            }
+            Self::Paragraph(_) | Self::Heading { .. } | Self::CodeBlock(_) | Self::Table(_) => {
+                leaves.push(self)
+            }
+            Self::HorizontalRule { .. } | Self::Unknown => {}
+        }
+    }
+
+    fn selected_leaf_text(&self) -> String {
+        match self {
             Self::Paragraph(paragraph) => paragraph.selected_text(),
             Self::Heading { children, .. } => children.selected_text(),
             Self::CodeBlock(code) => code.selected_text(),
@@ -104,7 +148,12 @@ impl BlockNode {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            Self::HorizontalRule { .. } | Self::Unknown => String::new(),
+            Self::Root { .. }
+            | Self::Blockquote { .. }
+            | Self::List { .. }
+            | Self::ListItem { .. }
+            | Self::HorizontalRule { .. }
+            | Self::Unknown => String::new(),
         }
     }
 
@@ -129,14 +178,6 @@ impl BlockNode {
             Self::HorizontalRule { .. } | Self::Unknown => {}
         }
     }
-}
-
-fn join_selected<'a>(nodes: impl Iterator<Item = &'a BlockNode>) -> String {
-    nodes
-        .map(BlockNode::selected_text)
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -423,5 +464,83 @@ fn append_selection(text: &mut String, state: &Arc<Mutex<InlineState>>) {
 fn clear_inline_selection(state: &Arc<Mutex<InlineState>>) {
     if let Ok(mut state) = state.lock() {
         state.selection = None;
+    }
+}
+
+fn rendered_code_text(code: &str) -> String {
+    let mut text = code.replace("\r\n", "\n");
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn select(state: &Arc<Mutex<InlineState>>, range: Range<usize>) {
+        state.lock().unwrap().selection = Some(range);
+    }
+
+    fn select_paragraph(paragraph: &Paragraph, range: Range<usize>) {
+        let mut state = paragraph.state.lock().unwrap();
+        state.set_text(paragraph.text().into());
+        state.selection = Some(range);
+    }
+
+    #[test]
+    fn extraction_includes_unpainted_blocks_between_selected_boundaries() {
+        let document = super::super::parse(
+            "intro text\n\n```text\nfirst code line\nsecond code line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |",
+        );
+        let mut leaves = Vec::new();
+        document.collect_text_leaves(&mut leaves);
+
+        let BlockNode::Paragraph(paragraph) = leaves[0] else {
+            panic!("expected paragraph");
+        };
+        select_paragraph(paragraph, 0..paragraph.text().len());
+        assert_eq!(paragraph.selected_text(), "intro text");
+
+        let BlockNode::Table(table) = leaves[2] else {
+            panic!("expected table");
+        };
+        for row in &table.children {
+            for cell in &row.children {
+                select_paragraph(&cell.children, 0..cell.children.text().len());
+            }
+        }
+
+        assert_eq!(
+            document.selected_text(),
+            "intro text\nfirst code line\nsecond code line\nname value\nalpha beta"
+        );
+    }
+
+    #[test]
+    fn extraction_preserves_partial_code_and_table_boundaries() {
+        let document = super::super::parse(
+            "intro text\n\n```text\nfirst code line\nsecond code line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |",
+        );
+        let mut leaves = Vec::new();
+        document.collect_text_leaves(&mut leaves);
+
+        let BlockNode::CodeBlock(code) = leaves[1] else {
+            panic!("expected code block");
+        };
+        let states = code.states_for_lines(&["first code line", "second code line"]);
+        select(&states[0], 6..10);
+        select(&states[1], 0..6);
+
+        let BlockNode::Table(table) = leaves[2] else {
+            panic!("expected table");
+        };
+        let first_cell = &table.children[0].children[0].children;
+        let second_cell = &table.children[0].children[1].children;
+        select_paragraph(first_cell, 1..4);
+        select_paragraph(second_cell, 0..3);
+
+        assert_eq!(document.selected_text(), "code\nsecond\name val");
     }
 }

@@ -416,4 +416,24 @@ mod tests {
             expected
         );
     }
+
+    #[gpui::test]
+    fn select_all_includes_code_and_table_text(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(super::super::init);
+        let state = cx.update(|cx| {
+            cx.new(|cx| {
+                MarkdownState::new(
+                    "intro\n\n```text\nfirst line\nsecond line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |",
+                    cx,
+                )
+            })
+        });
+
+        state.update(cx, |state, cx| state.select_all(cx));
+        assert_eq!(
+            state.read_with(cx, |state, _| state.selected_text()),
+            "intro\nfirst line\nsecond line\nname value\nalpha beta\n"
+        );
+    }
 }
