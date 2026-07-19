@@ -53,7 +53,7 @@ fn finish_quit_prompt(app_state: &Entity<AppState>, epoch: u64, cx: &mut App) ->
 }
 
 fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
-    let count = app_state.read(cx).turns_in_flight_count();
+    let count = app_state.read(cx).working_sessions_count();
     if count == 0 {
         cx.quit();
         return;
