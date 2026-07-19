@@ -144,6 +144,7 @@ settings:
   restore_title: "恢复默认设置？"
   restore_description: "将语言、主题、对话命名模型、diff、提供商和 Orchestrate 设置恢复为默认值。项目和对话不会受到影响。"
   cancel: "取消"
+  save: "保存"
   general_section: "通用"
   appearance_section: "外观"
   conversation_section: "对话"
@@ -311,9 +312,16 @@ providers:
   updating: "更新中"
   update_manual: "或者手动更新："
   copy_command: "复制命令"
+  # 单个配置的设置对话框（点击提供方行的齿轮图标打开）。
+  configure: "配置 %{name}"
+  dialog:
+    identity: "标识"
+    connection: "连接"
   display_name: "显示名称"
   display_name_help: "在提供方列表中显示的可选标签。"
   delete_profile: "删除配置"
+  delete_confirm_title: "确定删除此配置？"
+  delete_confirm_body: "其设置和已保存的密钥将被移除。仍在使用它的会话会回退到内置提供方。"
   third_party:
     section: "接入模型服务商"
     claude_title: "Claude Code"
@@ -353,8 +361,6 @@ providers:
   pi_home_help: "自定义 pi 智能体目录，可隔离会话、认证、模型、提示词与扩展。"
   home: "提供方主目录路径"
   home_help: "该提供方实例使用的自定义主目录或数据目录。"
-  shadow_home: "影子主目录路径"
-  shadow_home_help: "账号专用的 Codex 主目录。在共享 CODEX_HOME 状态的同时隔离 auth.json。"
   launch_args: "启动参数"
   launch_args_help: "会话启动时额外传入的 CLI 参数。"
   models:
@@ -366,8 +372,6 @@ providers:
     hidden: "已隐藏"
     favorite: "加入收藏"
     unfavorite: "取消收藏"
-    move_up: "上移"
-    move_down: "下移"
     hide: "从选择器中隐藏"
     show: "在选择器中显示"
     remove: "移除自定义模型"

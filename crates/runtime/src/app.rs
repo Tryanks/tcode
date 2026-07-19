@@ -1725,6 +1725,23 @@ impl AppState {
         out
     }
 
+    /// Every native profile enabled for new sessions (its card's switch on).
+    /// The new-session model/profile pickers iterate this; the Settings page
+    /// still lists every profile through [`Self::all_profiles`].
+    pub fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
+        let mut out = self.settings.enabled_profiles_for_kind(ProviderKind::Codex);
+        out.extend(
+            self.settings
+                .enabled_profiles_for_kind(ProviderKind::ClaudeCode),
+        );
+        out.extend(self.settings.enabled_profiles_for_kind(ProviderKind::Pi));
+        out.extend(
+            self.settings
+                .enabled_profiles_for_kind(ProviderKind::OpenCode),
+        );
+        out
+    }
+
     /// The protocol kind a profile drives (built-in or user). Falls back to
     /// ClaudeCode for an unknown id (callers treat unknown ids as gone).
     pub fn profile_kind(&self, id: &str) -> ProviderKind {
@@ -2148,6 +2165,31 @@ impl AppState {
         picker_models(
             self.catalog_for_profile(id),
             &self.profile_settings(id),
+            &self.settings.favorite_models,
+        )
+    }
+
+    /// The model catalog backing a profile, owned (the provider dialog resolves
+    /// draft custom/hidden edits against it before Save; favorites stay live).
+    pub fn profile_catalog(&self, id: &str) -> Vec<ModelSpec> {
+        self.catalog_for_profile(id).to_vec()
+    }
+
+    /// Resolve a profile's Settings-card model list against a *draft* custom /
+    /// hidden set (what the provider dialog edits before Save). Favorites are
+    /// read live, matching the dialog's live favorite toggling.
+    pub fn draft_models_for_profile(
+        &self,
+        id: &str,
+        custom_models: &[String],
+        hidden_models: &[String],
+    ) -> Vec<ResolvedModel> {
+        let mut settings = self.profile_settings(id);
+        settings.custom_models = custom_models.to_vec();
+        settings.hidden_models = hidden_models.to_vec();
+        resolve_models(
+            self.catalog_for_profile(id),
+            &settings,
             &self.settings.favorite_models,
         )
     }
@@ -8148,7 +8190,7 @@ mod tests {
         claude.home_path = Some(PathBuf::from("/tmp/claude-home"));
         claude.launch_args = Some("--chrome --verbose".into());
         let codex = settings.provider_mut(ProviderKind::Codex);
-        codex.shadow_home_path = Some(PathBuf::from("/tmp/codex-shadow"));
+        codex.home_path = Some(PathBuf::from("/tmp/codex-shadow"));
 
         let launch_env = LaunchEnv {
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
@@ -8168,7 +8210,7 @@ mod tests {
             ]
         );
 
-        // Codex takes its shadow home as CODEX_HOME, and has no launch args.
+        // Codex takes its home as CODEX_HOME, and has no launch args.
         let launch_env = LaunchEnv {
             env: Vec::new(),
             home: settings.provider(ProviderKind::Codex).effective_home(),
