@@ -607,17 +607,17 @@ impl SettingsPage {
             .child(
                 v_flex()
                     .child(self.section_label(tcode_i18n::tr!("settings.appearance_section"), cx))
-                    .child(self.grouped(appearance, cx)),
+                    .child(self.grouped_plain(appearance, cx)),
             )
             .child(
                 v_flex()
                     .child(self.section_label(tcode_i18n::tr!("settings.conversation_section"), cx))
-                    .child(self.grouped(conversation, cx)),
+                    .child(self.grouped_plain(conversation, cx)),
             )
             .child(
                 v_flex()
                     .child(self.section_label(tcode_i18n::tr!("settings.workspace_section"), cx))
-                    .child(self.grouped(workspace, cx)),
+                    .child(self.grouped_plain(workspace, cx)),
             )
     }
 
@@ -813,7 +813,7 @@ impl SettingsPage {
             col = col.child(
                 v_flex()
                     .child(self.section_label(group.project.name.clone(), cx))
-                    .child(self.grouped(rows, cx)),
+                    .child(self.grouped_plain(rows, cx)),
             );
         }
         col
@@ -883,7 +883,7 @@ impl SettingsPage {
             .child(
                 v_flex()
                     .child(self.section_label(tcode_i18n::tr!("computer_use.section"), cx))
-                    .child(self.grouped(rows, cx)),
+                    .child(self.grouped_plain(rows, cx)),
             )
             .child(self.permissions_group(
                 &[
@@ -918,7 +918,7 @@ impl SettingsPage {
         v_flex().gap(px(24.)).child(
             v_flex()
                 .child(self.section_label(tcode_i18n::tr!("browser.section"), cx))
-                .child(self.grouped(rows, cx)),
+                .child(self.grouped_plain(rows, cx)),
         )
     }
 
@@ -1064,7 +1064,10 @@ impl SettingsPage {
             .iter()
             .map(|kind| self.permission_row(*kind, cx))
             .collect();
-        let mut stack = v_flex().w_full().gap_2().child(self.grouped(rows, cx));
+        let mut stack = v_flex()
+            .w_full()
+            .gap_2()
+            .child(self.grouped_plain(rows, cx));
         // A fresh Screen Recording grant only takes effect after a restart; offer
         // an explicit relaunch when we've detected one is pending.
         if self.sr_restart_hint && kinds.contains(&PermissionKind::ScreenRecording) {
@@ -1224,30 +1227,28 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// One grouped-list container: a clean box on the paper plane — popover
-    /// fill, a single hairline border, input-radius corners, no shadow.
+    /// One grouped-list container: a floating card on the paper plane, in
+    /// chat's composer-console idiom — popover fill, a hairline border,
+    /// card-radius corners and a soft shadow so it reads as lifted, not a flat
+    /// System-Settings box (docs/visual-redesign.md §5.5, 2026-07 revision).
     fn group(&self, cx: &Context<Self>) -> gpui::Div {
-        v_flex()
-            .w_full()
-            .rounded(crate::material::radius_input())
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .overflow_hidden()
+        crate::material::floating_card(v_flex().w_full(), cx).overflow_hidden()
     }
 
-    /// Inset hairline between two rows — flush right, indented past the row's
-    /// left padding so it never reads as a full-bleed rule.
+    /// Faint inset hairline between two rows — flush right, indented past the
+    /// row's left padding, and dropped to 60% so it whispers rather than rules.
+    /// Only dense lists (Providers) use it; sparse surfaces separate with air.
     fn row_divider(&self, cx: &Context<Self>) -> AnyElement {
         div()
             .w_full()
             .pl_3()
-            .child(div().w_full().h(px(1.)).bg(cx.theme().border))
+            .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6)))
             .into_any_element()
     }
 
-    /// Assemble rows into a group, inset-divided between neighbours (never after
-    /// the last).
+    /// Assemble rows into a group with faint inset hairlines between neighbours
+    /// (never after the last) — for dense lists where rows need a visible
+    /// boundary.
     fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
         let mut group = self.group(cx);
         let last = rows.len().saturating_sub(1);
@@ -1256,6 +1257,17 @@ impl SettingsPage {
             if index != last {
                 group = group.child(self.row_divider(cx));
             }
+        }
+        group
+    }
+
+    /// Assemble rows into a group with NO dividers — chat separates content
+    /// with breathing room, not rules. The default for sparse settings surfaces
+    /// (General, Browser, Computer Use, Archived, permissions).
+    fn grouped_plain(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
+        let mut group = self.group(cx);
+        for row in rows {
+            group = group.child(row);
         }
         group
     }
@@ -1287,7 +1299,9 @@ impl SettingsPage {
             .w_full()
             .min_h(px(44.))
             .px_3()
-            .py_2()
+            // Divider-less cards lean on row air for separation: a touch more
+            // vertical padding gives neighbours room to breathe.
+            .py_2p5()
             .gap_3()
             .items_center()
     }
@@ -1553,9 +1567,12 @@ impl Render for SettingsPage {
             self.debug_acp_dialog_pending = false;
             self.open_acp_dialog(window, cx);
         }
+        // No opaque full-page fill: the nav must sit on the same translucent
+        // glass canvas the chat sidebar does (its `sidebar` token shows the
+        // T0 blur through its own translucency), so navigating chat↔settings
+        // never flips the window material. Only the content column is paper.
         gpui_component::h_flex()
             .size_full()
-            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_nav(window, cx))
             .child(
@@ -1564,6 +1581,9 @@ impl Render for SettingsPage {
                     .min_w_0()
                     .h_full()
                     .bg(crate::material::content_surface(cx))
+                    // T1 paper floats above the glass canvas — the same shadow
+                    // the chat column carries, so the reading plane is identical.
+                    .shadow_sm()
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
             )

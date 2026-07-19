@@ -109,6 +109,25 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
         .shadow_xl()
 }
 
+/// A floating content card in chat's composer-console idiom: near-opaque
+/// `popover` fill, a hairline border, `radius_card` corners and the composer
+/// console's soft `shadow_md`, so the card reads as genuinely lifted off the
+/// T1 paper — the same depth chat's cards carry. This is the group container
+/// every settings surface now wears (docs/visual-redesign.md §5.5, 2026-07
+/// revision), replacing the old flat, shadowless System-Settings box, and it
+/// suits any other on-paper grouping that wants chat's card depth.
+///
+/// The composer field itself deliberately does NOT share this: it keeps the
+/// 16px `radius_composer` and its focus-reactive `input` border, so its inline
+/// spec stays untouched.
+pub fn floating_card(el: Div, cx: &App) -> Div {
+    el.rounded(radius_card())
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().popover)
+        .shadow_md()
+}
+
 /// The sidebar brand wordmark — bold "tcode" + the "DEV" channel pill. The main
 /// sidebar's app row (`sidebar.rs`) and the settings left-nav header are
 /// round-trip counterparts, so this shares the exact chrome without either side

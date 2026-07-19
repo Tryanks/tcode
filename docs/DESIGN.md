@@ -244,8 +244,14 @@ palette, or leaving Chat hides every WebView that no longer owns the panel.
 ### Settings (full-page route)
 Left nav (sidebar width): General / Providers / Orchestrate + "← Back" pinned
 bottom. Header: "Settings" + "Restore defaults" bordered button (confirm).
-Rows: bold 14px title + 13px muted description left, control right (dropdown /
-toggle / text input), hairline separators. General: Language, Theme
+Groups are **floating cards** in chat's composer-console idiom, not flat
+System-Settings boxes (`material::floating_card`: popover fill, hairline border,
+radius 12, subtle `shadow_md`); the 768px content column and window material
+(T0 blur + translucent paper) are identical to chat, so navigating in/out never
+flips the material. Rows: bold 15px title + 13px muted description left, control
+right (dropdown / toggle / text input). Sparse surfaces separate rows with
+breathing room and no rules; only dense lists (Providers, Orchestrate) carry the
+faintest inset hairline. General: Language, Theme
 (System/Light/Dark, live), thread-title provider/model, Word wrap in diffs,
 Delete confirmation, task-panel behavior, and provider update checks. The title
 model defaults to Codex `gpt-5.6-luna`; its isolated background request always
