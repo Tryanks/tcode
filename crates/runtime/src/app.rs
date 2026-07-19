@@ -341,7 +341,13 @@ pub struct ActiveSession {
     queue: Vec<QueuedMessage>,
     /// Source of [`QueuedMessage::id`]s.
     next_queue_id: u64,
+    /// Queue head submitted to the adapter but not yet confirmed at its native
+    /// delivery boundary. The head remains in `queue` until acceptance.
+    delivery_in_flight: Option<u64>,
     turn_in_flight: bool,
+    /// Provider-owned background tasks which outlive a completed model turn.
+    /// Claude currently supplies this transient liveness signal.
+    background_task_count: usize,
     /// Provider-native commands / skills discovered at session start (Claude
     /// `slash_commands` + `skills`; Codex `skills/list` + custom prompts).
     /// Seeded from the per-provider cache, then replaced by live updates.
@@ -413,6 +419,19 @@ impl ActiveSession {
             != normalized_selections(&self.live_option_selections, ignore_effort)
     }
 
+    fn launch_settings_changed_while_live(&self) -> bool {
+        self.model_changed_while_live()
+            || self.approval_mode_changed_while_live()
+            || self.options_changed_while_live()
+    }
+
+    /// A settings restart must not kill Claude-owned background work or race a
+    /// turn whose provider delivery acknowledgement has not landed yet.
+    fn settings_restart_deferred(&self) -> bool {
+        self.launch_settings_changed_while_live()
+            && (self.background_task_count > 0 || self.delivery_in_flight.is_some())
+    }
+
     /// Per-turn overrides derived from the session's persisted state: Codex
     /// reasoning effort (applied per turn) and the Build/Plan interaction mode.
     fn turn_options(&self) -> TurnOptions {
@@ -435,7 +454,9 @@ impl ActiveSession {
             let _ = commands.try_send(SessionCommand::Shutdown);
         }
         self.runtime = Runtime::Idle;
+        self.delivery_in_flight = None;
         self.turn_in_flight = false;
+        self.background_task_count = 0;
         self._pump = None;
     }
 
@@ -474,6 +495,9 @@ impl ActiveSession {
 
     /// Pull a message out of the queue by id (the strip's steer/✕ buttons).
     fn take_queued(&mut self, id: u64) -> Option<QueuedMessage> {
+        if self.delivery_in_flight == Some(id) {
+            return None;
+        }
         let index = self.queue.iter().position(|m| m.id == id)?;
         Some(self.queue.remove(index))
     }
@@ -526,11 +550,11 @@ impl ActiveSession {
     /// drive the orchestrator before the rest are visible, and the leftovers may
     /// not run until much later.
     fn push_or_merge_orchestrate_callback(&mut self, text: String) -> u64 {
-        if let Some(pending) = self
-            .queue
-            .iter_mut()
-            .find(|message| message.kind == QueuedMessageKind::OrchestrateCallback)
-        {
+        let delivery_in_flight = self.delivery_in_flight;
+        if let Some(pending) = self.queue.iter_mut().find(|message| {
+            message.kind == QueuedMessageKind::OrchestrateCallback
+                && Some(message.id) != delivery_in_flight
+        }) {
             pending.text.push_str("\n\n");
             pending.text.push_str(&text);
             return pending.id;
@@ -555,7 +579,10 @@ impl ActiveSession {
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].)
     fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
-        if self.turn_in_flight {
+        if self.turn_in_flight
+            || self.delivery_in_flight.is_some()
+            || self.settings_restart_deferred()
+        {
             return Ok(false);
         }
         let Runtime::Live(commands) = &self.runtime else {
@@ -567,14 +594,27 @@ impl ActiveSession {
         let options = Some(self.turn_options());
         commands
             .try_send(SessionCommand::SendTurn {
+                delivery_id: send.id,
                 text: send.wire_text(),
                 options,
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
-        self.queue.remove(0);
-        self.turn_in_flight = true;
+        self.delivery_in_flight = Some(send.id);
         Ok(true)
+    }
+
+    /// Commit exactly one queue head after its correlated adapter acceptance.
+    /// Duplicate/stale acknowledgements are harmless and never persist twice.
+    fn accept_turn_delivery(&mut self, delivery_id: u64) -> Option<QueuedMessage> {
+        if self.delivery_in_flight != Some(delivery_id)
+            || self.queue.first().map(|message| message.id) != Some(delivery_id)
+        {
+            return None;
+        }
+        self.delivery_in_flight = None;
+        self.turn_in_flight = true;
+        Some(self.queue.remove(0))
     }
 
     fn is_starting_generation(&self, generation: u64) -> bool {
@@ -1436,7 +1476,9 @@ impl AppState {
             .or_else(|| self.background.get(&meta.id))
             .is_some_and(|child| {
                 child.turn_in_flight
+                    || child.delivery_in_flight.is_some()
                     || !child.queue.is_empty()
+                    || child.background_task_count > 0
                     || matches!(child.runtime, Runtime::Starting { .. })
             });
         let state = if running {
@@ -3566,9 +3608,12 @@ impl AppState {
         // A parked session is working when a turn is in flight or its queue
         // still has messages to run (the parked timeline is stale by design, so
         // the flags are the source of truth).
-        self.background
-            .get(session_id)
-            .is_some_and(|s| s.turn_in_flight || !s.queue.is_empty())
+        self.background.get(session_id).is_some_and(|s| {
+            s.turn_in_flight
+                || s.delivery_in_flight.is_some()
+                || !s.queue.is_empty()
+                || s.background_task_count > 0
+        })
     }
 
     /// The first approval currently blocking a session, including parked and
@@ -3802,7 +3847,9 @@ impl AppState {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -3853,7 +3900,9 @@ impl AppState {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4075,7 +4124,9 @@ impl AppState {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4152,8 +4203,8 @@ impl AppState {
         // leave it right now. With a turn in flight the message simply waits
         // (Enter → QUEUE) and shows up in the composer's queue strip; nothing is
         // written to the transcript yet, so dropping it there leaves no trace.
-        // See `dispatch_next_queued`, which records the user message at the
-        // moment the message is actually sent.
+        // See `on_turn_accepted`, which records the user message only after the
+        // adapter confirms provider submission.
         active.push_queued(text, attachments);
 
         // If the user switched models — or a provider that can't switch its
@@ -4161,26 +4212,38 @@ impl AppState {
         // option changed — while the provider is live, restart it first: the
         // queued turn then flushes on the fresh process, resumed from the stored
         // cursor with the current model + options + mode.
-        if active.model_changed_while_live() {
-            log::info!(
-                "model changed to {:?} while live; restarting provider before next turn",
-                active.meta.model
-            );
-            active.shutdown_to_idle();
-        } else if active.approval_mode_changed_while_live() {
-            log::info!(
-                "approval mode changed to {:?} while live; restarting provider before next turn",
-                active.meta.approval_mode
-            );
-            active.shutdown_to_idle();
-        } else if active.options_changed_while_live() {
-            log::info!(
-                "launch-time option changed while live; restarting provider before next turn"
-            );
-            active.shutdown_to_idle();
+        let model_changed = active.model_changed_while_live();
+        let approval_changed = active.approval_mode_changed_while_live();
+        let options_changed = active.options_changed_while_live();
+        let restart_deferred = active.settings_restart_deferred();
+        if model_changed || approval_changed || options_changed {
+            if restart_deferred {
+                log::info!(
+                    "deferring provider settings restart (background tasks: {}, delivery pending: {})",
+                    active.background_task_count,
+                    active.delivery_in_flight.is_some()
+                );
+            } else {
+                if model_changed {
+                    log::info!(
+                        "model changed to {:?} while live; restarting provider before next turn",
+                        active.meta.model
+                    );
+                } else if approval_changed {
+                    log::info!(
+                        "approval mode changed to {:?} while live; restarting provider before next turn",
+                        active.meta.approval_mode
+                    );
+                } else {
+                    log::info!(
+                        "launch-time option changed while live; restarting provider before next turn"
+                    );
+                }
+                active.shutdown_to_idle();
+            }
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
-        let dispatch_failed = self.dispatch_next_queued(cx).is_err();
+        let dispatch_failed = !restart_deferred && self.dispatch_next_queued(cx).is_err();
         if should_start {
             self.ensure_started(cx);
         }
@@ -4253,28 +4316,43 @@ impl AppState {
         cx.notify();
     }
 
-    /// Dispatch the queue head when the live provider can accept a turn. The
-    /// queue contains only unsent messages: after the command channel accepts
-    /// the turn, the message is removed and recorded as a user bubble in the
-    /// same UI update. File-change attribution is a provider event stream and
-    /// never participates in this state transition.
-    fn dispatch_next_queued(&mut self, cx: &mut Context<Self>) -> Result<bool, ()> {
+    /// Submit the queue head when the live provider can accept a turn. The head
+    /// remains queued until the adapter emits its correlated `TurnAccepted`;
+    /// only that provider-boundary acknowledgement persists the user bubble.
+    fn dispatch_next_queued(&mut self, _cx: &mut Context<Self>) -> Result<bool, ()> {
         let Some(active) = self.active.as_ref() else {
             return Ok(false);
         };
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
-        let session_id = active.meta.id.clone();
-        let Some(next) = active.queue.first().cloned() else {
-            return Ok(false);
+        self.active.as_mut().ok_or(())?.dispatch_next_pending()
+    }
+
+    /// Finalize one submitted queue head. Queue-id correlation makes duplicate
+    /// acceptance events idempotent, including after a provider close.
+    fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut Context<Self>) {
+        let is_active = self.active_session_id() == Some(session_id);
+        let accepted = if is_active {
+            self.active
+                .as_mut()
+                .and_then(|active| active.accept_turn_delivery(delivery_id))
+        } else {
+            self.background
+                .get_mut(session_id)
+                .and_then(|parked| parked.accept_turn_delivery(delivery_id))
         };
-        let dispatched = self.active.as_mut().ok_or(())?.dispatch_next_pending()?;
-        if dispatched {
-            self.record_user_message(&session_id, &next.text, next.context_len, cx);
-            self.maybe_generate_title(&next.text, &next.attachments, cx);
+        let Some(message) = accepted else {
+            log::debug!(
+                "ignoring stale or duplicate turn acceptance {delivery_id} for {session_id}"
+            );
+            return;
+        };
+        self.record_user_message(session_id, &message.text, message.context_len, cx);
+        if is_active {
+            self.maybe_generate_title(&message.text, &message.attachments, cx);
         }
-        Ok(dispatched)
+        cx.notify();
     }
 
     /// A parked session finished a turn: keep working through its queue, and
@@ -4285,7 +4363,29 @@ impl AppState {
             return;
         };
         parked.turn_in_flight = false;
+        if !parked.queue.is_empty() && parked.launch_settings_changed_while_live() {
+            if parked.background_task_count > 0 {
+                log::info!(
+                    "parked session {session_id}: deferring settings restart for {} background task(s)",
+                    parked.background_task_count
+                );
+                cx.notify();
+                return;
+            }
+            parked.shutdown_to_idle();
+            self.ensure_session_started(session_id, cx);
+            cx.notify();
+            return;
+        }
         if parked.queue.is_empty() {
+            if parked.background_task_count > 0 {
+                log::info!(
+                    "retaining parked session {session_id} for {} background task(s)",
+                    parked.background_task_count
+                );
+                cx.notify();
+                return;
+            }
             if parked.meta.parent_session_id.is_some() {
                 let child_id = session_id.to_string();
                 let idle_turns = Timeline::fold_events(self.store.read_events(session_id))
@@ -4298,7 +4398,9 @@ impl AppState {
                     let _ = this.update(cx, |state, cx| {
                         let still_idle =
                             state.background.get(&child_id).is_some_and(|child| {
-                                child.queue.is_empty() && !child.turn_in_flight
+                                child.queue.is_empty()
+                                    && !child.turn_in_flight
+                                    && child.background_task_count == 0
                             }) && Timeline::fold_events(state.store.read_events(&child_id))
                                 .turns
                                 .len()
@@ -4318,14 +4420,13 @@ impl AppState {
             cx.notify();
             return;
         }
-        let next = parked.queue.first().cloned().unwrap();
         match self
             .background
             .get_mut(session_id)
             .unwrap()
             .dispatch_next_pending()
         {
-            Ok(true) => self.record_user_message(session_id, &next.text, next.context_len, cx),
+            Ok(true) => {}
             Ok(false) => {}
             Err(()) => {
                 // The process is gone; the queue (with its unsent text)
@@ -4466,15 +4567,15 @@ impl AppState {
             parent.push_or_merge_orchestrate_callback(text);
 
             // Match ordinary sends when a launch-time selection changed while
-            // the provider was live: restart before waking the orchestrator.
-            if parent.model_changed_while_live()
-                || parent.approval_mode_changed_while_live()
-                || parent.options_changed_while_live()
-            {
+            // the provider was live. Background work keeps the old process
+            // alive; its final follow-up completion performs the restart.
+            let settings_changed = parent.launch_settings_changed_while_live();
+            let restart_deferred = parent.settings_restart_deferred();
+            if settings_changed && !restart_deferred {
                 parent.shutdown_to_idle();
             }
             let should_start = matches!(parent.runtime, Runtime::Idle);
-            if self.dispatch_next_queued(cx).is_err() {
+            if !restart_deferred && self.dispatch_next_queued(cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
             if should_start {
@@ -4969,7 +5070,9 @@ impl AppState {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -5315,6 +5418,8 @@ impl AppState {
         };
         if active.meta.provider != ProviderKind::ClaudeCode
             || active.turn_in_flight
+            || active.delivery_in_flight.is_some()
+            || active.background_task_count > 0
             || active.timeline.turn_running
             || !active.queue.is_empty()
         {
@@ -5533,10 +5638,14 @@ impl AppState {
                             // (the T3 bug family this app tests against).
                             if let Some(active) = state.active.as_mut().filter(|_| matches_active) {
                                 active.runtime = Runtime::Idle;
+                                active.delivery_in_flight = None;
                                 active.turn_in_flight = false;
+                                active.background_task_count = 0;
                             } else if let Some(parked) = state.background.get_mut(&session_id) {
                                 parked.runtime = Runtime::Idle;
+                                parked.delivery_in_flight = None;
                                 parked.turn_in_flight = false;
+                                parked.background_task_count = 0;
                             }
                             state.pending_native_rewinds.remove(&session_id);
                             let error_event = AgentEvent::ProviderStartFailed {
@@ -5588,29 +5697,56 @@ impl AppState {
             return;
         }
 
+        if let AgentEvent::TurnAccepted { delivery_id } = &event {
+            self.on_turn_accepted(session_id, *delivery_id, cx);
+            return;
+        }
+
+        if let AgentEvent::BackgroundTasksChanged { count } = &event {
+            if let Some(active) = self
+                .active
+                .as_mut()
+                .filter(|active| active.meta.id == session_id)
+            {
+                active.background_task_count = *count;
+            } else if let Some(parked) = self.background.get_mut(session_id) {
+                parked.background_task_count = *count;
+            }
+            cx.notify();
+            return;
+        }
+
         if let AgentEvent::SessionClosed { reason } = &event {
             self.pending_native_rewinds.remove(session_id);
             self.sessions_awaiting_approval.remove(session_id);
             self.close_orchestrator_children(session_id);
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
-                // A parked session's process died on its own (crash, fatal
-                // error): put the close on the record — the transcript should
-                // say why the work stopped when the thread is reopened — and
-                // forget the dead runtime.
+                // A parked session's process died on its own. Record the close,
+                // but retain any unaccepted/queued text on an Idle session so
+                // reopening it can resume delivery.
                 if self.background.contains_key(session_id) {
                     self.record_event(session_id, &event, cx);
+                    let has_queued = if let Some(parked) = self.background.get_mut(session_id) {
+                        parked.runtime = Runtime::Idle;
+                        parked.delivery_in_flight = None;
+                        parked.turn_in_flight = false;
+                        parked.background_task_count = 0;
+                        parked._pump = None;
+                        !parked.queue.is_empty()
+                    } else {
+                        false
+                    };
                     let is_child = self
                         .sessions
                         .iter()
                         .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
-                    if is_child {
-                        if let Some(child) = self.background.get_mut(session_id) {
-                            child.queue.clear();
-                        }
+                    if is_child && !has_queued {
                         self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
                     }
-                    self.background.remove(session_id);
+                    if !has_queued {
+                        self.background.remove(session_id);
+                    }
                     cx.notify();
                 }
                 // Otherwise: user-requested shutdowns remove the runtime before
@@ -5628,7 +5764,9 @@ impl AppState {
             }
             if let Some(active) = self.active.as_mut() {
                 active.runtime = Runtime::Idle;
+                active.delivery_in_flight = None;
                 active.turn_in_flight = false;
+                active.background_task_count = 0;
                 active._pump = None;
             }
             self.report_error(
@@ -5716,14 +5854,27 @@ impl AppState {
                 }
             }
             AgentEvent::SessionStarted { resume, model, .. } => {
+                let mut filled_default_model = false;
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.resume_cursor = Some(resume.clone());
                     if meta.model.is_none() {
                         meta.model = model.clone();
+                        filled_default_model = model.is_some();
                     }
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
+                }
+                if filled_default_model {
+                    if let Some(active) = self
+                        .active
+                        .as_mut()
+                        .filter(|active| active.meta.id == session_id)
+                    {
+                        active.live_model = model.clone();
+                    } else if let Some(parked) = self.background.get_mut(session_id) {
+                        parked.live_model = model.clone();
+                    }
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
@@ -5820,13 +5971,33 @@ impl AppState {
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
             // The turn is over: the next queued message (if any) now goes out as
             // an ordinary turn, FIFO, one at a time.
-            let is_active = self
+            let mut restart = false;
+            let mut restart_deferred = false;
+            let is_active = if let Some(active) = self
                 .active
                 .as_mut()
                 .filter(|active| active.meta.id == session_id)
-                .map(|active| active.turn_in_flight = false)
-                .is_some();
-            if is_active && self.dispatch_next_queued(cx).is_err() {
+            {
+                active.turn_in_flight = false;
+                restart = !active.queue.is_empty() && active.launch_settings_changed_while_live();
+                restart_deferred = restart && active.background_task_count > 0;
+                if restart_deferred {
+                    log::info!(
+                        "deferring settings restart for {} background task(s)",
+                        active.background_task_count
+                    );
+                } else if restart {
+                    active.shutdown_to_idle();
+                }
+                true
+            } else {
+                false
+            };
+            if is_active && restart {
+                if !restart_deferred {
+                    self.ensure_started(cx);
+                }
+            } else if is_active && self.dispatch_next_queued(cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
             if !is_active {
@@ -6085,10 +6256,10 @@ impl AppState {
     }
 
     /// Leave the active session without killing its work: a live session with a
-    /// turn in flight or queued messages is parked in `background` (process,
-    /// pump and queue intact — see the field docs); an idle one is shut down as
-    /// before. Every "switch away" path goes through here; only destructive
-    /// paths (archive, delete) use `shutdown_active` directly.
+    /// turn in flight, queued/unaccepted messages, or provider-owned background
+    /// tasks is parked in `background` (process, pump and queue intact — see the
+    /// field docs); an idle one is shut down as before. Every "switch away" path
+    /// goes through here; only destructive paths use `shutdown_active` directly.
     fn park_active(&mut self) {
         self.persist_terminal_preferences();
         let Some(mut active) = self.active.take() else {
@@ -6096,17 +6267,22 @@ impl AppState {
         };
         self.park_conversation_ui(&mut active);
         let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
-        let has_work = active.turn_in_flight || !active.queue.is_empty() || native_rewind_pending;
+        let has_work = active.turn_in_flight
+            || active.delivery_in_flight.is_some()
+            || !active.queue.is_empty()
+            || active.background_task_count > 0
+            || native_rewind_pending;
         // Live with work, or still Starting with messages waiting (the start
         // attempt finds and adopts the parked entry when it completes) — both
         // carry state that must not die with a thread switch.
         let parkable = matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. });
         if has_work && parkable {
             log::info!(
-                "parking session {} (turn in flight: {}, queued: {})",
+                "parking session {} (turn in flight: {}, queued: {}, background tasks: {})",
                 active.meta.id,
                 active.turn_in_flight,
-                active.queue.len()
+                active.queue.len(),
+                active.background_task_count
             );
             self.background.insert(active.meta.id.clone(), active);
         } else if let Runtime::Live(commands) = active.runtime {
@@ -6706,6 +6882,7 @@ async fn generate_ai_title_inner(
     handle
         .commands
         .send(SessionCommand::SendTurn {
+            delivery_id: 0,
             text: prompt,
             options: Some(title_turn_options()),
             attachments,
@@ -7147,7 +7324,7 @@ mod tests {
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
-        let (commands, _receiver) = async_channel::unbounded();
+        let (commands, receiver) = async_channel::unbounded();
 
         state.update(cx, |state, cx| {
             // A live, idle, already-enabled orchestrator: the turn is an ordinary
@@ -7163,6 +7340,11 @@ mod tests {
             state.active = Some(active);
 
             state.orchestrate_turn("执行某某任务".into(), Vec::new(), cx);
+            let delivery_id = match receiver.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected orchestrator SendTurn, got {other:?}"),
+            };
+            state.on_event("orchestrator", AgentEvent::TurnAccepted { delivery_id }, cx);
 
             // What the provider actually receives is the whole composed text.
             let expected_full = compose_orchestrate_text(
@@ -8732,11 +8914,14 @@ mod tests {
             state.background.get_mut("parent").unwrap().runtime = Runtime::Live(commands);
             state.on_background_turn_completed("parent", cx);
 
-            assert!(matches!(
-                receiver.try_recv(),
-                Ok(SessionCommand::SendTurn { text, .. })
-                    if text.contains("result a") && text.contains("result b")
-            ));
+            let delivery_id = match receiver.try_recv() {
+                Ok(SessionCommand::SendTurn {
+                    delivery_id, text, ..
+                }) if text.contains("result a") && text.contains("result b") => delivery_id,
+                other => panic!("expected merged callback SendTurn, got {other:?}"),
+            };
+            assert_eq!(state.background["parent"].queue.len(), 1);
+            state.on_event("parent", AgentEvent::TurnAccepted { delivery_id }, cx);
             let parent = state.background.get("parent").unwrap();
             assert!(parent.queue.is_empty());
             assert!(parent.turn_in_flight);
@@ -8769,7 +8954,9 @@ mod tests {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8807,9 +8994,11 @@ mod tests {
             plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
-            queue: vec!["first".into(), "second".into()],
-            next_queue_id: 2,
+            queue: Vec::new(),
+            next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -8820,22 +9009,35 @@ mod tests {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
+        active.push_queued("first".into(), Vec::new());
+        active.push_queued("second".into(), Vec::new());
 
         assert_eq!(active.dispatch_next_pending(), Ok(true));
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { text, .. }) if text == "first"
-        ));
+        let first_delivery = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) if text == "first" => delivery_id,
+            other => panic!("expected first SendTurn, got {other:?}"),
+        };
         assert_eq!(active.dispatch_next_pending(), Ok(false));
         assert!(receiver.try_recv().is_err());
-        assert_eq!(active.queue, [QueuedMessage::from("second")]);
+        assert_eq!(active.queue.len(), 2, "unaccepted head stays queued");
+        assert_eq!(
+            active.accept_turn_delivery(first_delivery).unwrap().text,
+            "first"
+        );
+        assert_eq!(active.queue.len(), 1);
+        assert_eq!(active.queue[0].text, "second");
 
         active.turn_in_flight = false;
         assert_eq!(active.dispatch_next_pending(), Ok(true));
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { text, .. }) if text == "second"
-        ));
+        let second_delivery = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) if text == "second" => delivery_id,
+            other => panic!("expected second SendTurn, got {other:?}"),
+        };
+        active.accept_turn_delivery(second_delivery).unwrap();
         assert!(active.queue.is_empty());
     }
 
@@ -8854,7 +9056,7 @@ mod tests {
             pending_relay: None,
             runtime: Runtime::Live(commands),
             live_model: None,
-            live_approval_mode: None,
+            live_approval_mode: Some(ApprovalMode::default()),
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
@@ -8863,7 +9065,9 @@ mod tests {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -9110,10 +9314,13 @@ mod tests {
 
         active.turn_in_flight = false;
         assert_eq!(active.dispatch_next_pending(), Ok(true));
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::SendTurn { text, .. }) if text == "Ultrathink:\ndeep"
-        ));
+        let first_delivery = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) if text == "Ultrathink:\ndeep" => delivery_id,
+            other => panic!("expected Ultrathink SendTurn, got {other:?}"),
+        };
+        active.accept_turn_delivery(first_delivery).unwrap();
         active.turn_in_flight = false;
         assert_eq!(active.dispatch_next_pending(), Ok(true));
         assert!(matches!(
@@ -9132,13 +9339,17 @@ mod tests {
 
         assert_eq!(active.dispatch_next_pending(), Ok(true));
         let first = receiver.try_recv().unwrap();
-        let SessionCommand::SendTurn { text, .. } = first else {
+        let SessionCommand::SendTurn {
+            delivery_id, text, ..
+        } = first
+        else {
             panic!("expected first send turn");
         };
         assert!(text.starts_with(tcode_core::relay::RELAY_PREAMBLE));
         assert!(text.contains("<conversation-transcript>\n# prior work"));
         assert!(text.contains("<new-user-message>\ncontinue here"));
 
+        active.accept_turn_delivery(delivery_id).unwrap();
         active.turn_in_flight = false;
         assert_eq!(active.dispatch_next_pending(), Ok(true));
         assert!(matches!(
@@ -9168,7 +9379,9 @@ mod tests {
             preparing_worktree: false,
             queue: Vec::new(),
             next_queue_id: 0,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -9184,6 +9397,255 @@ mod tests {
         assert!(active.is_starting_generation(2));
         active.runtime = Runtime::Live(async_channel::unbounded().0);
         assert!(!active.is_starting_generation(2));
+    }
+
+    #[gpui::test]
+    fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cwd = std::env::temp_dir().join(format!(
+            "tcode-acked-delivery-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data = std::env::temp_dir().join(format!(
+            "tcode-acked-delivery-data-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (session, first_actor) = fake_live_session(cwd.clone());
+        let session_id = session.meta.id.clone();
+
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            // The preceding model turn has completed, but Claude still owns a
+            // background process. This is the idle-send window from the repro.
+            state.on_event(
+                &session_id,
+                AgentEvent::TurnStarted {
+                    turn_id: "background-launch".into(),
+                },
+                cx,
+            );
+            state.on_event(
+                &session_id,
+                AgentEvent::BackgroundTasksChanged { count: 1 },
+                cx,
+            );
+            state.on_event(
+                &session_id,
+                AgentEvent::TurnCompleted {
+                    turn_id: "background-launch".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+
+            state.send_turn("survive the eof race".into(), Vec::new(), cx);
+            let (delivery_id, submitted_text) = match first_actor.try_recv() {
+                Ok(SessionCommand::SendTurn {
+                    delivery_id, text, ..
+                }) => (delivery_id, text),
+                other => panic!("expected submitted SendTurn, got {other:?}"),
+            };
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.queue.len(), 1);
+            assert_eq!(active.delivery_in_flight, Some(delivery_id));
+            assert!(!state.store.read_events(&session_id).iter().any(|stored| {
+                matches!(
+                    &stored.event,
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { text, .. },
+                        ..
+                    }) if text == "survive the eof race"
+                )
+            }));
+
+            // EOF wins before the first actor writes, so no TurnAccepted exists.
+            state.on_event(
+                &session_id,
+                AgentEvent::SessionClosed {
+                    reason: Some("claude closed stdout".into()),
+                },
+                cx,
+            );
+            let active = state.active.as_ref().unwrap();
+            assert!(matches!(active.runtime, Runtime::Idle));
+            assert_eq!(active.queue.len(), 1);
+            assert_eq!(active.delivery_in_flight, None);
+
+            let (resumed_commands, resumed_actor) = async_channel::unbounded();
+            state.active.as_mut().unwrap().runtime = Runtime::Live(resumed_commands);
+            assert_eq!(state.dispatch_next_queued(cx), Ok(true));
+            let retried_delivery = match resumed_actor.try_recv() {
+                Ok(SessionCommand::SendTurn {
+                    delivery_id: retried_id,
+                    text,
+                    ..
+                }) if text == submitted_text => retried_id,
+                other => panic!("expected retried SendTurn, got {other:?}"),
+            };
+            assert_eq!(retried_delivery, delivery_id);
+
+            state.on_event(
+                &session_id,
+                AgentEvent::TurnAccepted {
+                    delivery_id: retried_delivery,
+                },
+                cx,
+            );
+            // A duplicate acceptance cannot remove or persist anything twice.
+            state.on_event(
+                &session_id,
+                AgentEvent::TurnAccepted {
+                    delivery_id: retried_delivery,
+                },
+                cx,
+            );
+            assert!(state.active.as_ref().unwrap().queue.is_empty());
+            let delivered = state
+                .store
+                .read_events(&session_id)
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            content: ItemContent::UserMessage { text, .. },
+                            ..
+                        }) if text == "survive the eof race"
+                    )
+                })
+                .count();
+            assert_eq!(delivered, 1);
+        });
+
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn inferred_startup_model_updates_live_model_without_restart(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-live-model-sync-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "model-sync".into();
+
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.on_event(
+                "model-sync",
+                AgentEvent::SessionStarted {
+                    provider_session_id: "provider-session".into(),
+                    resume: agent::ResumeCursor(serde_json::json!({
+                        "session_id": "provider-session"
+                    })),
+                    model: Some("claude-sonnet-4-6".into()),
+                },
+                cx,
+            );
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.model.as_deref(), Some("claude-sonnet-4-6"));
+            assert_eq!(active.live_model, active.meta.model);
+            assert!(!active.model_changed_while_live());
+
+            state.send_turn("first message".into(), Vec::new(), cx);
+            assert!(matches!(
+                actor.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
+            assert!(actor.try_recv().is_err(), "phantom restart sent Shutdown");
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn park_active_retains_provider_with_background_tasks() {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-background-park-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let mut state = AppState::new(store);
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "background-owner".into();
+        session.background_task_count = 1;
+        state.active = Some(session);
+
+        state.park_active();
+
+        assert!(state.active.is_none());
+        assert_eq!(
+            state.background["background-owner"].background_task_count,
+            1
+        );
+        assert!(actor.try_recv().is_err(), "parking killed background work");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn settings_restart_waits_for_background_follow_up(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-background-restart-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "background-restart".into();
+        session.live_model = Some("claude-opus-4-8".into());
+        session.meta.model = Some("claude-sonnet-4-6".into());
+        session.background_task_count = 1;
+
+        state.update(cx, |state, cx| {
+            state
+                .settings
+                .provider_mut(ProviderKind::ClaudeCode)
+                .binary_path = Some("/nonexistent/tcode-test-claude".into());
+            state.active = Some(session);
+            state.send_turn("use the new model later".into(), Vec::new(), cx);
+            assert!(actor.try_recv().is_err());
+            assert_eq!(state.active.as_ref().unwrap().queue.len(), 1);
+
+            // Claude publishes zero immediately before its self-invoked result;
+            // the restart is still deferred until that follow-up turn closes.
+            state.on_event(
+                "background-restart",
+                AgentEvent::BackgroundTasksChanged { count: 0 },
+                cx,
+            );
+            assert!(actor.try_recv().is_err());
+            state.on_event(
+                "background-restart",
+                AgentEvent::TurnStarted {
+                    turn_id: "task-follow-up".into(),
+                },
+                cx,
+            );
+            state.on_event(
+                "background-restart",
+                AgentEvent::TurnCompleted {
+                    turn_id: "task-follow-up".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+            assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
+            assert_eq!(state.active.as_ref().unwrap().queue.len(), 1);
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -9214,7 +9676,9 @@ mod tests {
             preparing_worktree: false,
             queue: vec!["do it".into()],
             next_queue_id: 1,
+            delivery_in_flight: None,
             turn_in_flight: false,
+            background_task_count: 0,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -9369,17 +9833,24 @@ mod tests {
                 .provider_mut(ProviderKind::ClaudeCode)
                 .binary_path = Some("/nonexistent/tcode-test-claude".into());
 
-            // Send → the provider command and user bubble are committed in the
-            // same dispatch, with no filesystem snapshot barrier in between.
+            // Send → the provider command is queued, then the adapter's
+            // acceptance commits the user bubble.
             state.active = Some(session);
             state.send_turn("first message".into(), Vec::new(), cx);
+            let id_a = state.active.as_ref().unwrap().meta.id.clone();
+            let first_delivery = match commands_a.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected first SendTurn, got {other:?}"),
+            };
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnAccepted {
+                    delivery_id: first_delivery,
+                },
+                cx,
+            );
             assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
                 |entry| matches!(&entry.content, EntryContent::User { text, .. } if text == "first message")
-            ));
-            let id_a = state.active.as_ref().unwrap().meta.id.clone();
-            assert!(matches!(
-                commands_a.try_recv(),
-                Ok(SessionCommand::SendTurn { .. })
             ));
 
             state.on_event(
@@ -9429,10 +9900,17 @@ mod tests {
             // Provider comes up (simulated — the queue flush on start).
             state.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
             assert_eq!(state.dispatch_next_queued(cx), Ok(true));
-            assert!(matches!(
-                receiver_b.try_recv(),
-                Ok(SessionCommand::SendTurn { .. })
-            ));
+            let second_delivery = match receiver_b.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected second SendTurn, got {other:?}"),
+            };
+            state.on_event(
+                &id_b,
+                AgentEvent::TurnAccepted {
+                    delivery_id: second_delivery,
+                },
+                cx,
+            );
 
             // THE assertion: the new thread's first message is a visible user
             // entry in a rendered turn, and session A's error did not leak in.
@@ -9503,6 +9981,17 @@ mod tests {
             state.active = Some(session);
             state.send_turn("run the long migration".into(), Vec::new(), cx);
             state.send_turn("queued follow-up".into(), Vec::new(), cx);
+            let first_delivery = match commands_a.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected migration SendTurn, got {other:?}"),
+            };
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnAccepted {
+                    delivery_id: first_delivery,
+                },
+                cx,
+            );
             state.on_event(
                 &id_a,
                 AgentEvent::TurnStarted {
@@ -9510,10 +9999,6 @@ mod tests {
                 },
                 cx,
             );
-            assert!(matches!(
-                commands_a.try_recv(),
-                Ok(SessionCommand::SendTurn { .. })
-            ));
 
             // Glance at another thread: the session must survive, not die.
             state.start_draft("proj-t3".into(), cwd.clone(), cx);
@@ -9551,10 +10036,17 @@ mod tests {
                 },
                 cx,
             );
-            assert!(matches!(
-                commands_a.try_recv(),
-                Ok(SessionCommand::SendTurn { .. })
-            ));
+            let follow_up_delivery = match commands_a.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected follow-up SendTurn, got {other:?}"),
+            };
+            state.on_event(
+                &id_a,
+                AgentEvent::TurnAccepted {
+                    delivery_id: follow_up_delivery,
+                },
+                cx,
+            );
             assert!(state.turn_running_for(&id_a));
 
             // Coming back re-adopts the live session: everything that happened
@@ -9612,10 +10104,11 @@ mod tests {
             state.sessions = state.store.load_index();
             state.active = Some(session);
             state.send_turn("one last thing".into(), Vec::new(), cx);
-            assert!(matches!(
-                commands.try_recv(),
-                Ok(SessionCommand::SendTurn { .. })
-            ));
+            let delivery_id = match commands.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected final SendTurn, got {other:?}"),
+            };
+            state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
 
             state.start_draft("proj".into(), cwd.clone(), cx);
             assert!(state.turn_running_for(&id));

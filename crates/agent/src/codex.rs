@@ -1097,12 +1097,15 @@ impl Actor {
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
         match command {
             SessionCommand::SendTurn {
+                delivery_id,
                 text,
                 options,
                 attachments,
             } => {
                 let params = self.build_turn_params(&text, options.as_ref(), &attachments);
-                self.request("turn/start", params, PendingRequest::TurnStart)
+                self.request("turn/start", params, PendingRequest::TurnStart)?;
+                self.emit(AgentEvent::TurnAccepted { delivery_id }).await;
+                Ok(())
             }
             SessionCommand::SetInteractionMode(mode) => {
                 // Turn-scoped in the protocol: store it; it applies on the next

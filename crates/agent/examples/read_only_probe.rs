@@ -80,6 +80,7 @@ async fn run(provider: ProviderKind) -> i32 {
     handle
         .commands
         .send(SessionCommand::SendTurn {
+            delivery_id: 0,
             text: format!(
                 "Read the file `{}` using a native file-read tool if one is available, then report its first line. Do not use a shell command and do not modify anything.",
                 readable.display()
@@ -95,6 +96,7 @@ async fn run(provider: ProviderKind) -> i32 {
     handle
         .commands
         .send(SessionCommand::SendTurn {
+            delivery_id: 1,
             text: format!(
                 "Create the file `{}` containing exactly `blocked`. Use a shell command or file-writing tool now; do not merely describe how.",
                 marker.display()
