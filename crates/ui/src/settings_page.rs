@@ -294,12 +294,13 @@ impl SettingsPage {
                 .aria_selected(active)
                 .child(
                     gpui_component::h_flex()
-                        .h(px(34.))
+                        // Match the main sidebar thread rows: 30px tall, 13px
+                        // label, a tight 6px rounded rect tinted when active and
+                        // a neutral hover only when not.
+                        .h(px(30.))
                         .items_center()
                         .gap_2()
                         .px_2()
-                        // Match the main sidebar: 6px rounded rect, tinted when
-                        // active, neutral hover only when not.
                         .rounded(px(6.))
                         .cursor_pointer()
                         .when(active, |s| s.bg(cx.theme().list_active))
@@ -307,7 +308,7 @@ impl SettingsPage {
                         .child(Icon::new(icon).size_4().text_color(fg))
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(13.))
                                 .when(active, |d| d.font_medium())
                                 .text_color(fg)
                                 .child(label.clone()),
@@ -343,13 +344,9 @@ impl SettingsPage {
                     window,
                     cx,
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_bold()
-                        .text_color(cx.theme().sidebar_foreground)
-                        .child("tcode"),
-                ),
+                // Same brand chrome as the main sidebar's app row (DEV pill
+                // included) so the settings nav reads as the same family.
+                .child(crate::material::brand_wordmark(cx)),
             )
             .child(
                 v_flex()
@@ -446,32 +443,44 @@ impl SettingsPage {
     // -- content ------------------------------------------------------------
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The 52px strip spans the paper full-width (drag area), but its title
+        // and actions ride the same centered 768px column as the content below,
+        // the way the chat header aligns with its timeline column.
         window_drag_area(
             "settings-header-drag",
             gpui_component::h_flex()
                 .flex_none()
                 .h(px(52.))
+                .w_full()
                 .px_6()
+                .justify_center()
                 .items_center(),
             window,
             cx,
         )
         .child(
-            div()
-                .flex_1()
-                .text_size(px(15.))
-                .font_medium()
-                .child(tcode_i18n::tr!("settings.title")),
-        )
-        .child(
-            Button::new("restore-defaults")
-                .outline()
-                .small()
-                .icon(IconName::Undo)
-                .label(tcode_i18n::tr!("settings.restore"))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.confirm_restore(window, cx);
-                })),
+            gpui_component::h_flex()
+                .w(px(CONTENT_MAX_WIDTH))
+                .max_w_full()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(15.))
+                        .font_medium()
+                        .child(tcode_i18n::tr!("settings.title")),
+                )
+                .child(
+                    Button::new("restore-defaults")
+                        .outline()
+                        .small()
+                        .icon(IconName::Undo)
+                        .label(tcode_i18n::tr!("settings.restore"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.confirm_restore(window, cx);
+                        })),
+                ),
         )
         .into_any_element()
     }
@@ -548,18 +557,15 @@ impl SettingsPage {
 
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.app_state.read(cx).settings.clone();
-        let rows = vec![
+        // One mega-group on empty paper reads generic. Split the rows into three
+        // semantic groups (System-Settings rhythm): 20-24px between groups, each
+        // under an 11px caption.
+        let appearance = vec![
             self.language_row(settings.language.as_deref(), cx),
             self.theme_row(settings.theme_mode, cx),
+        ];
+        let conversation = vec![
             self.title_generation_row(cx),
-            self.toggle_row(
-                "word-wrap",
-                tcode_i18n::tr!("settings.word_wrap.title"),
-                tcode_i18n::tr!("settings.word_wrap.description"),
-                settings.word_wrap_diffs,
-                cx,
-                |s, checked| s.word_wrap_diffs = checked,
-            ),
             self.toggle_row(
                 "delete-confirm",
                 tcode_i18n::tr!("settings.delete_confirmation.title"),
@@ -576,6 +582,16 @@ impl SettingsPage {
                 cx,
                 |s, checked| s.auto_open_task_panel = checked,
             ),
+        ];
+        let workspace = vec![
+            self.toggle_row(
+                "word-wrap",
+                tcode_i18n::tr!("settings.word_wrap.title"),
+                tcode_i18n::tr!("settings.word_wrap.description"),
+                settings.word_wrap_diffs,
+                cx,
+                |s, checked| s.word_wrap_diffs = checked,
+            ),
             self.toggle_row(
                 "provider-update-checks",
                 tcode_i18n::tr!("settings.provider_updates.title"),
@@ -587,8 +603,22 @@ impl SettingsPage {
             ),
         ];
         v_flex()
-            .child(self.section_label(tcode_i18n::tr!("settings.general_section"), cx))
-            .child(self.grouped(rows, cx))
+            .gap(px(24.))
+            .child(
+                v_flex()
+                    .child(self.section_label(tcode_i18n::tr!("settings.appearance_section"), cx))
+                    .child(self.grouped(appearance, cx)),
+            )
+            .child(
+                v_flex()
+                    .child(self.section_label(tcode_i18n::tr!("settings.conversation_section"), cx))
+                    .child(self.grouped(conversation, cx)),
+            )
+            .child(
+                v_flex()
+                    .child(self.section_label(tcode_i18n::tr!("settings.workspace_section"), cx))
+                    .child(self.grouped(workspace, cx)),
+            )
     }
 
     fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1100,21 +1130,12 @@ impl SettingsPage {
             )
         } else {
             (
-                cx.theme().warning.opacity(0.15),
+                cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
                 tcode_i18n::tr!("permissions.missing"),
             )
         };
-        div()
-            .flex_none()
-            .px_2()
-            .py_0p5()
-            .rounded_full()
-            .bg(bg)
-            .text_size(px(11.))
-            .text_color(fg)
-            .child(label)
-            .into_any_element()
+        crate::material::semantic_chip(label, bg, fg).into_any_element()
     }
 
     fn restart_banner(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1330,7 +1351,11 @@ impl SettingsPage {
         label: impl Into<SharedString>,
         cx: &Context<Self>,
     ) -> Button {
-        Button::new(id).outline().compact().child(
+        // Ghost, not outline: transparent at rest (value + muted chevron) with a
+        // light tint only on hover — the same quiet trigger the composer's model
+        // picker uses. An outlined trigger reads as a card nested inside the
+        // already-bordered group.
+        Button::new(id).ghost().compact().child(
             gpui_component::h_flex()
                 .w(px(160.))
                 .items_center()

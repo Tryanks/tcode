@@ -12,7 +12,7 @@ use gpui::{
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_component::ActiveTheme as _;
+use gpui_component::{ActiveTheme as _, StyledExt as _};
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -107,6 +107,53 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
         .border_1()
         .border_color(cx.theme().border)
         .shadow_xl()
+}
+
+/// The sidebar brand wordmark — bold "tcode" + the "DEV" channel pill. The main
+/// sidebar's app row (`sidebar.rs`) and the settings left-nav header are
+/// round-trip counterparts, so this shares the exact chrome without either side
+/// reimplementing it. Neutral helper: sidebar.rs keeps its own inline copy, this
+/// only lets the settings nav wear the same treatment.
+pub fn brand_wordmark(cx: &App) -> impl IntoElement {
+    gpui_component::h_flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(14.))
+                .font_bold()
+                .text_color(cx.theme().sidebar_foreground)
+                .child("tcode"),
+        )
+        .child(
+            div()
+                .px_1()
+                .py(px(1.))
+                .rounded_sm()
+                .bg(cx.theme().muted)
+                .text_color(cx.theme().muted_foreground)
+                .text_size(px(9.))
+                .font_semibold()
+                .child("DEV"),
+        )
+}
+
+/// A compact metadata chip in chat's idiom (the plan/subagent badges in
+/// `chat.rs`): pill radius, 11px medium text, a tinted fill and same-hue
+/// foreground. Callers pass the semantic 12%-tint background and its foreground.
+/// It hugs its content (`flex_none`) so it never stretches into a full-width
+/// validation bar.
+pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
+    div()
+        .flex_none()
+        .px_2()
+        .py(px(1.))
+        .rounded_full()
+        .bg(bg)
+        .text_size(px(11.))
+        .font_medium()
+        .text_color(fg)
+        .child(label.into())
 }
 
 /// Gives a raw clickable surface the same keyboard and accessibility treatment

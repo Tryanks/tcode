@@ -145,6 +145,9 @@ settings:
   restore_description: "将语言、主题、对话命名模型、diff、提供商和 Orchestrate 设置恢复为默认值。项目和对话不会受到影响。"
   cancel: "取消"
   general_section: "通用"
+  appearance_section: "外观"
+  conversation_section: "对话"
+  workspace_section: "工作区"
   providers_section: "提供商"
   orchestrate_section: "ORCHESTRATE"
   language:
