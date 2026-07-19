@@ -36,6 +36,7 @@ use super::{
 const CODE_CACHE_CAPACITY: usize = 64;
 const BLOCK_OVERDRAW: Pixels = px(300.);
 const SCROLL_GESTURE_TIMEOUT: Duration = Duration::from_millis(250);
+const TABLE_BORDER_PX: f32 = 1.;
 type HighlightRuns = Vec<(Range<usize>, HighlightStyle)>;
 type SharedHighlightRuns = Arc<HighlightRuns>;
 type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
@@ -1016,6 +1017,15 @@ fn render_table(
     render_scroll_table(table, column_count, options, view, style, window, cx)
 }
 
+fn table_track_width(column_widths: &[f32]) -> f32 {
+    // Column widths cover text and horizontal cell padding. GPUI lays each
+    // vertical separator outside that flex basis, while the track's border-box
+    // consumes its two outer borders. Include both so the tracked child bounds
+    // contain every painted cell: N - 1 separators plus 2 outer borders.
+    column_widths.iter().sum::<f32>()
+        + TABLE_BORDER_PX * (column_widths.len().saturating_sub(1).saturating_add(2) as f32)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_scroll_table(
     table: &Table,
@@ -1074,7 +1084,7 @@ fn render_scroll_table(
             *slot = slot.max(f32::from(width) + CELL_PAD_PX);
         }
     }
-    let total_width = widths.iter().sum::<f32>();
+    let total_width = table_track_width(&widths);
     let row_count = table.children.len();
     let rows = table
         .children
@@ -1095,7 +1105,7 @@ fn render_scroll_table(
                 })
                 .children(row.children.iter().enumerate().map(|(ix, cell)| {
                     let align = table.column_align(ix);
-                    div()
+                    let rendered_cell = div()
                         .id(("table-cell", ix))
                         .flex_basis(px(widths.get(ix).copied().unwrap_or(CELL_MIN_PX)))
                         .flex_grow(widths.get(ix).copied().unwrap_or(CELL_MIN_PX))
@@ -1120,7 +1130,11 @@ fn render_scroll_table(
                             view,
                             style,
                             cx,
-                        ))
+                        ));
+                    #[cfg(test)]
+                    let rendered_cell = rendered_cell
+                        .debug_selector(move || format!("markdown-table-cell-{row_ix}-{ix}"));
+                    rendered_cell
                 }))
         })
         .collect::<Vec<_>>();
@@ -1228,6 +1242,12 @@ mod tests {
         assert_eq!(code_lines("a\n\n"), ["a", ""]);
         // Empty code renders zero lines rather than one phantom.
         assert_eq!(code_lines(""), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn table_track_width_includes_cell_and_outer_borders() {
+        assert_eq!(table_track_width(&[48., 72., 96.]), 220.);
+        assert_eq!(table_track_width(&[]), 2.);
     }
 
     #[test]
