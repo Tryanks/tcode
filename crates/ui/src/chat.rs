@@ -1225,8 +1225,11 @@ impl ChatView {
                 let pending = steering == Some(SteeringStatus::Pending);
                 div()
                     // Ceil past sub-pixel snapping plus 1px slack — an exact
-                    // fractional fit can still wrap the final glyph.
-                    .w((text_width + px(32.)).ceil() + px(1.))
+                    // fractional fit can still wrap the final glyph. The extra
+                    // 2px always reserves the pending state's border (sizes are
+                    // border-box), so the width holds steady across steering
+                    // states and the last glyph never wraps while pending.
+                    .w((text_width + px(32.)).ceil() + px(3.))
                     .flex_none()
                     .max_w_3_4()
                     .px_4()
