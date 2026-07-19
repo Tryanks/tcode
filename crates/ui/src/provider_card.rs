@@ -464,14 +464,17 @@ impl ProviderCard {
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
         let provider = self.provider;
-        // Name + enabled come from this profile's card; the status/version/probe
-        // is shared across all profiles of the kind (same CLI).
+        // Name, enabled state, and probe result all belong to this profile;
+        // update-check versions remain shared by protocol kind.
         let name = state.profile_display_name(&self.profile_id);
         let enabled = state.profile_settings(&self.profile_id).enabled;
-        let summary =
-            crate::provider_status::summarize(provider, state.provider_snapshot(provider), enabled);
+        let summary = crate::provider_status::summarize(
+            provider,
+            state.profile_snapshot(&self.profile_id),
+            enabled,
+        );
         let version = state
-            .provider_snapshot(provider)
+            .profile_snapshot(&self.profile_id)
             .and_then(|s| s.version.clone())
             .or_else(|| {
                 state
