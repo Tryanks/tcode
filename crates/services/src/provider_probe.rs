@@ -49,6 +49,12 @@ pub async fn run_capture_env(
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !text.is_empty() {
+        return Some(text);
+    }
+    // Some CLIs (pi among them) print `--version` output to stderr; a clean
+    // exit with empty stdout is still a successful run.
+    let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 

@@ -1224,7 +1224,9 @@ impl ChatView {
             .child({
                 let pending = steering == Some(SteeringStatus::Pending);
                 div()
-                    .w(text_width + px(32.))
+                    // Ceil past sub-pixel snapping plus 1px slack — an exact
+                    // fractional fit can still wrap the final glyph.
+                    .w((text_width + px(32.)).ceil() + px(1.))
                     .flex_none()
                     .max_w_3_4()
                     .px_4()
