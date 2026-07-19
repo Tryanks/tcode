@@ -10,7 +10,7 @@
 //! [`AgentEvent`] stream and the [`SessionCommand`] channel are the only things
 //! that cross the thread boundary — exactly like `claude.rs` / `codex.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
 use async_channel::{Receiver, Sender};
-use futures_lite::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, StreamExt as _, future};
+use futures_lite::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, StreamExt as _, future,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -208,6 +210,82 @@ impl<R: AsyncRead + Unpin> AsyncRead for ObservedReader<R> {
     }
 }
 
+/// Reports a turn only after the SDK has written its complete JSON-RPC prompt
+/// line to the child. `ConnectionTo::send_request` merely queues internally and
+/// does not expose a synchronous enqueue failure, so it is not a delivery
+/// boundary on its own.
+struct ObservedWriter<W> {
+    inner: W,
+    line: Vec<u8>,
+    pending_deliveries: Arc<Mutex<VecDeque<u64>>>,
+    events: Sender<AgentEvent>,
+}
+
+impl<W> ObservedWriter<W> {
+    fn new(
+        inner: W,
+        pending_deliveries: Arc<Mutex<VecDeque<u64>>>,
+        events: Sender<AgentEvent>,
+    ) -> Self {
+        Self {
+            inner,
+            line: Vec::new(),
+            pending_deliveries,
+            events,
+        }
+    }
+
+    fn finish_line(&mut self) {
+        let is_prompt = serde_json::from_slice::<Value>(&self.line)
+            .ok()
+            .and_then(|message| {
+                message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|method| method == "session/prompt");
+        self.line.clear();
+        if !is_prompt {
+            return;
+        }
+        if let Some(delivery_id) = self.pending_deliveries.lock().unwrap().pop_front() {
+            let _ = self
+                .events
+                .try_send(AgentEvent::TurnAccepted { delivery_id });
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for ObservedWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let written = match Pin::new(&mut self.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(written)) => written,
+            other => return other,
+        };
+        for byte in &buf[..written] {
+            if *byte == b'\n' {
+                self.finish_line();
+            } else {
+                self.line.push(*byte);
+            }
+        }
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Actor
 // ---------------------------------------------------------------------------
@@ -267,7 +345,11 @@ async fn run_actor(
         cwd: opts.cwd.clone(),
     };
     let (io_done_tx, io_done) = async_channel::bounded::<String>(1);
-    let transport = sdk::ByteStreams::new(stdin, ObservedReader::new(stdout, io_done_tx));
+    let pending_deliveries = Arc::new(Mutex::new(VecDeque::new()));
+    let transport = sdk::ByteStreams::new(
+        ObservedWriter::new(stdin, pending_deliveries.clone(), events.clone()),
+        ObservedReader::new(stdout, io_done_tx),
+    );
     let session_started = Arc::new(AtomicBool::new(false));
     let connection_result = sdk::Client
         .builder()
@@ -406,6 +488,7 @@ async fn run_actor(
                     &stderr_tail,
                     &io_done,
                     &session_started,
+                    &pending_deliveries,
                 )
                 .await
             }
@@ -462,6 +545,7 @@ async fn connected_actor(
     stderr_tail: &Arc<Mutex<Vec<String>>>,
     io_done: &Receiver<String>,
     session_started: &AtomicBool,
+    pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
 ) -> Result<Option<String>, acp::Error> {
     enum Startup {
         Handshake(Result<Session, AgentError>),
@@ -561,6 +645,7 @@ async fn connected_actor(
                     &turn_tx,
                     &mut turn_id,
                     &mut turn_seq,
+                    pending_deliveries,
                 )
                 .await;
             }
@@ -959,6 +1044,7 @@ async fn handle_command(
     turn_tx: &Sender<TurnOutcome>,
     turn_id: &mut Option<String>,
     turn_seq: &mut u64,
+    pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
 ) {
     match command {
         // ACP has no steering method at all (`session/prompt` is one request per
@@ -976,7 +1062,10 @@ async fn handle_command(
                 .await;
         }
         SessionCommand::SendTurn {
-            text, attachments, ..
+            delivery_id,
+            text,
+            attachments,
+            ..
         } => {
             if turn_id.is_some() {
                 // ACP has no steering: one `session/prompt` per turn. The app
@@ -993,21 +1082,24 @@ async fn handle_command(
             let id = format!("turn-{turn_seq}");
             *turn_id = Some(id.clone());
             state.lock().unwrap().turn = Some(id.clone());
-            let _ = events
-                .send(AgentEvent::TurnStarted {
-                    turn_id: id.clone(),
-                })
-                .await;
 
             let request = acp::PromptRequest::new(
                 session.session_id.clone(),
                 prompt_blocks(&text, &attachments),
             );
-            let connection = connection.clone();
+            // The observed stdio writer consumes this id when the complete
+            // `session/prompt` JSON-RPC line reaches the child.
+            pending_deliveries.lock().unwrap().push_back(delivery_id);
+            let request = connection.send_request(request);
+            let _ = events
+                .send(AgentEvent::TurnStarted {
+                    turn_id: id.clone(),
+                })
+                .await;
             let turn_tx = turn_tx.clone();
             executor
                 .spawn(async move {
-                    let result = connection.send_request(request).block_task().await;
+                    let result = request.block_task().await;
                     let _ = turn_tx
                         .send(TurnOutcome {
                             turn_id: id,
@@ -2435,6 +2527,41 @@ mod tests {
 
     fn update(json: Value) -> acp::SessionUpdate {
         serde_json::from_value(json).expect("valid session/update payload")
+    }
+
+    #[test]
+    fn prompt_acceptance_follows_the_complete_stdio_write() {
+        smol::block_on(async {
+            use futures_lite::AsyncWriteExt as _;
+
+            let pending = Arc::new(Mutex::new(VecDeque::from([41])));
+            let (events, received) = async_channel::unbounded();
+            let inner = futures_lite::io::Cursor::new(Vec::new());
+            let mut writer = ObservedWriter::new(inner, pending.clone(), events);
+
+            writer
+                .write_all(
+                    br#"{"jsonrpc":"2.0","method":"initialize"}
+"#,
+                )
+                .await
+                .unwrap();
+            writer
+                .write_all(br#"{"jsonrpc":"2.0","method":"session/prompt"}"#)
+                .await
+                .unwrap();
+            assert!(
+                received.try_recv().is_err(),
+                "an incomplete line must not ack"
+            );
+
+            writer.write_all(b"\n").await.unwrap();
+            assert!(matches!(
+                received.recv().await.unwrap(),
+                AgentEvent::TurnAccepted { delivery_id: 41 }
+            ));
+            assert!(pending.lock().unwrap().is_empty());
+        });
     }
 
     #[test]

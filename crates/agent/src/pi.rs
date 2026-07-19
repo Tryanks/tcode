@@ -579,7 +579,10 @@ impl PiActor {
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
         match command {
             SessionCommand::SendTurn {
-                text, attachments, ..
+                delivery_id,
+                text,
+                attachments,
+                ..
             } => {
                 let id = self.request_id();
                 let mut request = json!({"id":id,"type":"prompt","message":text});
@@ -587,7 +590,9 @@ impl PiActor {
                     request["streamingBehavior"] = json!("followUp");
                 }
                 attach_images(&mut request, attachments);
-                send_json(&mut self.stdin, &request).map_err(|err| err.to_string())
+                send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+                self.emit(AgentEvent::TurnAccepted { delivery_id }).await;
+                Ok(())
             }
             SessionCommand::Steer {
                 request_id,

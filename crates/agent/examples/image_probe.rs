@@ -139,6 +139,7 @@ fn main() {
         handle
             .commands
             .send(SessionCommand::SendTurn {
+                delivery_id: 0,
                 text: prompt,
                 options: None,
                 attachments: vec![attachment],

@@ -533,6 +533,9 @@ pub enum AgentError {
 #[derive(Debug, Clone)]
 pub enum SessionCommand {
     SendTurn {
+        /// Runtime queue id echoed by [`AgentEvent::TurnAccepted`] after the
+        /// adapter has crossed its provider-specific submission boundary.
+        delivery_id: u64,
         text: String,
         /// Per-turn overrides (Codex/OpenCode apply effort per turn; Claude/pi
         /// use session options). `None` = use the persisted options.
@@ -648,6 +651,18 @@ pub enum AgentEvent {
     },
     TurnStarted {
         turn_id: String,
+    },
+    /// Transient delivery acknowledgement for [`SessionCommand::SendTurn`].
+    /// The runtime consumes this before persistence: it is control-plane state,
+    /// not part of the canonical conversation history.
+    TurnAccepted {
+        delivery_id: u64,
+    },
+    /// Claude-owned background work which must keep its provider process alive
+    /// after the model turn itself has completed. Other adapters currently do
+    /// not emit this transient liveness signal.
+    BackgroundTasksChanged {
+        count: usize,
     },
     /// The provider's current net file changes for one turn. Unlike the
     /// per-tool [`ItemContent::FileChange`] stream, this is a replacement

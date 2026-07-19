@@ -82,6 +82,7 @@ async fn run(prompt: String, cwd: PathBuf, binary_path: Option<PathBuf>) -> i32 
     if handle
         .commands
         .send(SessionCommand::SendTurn {
+            delivery_id: 0,
             text: prompt,
             options: None,
             attachments: Vec::new(),

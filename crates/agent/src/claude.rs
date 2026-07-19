@@ -396,11 +396,10 @@ async fn actor_loop(
 
         match sel {
             Sel::Cmd(Some(command)) => {
-                if handle_command(command, &mut mapper, &mut stdin, &event_tx, &mut child)
-                    .await
-                    .is_break()
+                if let Flow::Break(reason) =
+                    handle_command(command, &mut mapper, &mut stdin, &event_tx, &mut child).await
                 {
-                    break Some("shutdown requested".into());
+                    break Some(reason.into());
                 }
             }
             Sel::Cmd(None) => {
@@ -585,13 +584,7 @@ async fn run_subagent_tail(
 /// Whether the actor loop should stop.
 enum Flow {
     Continue,
-    Break,
-}
-
-impl Flow {
-    fn is_break(&self) -> bool {
-        matches!(self, Flow::Break)
-    }
+    Break(&'static str),
 }
 
 async fn handle_command(
@@ -603,6 +596,7 @@ async fn handle_command(
 ) -> Flow {
     match command {
         SessionCommand::SendTurn {
+            delivery_id,
             text,
             options,
             attachments,
@@ -619,16 +613,18 @@ async fn handle_command(
             };
             if desired != mapper.applied_permission_mode {
                 let req = mapper.set_permission_mode_request_str(desired);
-                let _ = write_line(stdin, &req).await;
+                if write_line(stdin, &req).await.is_err() {
+                    let _ = event_tx
+                        .send(AgentEvent::Error {
+                            message: "failed to write turn mode to provider stdin".into(),
+                            fatal: true,
+                        })
+                        .await;
+                    return Flow::Break("provider stdin write failed");
+                }
                 mapper.applied_permission_mode = desired.to_string();
             }
 
-            let turn_id = mapper.start_turn();
-            let _ = event_tx
-                .send(AgentEvent::TurnStarted {
-                    turn_id: turn_id.clone(),
-                })
-                .await;
             // `ultrathink` is a prompt-prefix mode, not a `--effort` value.
             let text = if mapper.ultrathink {
                 format!("Ultrathink:\n{text}")
@@ -636,14 +632,20 @@ async fn handle_command(
                 text
             };
             let msg = user_message(&text, &attachments);
-            if write_line(stdin, &msg).await.is_err() {
+            if write_turn_message(stdin, &msg, delivery_id, event_tx)
+                .await
+                .is_err()
+            {
                 let _ = event_tx
                     .send(AgentEvent::Error {
                         message: "failed to write turn to provider stdin".into(),
                         fatal: true,
                     })
                     .await;
+                return Flow::Break("provider stdin write failed");
             }
+            let turn_id = mapper.start_turn();
+            let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
             Flow::Continue
         }
         SessionCommand::SetInteractionMode(mode) => {
@@ -783,9 +785,24 @@ async fn handle_command(
             }
             let _ = stdin.close().await;
             let _ = child.kill();
-            Flow::Break
+            Flow::Break("shutdown requested")
         }
     }
+}
+
+async fn write_turn_message<W: AsyncWrite + Unpin>(
+    stdin: &mut W,
+    message: &Value,
+    delivery_id: u64,
+    event_tx: &async_channel::Sender<AgentEvent>,
+) -> std::io::Result<()> {
+    write_line(stdin, message).await?;
+    // The complete newline-delimited prompt is now flushed. Emit acceptance
+    // before returning to the actor loop, where stdout EOF can win the race.
+    let _ = event_tx
+        .send(AgentEvent::TurnAccepted { delivery_id })
+        .await;
+    Ok(())
 }
 
 async fn write_steering_message<W: AsyncWrite + Unpin>(
@@ -959,6 +976,10 @@ pub(crate) struct Mapper {
     pending_steers: VecDeque<String>,
     /// Once the CLI exposes request checkpoints, never use the legacy fallback.
     saw_requesting: bool,
+    /// Background Bash tasks still owned by this Claude process. When the list
+    /// becomes empty Claude immediately re-invokes itself with the completion
+    /// notification, so zero is not published until that follow-up result.
+    background_tasks: HashSet<String>,
     /// Bash tasks which were observed in `background_tasks_changed`, retained
     /// until their final notification so the command card can be completed.
     background_task_history: HashSet<String>,
@@ -994,6 +1015,7 @@ impl Mapper {
             cumulative_processed: 0,
             pending_steers: VecDeque::new(),
             saw_requesting: false,
+            background_tasks: HashSet::new(),
             background_task_history: HashSet::new(),
             pending_rewinds: HashMap::new(),
             native_rewind: false,
@@ -1383,8 +1405,20 @@ impl Mapper {
             .filter_map(|task| task.get("task_id").and_then(Value::as_str))
             .map(str::to_owned)
             .collect::<HashSet<_>>();
-        self.background_task_history.extend(current);
-        Vec::new()
+        self.background_task_history.extend(current.iter().cloned());
+        let had_background_tasks = !self.background_tasks.is_empty();
+        self.background_tasks = current;
+        if self.background_tasks.is_empty() && had_background_tasks {
+            // Recorded Claude traces put `background_tasks_changed []` before
+            // task_notification and the provider's self-invoked follow-up turn.
+            // Keep the last non-zero liveness until that turn's result so the
+            // runtime cannot park/restart the process in this handoff window.
+            Vec::new()
+        } else {
+            vec![AgentEvent::BackgroundTasksChanged {
+                count: self.background_tasks.len(),
+            }]
+        }
     }
 
     fn on_task_updated(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1426,6 +1460,9 @@ impl Mapper {
         let is_background_bash = task_id
             .as_ref()
             .is_some_and(|id| self.background_task_history.remove(id));
+        if let Some(task_id) = &task_id {
+            self.background_tasks.remove(task_id);
+        }
         if let Some(path) = msg.get("output_file").and_then(Value::as_str) {
             self.tail_requests.push(TailRequest::PreferPath {
                 parent_id: tool_use_id.clone(),
@@ -2167,6 +2204,15 @@ impl Mapper {
             events.push(AgentEvent::Error {
                 message: format!("claude turn failed ({subtype}): {detail}"),
                 fatal: false,
+            });
+        }
+        if msg.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification") {
+            // Publish the final liveness transition immediately before the
+            // follow-up TurnCompleted. A parked runtime then observes zero and
+            // finishes parking/restart decisions only after all completion
+            // output has landed.
+            events.push(AgentEvent::BackgroundTasksChanged {
+                count: self.background_tasks.len(),
             });
         }
         events.push(AgentEvent::TurnCompleted {
@@ -3485,13 +3531,14 @@ mod tests {
             })
         ));
 
-        assert!(
+        assert!(matches!(
             feed(
                 &mut m,
                 r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"sleep"}]}"#,
             )
-            .is_empty()
-        );
+            .as_slice(),
+            [AgentEvent::BackgroundTasksChanged { count: 1 }]
+        ));
         assert!(
             feed(
                 &mut m,
@@ -3671,6 +3718,10 @@ mod tests {
         );
         assert!(matches!(
             &second_result[0],
+            AgentEvent::BackgroundTasksChanged { count: 0 }
+        ));
+        assert!(matches!(
+            &second_result[1],
             AgentEvent::TurnCompleted {
                 turn_id,
                 status: TurnStatus::Completed,
@@ -4302,7 +4353,7 @@ mod tests {
     }
 
     #[test]
-    fn steer_write_success_queues_acceptance_and_failures_remain_fatal() {
+    fn turn_acceptance_requires_a_flushed_write_and_steer_failures_remain_fatal() {
         smol::block_on(async {
             use std::io;
             use std::pin::Pin;
@@ -4346,6 +4397,30 @@ mod tests {
                     Poll::Ready(Ok(()))
                 }
             }
+
+            let message = user_message("deliver", &[]);
+            let (event_tx, event_rx) = async_channel::unbounded();
+            let mut writer = DeterministicWriter::default();
+            write_turn_message(&mut writer, &message, 42, &event_tx)
+                .await
+                .unwrap();
+            assert!(matches!(
+                event_rx.recv().await.unwrap(),
+                AgentEvent::TurnAccepted { delivery_id: 42 }
+            ));
+            assert_eq!(writer.bytes.last(), Some(&b'\n'));
+
+            let (event_tx, event_rx) = async_channel::unbounded();
+            let mut writer = DeterministicWriter {
+                failure: Some(FailurePoint::Flush),
+                ..Default::default()
+            };
+            assert!(
+                write_turn_message(&mut writer, &message, 43, &event_tx)
+                    .await
+                    .is_err()
+            );
+            assert!(event_rx.try_recv().is_err(), "failed flush must not ack");
 
             let (event_tx, event_rx) = async_channel::unbounded();
             let mut writer = DeterministicWriter::default();
