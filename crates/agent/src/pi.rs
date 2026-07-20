@@ -314,10 +314,11 @@ async fn run_actor(
     }
     if opts.interaction_mode == InteractionMode::Plan {
         actor
-            .emit(AgentEvent::Warning(
+            .emit(AgentEvent::Warning {
+                message:
                 "pi RPC has no native Plan interaction mode; this session is running in Build mode"
                     .into(),
-            ))
+             })
             .await;
     }
     if opts.mcp_server.is_some()
@@ -325,10 +326,11 @@ async fn run_actor(
         || opts.computer_use_server.is_some()
     {
         actor
-            .emit(AgentEvent::Warning(
+            .emit(AgentEvent::Warning {
+                message:
                 "pi RPC does not expose native MCP registration; configured tcode MCP servers were not attached"
                     .into(),
-            ))
+             })
             .await;
     }
     if ready.send(Ok(())).await.is_err() {
@@ -483,9 +485,9 @@ impl PiActor {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
             Err(err) => {
-                self.emit(AgentEvent::Warning(format!(
-                    "ignored invalid pi RPC record: {err}"
-                )))
+                self.emit(AgentEvent::Warning {
+                    message: format!("ignored invalid pi RPC record: {err}"),
+                })
                 .await;
                 return;
             }
@@ -535,16 +537,16 @@ impl PiActor {
                 &mut self.stdin,
                 &json!({"type":"extension_ui_response","id":id,"cancelled":true}),
             );
-            self.emit(AgentEvent::Warning(format!(
-                "pi extension requested unsupported UI method `{method}`"
-            )))
+            self.emit(AgentEvent::Warning {
+                message: format!("pi extension requested unsupported UI method `{method}`"),
+            })
             .await;
             return;
         }
         let Some(id) = message.get("id").and_then(Value::as_str) else {
-            self.emit(AgentEvent::Warning(
-                "pi extension confirmation omitted its id".into(),
-            ))
+            self.emit(AgentEvent::Warning {
+                message: "pi extension confirmation omitted its id".into(),
+            })
             .await;
             return;
         };
@@ -661,33 +663,33 @@ impl PiActor {
             }
             SessionCommand::SetApprovalMode(mode) => {
                 if mode != self.approval_mode {
-                    self.emit(AgentEvent::Warning(
-                        "pi permission changes require restarting the session".into(),
-                    ))
+                    self.emit(AgentEvent::Warning {
+                        message: "pi permission changes require restarting the session".into(),
+                    })
                     .await;
                 }
                 Ok(())
             }
             SessionCommand::SetInteractionMode(mode) => {
                 if mode == InteractionMode::Plan {
-                    self.emit(AgentEvent::Warning(
-                        "pi RPC has no native Plan interaction mode".into(),
-                    ))
+                    self.emit(AgentEvent::Warning {
+                        message: "pi RPC has no native Plan interaction mode".into(),
+                    })
                     .await;
                 }
                 Ok(())
             }
             SessionCommand::RespondUserInput { .. } => {
-                self.emit(AgentEvent::Warning(
-                    "pi RPC does not expose structured user-input requests".into(),
-                ))
+                self.emit(AgentEvent::Warning {
+                    message: "pi RPC does not expose structured user-input requests".into(),
+                })
                 .await;
                 Ok(())
             }
             SessionCommand::Rewind { .. } => {
-                self.emit(AgentEvent::Warning(
-                    "pi rewind is not exposed by tcode's native adapter".into(),
-                ))
+                self.emit(AgentEvent::Warning {
+                    message: "pi rewind is not exposed by tcode's native adapter".into(),
+                })
                 .await;
                 Ok(())
             }
@@ -792,36 +794,42 @@ impl PiMapper {
                 },
                 true,
             ),
-            "compaction_start" => vec![AgentEvent::Warning(format!(
-                "pi is compacting context ({})",
-                message
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown reason")
-            ))],
+            "compaction_start" => vec![AgentEvent::Warning {
+                message: format!(
+                    "pi is compacting context ({})",
+                    message
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown reason")
+                ),
+            }],
             "compaction_end" => {
                 if message.get("result").is_some_and(|value| !value.is_null()) {
                     vec![AgentEvent::ContextCompacted]
                 } else {
-                    vec![AgentEvent::Warning(format!(
-                        "pi context compaction did not complete: {}",
-                        message
-                            .get("errorMessage")
-                            .and_then(Value::as_str)
-                            .unwrap_or("aborted")
-                    ))]
+                    vec![AgentEvent::Warning {
+                        message: format!(
+                            "pi context compaction did not complete: {}",
+                            message
+                                .get("errorMessage")
+                                .and_then(Value::as_str)
+                                .unwrap_or("aborted")
+                        ),
+                    }]
                 }
             }
-            "auto_retry_start" => vec![AgentEvent::Warning(format!(
-                "pi retry {}/{} in {} ms: {}",
-                number(message.get("attempt")).unwrap_or(0),
-                number(message.get("maxAttempts")).unwrap_or(0),
-                number(message.get("delayMs")).unwrap_or(0),
-                message
-                    .get("errorMessage")
-                    .and_then(Value::as_str)
-                    .unwrap_or("transient provider error")
-            ))],
+            "auto_retry_start" => vec![AgentEvent::Warning {
+                message: format!(
+                    "pi retry {}/{} in {} ms: {}",
+                    number(message.get("attempt")).unwrap_or(0),
+                    number(message.get("maxAttempts")).unwrap_or(0),
+                    number(message.get("delayMs")).unwrap_or(0),
+                    message
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .unwrap_or("transient provider error")
+                ),
+            }],
             "auto_retry_end"
                 if !message
                     .get("success")
@@ -829,25 +837,29 @@ impl PiMapper {
                     .unwrap_or(false) =>
             {
                 self.failed = true;
-                vec![AgentEvent::Warning(format!(
-                    "pi retry failed: {}",
-                    message
-                        .get("finalError")
-                        .and_then(Value::as_str)
-                        .unwrap_or("provider error")
-                ))]
+                vec![AgentEvent::Warning {
+                    message: format!(
+                        "pi retry failed: {}",
+                        message
+                            .get("finalError")
+                            .and_then(Value::as_str)
+                            .unwrap_or("provider error")
+                    ),
+                }]
             }
-            "extension_error" => vec![AgentEvent::Warning(format!(
-                "pi extension error in {}: {}",
-                message
-                    .get("event")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown event"),
-                message
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error")
-            ))],
+            "extension_error" => vec![AgentEvent::Warning {
+                message: format!(
+                    "pi extension error in {}: {}",
+                    message
+                        .get("event")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown event"),
+                    message
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error")
+                ),
+            }],
             _ => Vec::new(),
         }
     }
