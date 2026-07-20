@@ -18,9 +18,9 @@ use std::sync::Arc;
 use agent::{FileChange, FileChangeKind};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
-    IntoElement, ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
-    StyledText, Subscription, Window, div, list, prelude::FluentBuilder as _, px,
+    IntoElement, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, StyledText,
+    Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -558,6 +558,8 @@ struct DiffCache {
     files: Vec<RenderedFile>,
     unified_items: Vec<DiffListItem>,
     split_items: Vec<DiffListItem>,
+    unified_content_width: f32,
+    split_content_width: f32,
     unified_list: ListState,
     split_list: ListState,
 }
@@ -593,6 +595,66 @@ fn build_list_items(files: &[RenderedFile]) -> (Vec<DiffListItem>, Vec<DiffListI
         );
     }
     (unified, split)
+}
+
+/// Conservative monospace width used by the no-wrap virtual lists. GPUI's
+/// inferred list sizing renders and measures the viewport during both layout
+/// and prepaint; fixing the list width up front keeps rendering virtualized to
+/// prepaint while still giving the horizontal scroll container real overflow.
+fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
+    const MONO_ADVANCE: f32 = 8.;
+    const UNIFIED_CHROME: f32 = 106.; // border + two gutters + code padding
+    const SPLIT_CHROME: f32 = 117.; // two gutters + code padding + divider
+    const HEADER_CHROME: f32 = 180.;
+
+    let mut unified_columns = 0;
+    let mut split_columns = 0;
+    let mut header_columns = 0;
+    for file in files {
+        header_columns = header_columns.max(display_columns(&file.path));
+        for row in &file.rows {
+            if let RenderedRow::Code { text, .. } = row {
+                unified_columns = unified_columns.max(display_columns(text));
+            }
+        }
+        for row in &file.split_rows {
+            if let PairedRenderedRow::Pair { left, right } = row {
+                let columns = left
+                    .as_ref()
+                    .and_then(|(_, row)| rendered_row_text(row))
+                    .map(display_columns)
+                    .unwrap_or(0)
+                    + right
+                        .as_ref()
+                        .and_then(|(_, row)| rendered_row_text(row))
+                        .map(display_columns)
+                        .unwrap_or(0);
+                split_columns = split_columns.max(columns);
+            }
+        }
+    }
+
+    let header_width = header_columns as f32 * MONO_ADVANCE + HEADER_CHROME;
+    (
+        (unified_columns as f32 * MONO_ADVANCE + UNIFIED_CHROME).max(header_width),
+        (split_columns as f32 * MONO_ADVANCE + SPLIT_CHROME).max(header_width),
+    )
+}
+
+fn rendered_row_text(row: &RenderedRow) -> Option<&str> {
+    match row {
+        RenderedRow::Code { text, .. } => Some(text),
+        RenderedRow::Gap(_) => None,
+    }
+}
+
+fn display_columns(text: &str) -> usize {
+    text.chars().fold(0, |columns, ch| match ch {
+        '\t' => columns + (4 - columns % 4),
+        ch if ch.is_ascii_control() => columns,
+        ch if ch.is_ascii() => columns + 1,
+        _ => columns + 2,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,6 +700,7 @@ pub struct DiffPanel {
     render_loading_key: Option<RenderKey>,
     selection: Option<CommentSelection>,
     comment_input: Option<Entity<InputState>>,
+    observed_review_comments: Vec<ReviewComment>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -646,8 +709,12 @@ impl DiffPanel {
         // Soft-wrap defaults to the user's "Word wrap in diffs" setting.
         let wrap = app_state.read(cx).settings.word_wrap_diffs;
         let plan = cx.new(|cx| PlanPanel::new(app_state.clone(), cx));
-        let subscriptions = vec![cx.observe(&app_state, |this, _, cx| {
-            this.remeasure_lists();
+        let subscriptions = vec![cx.observe(&app_state, |this, state, cx| {
+            let comments = state.read(cx).review_comments();
+            if this.observed_review_comments != comments {
+                this.observed_review_comments = comments.to_vec();
+                this.remeasure_lists();
+            }
             cx.notify();
         })];
         Self {
@@ -663,6 +730,7 @@ impl DiffPanel {
             render_loading_key: None,
             selection: None,
             comment_input: None,
+            observed_review_comments: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -745,14 +813,21 @@ impl DiffPanel {
         self.cache = None;
         self.render_loading_key = Some(key.clone());
         cx.spawn(async move |this, cx| {
-            let (files, unified_items, split_items) =
+            let (files, unified_items, split_items, unified_content_width, split_content_width) =
                 tcode_runtime::blocking::unblock(cx.background_executor(), move || {
                     let files = changes
                         .iter()
                         .map(|change| render_file(change, &cwd, &theme))
                         .collect::<Vec<_>>();
                     let (unified_items, split_items) = build_list_items(&files);
-                    (files, unified_items, split_items)
+                    let (unified_content_width, split_content_width) = diff_content_widths(&files);
+                    (
+                        files,
+                        unified_items,
+                        split_items,
+                        unified_content_width,
+                        split_content_width,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
@@ -769,6 +844,8 @@ impl DiffPanel {
                         files,
                         unified_items,
                         split_items,
+                        unified_content_width,
+                        split_content_width,
                         unified_list,
                         split_list,
                     });
@@ -1521,26 +1598,37 @@ impl DiffPanel {
         } else {
             cache.unified_list.clone()
         };
+        let content_width = if split {
+            cache.split_content_width
+        } else {
+            cache.unified_content_width
+        };
         let panel = cx.entity();
         let mut rows = list(list_state, move |index, _, cx| {
             panel.update(cx, |this, cx| this.render_list_item(index, split, cx))
         })
         .flex_1()
         .min_h_0()
+        .h_full()
         .text_size(px(13.))
         .font_family(cx.theme().mono_font_family.clone());
         if self.wrap {
             rows = rows.w_full();
         } else {
-            rows = rows.with_sizing_behavior(ListSizingBehavior::Infer);
+            rows = rows.min_w(px(content_width));
         }
 
-        let viewport = div()
+        let mut viewport = div()
             .id("diff-body")
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
             .child(rows);
+        // Do not let this horizontal overflow container translate ordinary
+        // vertical wheel input into horizontal movement. The event can then
+        // bubble to the List's vertical scroll handler; explicit horizontal
+        // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
+        viewport.style().restrict_scroll_to_axis = Some(true);
         let mut content = v_flex().size_full().min_h_0().child(viewport);
 
         if let Some(preview) = self
@@ -2079,6 +2167,44 @@ impl Render for DiffPanel {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn display_columns_accounts_for_tabs_and_wide_characters() {
+        assert_eq!(display_columns("ab\tcd"), 6);
+        assert_eq!(display_columns("a界b"), 4);
+    }
+
+    #[test]
+    fn no_wrap_widths_cover_unified_and_split_rows() {
+        let rows = vec![
+            RenderedRow::Code {
+                kind: RowKind::Removed,
+                old: Some(1),
+                new: None,
+                text: "short".into(),
+                runs: Vec::new(),
+            },
+            RenderedRow::Code {
+                kind: RowKind::Added,
+                old: None,
+                new: Some(1),
+                text: "a much longer replacement".into(),
+                runs: Vec::new(),
+            },
+        ];
+        let files = vec![RenderedFile {
+            path: "src/example.rs".into(),
+            kind: FileChangeKind::Modify,
+            added: 1,
+            removed: 1,
+            split_rows: pair_rendered_rows(&rows),
+            rows,
+        }];
+
+        let (unified, split) = diff_content_widths(&files);
+        assert!(unified >= 24. * 8. + 106.);
+        assert!(split >= (5. + 24.) * 8. + 117.);
+    }
 
     #[test]
     fn parses_bare_create_diff() {
