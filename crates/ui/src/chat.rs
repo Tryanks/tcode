@@ -2147,28 +2147,42 @@ impl ChatView {
                     );
                 }
                 for file in files {
+                    let path = file.path.clone();
+                    let row_label = format!("{}: {}", tcode_i18n::tr!("chat.view_diff"), file.path);
                     body = body.child(
-                        h_flex()
-                            .w_full()
-                            .pl(px(if dir.is_empty() { 8. } else { 28. }))
-                            .pr_2()
-                            .py_1()
-                            .gap_1p5()
-                            .items_center()
-                            .text_size(px(13.))
-                            .rounded(px(6.))
-                            .hover(|s| s.bg(cx.theme().list_hover))
-                            .child(Icon::new(IconName::File).xsmall().text_color(muted))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .child(file.name),
-                            )
-                            .child(diff_counts(file.added, file.deleted, cx)),
+                        crate::material::accessible_clickable(
+                            h_flex(),
+                            SharedString::from(format!("changed-file-{index}-{}", file.path)),
+                            Role::Button,
+                            row_label,
+                            cx,
+                        )
+                        .w_full()
+                        .pl(px(if dir.is_empty() { 8. } else { 28. }))
+                        .pr_2()
+                        .py_1()
+                        .gap_1p5()
+                        .items_center()
+                        .text_size(px(13.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().list_hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.app_state.update(cx, |state, cx| {
+                                state.open_diff_for_file(index, path.clone(), cx)
+                            });
+                        }))
+                        .child(Icon::new(IconName::File).xsmall().text_color(muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(file.name),
+                        )
+                        .child(diff_counts(file.added, file.deleted, cx)),
                     );
                 }
             }
@@ -3183,6 +3197,7 @@ fn diff_stats(diff: Option<&str>) -> (u32, u32) {
 }
 
 struct FileRow {
+    path: String,
     name: String,
     added: u32,
     deleted: u32,
@@ -3201,6 +3216,7 @@ fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>
         };
         let (added, deleted) = diff_stats(change.diff.as_deref());
         let row = FileRow {
+            path: display,
             name,
             added,
             deleted,
