@@ -3267,6 +3267,7 @@ mod tests {
             &[Attachment {
                 media_type: "image/png".into(),
                 data_base64: "AAAA".into(),
+                source_path: None,
             }],
         );
         let value = serde_json::to_value(&blocks).unwrap();

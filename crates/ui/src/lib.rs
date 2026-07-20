@@ -14,6 +14,7 @@ pub mod markdown;
 pub mod material;
 mod orchestrate_settings;
 mod palette;
+mod pasteboard;
 mod plan_panel;
 mod preview_panel;
 pub mod provider_card;

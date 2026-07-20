@@ -14,6 +14,7 @@ computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 async-channel = "2"
 base64 = "0.22"
 chrono = "0.4"
@@ -31,7 +32,7 @@ raw-window-handle = { version = "0.6", features = ["std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
-objc2-app-kit = { version = "0.3.2", features = ["NSGraphicsContext", "NSImage", "NSImageRep", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGImage"] }
 objc2-foundation = { version = "0.3.2", features = ["NSError"] }

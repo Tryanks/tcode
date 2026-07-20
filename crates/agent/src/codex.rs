@@ -2314,6 +2314,7 @@ mod tests {
         let attachments = vec![Attachment {
             media_type: "image/png".into(),
             data_base64: "AAAA".into(),
+            source_path: None,
         }];
         let params = actor.build_turn_params("what color?", None, &attachments);
         let input = params["input"].as_array().unwrap();
