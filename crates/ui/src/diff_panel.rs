@@ -18,7 +18,7 @@ use std::sync::Arc;
 use agent::{FileChange, FileChangeKind};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    IntoElement, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, StyledText,
     Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
@@ -597,6 +597,13 @@ fn build_list_items(files: &[RenderedFile]) -> (Vec<DiffListItem>, Vec<DiffListI
     (unified, split)
 }
 
+fn file_header_index(files: &[RenderedFile], items: &[DiffListItem], path: &str) -> Option<usize> {
+    let file_index = files.iter().position(|file| file.path == path)?;
+    items
+        .iter()
+        .position(|item| matches!(item, DiffListItem::Header(index) if *index == file_index))
+}
+
 /// Conservative monospace width used by the no-wrap virtual lists. GPUI's
 /// inferred list sizing renders and measures the viewport during both layout
 /// and prepaint; fixing the list width up front keeps rendering virtualized to
@@ -750,6 +757,48 @@ impl DiffPanel {
         }
     }
 
+    fn apply_pending_file_focus(
+        &mut self,
+        session: &str,
+        scope: DiffScope,
+        cx: &mut Context<Self>,
+    ) {
+        let DiffScope::Turn(turn) = scope else {
+            return;
+        };
+        let request = self
+            .app_state
+            .read(cx)
+            .pending_diff_focus()
+            .filter(|request| request.session == session && request.turn == turn)
+            .cloned();
+        let Some(request) = request else {
+            return;
+        };
+        let Some(cache) = self
+            .cache
+            .as_ref()
+            .filter(|cache| cache.session == session && cache.scope == scope)
+        else {
+            return;
+        };
+        if let Some(index) = file_header_index(&cache.files, &cache.unified_items, &request.path) {
+            cache.unified_list.scroll_to(ListOffset {
+                item_ix: index,
+                offset_in_item: px(0.),
+            });
+        }
+        if let Some(index) = file_header_index(&cache.files, &cache.split_items, &request.path) {
+            cache.split_list.scroll_to(ListOffset {
+                item_ix: index,
+                offset_in_item: px(0.),
+            });
+        }
+        self.app_state.update(cx, |state, _| {
+            state.take_diff_focus(session, turn);
+        });
+    }
+
     fn request_git_preview(
         &mut self,
         session: String,
@@ -850,6 +899,7 @@ impl DiffPanel {
                         split_list,
                     });
                     panel.render_loading_key = None;
+                    panel.apply_pending_file_focus(&key.session, key.scope, cx);
                     cx.notify();
                 }
             });
@@ -860,6 +910,21 @@ impl DiffPanel {
     /// Rebuild the rendered-file cache when its key (session / turn / theme)
     /// changed. Returns whether there is anything to show.
     fn ensure_cache(&mut self, cx: &mut Context<Self>) -> bool {
+        let pending_focus = self.app_state.read(cx).pending_diff_focus().cloned();
+        if let Some(request) = pending_focus {
+            let is_active = self
+                .app_state
+                .read(cx)
+                .active_session_id()
+                .is_some_and(|session| session == request.session);
+            if is_active {
+                self.scopes
+                    .insert(request.session.clone(), DiffScope::Turn(request.turn));
+            } else {
+                self.app_state
+                    .update(cx, |state, _| state.discard_diff_focus());
+            }
+        }
         let debug = {
             let state = self.app_state.read(cx);
             state.active.as_ref().map(|active| {
@@ -959,6 +1024,7 @@ impl DiffPanel {
             );
             return false;
         }
+        self.apply_pending_file_focus(&session, scope, cx);
         let debug_comment = self.app_state.read(cx).debug_review_comment
             && self.app_state.read(cx).review_comments().is_empty();
         if debug_comment
@@ -1222,6 +1288,8 @@ impl DiffPanel {
                                         this.scopes.insert(session.clone(), scope);
                                         this.cache = None;
                                         this.selection = None;
+                                        this.app_state
+                                            .update(cx, |state, _| state.discard_diff_focus());
                                         cx.notify();
                                     });
                                     popover.update(cx, |state, cx| state.dismiss(window, cx));
@@ -1295,6 +1363,8 @@ impl DiffPanel {
                                     this.scopes.insert(session.clone(), DiffScope::Turn(turn));
                                     this.cache = None;
                                     this.selection = None;
+                                    this.app_state
+                                        .update(cx, |state, _| state.discard_diff_focus());
                                     cx.notify();
                                 });
                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
@@ -2204,6 +2274,48 @@ mod tests {
         let (unified, split) = diff_content_widths(&files);
         assert!(unified >= 24. * 8. + 106.);
         assert!(split >= (5. + 24.) * 8. + 117.);
+    }
+
+    #[test]
+    fn resolves_file_headers_independently_for_unified_and_split_lists() {
+        let code_row = |text: &str| RenderedRow::Code {
+            kind: RowKind::Added,
+            old: None,
+            new: Some(1),
+            text: text.into(),
+            runs: Vec::new(),
+        };
+        let first_rows = vec![code_row("one"), code_row("two"), code_row("three")];
+        let second_rows = vec![code_row("replacement")];
+        let files = vec![
+            RenderedFile {
+                path: "src/first.rs".into(),
+                kind: FileChangeKind::Modify,
+                added: 3,
+                removed: 0,
+                split_rows: vec![PairedRenderedRow::Gap(7)],
+                rows: first_rows,
+            },
+            RenderedFile {
+                path: "tests/second.rs".into(),
+                kind: FileChangeKind::Modify,
+                added: 1,
+                removed: 0,
+                split_rows: pair_rendered_rows(&second_rows),
+                rows: second_rows,
+            },
+        ];
+        let (unified, split) = build_list_items(&files);
+
+        assert_eq!(
+            file_header_index(&files, &unified, "tests/second.rs"),
+            Some(4)
+        );
+        assert_eq!(
+            file_header_index(&files, &split, "tests/second.rs"),
+            Some(2)
+        );
+        assert_eq!(file_header_index(&files, &unified, "missing.rs"), None);
     }
 
     #[test]
