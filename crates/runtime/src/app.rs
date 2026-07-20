@@ -231,19 +231,41 @@ enum QueuedMessageKind {
 }
 
 impl QueuedMessage {
-    /// The text actually sent to the provider (Ultrathink prefix applied).
+    /// The text actually sent to the provider (image-only placeholder and
+    /// Ultrathink prefix applied). The recorded user message keeps `text`
+    /// verbatim, so an image-only bubble renders as just its thumbnails.
     fn wire_text(&self) -> String {
         let text = if let Some(transcript) = &self.relay_transcript {
             assemble_relay_prompt(transcript, &self.text)
         } else {
             self.text.clone()
         };
+        let text = wire_text_with_placeholder(text, &self.attachments);
         if self.ultrathink {
             format!("Ultrathink:\n{text}")
         } else {
             text
         }
     }
+}
+
+/// Providers require non-empty turn text: an image-only message goes on the
+/// wire with T3's synthetic placeholder while the transcript records the
+/// user's (empty) text plus the attachments.
+fn wire_text_with_placeholder(text: String, attachments: &[Attachment]) -> String {
+    if text.trim().is_empty() && !attachments.is_empty() {
+        tcode_core::attachments::image_only_message().to_string()
+    } else {
+        text
+    }
+}
+
+/// The local persisted paths behind `attachments`, for the recorded event.
+fn attachment_paths(attachments: &[Attachment]) -> Vec<String> {
+    attachments
+        .iter()
+        .filter_map(|attachment| attachment.source_path.clone())
+        .collect()
 }
 
 impl From<&str> for QueuedMessage {
@@ -1277,7 +1299,7 @@ impl AppState {
                     .or_else(|| self.background.get(&thread_id))
                     .is_some_and(|child| child.turn_in_flight && child.supports_steering());
                 if can_steer {
-                    let request_id = self.record_steer_request(&thread_id, &message, cx);
+                    let request_id = self.record_steer_request(&thread_id, &message, &[], cx);
                     let sent = self
                         .active
                         .as_mut()
@@ -4439,7 +4461,13 @@ impl AppState {
             );
             return;
         };
-        self.record_user_message(session_id, &message.text, message.context_len, cx);
+        self.record_user_message(
+            session_id,
+            &message.text,
+            message.context_len,
+            &message.attachments,
+            cx,
+        );
         if is_active {
             self.maybe_generate_title(&message.text, &message.attachments, cx);
         }
@@ -4639,7 +4667,7 @@ impl AppState {
         if can_steer {
             // A steered callback is already part of this turn, so persist it just
             // like a user-triggered steer before handing it to the provider.
-            let request_id = self.record_steer_request(parent_id, &text, cx);
+            let request_id = self.record_steer_request(parent_id, &text, &[], cx);
             let sent = self
                 .active
                 .as_mut()
@@ -4707,6 +4735,7 @@ impl AppState {
         session_id: &str,
         text: &str,
         context_len: Option<usize>,
+        attachments: &[Attachment],
         cx: &mut Context<Self>,
     ) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
@@ -4715,6 +4744,7 @@ impl AppState {
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
                 context_len,
+                attachments: attachment_paths(attachments),
             },
         });
         self.record_event(session_id, &user_event, cx);
@@ -4726,6 +4756,7 @@ impl AppState {
         &mut self,
         session_id: &str,
         text: &str,
+        attachments: &[Attachment],
         cx: &mut Context<Self>,
     ) -> String {
         let request_id = format!("local-steer-{}", uuid::Uuid::new_v4());
@@ -4734,6 +4765,7 @@ impl AppState {
             &AgentEvent::SteerRequested {
                 request_id: request_id.clone(),
                 text: text.to_owned(),
+                attachments: attachment_paths(attachments),
             },
             cx,
         );
@@ -4769,15 +4801,16 @@ impl AppState {
             }
             SendRouting::Steer => {
                 let session_id = active.meta.id.clone();
+                let wire_text = wire_text_with_placeholder(text.clone(), &attachments);
                 let wire_text = if active.pending_ultrathink {
-                    format!("Ultrathink:\n{text}")
+                    format!("Ultrathink:\n{wire_text}")
                 } else {
-                    text.clone()
+                    wire_text
                 };
                 // The steered message joins the running turn, so it belongs in
                 // the transcript exactly like any other user message. (A merely
                 // *queued* message does not — see `dispatch_next_queued`.)
-                let request_id = self.record_steer_request(&session_id, &text, cx);
+                let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);
 
                 let Some(active) = self.active.as_mut() else {
                     return;
@@ -7452,7 +7485,10 @@ mod tests {
                 .iter()
                 .find_map(|stored| match &stored.event {
                     AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::UserMessage { text, context_len },
+                        content:
+                            ItemContent::UserMessage {
+                                text, context_len, ..
+                            },
                         ..
                     }) => Some((text.clone(), *context_len)),
                     _ => None,
@@ -8996,6 +9032,7 @@ mod tests {
                     content: ItemContent::UserMessage {
                         text: "start".into(),
                         context_len: None,
+                        attachments: Vec::new(),
                     },
                 }),
             );
@@ -9537,6 +9574,40 @@ mod tests {
             receiver.try_recv(),
             Ok(SessionCommand::SendTurn { text, .. }) if text == "shallow"
         ));
+    }
+
+    /// An image-only send keeps its empty text in the transcript (the bubble
+    /// renders just the thumbnails) while the wire carries T3's placeholder.
+    #[test]
+    fn image_only_message_gets_placeholder_on_the_wire_only() {
+        let (commands, receiver) = async_channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        let attachment = Attachment {
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+            source_path: Some("/tmp/a.png".into()),
+        };
+        active.push_queued(String::new(), vec![attachment.clone()]);
+
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        let delivery_id = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id,
+                text,
+                attachments,
+                ..
+            }) => {
+                assert_eq!(text, tcode_core::attachments::image_only_message());
+                assert_eq!(attachments, vec![attachment]);
+                delivery_id
+            }
+            other => panic!("expected SendTurn, got {other:?}"),
+        };
+        // The accepted (recorded) message keeps the user's empty text and the
+        // local path for the timeline.
+        let recorded = active.accept_turn_delivery(delivery_id).unwrap();
+        assert_eq!(recorded.text, "");
+        assert_eq!(attachment_paths(&recorded.attachments), vec!["/tmp/a.png"]);
     }
 
     #[test]

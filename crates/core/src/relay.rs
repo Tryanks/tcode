@@ -358,6 +358,7 @@ mod tests {
             ItemContent::UserMessage {
                 text: text.into(),
                 context_len: None,
+                attachments: Vec::new(),
             },
         )
     }

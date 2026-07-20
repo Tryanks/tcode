@@ -433,6 +433,12 @@ pub struct Attachment {
     pub media_type: String,
     /// Standard-base64 of the raw bytes (no `data:...;base64,` prefix).
     pub data_base64: String,
+    /// Local path of the persisted copy backing this attachment, when one
+    /// exists. Never sent to providers (their payloads are built field by
+    /// field); the runtime threads it into the recorded user-message event so
+    /// the timeline can render the image without re-encoding the base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
 }
 
 /// A provider-native command or skill surfaced to the composer's `/` and `$`
@@ -708,6 +714,10 @@ pub enum AgentEvent {
     SteerRequested {
         request_id: String,
         text: String,
+        /// Local paths of the image attachments steered with the text (see
+        /// [`ItemContent::UserMessage::attachments`]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// Emitted only after the provider has consumed the correlated steer into
     /// its model context (or provided the strongest available consumption
@@ -881,6 +891,11 @@ pub enum ItemContent {
         /// which therefore render as a plain bubble exactly as before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_len: Option<usize>,
+        /// Local paths of the image attachments sent with this message, so the
+        /// timeline (live and replayed) can render them. Empty on text-only
+        /// messages and on logs written before this field existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     AssistantMessage {
         text: String,

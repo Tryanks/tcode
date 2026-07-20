@@ -20,7 +20,10 @@ pub fn validate_attachment(
     size: u64,
     current_count: usize,
 ) -> Result<(), AttachError> {
-    if !mime.starts_with("image/") {
+    if !matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/bmp"
+    ) {
         return Err(AttachError::UnsupportedType {
             name: name.to_string(),
         });
@@ -58,6 +61,21 @@ mod tests {
                 name: "notes.txt".into()
             })
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_image_type() {
+        assert_eq!(
+            validate_attachment("drawing.svg", "image/svg+xml", 10, 0),
+            Err(AttachError::UnsupportedType {
+                name: "drawing.svg".into()
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_tiff_for_transcoding() {
+        assert!(validate_attachment("scan.tiff", "image/tiff", 1_000, 0).is_ok());
     }
 
     #[test]

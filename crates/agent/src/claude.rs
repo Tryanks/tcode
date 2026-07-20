@@ -3245,10 +3245,12 @@ mod tests {
             Attachment {
                 media_type: "image/png".into(),
                 data_base64: "AAAA".into(),
+                source_path: None,
             },
             Attachment {
                 media_type: "image/jpeg".into(),
                 data_base64: "BBBB".into(),
+                source_path: None,
             },
         ];
         let msg = user_message("what color is this?", &attachments);
