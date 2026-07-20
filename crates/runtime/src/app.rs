@@ -131,6 +131,15 @@ pub enum RightTab {
     Preview,
 }
 
+/// One-shot request from a changed-file row to focus that file in a turn diff.
+/// The diff panel consumes it only after the matching rendered cache is ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFocusRequest {
+    pub session: String,
+    pub turn: usize,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RightPanelState {
     open: bool,
@@ -827,6 +836,8 @@ pub struct AppState {
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// Invalidates working-tree/branch previews on panel open and turn finish.
     pub diff_refresh_generation: u64,
+    /// Pending changed-file row navigation, consumed by the diff panel once.
+    pending_diff_focus: Option<DiffFocusRequest>,
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
@@ -947,6 +958,7 @@ impl AppState {
             debug_open_commit_dialog: false,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
+            pending_diff_focus: None,
             debug_palette: None,
             debug_settings_section: None,
             debug_acp_search: None,
@@ -2839,6 +2851,7 @@ impl AppState {
             // tabs while already open) shows diffs; a second click closes.
             if active.diff_open && active.right_tab == RightTab::Diff {
                 active.diff_open = false;
+                self.pending_diff_focus = None;
                 if active.timeline.turn_running {
                     active.auto_open_suppressed = true;
                 }
@@ -2853,6 +2866,7 @@ impl AppState {
 
     /// Open the diff panel and select `turn` (a "View diff" card button).
     pub fn open_diff_for_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+        self.pending_diff_focus = None;
         if let Some(active) = self.active.as_mut() {
             active.diff_open = true;
             active.right_tab = RightTab::Diff;
@@ -2862,9 +2876,50 @@ impl AppState {
         }
     }
 
+    /// Open a turn diff and focus one file after its async render cache lands.
+    pub fn open_diff_for_file(&mut self, turn: usize, path: String, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let session = active.meta.id.clone();
+        active.diff_open = true;
+        active.right_tab = RightTab::Diff;
+        active.diff_selected_turn = Some(turn);
+        self.set_diff_focus(session, turn, path);
+        self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
+        cx.notify();
+    }
+
+    pub fn pending_diff_focus(&self) -> Option<&DiffFocusRequest> {
+        self.pending_diff_focus.as_ref()
+    }
+
+    fn set_diff_focus(&mut self, session: String, turn: usize, path: String) {
+        self.pending_diff_focus = Some(DiffFocusRequest {
+            session,
+            turn,
+            path,
+        });
+    }
+
+    /// Consume a request only for the cache it was created for.
+    pub fn take_diff_focus(&mut self, session: &str, turn: usize) -> Option<DiffFocusRequest> {
+        let matches = self
+            .pending_diff_focus
+            .as_ref()
+            .is_some_and(|request| request.session == session && request.turn == turn);
+        matches.then(|| self.pending_diff_focus.take()).flatten()
+    }
+
+    /// Cancel pending file navigation when the user chooses another scope.
+    pub fn discard_diff_focus(&mut self) {
+        self.pending_diff_focus = None;
+    }
+
     /// Open the diff panel on the latest turn with changes (used by
     /// `--open-diff` and as a general "just show me the diffs" entry point).
     pub fn open_diff_panel(&mut self, cx: &mut Context<Self>) {
+        self.pending_diff_focus = None;
         if let Some(active) = self.active.as_mut() {
             active.diff_open = true;
             active.right_tab = RightTab::Diff;
@@ -3190,6 +3245,7 @@ impl AppState {
     }
 
     pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
+        self.pending_diff_focus = None;
         if let Some(active) = self.active.as_mut() {
             active.diff_open = false;
             // Closing during a turn suppresses auto-open for the rest of it.
@@ -4155,6 +4211,7 @@ impl AppState {
         if self.active_session_id() == Some(session_id) {
             return;
         }
+        self.pending_diff_focus = None;
         let Some(meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() else {
             return;
         };
@@ -6385,6 +6442,7 @@ impl AppState {
     /// field docs); an idle one is shut down as before. Every "switch away" path
     /// goes through here; only destructive paths use `shutdown_active` directly.
     fn park_active(&mut self) {
+        self.pending_diff_focus = None;
         self.persist_terminal_preferences();
         let Some(mut active) = self.active.take() else {
             return;
@@ -7161,6 +7219,34 @@ fn truncate_title(text: &str) -> String {
 mod tests {
     use super::*;
     use gpui::AppContext as _;
+
+    #[test]
+    fn diff_file_focus_request_is_consumed_once_and_discarded_on_scope_change() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-diff-focus-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut state = AppState::new(store);
+
+        state.set_diff_focus("session-a".into(), 3, "src/second.rs".into());
+        assert_eq!(state.take_diff_focus("session-a", 2), None);
+        assert!(state.pending_diff_focus().is_some());
+        assert_eq!(
+            state.take_diff_focus("session-a", 3),
+            Some(DiffFocusRequest {
+                session: "session-a".into(),
+                turn: 3,
+                path: "src/second.rs".into(),
+            })
+        );
+        assert_eq!(state.take_diff_focus("session-a", 3), None);
+
+        state.set_diff_focus("session-a".into(), 3, "src/second.rs".into());
+        // The diff panel invokes this when its local scope selector changes.
+        state.discard_diff_focus();
+        assert!(state.pending_diff_focus().is_none());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn generated_titles_are_cleaned_and_bounded() {
