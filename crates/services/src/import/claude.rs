@@ -55,6 +55,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                     content: ItemContent::UserMessage {
                                         text,
                                         context_len: None,
+                                        attachments: Vec::new(),
                                     },
                                 },
                             });

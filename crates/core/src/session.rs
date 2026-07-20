@@ -207,6 +207,9 @@ pub enum EntryContent {
         /// collapsed disclosure row and keeps the bubble to `text[context_len..]`.
         /// `None` for ordinary messages and for logs predating the annotation.
         context_len: Option<usize>,
+        /// Local paths of the image attachments sent with this message (empty
+        /// for text-only messages and for logs predating the field).
+        attachments: Vec<String>,
     },
     Assistant {
         text: String,
@@ -479,9 +482,11 @@ impl Timeline {
                     }
                 }
             }
-            AgentEvent::SteerRequested { request_id, text } => {
-                self.request_steer(ts, request_id, text)
-            }
+            AgentEvent::SteerRequested {
+                request_id,
+                text,
+                attachments,
+            } => self.request_steer(ts, request_id, text, attachments),
             AgentEvent::SteerAccepted { request_id } => self.accept_steer(request_id),
             AgentEvent::Delta {
                 item_id,
@@ -779,7 +784,13 @@ impl Timeline {
         }
     }
 
-    fn request_steer(&mut self, ts: Option<u64>, request_id: &str, text: &str) {
+    fn request_steer(
+        &mut self,
+        ts: Option<u64>,
+        request_id: &str,
+        text: &str,
+        attachments: &[String],
+    ) {
         if self.entries.iter().any(|entry| entry.id == request_id) {
             return;
         }
@@ -790,6 +801,7 @@ impl Timeline {
                 text: text.to_owned(),
                 steering: Some(SteeringStatus::Pending),
                 context_len: None,
+                attachments: attachments.to_vec(),
             },
             ts,
             turn,
@@ -827,10 +839,15 @@ impl Timeline {
 
     fn content_from_item(content: &ItemContent) -> EntryContent {
         match content {
-            ItemContent::UserMessage { text, context_len } => EntryContent::User {
+            ItemContent::UserMessage {
+                text,
+                context_len,
+                attachments,
+            } => EntryContent::User {
                 text: text.clone(),
                 steering: None,
                 context_len: *context_len,
+                attachments: attachments.clone(),
             },
             ItemContent::AssistantMessage { text } => {
                 EntryContent::Assistant { text: text.clone() }
@@ -1006,12 +1023,16 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
         (
             EntryContent::User { steering, .. },
             EntryContent::User {
-                text, context_len, ..
+                text,
+                context_len,
+                attachments,
+                ..
             },
         ) => EntryContent::User {
             text,
             steering,
             context_len,
+            attachments,
         },
         (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
             EntryContent::Assistant {
@@ -1095,6 +1116,7 @@ mod tests {
             content: ItemContent::UserMessage {
                 text: text.into(),
                 context_len: None,
+                attachments: Vec::new(),
             },
         })
     }
@@ -1467,6 +1489,7 @@ mod tests {
         let request = AgentEvent::SteerRequested {
             request_id: "steer-a".into(),
             text: "change direction".into(),
+            attachments: Vec::new(),
         };
         let encoded = serde_json::to_string(&request).unwrap();
         let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
@@ -1551,6 +1574,7 @@ mod tests {
             AgentEvent::SteerRequested {
                 request_id: "S".into(),
                 text: "change direction".into(),
+                attachments: Vec::new(),
             },
             assistant_item("A"),
             assistant_item("B"),
@@ -2108,6 +2132,7 @@ mod tests {
             content: ItemContent::UserMessage {
                 text: "ping".into(),
                 context_len: None,
+                attachments: Vec::new(),
             },
         };
         let completed = ThreadItem {
@@ -2248,6 +2273,7 @@ mod tests {
             content: ItemContent::UserMessage {
                 text: text.into(),
                 context_len,
+                attachments: Vec::new(),
             },
         })
     }

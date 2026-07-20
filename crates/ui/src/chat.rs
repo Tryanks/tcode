@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use agent::{ChangeCompleteness, FileChange, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Render,
-    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
-    div, list, prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, ListAlignment, ListState, ObjectFit, ParentElement as _,
+    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Subscription, Task, Window, div, img, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -512,7 +512,9 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             text,
             steering,
             context_len,
+            attachments,
         } => {
+            attachments.len().hash(hash);
             text.len().hash(hash);
             steering.hash(hash);
             context_len.hash(hash);
@@ -873,6 +875,7 @@ impl ChatView {
                         text,
                         steering,
                         context_len,
+                        attachments,
                     } = &entry.content
                     else {
                         unreachable!();
@@ -893,6 +896,7 @@ impl ChatView {
                             &entry.id,
                             text,
                             *context_len,
+                            attachments,
                             *steering,
                             pinned.0 == Some(entry.id.as_str()),
                             window,
@@ -986,6 +990,7 @@ impl ChatView {
                 text,
                 steering,
                 context_len,
+                attachments,
             } = &entry.content
             else {
                 unreachable!();
@@ -995,6 +1000,7 @@ impl ChatView {
                 &entry.id,
                 text,
                 *context_len,
+                attachments,
                 *steering,
                 pinned.0 == Some(entry.id.as_str()),
                 window,
@@ -1151,12 +1157,14 @@ impl ChatView {
     /// the timeline; it is revealed for `pinned` (the last user message) so the
     /// action is reachable without hovering.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn render_user(
         &self,
         turn: usize,
         entry_id: &str,
         text: &str,
         context_len: Option<usize>,
+        attachments: &[String],
         steering: Option<SteeringStatus>,
         pinned: bool,
         window: &mut Window,
@@ -1182,16 +1190,62 @@ impl ChatView {
         });
 
         let group_key = SharedString::from(format!("user-{entry_id}"));
-        let mut actions = h_flex()
-            .gap_1()
-            .items_center()
-            .justify_end()
-            .child(self.render_copy_button(&format!("user:{entry_id}"), Arc::from(visible), cx));
+        let mut actions = h_flex().gap_1().items_center().justify_end();
+        if !visible.trim().is_empty() {
+            actions = actions.child(self.render_copy_button(
+                &format!("user:{entry_id}"),
+                Arc::from(visible),
+                cx,
+            ));
+        }
         if steering.is_none()
             && let Some(rewind) = self.render_native_rewind_button(turn, cx)
         {
             actions = actions.child(rewind);
         }
+
+        // Sent image attachments render as a right-aligned thumbnail row above
+        // the text bubble; each opens the shared window-level lightbox. Missing
+        // files (a pruned attachments dir) simply render an empty tile.
+        let thumbnails = (!attachments.is_empty()).then(|| {
+            h_flex().gap_2().justify_end().flex_wrap().children(
+                attachments
+                    .iter()
+                    .enumerate()
+                    .map(|(image_index, path)| {
+                        let path = PathBuf::from(path);
+                        let title = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "image".to_string());
+                        let click_path = path.clone();
+                        div()
+                            .id(SharedString::from(format!(
+                                "user-image-{entry_id}-{image_index}"
+                            )))
+                            .size(px(120.))
+                            .rounded_xl()
+                            .overflow_hidden()
+                            .bg(cx.theme().muted)
+                            .cursor_pointer()
+                            .child(
+                                img(path)
+                                    .size(px(120.))
+                                    .rounded_xl()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                crate::attachments::open_image_lightbox(
+                                    click_path.clone(),
+                                    title.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        });
 
         let content = self.md_states.get(entry_id).map_or_else(
             || div().child(visible.to_string()).into_any_element(),
@@ -1221,30 +1275,33 @@ impl ChatView {
                         }),
                 )
             })
-            .child({
-                let pending = steering == Some(SteeringStatus::Pending);
-                div()
-                    // Ceil past sub-pixel snapping plus 1px slack — an exact
-                    // fractional fit can still wrap the final glyph. The extra
-                    // 2px always reserves the pending state's border (sizes are
-                    // border-box), so the width holds steady across steering
-                    // states and the last glyph never wraps while pending.
-                    .w((text_width + px(32.)).ceil() + px(3.))
-                    .flex_none()
-                    .max_w_3_4()
-                    .px_4()
-                    .py_3()
-                    .rounded_xl()
-                    .bg(cx.theme().muted)
-                    .when(pending, |bubble| {
-                        bubble
-                            .border_1()
-                            .border_dashed()
-                            .border_color(cx.theme().border)
-                    })
-                    .text_color(cx.theme().foreground)
-                    .text_size(px(15.))
-                    .child(content)
+            .children(thumbnails)
+            .when(!visible.trim().is_empty(), |column| {
+                column.child({
+                    let pending = steering == Some(SteeringStatus::Pending);
+                    div()
+                        // Ceil past sub-pixel snapping plus 1px slack — an exact
+                        // fractional fit can still wrap the final glyph. The extra
+                        // 2px always reserves the pending state's border (sizes are
+                        // border-box), so the width holds steady across steering
+                        // states and the last glyph never wraps while pending.
+                        .w((text_width + px(32.)).ceil() + px(3.))
+                        .flex_none()
+                        .max_w_3_4()
+                        .px_4()
+                        .py_3()
+                        .rounded_xl()
+                        .bg(cx.theme().muted)
+                        .when(pending, |bubble| {
+                            bubble
+                                .border_1()
+                                .border_dashed()
+                                .border_color(cx.theme().border)
+                        })
+                        .text_color(cx.theme().foreground)
+                        .text_size(px(15.))
+                        .child(content)
+                })
             })
             .child(self.reserve_action_row(actions, group_key, pinned));
 
@@ -3333,6 +3390,7 @@ This begins after the hard break."#;
                         text: "render a long document".into(),
                         steering: None,
                         context_len: None,
+                        attachments: Vec::new(),
                     },
                 ),
                 entry(
@@ -3495,6 +3553,7 @@ This begins after the hard break."#;
                     text: "go".into(),
                     steering: None,
                     context_len: None,
+                    attachments: Vec::new(),
                 },
             ),
             entry(
@@ -3531,6 +3590,7 @@ This begins after the hard break."#;
                     text: "next".into(),
                     steering: None,
                     context_len: None,
+                    attachments: Vec::new(),
                 },
             ),
             1,
@@ -3611,6 +3671,7 @@ This begins after the hard break."#;
                     text: "go".into(),
                     steering: None,
                     context_len: None,
+                    attachments: Vec::new(),
                 },
             ),
             command("cmd-1"),
@@ -3682,6 +3743,7 @@ This begins after the hard break."#;
                     text: id.into(),
                     steering: Some(SteeringStatus::Pending),
                     context_len: None,
+                    attachments: Vec::new(),
                 },
             )
         };
@@ -3730,6 +3792,7 @@ This begins after the hard break."#;
                 text: "redirect".into(),
                 steering: Some(SteeringStatus::Pending),
                 context_len: None,
+                attachments: Vec::new(),
             },
         );
         let assistant = entry(

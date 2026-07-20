@@ -82,6 +82,7 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                                 ItemContent::UserMessage {
                                     text,
                                     context_len: None,
+                                    attachments: Vec::new(),
                                 }
                             } else if role == Some("assistant") {
                                 ItemContent::AssistantMessage { text }

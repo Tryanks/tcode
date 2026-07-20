@@ -41,7 +41,7 @@ use crate::context_meter;
 use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::workspace_walk::filter_entries;
-use tcode_core::attachments::{image_only_message, validate_attachment};
+use tcode_core::attachments::validate_attachment;
 use tcode_core::session::append_review_comments_to_prompt;
 use tcode_runtime::app::{AppState, TerminalContext, WorkspaceMode};
 use tcode_runtime::ui_facade::PathEntry;
@@ -422,12 +422,9 @@ fn provider_display_name(provider: ProviderKind) -> &'static str {
 fn image_extension(mime: &str, name: &str) -> String {
     let from_mime = match mime {
         "image/png" => "png",
-        "image/jpeg" | "image/jpg" => "jpg",
+        "image/jpeg" => "jpg",
         "image/webp" => "webp",
         "image/gif" => "gif",
-        "image/svg+xml" => "svg",
-        "image/bmp" => "bmp",
-        "image/tiff" | "image/tif" => "tiff",
         _ => "",
     };
     if !from_mime.is_empty() {
@@ -438,6 +435,20 @@ fn image_extension(mime: &str, name: &str) -> String {
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_else(|| "png".to_string())
+}
+
+fn is_wire_ready_image(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
+
+fn transcode_image_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
+    let image = image::load_from_memory(bytes)?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png)?;
+    Ok(png.into_inner())
 }
 
 /// Best-effort MIME type from a file extension (for drag/drop of image files).
@@ -516,8 +527,6 @@ pub struct Composer {
     pending_images: Vec<PendingImage>,
     /// The session id `pending_images` belongs to (reset the strip on switch).
     images_session: Option<String>,
-    /// Index of the image shown in the expanded-preview overlay, if any.
-    image_preview: Option<usize>,
     /// Whether the one-shot screenshot debug seed has been applied.
     debug_applied: bool,
     _subscriptions: Vec<Subscription>,
@@ -620,7 +629,6 @@ impl Composer {
             workspace_loading: false,
             pending_images: Vec::new(),
             images_session: None,
-            image_preview: None,
             debug_applied: false,
             _subscriptions: subscriptions,
         }
@@ -771,14 +779,12 @@ impl Composer {
         let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
         let text = append_terminal_contexts_to_prompt(prompt_text, &terminal_contexts);
         let text = append_review_comments_to_prompt(&text, &review_comments);
-        // Image-only messages get T3's exact synthetic text. Attachments are
-        // persisted on disk (see `add_image_*`); read + base64-encode each one
-        // so the provider receives real image content blocks (Group A).
-        let sent_text = if text.is_empty() && has_images {
-            image_only_message().to_string()
-        } else {
-            text
-        };
+        // Attachments are persisted on disk (see `add_image_*`); read +
+        // base64-encode each one so the provider receives real image content
+        // blocks. An image-only message keeps its empty text here — the runtime
+        // substitutes T3's synthetic placeholder on the wire only, so the
+        // transcript bubble renders as just the thumbnails.
+        let sent_text = text;
         let attachments = self.collect_attachments();
         if let Some((from, to)) = self.app_state.read(cx).relay_confirmation() {
             let composer = cx.entity();
@@ -846,7 +852,6 @@ impl Composer {
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.pending_images.clear();
-        self.image_preview = None;
         self.app_state.update(cx, |state, cx| {
             if let Some(active) = state.active.as_mut() {
                 active.terminal_workspace.contexts.clear();
@@ -1111,7 +1116,6 @@ impl Composer {
         if id != self.images_session {
             self.images_session = id;
             self.pending_images.clear();
-            self.image_preview = None;
         }
     }
 
@@ -1131,6 +1135,17 @@ impl Composer {
             window.push_notification(Notification::error(attach_error_message(&err)), cx);
             return;
         }
+        let (mime, bytes) = if is_wire_ready_image(&mime) {
+            (mime, bytes)
+        } else {
+            let Ok(bytes) = transcode_image_to_png(&bytes) else {
+                let err =
+                    tcode_core::attachments::AttachError::UnsupportedType { name: name.clone() };
+                window.push_notification(Notification::error(attach_error_message(&err)), cx);
+                return;
+            };
+            ("image/png".to_string(), bytes)
+        };
         let ext = image_extension(&mime, &name);
         match self.app_state.read(cx).save_attachment(&bytes, &ext) {
             Ok(path) => {
@@ -1166,25 +1181,30 @@ impl Composer {
 
     /// Pull an image off the clipboard (⌘V with image content), if present.
     fn paste_clipboard_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        for entry in &item.entries {
-            match entry {
-                ClipboardEntry::Image(image) => {
-                    let mime = image.format().mime_type().to_string();
-                    let bytes = image.bytes().to_vec();
-                    self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
-                }
-                ClipboardEntry::ExternalPaths(paths) => {
-                    for path in paths.paths() {
-                        if mime_from_path(path).starts_with("image/") {
-                            self.add_image_path(path.clone(), window, cx);
+        let image_count_before = self.pending_images.len();
+        if let Some(item) = cx.read_from_clipboard() {
+            for entry in &item.entries {
+                match entry {
+                    ClipboardEntry::Image(image) => {
+                        let mime = image.format().mime_type().to_string();
+                        let bytes = image.bytes().to_vec();
+                        self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
+                    }
+                    ClipboardEntry::ExternalPaths(paths) => {
+                        for path in paths.paths() {
+                            if mime_from_path(path).starts_with("image/") {
+                                self.add_image_path(path.clone(), window, cx);
+                            }
                         }
                     }
+                    ClipboardEntry::String(_) => {}
                 }
-                ClipboardEntry::String(_) => {}
             }
+        }
+        if self.pending_images.len() == image_count_before
+            && let Some((mime, bytes)) = crate::pasteboard::read_pasteboard_image()
+        {
+            self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
         }
     }
 
@@ -1199,6 +1219,7 @@ impl Composer {
                 Some(Attachment {
                     media_type: mime_from_path(&image.path),
                     data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    source_path: Some(image.path.to_string_lossy().into_owned()),
                 })
             })
             .collect()
@@ -1208,9 +1229,6 @@ impl Composer {
         if index < self.pending_images.len() {
             let removed = self.pending_images.remove(index);
             let _ = tcode_runtime::ui_facade::remove_user_file(&removed.path);
-            if self.image_preview == Some(index) {
-                self.image_preview = None;
-            }
             cx.notify();
         }
     }
@@ -1870,9 +1888,8 @@ impl Composer {
                             .size(px(64.))
                             .rounded(crate::material::radius_card()),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.image_preview = Some(index);
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_image_preview(index, window, cx);
                     }))
                     .child(
                         div()
@@ -1903,47 +1920,13 @@ impl Composer {
         Some(row.into_any_element())
     }
 
-    /// The expanded image preview overlay (click backdrop / `x` to close).
-    fn render_image_preview(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let index = self.image_preview?;
-        let image = self.pending_images.get(index)?;
-        let path = image.path.clone();
-        let name = image.name.clone();
-        Some(
-            div()
-                .id("image-preview")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::black().opacity(0.7))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.image_preview = None;
-                    cx.notify();
-                }))
-                .child(
-                    v_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .max_w(px(420.))
-                                .max_h(px(420.))
-                                .rounded(crate::material::radius_card())
-                                .overflow_hidden()
-                                .child(img(path).max_w(px(420.)).max_h(px(420.))),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(gpui::white())
-                                .child(name),
-                        ),
-                )
-                .into_any_element(),
-        )
+    /// Open the clicked thumbnail as a window-level lightbox (see
+    /// [`crate::attachments::open_image_lightbox`]).
+    fn open_image_preview(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(image) = self.pending_images.get(index) else {
+            return;
+        };
+        crate::attachments::open_image_lightbox(image.path.clone(), image.name.clone(), window, cx);
     }
 
     // -- send / stop --------------------------------------------------------
@@ -3488,7 +3471,6 @@ impl Render for Composer {
                     .child(card)
                     .children(self.render_checkout_row(cx)),
             )
-            .children(self.render_image_preview(cx))
     }
 }
 
@@ -4565,6 +4547,20 @@ fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bmp_and_tiff_transcode_to_decodable_png() {
+        let source = image::DynamicImage::new_rgba8(2, 2);
+        for format in [image::ImageFormat::Bmp, image::ImageFormat::Tiff] {
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            source.write_to(&mut encoded, format).unwrap();
+
+            let png = transcode_image_to_png(&encoded.into_inner()).unwrap();
+            assert_eq!(image::guess_format(&png).unwrap(), image::ImageFormat::Png);
+            let decoded = image::load_from_memory(&png).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        }
+    }
 
     fn thread(id: &str) -> ComposerDestination {
         ComposerDestination::Thread(id.to_string())

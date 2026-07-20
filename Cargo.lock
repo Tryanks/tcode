@@ -8546,6 +8546,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui-wry",
+ "image",
  "lb-wry",
  "log",
  "objc2-app-kit 0.3.2",
