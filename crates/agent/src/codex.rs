@@ -1115,9 +1115,9 @@ impl Actor {
             }
             SessionCommand::Interrupt => {
                 let Some(turn_id) = self.active_turn.clone() else {
-                    self.emit(AgentEvent::Warning(
-                        "cannot interrupt: no active Codex turn".into(),
-                    ))
+                    self.emit(AgentEvent::Warning {
+                        message: "cannot interrupt: no active Codex turn".into(),
+                    })
                     .await;
                     return Ok(());
                 };
@@ -1133,9 +1133,9 @@ impl Actor {
                 decision,
             } => {
                 let Some(json_rpc_id) = self.approvals.remove(&request_id) else {
-                    self.emit(AgentEvent::Warning(format!(
-                        "unknown Codex approval request id: {request_id}"
-                    )))
+                    self.emit(AgentEvent::Warning {
+                        message: format!("unknown Codex approval request id: {request_id}"),
+                    })
                     .await;
                     return Ok(());
                 };
@@ -1171,9 +1171,9 @@ impl Actor {
                 answers,
             } => {
                 let Some(json_rpc_id) = self.user_inputs.remove(&request_id) else {
-                    self.emit(AgentEvent::Warning(format!(
-                        "unknown Codex user-input request id: {request_id}"
-                    )))
+                    self.emit(AgentEvent::Warning {
+                        message: format!("unknown Codex user-input request id: {request_id}"),
+                    })
                     .await;
                     return Ok(());
                 };
@@ -1201,9 +1201,11 @@ impl Actor {
                 // request. Signal the UI to fall back to a resume-restart (the
                 // fresh thread/resume carries the new mode), mirroring the
                 // model-switch path.
-                self.emit(AgentEvent::Warning(format!(
-                    "codex: applying approval mode {mode:?} requires a session restart"
-                )))
+                self.emit(AgentEvent::Warning {
+                    message: format!(
+                        "codex: applying approval mode {mode:?} requires a session restart"
+                    ),
+                })
                 .await;
                 Ok(())
             }
@@ -1227,9 +1229,9 @@ impl Actor {
                 // which is exactly the race we want to lose loudly rather than
                 // silently start a second turn.
                 let Some(turn_id) = self.active_turn.clone() else {
-                    self.emit(AgentEvent::Warning(
-                        "cannot steer: no active Codex turn".into(),
-                    ))
+                    self.emit(AgentEvent::Warning {
+                        message: "cannot steer: no active Codex turn".into(),
+                    })
                     .await;
                     return Ok(());
                 };
@@ -1381,9 +1383,9 @@ impl Actor {
                     &mut self.stdin,
                     &json!({ "id": id, "error": { "code": -32601, "message": format!("unsupported server request: {method}") } }),
                 );
-                self.emit(AgentEvent::Warning(format!(
-                    "unsupported Codex server request: {method}"
-                )))
+                self.emit(AgentEvent::Warning {
+                    message: format!("unsupported Codex server request: {method}"),
+                })
                 .await;
                 return;
             }
@@ -1454,9 +1456,9 @@ impl Actor {
                         .await;
                     }
                     Err(err) => {
-                        self.emit(AgentEvent::Warning(format!(
-                            "Codex supplied an invalid turn diff: {err}"
-                        )))
+                        self.emit(AgentEvent::Warning {
+                            message: format!("Codex supplied an invalid turn diff: {err}"),
+                        })
                         .await;
                     }
                 }
@@ -1603,13 +1605,16 @@ impl Actor {
             }
             "warning" | "configWarning" | "deprecationNotice" => {
                 if let Some(message) = params.get("message").and_then(Value::as_str) {
-                    self.emit(AgentEvent::Warning(message.into())).await;
+                    self.emit(AgentEvent::Warning {
+                        message: message.into(),
+                    })
+                    .await;
                 }
             }
             "thread/closed" => {
-                self.emit(AgentEvent::Warning(
-                    "Codex thread was closed by the server".into(),
-                ))
+                self.emit(AgentEvent::Warning {
+                    message: "Codex thread was closed by the server".into(),
+                })
                 .await;
             }
             _ => log::trace!("ignored Codex notification {method}: {params}"),

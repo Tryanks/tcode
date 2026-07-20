@@ -770,7 +770,9 @@ pub enum AgentEvent {
         item_id: String,
         markdown: String,
     },
-    Warning(String),
+    Warning {
+        message: String,
+    },
     /// A runtime-synthesized fatal provider startup failure persisted for replay.
     #[rustfmt::skip]
     ProviderStartFailed { error: String },
@@ -1480,6 +1482,21 @@ mod turn_diff_tests {
     fn empty_diff_is_an_exact_empty_snapshot_but_malformed_diff_is_rejected() {
         assert!(file_changes_from_unified_diff("\n").unwrap().is_empty());
         assert!(file_changes_from_unified_diff("--- a/file\n+++ b/file\n").is_err());
+    }
+
+    #[test]
+    fn warning_event_round_trips() {
+        let event = AgentEvent::Warning {
+            message: "boom".into(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "warning");
+        assert_eq!(json["message"], "boom");
+        let decoded: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            decoded,
+            AgentEvent::Warning { message } if message == "boom"
+        ));
     }
 
     #[test]

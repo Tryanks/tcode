@@ -191,10 +191,11 @@ async fn run_actor(
         .await;
     if opts.launch_env.home.is_some() {
         actor
-            .emit(AgentEvent::Warning(
+            .emit(AgentEvent::Warning {
+                message:
                 "OpenCode has no supported single-directory home override; custom environment variables still apply"
                     .into(),
-            ))
+             })
             .await;
     }
     if ready.send(Ok(())).await.is_err() {
@@ -273,9 +274,9 @@ impl OpenCodeActor {
             match self.fetch_diff() {
                 Ok(event) => self.emit(event).await,
                 Err(err) => {
-                    self.emit(AgentEvent::Warning(format!(
-                        "failed to fetch OpenCode session diff: {err}"
-                    )))
+                    self.emit(AgentEvent::Warning {
+                        message: format!("failed to fetch OpenCode session diff: {err}"),
+                    })
                     .await
                 }
             }
@@ -368,10 +369,11 @@ impl OpenCodeActor {
             }
             SessionCommand::SetApprovalMode(mode) => {
                 if mode != self.approval_mode {
-                    self.emit(AgentEvent::Warning(
-                        "OpenCode permission changes require restarting the per-session server"
-                            .into(),
-                    ))
+                    self.emit(AgentEvent::Warning {
+                        message:
+                            "OpenCode permission changes require restarting the per-session server"
+                                .into(),
+                    })
                     .await;
                 }
                 Ok(())
@@ -387,23 +389,25 @@ impl OpenCodeActor {
                 Ok(())
             }
             SessionCommand::Steer { .. } => {
-                self.emit(AgentEvent::Warning(
-                    "OpenCode's server API does not support steering an active turn".into(),
-                ))
+                self.emit(AgentEvent::Warning {
+                    message: "OpenCode's server API does not support steering an active turn"
+                        .into(),
+                })
                 .await;
                 Ok(())
             }
             SessionCommand::RespondUserInput { .. } => {
-                self.emit(AgentEvent::Warning(
-                    "OpenCode structured questions are not yet bridged by this adapter".into(),
-                ))
+                self.emit(AgentEvent::Warning {
+                    message: "OpenCode structured questions are not yet bridged by this adapter"
+                        .into(),
+                })
                 .await;
                 Ok(())
             }
             SessionCommand::Rewind { .. } => {
-                self.emit(AgentEvent::Warning(
-                    "OpenCode rewind is not exposed by tcode's native adapter".into(),
-                ))
+                self.emit(AgentEvent::Warning {
+                    message: "OpenCode rewind is not exposed by tcode's native adapter".into(),
+                })
                 .await;
                 Ok(())
             }
@@ -508,17 +512,19 @@ impl OpenCodeMapper {
         match kind {
             "session.status" => match properties.pointer("/status/type").and_then(Value::as_str) {
                 Some("busy") => mapped.events.extend(self.start_turn()),
-                Some("retry") => mapped.events.push(AgentEvent::Warning(format!(
-                    "OpenCode retry {}: {}",
-                    properties
-                        .pointer("/status/attempt")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    properties
-                        .pointer("/status/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("provider error")
-                ))),
+                Some("retry") => mapped.events.push(AgentEvent::Warning {
+                    message: format!(
+                        "OpenCode retry {}: {}",
+                        properties
+                            .pointer("/status/attempt")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        properties
+                            .pointer("/status/message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("provider error")
+                    ),
+                }),
                 Some("idle") => mapped.events.extend(self.complete_turn()),
                 _ => {}
             },

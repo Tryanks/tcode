@@ -512,7 +512,7 @@ impl Timeline {
                 }
             }
             AgentEvent::TokenUsage(usage) => self.usage = Some(*usage),
-            AgentEvent::Warning(message) => log::warn!("provider warning: {message}"),
+            AgentEvent::Warning { message } => log::warn!("provider warning: {message}"),
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn(ts);
                 let id = self.synthetic_id("error");

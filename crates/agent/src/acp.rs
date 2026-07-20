@@ -755,10 +755,10 @@ async fn handshake(
             agent.id
         );
         let _ = events
-            .send(AgentEvent::Warning(format!(
+            .send(AgentEvent::Warning { message: format!(
                 "{} does not support HTTP MCP servers; tcode MCP tools are unavailable in this session",
                 agent.name
-            )))
+            ) })
             .await;
     }
 
@@ -770,46 +770,47 @@ async fn handshake(
         .map(str::to_string)
         .filter(|_| caps.load_session);
 
-    let (session_id, mut modes, config_options) = match resumed {
-        Some(session_id) => {
-            // `session/load` replays the whole conversation as `session/update`
-            // notifications. Our JSONL log is the authoritative history and the
-            // UI has already folded it, so the replay is swallowed (see
-            // `State::replaying`); we only want the session live again.
-            state.lock().unwrap().replaying = true;
-            let session_id = acp::SessionId::new(session_id);
-            let loaded = connection
-                .send_request(
-                    acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
-                        .mcp_servers(mcp_servers.clone()),
-                )
-                .block_task()
-                .await;
-            state.lock().unwrap().replaying = false;
-            match loaded {
-                Ok(loaded) => (session_id, loaded.modes, loaded.config_options),
-                Err(err) => {
-                    log::warn!(
-                        "acp[{}]: session/load failed ({}); starting a fresh session",
-                        agent.id,
-                        describe(&err)
-                    );
-                    let _ = events
-                        .send(AgentEvent::Warning(format!(
+    let (session_id, mut modes, config_options) =
+        match resumed {
+            Some(session_id) => {
+                // `session/load` replays the whole conversation as `session/update`
+                // notifications. Our JSONL log is the authoritative history and the
+                // UI has already folded it, so the replay is swallowed (see
+                // `State::replaying`); we only want the session live again.
+                state.lock().unwrap().replaying = true;
+                let session_id = acp::SessionId::new(session_id);
+                let loaded = connection
+                    .send_request(
+                        acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
+                            .mcp_servers(mcp_servers.clone()),
+                    )
+                    .block_task()
+                    .await;
+                state.lock().unwrap().replaying = false;
+                match loaded {
+                    Ok(loaded) => (session_id, loaded.modes, loaded.config_options),
+                    Err(err) => {
+                        log::warn!(
+                            "acp[{}]: session/load failed ({}); starting a fresh session",
+                            agent.id,
+                            describe(&err)
+                        );
+                        let _ = events
+                        .send(AgentEvent::Warning { message: format!(
                             "{} could not resume the previous conversation; starting a new one",
                             agent.name
-                        )))
+                        ) })
                         .await;
-                    let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
-                    (new.session_id, new.modes, new.config_options)
+                        let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
+                        (new.session_id, new.modes, new.config_options)
+                    }
                 }
             }
-        }
-        None => {
-            let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
-            (new.session_id, new.modes, new.config_options)
-        }
-    };
+            None => {
+                let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
+                (new.session_id, new.modes, new.config_options)
+            }
+        };
 
     if opts.approval_mode == ApprovalMode::ReadOnly
         && let Some(plan_mode) = modes.as_ref().and_then(acp_plan_mode)
@@ -832,11 +833,13 @@ async fn handshake(
                 // current mode, which is the same least-privilege fallback used
                 // for Supervised sessions.
                 let _ = events
-                    .send(AgentEvent::Warning(format!(
-                        "{} could not enter its read-only plan mode: {}",
-                        agent.name,
-                        describe(&err)
-                    )))
+                    .send(AgentEvent::Warning {
+                        message: format!(
+                            "{} could not enter its read-only plan mode: {}",
+                            agent.name,
+                            describe(&err)
+                        ),
+                    })
                     .await;
             }
         }
@@ -1054,11 +1057,11 @@ async fn handle_command(
         SessionCommand::Steer { .. } => {
             log::warn!("acp: steering is not part of the protocol; ignoring");
             let _ = events
-                .send(AgentEvent::Warning(
-                    "This agent cannot be steered (ACP has no steering method); \
+                .send(AgentEvent::Warning {
+                    message: "This agent cannot be steered (ACP has no steering method); \
                      send the message after the turn finishes."
                         .into(),
-                ))
+                })
                 .await;
         }
         SessionCommand::SendTurn {
@@ -1071,10 +1074,11 @@ async fn handle_command(
                 // ACP has no steering: one `session/prompt` per turn. The app
                 // queues turns, so this should not happen.
                 let _ = events
-                    .send(AgentEvent::Warning(
+                    .send(AgentEvent::Warning {
+                        message:
                         "a turn is already running; ACP agents cannot take a second prompt mid-turn"
                             .into(),
-                    ))
+                     })
                     .await;
                 return;
             }
@@ -1153,10 +1157,11 @@ async fn handle_command(
                 Some(outcome) => outcome,
                 None => {
                     let _ = events
-                        .send(AgentEvent::Warning(
+                        .send(AgentEvent::Warning {
+                            message:
                             "the agent offered no matching permission option; cancelling instead"
                                 .into(),
-                        ))
+                         })
                         .await;
                     acp::RequestPermissionOutcome::Cancelled
                 }
@@ -1188,10 +1193,9 @@ async fn handle_command(
                 }
                 Err(err) => {
                     let _ = events
-                        .send(AgentEvent::Warning(format!(
-                            "could not apply `{id}`: {}",
-                            describe(&err)
-                        )))
+                        .send(AgentEvent::Warning {
+                            message: format!("could not apply `{id}`: {}", describe(&err)),
+                        })
                         .await;
                 }
             }
@@ -1202,10 +1206,11 @@ async fn handle_command(
         }
         SessionCommand::SetApprovalMode(_) => {
             let _ = events
-                .send(AgentEvent::Warning(
-                    "ACP agents own their permission policy; use the agent's own mode selector"
-                        .into(),
-                ))
+                .send(AgentEvent::Warning {
+                    message:
+                        "ACP agents own their permission policy; use the agent's own mode selector"
+                            .into(),
+                })
                 .await;
         }
         SessionCommand::SetInteractionMode(_) => {

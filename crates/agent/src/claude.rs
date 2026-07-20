@@ -704,9 +704,9 @@ async fn handle_command(
             let msg = mapper.set_permission_mode_request(mode);
             if write_line(stdin, &msg).await.is_err() {
                 let _ = event_tx
-                    .send(AgentEvent::Warning(format!(
-                        "claude: failed to switch permission mode to {mode:?}"
-                    )))
+                    .send(AgentEvent::Warning {
+                        message: format!("claude: failed to switch permission mode to {mode:?}"),
+                    })
                     .await;
             } else {
                 mapper.applied_permission_mode = flag.to_string();
