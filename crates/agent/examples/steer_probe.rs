@@ -148,7 +148,7 @@ fn main() {
                         assistant.push('\n');
                     }
                 }
-                AgentEvent::Warning(message) => {
+                AgentEvent::Warning { message } => {
                     eprintln!("steer_probe: WARNING: {message}");
                 }
                 AgentEvent::Error { message, .. } => {

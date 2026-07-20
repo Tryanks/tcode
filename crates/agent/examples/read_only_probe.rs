@@ -223,7 +223,7 @@ fn print_event(label: &str, event: &AgentEvent) {
         AgentEvent::TurnCompleted { status, .. } => {
             eprintln!("probe: {label} TurnCompleted status={status:?}")
         }
-        AgentEvent::Warning(message) => eprintln!("probe: {label} Warning {message:?}"),
+        AgentEvent::Warning { message } => eprintln!("probe: {label} Warning {message:?}"),
         AgentEvent::Error { fatal, message } => {
             eprintln!("probe: {label} Error fatal={fatal} {message:?}")
         }

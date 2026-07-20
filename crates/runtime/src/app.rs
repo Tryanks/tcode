@@ -6010,7 +6010,7 @@ impl AppState {
                     message.clone(),
                 )));
             }
-            AgentEvent::Warning(message) => {
+            AgentEvent::Warning { message } => {
                 // Provider warnings (config problems, deprecations, failed
                 // mode switches) explain later misbehavior: a log line alone
                 // hides them from the person who needs to act on them.
