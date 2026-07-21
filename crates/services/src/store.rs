@@ -304,6 +304,21 @@ impl SessionStore {
         events
     }
 
+    /// Atomically clone one session's append-only event log. A missing source
+    /// is an empty transcript and therefore succeeds without creating a file.
+    pub fn clone_events(&self, src_id: &str, dst_id: &str) -> std::io::Result<()> {
+        let src = self.events_path(src_id);
+        let data = match fs::read(src) {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        let dst = self.events_path(dst_id);
+        let tmp = dst.with_extension("jsonl.tmp");
+        fs::write(&tmp, data)?;
+        fs::rename(tmp, dst)
+    }
+
     /// Remove a session from the index and delete its event log.
     pub fn remove_session(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
@@ -646,6 +661,27 @@ mod tests {
     }
 
     #[test]
+    fn session_meta_fork_fields_are_legacy_safe_and_roundtrip() {
+        let legacy = serde_json::json!({
+            "id": "s1", "title": "One", "provider": "codex",
+            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
+        });
+        let mut meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.forked_from, None);
+        assert!(!meta.pending_fork);
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("forked_from"));
+        assert!(!json.contains("pending_fork"));
+
+        meta.forked_from = Some("source".into());
+        meta.pending_fork = true;
+        let back: SessionMeta =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert_eq!(back.forked_from.as_deref(), Some("source"));
+        assert!(back.pending_fork);
+    }
+
+    #[test]
     fn orchestration_fields_are_legacy_safe_and_roundtrip() {
         let legacy = serde_json::json!({
             "id": "s1", "title": "One", "provider": "codex",
@@ -746,6 +782,29 @@ mod tests {
 
         assert!(store.load_index().is_empty());
         assert!(!store.events_path(&meta.id).exists());
+        let _ = fs::remove_dir_all(store.root());
+    }
+
+    #[test]
+    fn clone_events_copies_contents_and_missing_source_is_a_noop() {
+        let store = SessionStore::open_at(temp_root()).unwrap();
+        store
+            .append_event(
+                "source",
+                7,
+                &AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+            )
+            .unwrap();
+        store.clone_events("source", "fork").unwrap();
+        assert_eq!(
+            fs::read(store.events_path("fork")).unwrap(),
+            fs::read(store.events_path("source")).unwrap()
+        );
+
+        store.clone_events("missing", "empty-fork").unwrap();
+        assert!(!store.events_path("empty-fork").exists());
         let _ = fs::remove_dir_all(store.root());
     }
 }

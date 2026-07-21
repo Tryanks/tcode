@@ -109,8 +109,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(settings) = &launch.settings_json {
         cmd.arg("--settings").arg(settings);
     }
-    if let Some(session_id) = resume_session_id(&opts.resume) {
-        cmd.arg("--resume").arg(session_id);
+    for arg in resume_args(&opts.resume, opts.fork) {
+        cmd.arg(arg);
     }
     // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
     // headers inside the merged `--mcp-config` JSON.
@@ -362,6 +362,17 @@ fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<String> {
         .and_then(|c| c.0.get("session_id"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
+    let Some(session_id) = resume_session_id(resume) else {
+        return Vec::new();
+    };
+    let mut args = vec!["--resume".into(), session_id];
+    if fork {
+        args.push("--fork-session".into());
+    }
+    args
 }
 
 /// How many trailing stderr lines to keep for exit diagnostics.
@@ -2909,6 +2920,17 @@ pub async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_flag_requires_both_request_and_resume_cursor() {
+        let resume = Some(ResumeCursor(json!({"session_id": "session-source"})));
+        assert_eq!(
+            resume_args(&resume, true),
+            ["--resume", "session-source", "--fork-session"]
+        );
+        assert_eq!(resume_args(&resume, false), ["--resume", "session-source"]);
+        assert!(resume_args(&None, true).is_empty());
+    }
 
     #[test]
     fn mcp_builder_handles_both_one_and_none() {

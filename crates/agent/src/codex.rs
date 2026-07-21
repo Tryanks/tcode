@@ -744,24 +744,7 @@ async fn initialize_and_open_thread(
     let cwd = opts.cwd.to_string_lossy();
     let (approval_policy, sandbox) = approval_knobs(opts.approval_mode);
     let (method, mut params) = if let Some(resume) = &opts.resume {
-        let thread_id = resume
-            .0
-            .get("thread_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AgentError::Protocol(
-                    "Codex resume cursor is missing string field `thread_id`".into(),
-                )
-            })?;
-        (
-            "thread/resume",
-            json!({
-                "threadId": thread_id,
-                "cwd": cwd,
-                "approvalPolicy": approval_policy,
-                "sandbox": sandbox
-            }),
-        )
+        resume_request(resume, opts.fork, &cwd, approval_policy, sandbox)?
     } else {
         (
             "thread/start",
@@ -811,6 +794,31 @@ async fn initialize_and_open_thread(
     next_id += 1;
     provider_commands.extend(load_codex_prompts(&opts.launch_env));
     Ok((thread_id, model, next_id, provider_commands))
+}
+
+fn resume_request(
+    resume: &ResumeCursor,
+    fork: bool,
+    cwd: &str,
+    approval_policy: &str,
+    sandbox: &str,
+) -> Result<(&'static str, Value), AgentError> {
+    let thread_id = resume
+        .0
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
+        })?;
+    Ok((
+        if fork { "thread/fork" } else { "thread/resume" },
+        json!({
+            "threadId": thread_id,
+            "cwd": cwd,
+            "approvalPolicy": approval_policy,
+            "sandbox": sandbox
+        }),
+    ))
 }
 
 /// Query `skills/list` for `cwd` and map the entries into `Skill`-kind
@@ -2041,6 +2049,19 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_request_uses_native_method_and_resume_thread_id() {
+        let resume = ResumeCursor(json!({"thread_id": "thread-source"}));
+        let (method, params) =
+            resume_request(&resume, true, "/workspace", "never", "danger-full-access").unwrap();
+        assert_eq!(method, "thread/fork");
+        assert_eq!(params["threadId"], "thread-source");
+
+        let (method, _) =
+            resume_request(&resume, false, "/workspace", "never", "danger-full-access").unwrap();
+        assert_eq!(method, "thread/resume");
+    }
 
     #[test]
     fn mcp_builder_handles_both_one_and_none() {

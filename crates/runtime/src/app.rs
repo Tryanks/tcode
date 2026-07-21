@@ -414,6 +414,7 @@ impl ActiveSession {
     fn resume_cursor_for_fresh_provider(&mut self) {
         self.shutdown_to_idle();
         self.meta.resume_cursor = None;
+        self.meta.pending_fork = false;
         self.pending_relay = None;
     }
 
@@ -3620,6 +3621,91 @@ impl AppState {
         }
     }
 
+    /// Duplicate a stored transcript and arrange for its next provider start to
+    /// fork the source's native session. The fork stays idle until its first
+    /// user turn, exactly like a cold-opened stored thread.
+    pub fn fork_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+        let source = self
+            .active
+            .as_ref()
+            .filter(|session| session.meta.id == id)
+            .map(|session| (session.meta.clone(), session.turn_in_flight))
+            .or_else(|| {
+                self.background
+                    .get(id)
+                    .map(|session| (session.meta.clone(), session.turn_in_flight))
+            })
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .find(|meta| meta.id == id)
+                    .cloned()
+                    .map(|meta| (meta, false))
+            });
+        let Some((source, turn_in_flight)) = source else {
+            return;
+        };
+        if !source.provider.supports_fork() {
+            self.report_error(
+                RuntimeError::External("This provider does not support conversation forks.".into()),
+                cx,
+            );
+            return;
+        }
+        if source.resume_cursor.is_none() {
+            self.report_error(
+                RuntimeError::External("This conversation is empty and cannot be forked.".into()),
+                cx,
+            );
+            return;
+        }
+        if turn_in_flight {
+            self.report_error(
+                RuntimeError::External(
+                    "Wait for the running turn to finish before forking this conversation.".into(),
+                ),
+                cx,
+            );
+            return;
+        }
+
+        let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
+        fork.title = format!("{} (fork)", source.title);
+        fork.option_selections = source.option_selections.clone();
+        fork.approval_mode = source.approval_mode;
+        fork.interaction_mode = source.interaction_mode;
+        fork.project_id = source.project_id.clone();
+        fork.acp_agent_id = source.acp_agent_id.clone();
+        fork.profile_id = source.profile_id.clone();
+        fork.resume_cursor = source.resume_cursor.clone();
+        fork.pending_fork = true;
+        fork.forked_from = Some(source.id.clone());
+        // `worktree` deliberately stays absent: it is an ownership/cleanup
+        // marker. The cwd may be shared, but the fork must not own the source's
+        // generated worktree or offer to delete it.
+
+        if let Err(err) = self.store.clone_events(&source.id, &fork.id) {
+            self.report_error(
+                RuntimeError::PersistEvent {
+                    error: err.to_string(),
+                },
+                cx,
+            );
+            return;
+        }
+        if let Err(err) = self.store.upsert_meta(&fork) {
+            self.report_error(
+                RuntimeError::PersistSession {
+                    error: err.to_string(),
+                },
+                cx,
+            );
+            return;
+        }
+        self.sessions = self.store.load_index();
+        self.select_session(&fork.id, cx);
+    }
+
     /// The worktree that deleting `session_id` would orphan (i.e. it is the only
     /// remaining session bound to that worktree), if any — drives the "also
     /// remove the worktree?" confirmation.
@@ -4465,6 +4551,7 @@ impl AppState {
         let session_id = active.meta.id.clone();
         active.shutdown_to_idle();
         active.meta.resume_cursor = None;
+        active.meta.pending_fork = false;
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
 
@@ -6038,6 +6125,7 @@ impl AppState {
                 let mut filled_default_model = false;
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.resume_cursor = Some(resume.clone());
+                    meta.pending_fork = false;
                     if meta.model.is_none() {
                         meta.model = model.clone();
                         filled_default_model = model.is_some();
@@ -6962,6 +7050,7 @@ fn session_options(
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
+        fork: meta.pending_fork,
         binary_path: provider_settings.binary_path.clone(),
         approval_mode: meta.approval_mode,
         option_selections: meta.option_selections.clone(),
@@ -10146,6 +10235,60 @@ mod tests {
             Some("tcode/shared".to_string())
         );
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn fork_thread_clones_timeline_and_provider_cursor(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("tcode-fork-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let mut source = SessionMeta::new(
+            ProviderKind::Codex,
+            PathBuf::from("/tmp/source-worktree"),
+            Some("gpt-5.4".into()),
+        );
+        source.title = "Investigate parser".into();
+        source.resume_cursor = Some(agent::ResumeCursor(
+            serde_json::json!({"thread_id": "native-source"}),
+        ));
+        source.worktree = Some(WorktreeInfo {
+            root_project_path: PathBuf::from("/tmp/project"),
+            base: "main".into(),
+            branch: "tcode/source".into(),
+        });
+        store.upsert_meta(&source).unwrap();
+        store
+            .append_event(
+                &source.id,
+                1,
+                &AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+            )
+            .unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
+
+        state.update(cx, |state, _cx| {
+            let active = state.active.as_ref().unwrap();
+            let fork = &active.meta;
+            assert_ne!(fork.id, source.id);
+            assert_eq!(fork.forked_from.as_deref(), Some(source.id.as_str()));
+            assert!(fork.pending_fork);
+            assert_eq!(
+                fork.resume_cursor.as_ref().unwrap().0["thread_id"],
+                "native-source"
+            );
+            assert_eq!(fork.cwd, source.cwd);
+            assert_eq!(fork.worktree, None);
+            assert!(!active.timeline.turn_running);
+            assert_eq!(state.store.read_events(&fork.id).len(), 1);
+            assert_eq!(
+                std::fs::read(root.join(format!("{}.jsonl", fork.id))).unwrap(),
+                std::fs::read(root.join(format!("{}.jsonl", source.id))).unwrap()
+            );
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 

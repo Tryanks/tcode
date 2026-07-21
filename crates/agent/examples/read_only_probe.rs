@@ -56,6 +56,7 @@ async fn run(provider: ProviderKind) -> i32 {
         cwd: cwd.clone(),
         model: None,
         resume: None,
+        fork: false,
         binary_path: None,
         approval_mode: ApprovalMode::ReadOnly,
         option_selections: Vec::new(),

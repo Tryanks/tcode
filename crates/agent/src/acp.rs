@@ -61,6 +61,11 @@ type AcpConnection = sdk::ConnectionTo<sdk::Agent>;
 
 /// Start (or resume) a session with an ACP agent.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
+    if opts.fork {
+        return Err(AgentError::Protocol(
+            "session fork is not supported for this provider".into(),
+        ));
+    }
     let (commands_tx, commands_rx) = async_channel::unbounded();
     let (events_tx, events_rx) = async_channel::unbounded();
     let (ready_tx, ready_rx) = async_channel::bounded(1);
