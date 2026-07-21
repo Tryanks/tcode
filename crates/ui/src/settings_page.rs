@@ -90,6 +90,8 @@ pub struct SettingsPage {
     section: Section,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: Entity<InputState>,
+    auto_archive_idle_input: Entity<InputState>,
+    auto_archive_keep_input: Entity<InputState>,
     /// Last-known TCC permission snapshot, refreshed when Computer Use becomes
     /// visible and on every explicit Recheck / Grant.
     perm_status: PermissionStatus,
@@ -100,6 +102,22 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
+    fn take_requested_section(
+        app_state: &Entity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Option<Section> {
+        app_state
+            .update(cx, |state, _| state.debug_settings_section.take())
+            .map(|section| match section.as_str() {
+                "providers" => Section::Providers,
+                "browser" => Section::Browser,
+                "computer_use" => Section::ComputerUse,
+                "orchestrate" => Section::Orchestrate,
+                "archived" => Section::Archived,
+                _ => Section::General,
+            })
+    }
+
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title_generation = app_state.read(cx).settings.title_generation.clone();
         let title_model_picker = cx.new(|cx| {
@@ -115,6 +133,10 @@ impl SettingsPage {
         });
         let subscriptions = vec![
             cx.observe(&app_state, |this, _, cx| {
+                let app_state = this.app_state.clone();
+                if let Some(section) = Self::take_requested_section(&app_state, cx) {
+                    this.section = section;
+                }
                 let selection = this.app_state.read(cx).settings.title_generation.clone();
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
@@ -139,16 +161,9 @@ impl SettingsPage {
             }),
         ];
 
-        // Screenshot-only / restart-continuity: `--debug-settings-section` (also
-        // reused by the relaunch marker) opens a specific section.
-        let section = match app_state.read(cx).debug_settings_section.as_deref() {
-            Some("providers") => Section::Providers,
-            Some("browser") => Section::Browser,
-            Some("computer_use") => Section::ComputerUse,
-            Some("orchestrate") => Section::Orchestrate,
-            Some("archived") => Section::Archived,
-            _ => Section::General,
-        };
+        // Consume launch-time screenshot/relaunch requests through the same
+        // channel used by in-app Settings links.
+        let section = Self::take_requested_section(&app_state, cx).unwrap_or(Section::General);
         let acp_panel = cx.new(|cx| AcpPanel::new(app_state.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(app_state.clone(), window, cx));
@@ -165,6 +180,26 @@ impl SettingsPage {
                 .placeholder(tcode_i18n::tr!("browser.home_url.placeholder"))
                 .default_value(home_url_value)
         });
+        let auto_archive_idle_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(
+                app_state
+                    .read(cx)
+                    .settings
+                    .auto_archive_max_idle_days
+                    .max(1)
+                    .to_string(),
+            )
+        });
+        let auto_archive_keep_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(
+                app_state
+                    .read(cx)
+                    .settings
+                    .auto_archive_keep_count
+                    .max(1)
+                    .to_string(),
+            )
+        });
         // Refresh the TCC snapshot once as the page mounts. When the page is
         // opened by a post-grant relaunch this is the "automatic recheck" that
         // surfaces the new status immediately.
@@ -179,6 +214,8 @@ impl SettingsPage {
             debug_acp_dialog_pending,
             section,
             home_url_input: home_url_input.clone(),
+            auto_archive_idle_input: auto_archive_idle_input.clone(),
+            auto_archive_keep_input: auto_archive_keep_input.clone(),
             perm_status,
             sr_restart_hint: false,
             _subscriptions: subscriptions,
@@ -189,6 +226,20 @@ impl SettingsPage {
                     this.commit_home_url(cx);
                 }
             }));
+        page._subscriptions.push(
+            cx.subscribe(&auto_archive_idle_input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.commit_auto_archive_idle_days(cx);
+                }
+            }),
+        );
+        page._subscriptions.push(
+            cx.subscribe(&auto_archive_keep_input, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.commit_auto_archive_keep_count(cx);
+                }
+            }),
+        );
         page.build_provider_cards(cx);
         page.sync_acp_cards(window, cx);
         page
@@ -199,6 +250,40 @@ impl SettingsPage {
         let value = self.home_url_input.read(cx).value().trim().to_string();
         let home_url = (!value.is_empty()).then_some(value);
         self.update_settings(move |settings| settings.browser.home_url = home_url, cx);
+    }
+
+    fn commit_auto_archive_idle_days(&self, cx: &mut Context<Self>) {
+        let Some(days) = self
+            .auto_archive_idle_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u32>()
+            .ok()
+        else {
+            return;
+        };
+        self.update_settings(
+            move |settings| settings.auto_archive_max_idle_days = days.max(1),
+            cx,
+        );
+    }
+
+    fn commit_auto_archive_keep_count(&self, cx: &mut Context<Self>) {
+        let Some(keep) = self
+            .auto_archive_keep_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<usize>()
+            .ok()
+        else {
+            return;
+        };
+        self.update_settings(
+            move |settings| settings.auto_archive_keep_count = keep.max(1),
+            cx,
+        );
     }
 
     /// (Re)build the provider cards from current settings — also used after
@@ -516,6 +601,10 @@ impl SettingsPage {
                             .unwrap_or_default();
                         page.home_url_input
                             .update(cx, |input, cx| input.set_value(home_url, window, cx));
+                        page.auto_archive_idle_input
+                            .update(cx, |input, cx| input.set_value("7", window, cx));
+                        page.auto_archive_keep_input
+                            .update(cx, |input, cx| input.set_value("30", window, cx));
                     });
                     apply_theme(ThemeMode::System, window, cx);
                     true
@@ -726,10 +815,60 @@ impl SettingsPage {
     /// Archived Threads: archived sessions grouped by project, each with
     /// Unarchive + Delete-permanently controls (Group A).
     fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let groups = self.app_state.read(cx).archived_groups();
+        let (groups, settings) = {
+            let state = self.app_state.read(cx);
+            (state.archived_groups(), state.settings.clone())
+        };
+        let days = settings.auto_archive_max_idle_days.max(1);
+        let keep = settings.auto_archive_keep_count.max(1);
+        let controls = v_flex()
+            .child(self.section_label(tcode_i18n::tr!("settings.auto_archive.section"), cx))
+            .child(self.grouped_plain(
+                vec![
+                    self.toggle_row(
+                        "auto-archive",
+                        tcode_i18n::tr!("settings.auto_archive.title"),
+                        tcode_i18n::tr!(
+                            "settings.auto_archive.description",
+                            days = days,
+                            keep = keep
+                        ),
+                        !settings.auto_archive_disabled,
+                        cx,
+                        |settings, checked| settings.auto_archive_disabled = !checked,
+                    ),
+                    self.row_frame(cx)
+                        .child(self.row_labels(
+                            tcode_i18n::tr!("settings.auto_archive.idle_days"),
+                            tcode_i18n::tr!("settings.auto_archive.idle_days_description"),
+                            cx,
+                        ))
+                        .child(
+                            Input::new(&self.auto_archive_idle_input)
+                                .w(px(72.))
+                                .rounded(crate::material::radius_input()),
+                        )
+                        .into_any_element(),
+                    self.row_frame(cx)
+                        .child(self.row_labels(
+                            tcode_i18n::tr!("settings.auto_archive.keep_count"),
+                            tcode_i18n::tr!("settings.auto_archive.keep_count_description"),
+                            cx,
+                        ))
+                        .child(
+                            Input::new(&self.auto_archive_keep_input)
+                                .w(px(72.))
+                                .rounded(crate::material::radius_input()),
+                        )
+                        .into_any_element(),
+                ],
+                cx,
+            ));
 
         if groups.is_empty() {
             return v_flex()
+                .gap(px(20.))
+                .child(controls)
                 .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx))
                 .child(
                     v_flex()
@@ -756,6 +895,7 @@ impl SettingsPage {
         // Each project becomes its own grouped list, spaced from the next.
         let mut col = v_flex()
             .gap(px(20.))
+            .child(controls)
             .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx));
         for group in groups {
             let mut rows: Vec<AnyElement> = Vec::new();

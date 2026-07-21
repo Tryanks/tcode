@@ -209,6 +209,8 @@ pub struct SessionsSidebar {
     collapsed_parents: HashSet<String>,
     /// The thread currently being renamed inline, if any.
     renaming: Option<RenameState>,
+    /// Last expansion sweep result, cleared on collapse or the next sweep.
+    auto_archive_notice: Option<(String, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -220,6 +222,7 @@ impl SessionsSidebar {
             expanded_groups: HashSet::new(),
             collapsed_parents: HashSet::new(),
             renaming: None,
+            auto_archive_notice: None,
             _subscriptions: subscriptions,
         }
     }
@@ -231,11 +234,77 @@ impl SessionsSidebar {
         super::add_project_dialog::open(self.app_state.clone(), window, cx);
     }
 
-    fn toggle_group(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        if !self.expanded_groups.remove(project_id) {
+    fn toggle_group(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.expanded_groups.remove(project_id) {
+            if self
+                .auto_archive_notice
+                .as_ref()
+                .is_some_and(|(notice_project, _)| notice_project == project_id)
+            {
+                self.auto_archive_notice = None;
+            }
+        } else {
+            self.auto_archive_notice = None;
+            let (notice_shown, days, keep) = {
+                let settings = &self.app_state.read(cx).settings;
+                (
+                    settings.auto_archive_notice_shown,
+                    settings.auto_archive_max_idle_days.max(1),
+                    settings.auto_archive_keep_count.max(1),
+                )
+            };
+            let count = self
+                .app_state
+                .update(cx, |state, cx| state.auto_archive_sweep(project_id, cx));
             self.expanded_groups.insert(project_id.to_string());
+            if count > 0 {
+                self.auto_archive_notice = Some((project_id.to_string(), count));
+                if !notice_shown {
+                    self.show_auto_archive_dialog(count, days, keep, window, cx);
+                }
+            }
         }
         cx.notify();
+    }
+
+    fn show_auto_archive_dialog(
+        &self,
+        count: usize,
+        days: u32,
+        keep: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.app_state.update(cx, |state, cx| {
+            let mut settings = state.settings.clone();
+            settings.auto_archive_notice_shown = true;
+            state.update_settings(settings, cx);
+        });
+        let app_state = self.app_state.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let app_state = app_state.clone();
+            alert
+                .title(tcode_i18n::tr!("sidebar.auto_archive_dialog.title"))
+                .description(tcode_i18n::tr!(
+                    "sidebar.auto_archive_dialog.body",
+                    count = count,
+                    days = days,
+                    keep = keep
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(tcode_i18n::tr!("sidebar.auto_archive_dialog.open_settings"))
+                        .cancel_text(tcode_i18n::tr!("sidebar.auto_archive_dialog.got_it"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    app_state.update(cx, |state, cx| {
+                        state.debug_settings_section = Some("archived".into());
+                        state.open_settings(cx);
+                    });
+                    true
+                })
+        });
     }
 
     // -- context-menu action handlers ---------------------------------------
@@ -914,10 +983,41 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground)
                     .cursor_pointer()
                     .hover(|s| s.text_color(cx.theme().sidebar_foreground))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_group(&toggle_id, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_group(&toggle_id, window, cx);
                     }))
                     .child(toggle_label),
+                );
+            }
+            if expanded
+                && let Some((_, count)) = self
+                    .auto_archive_notice
+                    .as_ref()
+                    .filter(|(notice_project, _)| notice_project == &project_id)
+            {
+                let label = tcode_i18n::tr!("sidebar.auto_archived", count = *count);
+                let app_state = self.app_state.clone();
+                container = container.child(
+                    crate::material::accessible_clickable(
+                        div(),
+                        gpui::SharedString::from(format!("auto-archived-{project_id}")),
+                        Role::Button,
+                        label.clone(),
+                        cx,
+                    )
+                    .pl(px(30.))
+                    .py_1()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(cx.theme().sidebar_foreground))
+                    .on_click(move |_, _, cx| {
+                        app_state.update(cx, |state, cx| {
+                            state.debug_settings_section = Some("archived".into());
+                            state.open_settings(cx);
+                        });
+                    })
+                    .child(label),
                 );
             }
         }
