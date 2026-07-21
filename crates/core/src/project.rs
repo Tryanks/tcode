@@ -1,6 +1,9 @@
 //! Projects and session-index domain data.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use agent::{ApprovalMode, InteractionMode, OptionSelection, ProviderKind, ResumeCursor};
 use serde::{Deserialize, Serialize};
@@ -149,6 +152,159 @@ impl SessionMeta {
             updated_at: now,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoArchiveConfig {
+    pub max_idle_secs: u64,
+    pub keep_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoArchiveExemptions {
+    pub working: HashSet<String>,
+    pub unread: HashSet<String>,
+    pub active: HashSet<String>,
+}
+
+/// Return the cascade-closed ids eligible for auto-archive in one project.
+/// `sessions` may contain only non-archived entries; archived entries are also
+/// defensively ignored here so they cannot consume ranking slots.
+pub fn auto_archive_candidates(
+    sessions: &[SessionMeta],
+    now: u64,
+    config: &AutoArchiveConfig,
+    exempt: &AutoArchiveExemptions,
+) -> Vec<String> {
+    let sessions: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|session| session.archived_at.is_none())
+        .collect();
+    let ids: HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
+    let mut children: HashMap<&str, Vec<&SessionMeta>> = HashMap::new();
+    let mut roots = Vec::new();
+    for session in &sessions {
+        if let Some(parent) = session.parent_session_id.as_deref()
+            && ids.contains(parent)
+        {
+            children.entry(parent).or_default().push(session);
+        } else {
+            roots.push(*session);
+        }
+    }
+    roots.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    for siblings in children.values_mut() {
+        siblings.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    }
+
+    fn has_exempt_descendant(
+        session_id: &str,
+        children: &HashMap<&str, Vec<&SessionMeta>>,
+        exempt: &AutoArchiveExemptions,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
+        if !visiting.insert(session_id.to_string()) {
+            return false;
+        }
+        let found = children.get(session_id).is_some_and(|descendants| {
+            descendants.iter().any(|child| {
+                exempt.working.contains(&child.id)
+                    || exempt.unread.contains(&child.id)
+                    || exempt.active.contains(&child.id)
+                    || has_exempt_descendant(&child.id, children, exempt, visiting)
+            })
+        });
+        visiting.remove(session_id);
+        found
+    }
+
+    fn append_subtree(
+        session_id: &str,
+        children: &HashMap<&str, Vec<&SessionMeta>>,
+        archived: &mut HashSet<String>,
+        output: &mut Vec<String>,
+    ) {
+        if !archived.insert(session_id.to_string()) {
+            return;
+        }
+        output.push(session_id.to_string());
+        if let Some(descendants) = children.get(session_id) {
+            for child in descendants {
+                append_subtree(&child.id, children, archived, output);
+            }
+        }
+    }
+
+    struct WalkState {
+        archived: HashSet<String>,
+        output: Vec<String>,
+        visited: HashSet<String>,
+    }
+
+    fn visit_siblings(
+        siblings: &[&SessionMeta],
+        parent_id: Option<&str>,
+        children: &HashMap<&str, Vec<&SessionMeta>>,
+        now: u64,
+        config: &AutoArchiveConfig,
+        exempt: &AutoArchiveExemptions,
+        state: &mut WalkState,
+    ) {
+        for (rank, session) in siblings.iter().enumerate() {
+            if !state.visited.insert(session.id.clone()) || state.archived.contains(&session.id) {
+                continue;
+            }
+            let directly_exempt = exempt.working.contains(&session.id)
+                || exempt.unread.contains(&session.id)
+                || exempt.active.contains(&session.id)
+                || parent_id.is_some_and(|parent| exempt.working.contains(parent));
+            let exempt_descendant =
+                has_exempt_descendant(&session.id, children, exempt, &mut HashSet::new());
+            let eligible = rank >= config.keep_count.max(1)
+                && now.saturating_sub(session.updated_at) > config.max_idle_secs
+                && !directly_exempt
+                && !exempt_descendant;
+            if eligible {
+                append_subtree(
+                    &session.id,
+                    children,
+                    &mut state.archived,
+                    &mut state.output,
+                );
+            } else if let Some(descendants) = children.get(session.id.as_str()) {
+                visit_siblings(
+                    descendants,
+                    Some(&session.id),
+                    children,
+                    now,
+                    config,
+                    exempt,
+                    state,
+                );
+            }
+        }
+    }
+
+    let mut state = WalkState {
+        archived: HashSet::new(),
+        output: Vec::new(),
+        visited: HashSet::new(),
+    };
+    visit_siblings(&roots, None, &children, now, config, exempt, &mut state);
+
+    // Malformed cycles have no root. Keep the function total and apply the same
+    // sibling rule to any remaining entries, mirroring the sidebar's defensive
+    // visibility behavior.
+    let mut remainder: Vec<_> = sessions
+        .iter()
+        .copied()
+        .filter(|session| {
+            !state.visited.contains(&session.id) && !state.archived.contains(&session.id)
+        })
+        .collect();
+    remainder.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    visit_siblings(&remainder, None, &children, now, config, exempt, &mut state);
+    state.output
 }
 
 /// A project and its sessions, ready for the sidebar (newest activity first).
@@ -320,6 +476,33 @@ mod tests {
         meta
     }
 
+    fn archive_session(id: &str, updated_at: u64, parent: Option<&str>) -> SessionMeta {
+        let mut meta = session_in("p", updated_at);
+        meta.id = id.to_string();
+        meta.parent_session_id = parent.map(str::to_string);
+        meta
+    }
+
+    fn candidates(
+        sessions: &[SessionMeta],
+        now: u64,
+        max_idle_secs: u64,
+        keep_count: usize,
+        exempt: &AutoArchiveExemptions,
+    ) -> HashSet<String> {
+        auto_archive_candidates(
+            sessions,
+            now,
+            &AutoArchiveConfig {
+                max_idle_secs,
+                keep_count,
+            },
+            exempt,
+        )
+        .into_iter()
+        .collect()
+    }
+
     #[test]
     fn group_sessions_orders_by_activity() {
         let projects = vec![
@@ -423,5 +606,89 @@ mod tests {
         let roundtrip: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip.forked_from.as_deref(), Some("source"));
         assert!(roundtrip.pending_fork);
+    }
+
+    #[test]
+    fn auto_archive_requires_idle_and_beyond_keep_window() {
+        let day = 86_400;
+        let now = 20 * day;
+        let idle = vec![archive_session("idle-in-window", now - 8 * day, None)];
+        assert!(candidates(&idle, now, 7 * day, 1, &AutoArchiveExemptions::default(),).is_empty());
+
+        let beyond = vec![
+            archive_session("newer", now - day, None),
+            archive_session("recent-beyond-window", now - 2 * day, None),
+            archive_session("idle-beyond-window", now - 9 * day, None),
+        ];
+        let found = candidates(&beyond, now, 7 * day, 1, &AutoArchiveExemptions::default());
+        assert!(!found.contains("recent-beyond-window"));
+        assert!(found.contains("idle-beyond-window"));
+    }
+
+    #[test]
+    fn auto_archive_exemptions_keep_threads_and_consume_rank_slots() {
+        let sessions = vec![
+            archive_session("working", 40, None),
+            archive_session("active", 30, None),
+            archive_session("unread", 20, None),
+            archive_session("candidate", 10, None),
+        ];
+        let exempt = AutoArchiveExemptions {
+            working: HashSet::from(["working".into()]),
+            active: HashSet::from(["active".into()]),
+            unread: HashSet::from(["unread".into()]),
+        };
+        let found = candidates(&sessions, 1_000, 100, 3, &exempt);
+        assert_eq!(found, HashSet::from(["candidate".into()]));
+    }
+
+    #[test]
+    fn auto_archive_working_descendant_keeps_its_whole_subtree() {
+        let sessions = vec![
+            archive_session("new-root", 900, None),
+            archive_session("root", 100, None),
+            archive_session("child", 90, Some("root")),
+            archive_session("worker", 80, Some("child")),
+        ];
+        let exempt = AutoArchiveExemptions {
+            working: HashSet::from(["worker".into()]),
+            ..Default::default()
+        };
+        let found = candidates(&sessions, 1_000, 100, 1, &exempt);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn auto_archive_ranks_children_only_with_their_siblings() {
+        let mut sessions = vec![archive_session("parent", 1, None)];
+        sessions.extend(
+            (0..31).map(|index| {
+                archive_session(&format!("child-{index}"), 100 - index, Some("parent"))
+            }),
+        );
+        let found = candidates(
+            &sessions,
+            10_000,
+            100,
+            30,
+            &AutoArchiveExemptions::default(),
+        );
+        assert!(!found.contains("parent"));
+        assert_eq!(found, HashSet::from(["child-30".into()]));
+    }
+
+    #[test]
+    fn auto_archive_parent_candidate_cascades_to_all_descendants() {
+        let sessions = vec![
+            archive_session("new-root", 900, None),
+            archive_session("root", 100, None),
+            archive_session("child", 999, Some("root")),
+            archive_session("grandchild", 999, Some("child")),
+        ];
+        let found = candidates(&sessions, 1_000, 100, 1, &AutoArchiveExemptions::default());
+        assert_eq!(
+            found,
+            HashSet::from(["root".into(), "child".into(), "grandchild".into()])
+        );
     }
 }

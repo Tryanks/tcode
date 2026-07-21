@@ -18,7 +18,10 @@ use tcode_core::git::{
     GitAction, GitFileEntry, GitStatus, MenuItem, QuickAction, build_commit_prompt, menu_items,
     quick_action, sanitize_commit_message,
 };
-use tcode_core::project::{Project, SessionMeta, WorktreeInfo};
+use tcode_core::project::{
+    AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo,
+    auto_archive_candidates,
+};
 use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
@@ -775,8 +778,8 @@ pub struct AppState {
     /// Screenshot-only: seed the command palette's query when it opens (so the
     /// `>`-actions filter and thread result rows can be captured headlessly).
     pub debug_palette: Option<String>,
-    /// Screenshot-only: which Settings section to open (`general` / `providers` /
-    /// `archived`), so each can be captured headlessly.
+    /// Pending Settings section target, consumed by `SettingsPage`. Used by
+    /// screenshot capture, relaunch continuity, and in-app section links.
     pub debug_settings_section: Option<String>,
     /// Screenshot-only: seed the ACP marketplace's search box.
     pub debug_acp_search: Option<String>,
@@ -3575,28 +3578,114 @@ impl AppState {
     /// its turn is running (returns without changing anything so the caller's
     /// tooltip stands). The active thread is closed back to the empty state.
     pub fn archive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.turn_running_for(session_id) {
+        if self.turn_running_for(session_id)
+            || self
+                .sessions
+                .iter()
+                .find(|meta| meta.id == session_id)
+                .is_none_or(|meta| meta.archived_at.is_some())
+        {
             return;
         }
-        if self.active_session_id() == Some(session_id) {
-            self.shutdown_active();
-        }
-        // An archived conversation must not leave an off-screen PTY running.
-        self.conversation_ui
-            .remove(&ConversationDestination::Thread(session_id.to_string()));
-        self.close_orchestrator_children(session_id);
-        if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
-            meta.archived_at = Some(now_secs());
+        let ids = descendant_session_ids(&self.sessions, session_id);
+        self.archive_session_ids(&ids, now_secs(), cx);
+    }
+
+    /// Restore an archived thread (Settings → Archived Threads → Unarchive).
+    pub fn unarchive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(archived_at) = self
+            .sessions
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .and_then(|meta| meta.archived_at)
+        else {
+            return;
+        };
+        let ids = descendant_session_ids(&self.sessions, session_id);
+        for id in ids {
+            let Some(meta) = self
+                .sessions
+                .iter_mut()
+                .find(|meta| meta.id == id && meta.archived_at == Some(archived_at))
+            else {
+                continue;
+            };
+            meta.archived_at = None;
             let meta = meta.clone();
             self.persist_meta(&meta, cx);
         }
     }
 
-    /// Restore an archived thread (Settings → Archived Threads → Unarchive).
-    pub fn unarchive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
-            meta.archived_at = None;
-            let meta = meta.clone();
+    /// Sweep one project's visible sessions using the configured idle and
+    /// sibling keep windows. Returns the number of threads archived.
+    pub fn auto_archive_sweep(&mut self, project_id: &str, cx: &mut Context<Self>) -> usize {
+        if self.settings.auto_archive_disabled {
+            return 0;
+        }
+        let sessions: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| {
+                meta.project_id.as_deref() == Some(project_id) && meta.archived_at.is_none()
+            })
+            .cloned()
+            .collect();
+        let exemptions = AutoArchiveExemptions {
+            working: sessions
+                .iter()
+                .filter(|meta| self.turn_running_for(&meta.id))
+                .map(|meta| meta.id.clone())
+                .collect(),
+            unread: sessions
+                .iter()
+                .filter(|meta| self.session_unread(&meta.id))
+                .map(|meta| meta.id.clone())
+                .collect(),
+            active: self
+                .active_session_id()
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
+        };
+        let config = AutoArchiveConfig {
+            max_idle_secs: u64::from(self.settings.auto_archive_max_idle_days.max(1)) * 86_400,
+            keep_count: self.settings.auto_archive_keep_count.max(1),
+        };
+        let ids = auto_archive_candidates(&sessions, now_secs(), &config, &exemptions);
+        let count = ids.len();
+        if count > 0 {
+            self.archive_session_ids(&ids, now_secs(), cx);
+        }
+        count
+    }
+
+    fn archive_session_ids(&mut self, ids: &[String], archived_at: u64, cx: &mut Context<Self>) {
+        let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        if self
+            .active_session_id()
+            .is_some_and(|active| ids.contains(active))
+        {
+            self.shutdown_active();
+        }
+        for id in ids.iter().copied() {
+            // An archived conversation must not leave an off-screen PTY running.
+            self.conversation_ui
+                .remove(&ConversationDestination::Thread(id.to_string()));
+            self.drop_background(id);
+            self.revoke_preview_registration(id);
+        }
+        let orchestrators: Vec<_> = ids.iter().map(|id| (*id).to_string()).collect();
+        for id in orchestrators {
+            self.close_orchestrator_children(&id);
+        }
+        let mut changed = Vec::new();
+        for meta in &mut self.sessions {
+            if ids.contains(meta.id.as_str()) {
+                meta.archived_at = Some(archived_at);
+                changed.push(meta.clone());
+            }
+        }
+        for meta in changed {
             self.persist_meta(&meta, cx);
         }
     }
@@ -7304,10 +7393,131 @@ fn truncate_title(text: &str) -> String {
     title
 }
 
+fn descendant_session_ids(sessions: &[SessionMeta], root_id: &str) -> Vec<String> {
+    fn append(
+        sessions: &[SessionMeta],
+        session_id: &str,
+        visited: &mut HashSet<String>,
+        output: &mut Vec<String>,
+    ) {
+        if !visited.insert(session_id.to_string()) {
+            return;
+        }
+        output.push(session_id.to_string());
+        let children: Vec<_> = sessions
+            .iter()
+            .filter(|meta| meta.parent_session_id.as_deref() == Some(session_id))
+            .map(|meta| meta.id.clone())
+            .collect();
+        for child in children {
+            append(sessions, &child, visited, output);
+        }
+    }
+
+    if !sessions.iter().any(|meta| meta.id == root_id) {
+        return Vec::new();
+    }
+    let mut output = Vec::new();
+    append(sessions, root_id, &mut HashSet::new(), &mut output);
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::AppContext as _;
+
+    #[gpui::test]
+    fn archive_and_unarchive_apply_exact_timestamp_cascades(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-archive-cascade-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        for (id, parent) in [
+            ("parent", None),
+            ("child", Some("parent")),
+            ("grandchild", Some("child")),
+        ] {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+            meta.id = id.into();
+            meta.parent_session_id = parent.map(str::to_string);
+            store.upsert_meta(&meta).unwrap();
+        }
+        let state = cx.new(|_| AppState::new(store.clone()));
+
+        state.update(cx, |state, cx| {
+            state.archive_session("parent", cx);
+            let archived_at = state
+                .sessions
+                .iter()
+                .find(|meta| meta.id == "parent")
+                .unwrap()
+                .archived_at
+                .unwrap();
+            assert!(
+                state
+                    .sessions
+                    .iter()
+                    .all(|meta| meta.archived_at == Some(archived_at))
+            );
+
+            let grandchild = state
+                .sessions
+                .iter_mut()
+                .find(|meta| meta.id == "grandchild")
+                .unwrap();
+            grandchild.archived_at = Some(archived_at + 1);
+            let grandchild = grandchild.clone();
+            state.persist_meta(&grandchild, cx);
+
+            state.unarchive_session("parent", cx);
+            assert_eq!(
+                state
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == "parent")
+                    .unwrap()
+                    .archived_at,
+                None
+            );
+            assert_eq!(
+                state
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == "child")
+                    .unwrap()
+                    .archived_at,
+                None
+            );
+            assert_eq!(
+                state
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == "grandchild")
+                    .unwrap()
+                    .archived_at,
+                Some(archived_at + 1)
+            );
+        });
+        let persisted = store.load_index();
+        assert!(
+            persisted
+                .iter()
+                .find(|meta| meta.id == "grandchild")
+                .unwrap()
+                .archived_at
+                .is_some()
+        );
+        assert!(
+            persisted
+                .iter()
+                .filter(|meta| meta.id != "grandchild")
+                .all(|meta| meta.archived_at.is_none())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn diff_file_focus_request_is_consumed_once_and_discarded_on_scope_change() {
