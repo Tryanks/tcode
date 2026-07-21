@@ -285,15 +285,16 @@ fn main() {
             #[cfg(target_os = "macos")]
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
 
-            let mut application_fonts: Vec<Cow<'static, [u8]>> =
-                vec![Cow::Borrowed(assets::DM_SANS)];
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            application_fonts.extend([
+            let application_fonts: Vec<Cow<'static, [u8]>> = vec![
+                Cow::Borrowed(assets::DM_SANS),
                 Cow::Borrowed(assets::LILEX_REGULAR),
                 Cow::Borrowed(assets::LILEX_BOLD),
                 Cow::Borrowed(assets::LILEX_ITALIC),
                 Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
-            ]);
+            ];
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
             cx.text_system()
                 .add_fonts(application_fonts)
                 .expect("failed to register bundled application fonts");
