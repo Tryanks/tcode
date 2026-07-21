@@ -4,6 +4,15 @@ use gpui::{AssetSource, Result, SharedString};
 use gpui_component_assets::Assets as ComponentAssets;
 
 pub const DM_SANS: &[u8] = include_bytes!("../../../assets/fonts/DMSans[wght].ttf");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const LILEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const LILEX_BOLD: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Bold.ttf");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const LILEX_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Italic.ttf");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const LILEX_BOLD_ITALIC: &[u8] =
+    include_bytes!("../../../assets/fonts/lilex/Lilex-BoldItalic.ttf");
 const DM_SANS_PATH: &str = "fonts/DMSans[wght].ttf";
 
 /// Extra SVG icons bundled by tcode (not shipped by gpui-component).
