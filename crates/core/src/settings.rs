@@ -561,7 +561,7 @@ impl BrowserSettings {
 
 // `Eq` is intentionally absent: `acp_agents` holds `AcpLaunch`, which the
 // agent crate derives only `PartialEq` for.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -607,6 +607,19 @@ pub struct Settings {
     /// on) even for legacy settings files that lack the field.
     #[serde(default)]
     pub provider_update_checks_disabled: bool,
+    /// Whether automatic archiving is DISABLED. Stored inverted so the feature
+    /// defaults to on even for legacy settings files that lack the field.
+    #[serde(default)]
+    pub auto_archive_disabled: bool,
+    /// Threads must be idle longer than this many days before auto-archive.
+    #[serde(default = "default_auto_archive_max_idle_days")]
+    pub auto_archive_max_idle_days: u32,
+    /// Newest siblings preserved regardless of age by auto-archive.
+    #[serde(default = "default_auto_archive_keep_count")]
+    pub auto_archive_keep_count: usize,
+    /// Whether the one-time first-auto-archive explanation has been shown.
+    #[serde(default)]
+    pub auto_archive_notice_shown: bool,
     /// Built-in orchestration identities and child-model routing table.
     #[serde(default, skip_serializing_if = "OrchestrateSettings::is_default")]
     pub orchestrate: OrchestrateSettings,
@@ -649,6 +662,46 @@ pub struct Settings {
     /// downgrade, and your installed ACP agents or provider config are gone.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub unknown: serde_json::Map<String, serde_json::Value>,
+}
+
+const fn default_auto_archive_max_idle_days() -> u32 {
+    7
+}
+
+const fn default_auto_archive_keep_count() -> usize {
+    30
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            language: None,
+            providers: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+            codex_binary: None,
+            claude_binary: None,
+            theme_mode: ThemeMode::default(),
+            sidebar_collapsed: false,
+            word_wrap_diffs: false,
+            skip_delete_confirmation: false,
+            auto_open_task_panel: false,
+            provider_update_checks_disabled: false,
+            auto_archive_disabled: false,
+            auto_archive_max_idle_days: default_auto_archive_max_idle_days(),
+            auto_archive_keep_count: default_auto_archive_keep_count(),
+            auto_archive_notice_shown: false,
+            orchestrate: OrchestrateSettings::default(),
+            computer_use: ComputerUseSettings::default(),
+            browser: BrowserSettings::default(),
+            title_generation: TitleGenerationSettings::default(),
+            collapsed_projects: Vec::new(),
+            favorite_models: Vec::new(),
+            project_sort: ProjectSort::default(),
+            last_visited: HashMap::new(),
+            acp_agents: BTreeMap::new(),
+            unknown: serde_json::Map::new(),
+        }
+    }
 }
 
 impl Settings {
@@ -855,6 +908,38 @@ mod tests {
         // The button cycles RecentActivity → NameAsc → RecentActivity.
         assert_eq!(ProjectSort::RecentActivity.next(), ProjectSort::NameAsc);
         assert_eq!(ProjectSort::NameAsc.next(), ProjectSort::RecentActivity);
+    }
+
+    #[test]
+    fn auto_archive_settings_are_legacy_safe_and_roundtrip() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(!legacy.auto_archive_disabled);
+        assert_eq!(legacy.auto_archive_max_idle_days, 7);
+        assert_eq!(legacy.auto_archive_keep_count, 30);
+        assert!(!legacy.auto_archive_notice_shown);
+
+        let settings = Settings {
+            auto_archive_disabled: true,
+            auto_archive_max_idle_days: 14,
+            auto_archive_keep_count: 42,
+            auto_archive_notice_shown: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.auto_archive_disabled, settings.auto_archive_disabled);
+        assert_eq!(
+            back.auto_archive_max_idle_days,
+            settings.auto_archive_max_idle_days
+        );
+        assert_eq!(
+            back.auto_archive_keep_count,
+            settings.auto_archive_keep_count
+        );
+        assert_eq!(
+            back.auto_archive_notice_shown,
+            settings.auto_archive_notice_shown
+        );
     }
 
     #[test]
