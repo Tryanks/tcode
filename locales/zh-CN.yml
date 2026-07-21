@@ -636,7 +636,7 @@ errors:
   update_unknown: "无法自动更新 %{provider}，请手动更新。"
   worktree_add: "创建工作树失败：%{error}"
   worktree_remove: "移除工作树失败：%{error}"
-  zed_cli_missing: "找不到 Zed CLI（请通过 Zed → Install CLI 安装）"
+  zed_cli_missing: "找不到 Zed CLI（已尝试 zed / zeditor / zed-cli；请通过 Zed → Install CLI 安装）"
 notice:
   switched_branch: "已切换到 %{branch}"
   dirty_tree: "工作树中有未提交的更改"
