@@ -59,6 +59,7 @@ async fn run(prompt: String, cwd: PathBuf, binary_path: Option<PathBuf>) -> i32 
             cwd,
             model,
             resume: None,
+            fork: false,
             binary_path,
             approval_mode: ApprovalMode::Supervised,
             option_selections: Vec::new(),

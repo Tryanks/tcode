@@ -26,6 +26,11 @@ const STDERR_TAIL_LINES: usize = 20;
 const SETTLED_MIN_VERSION: (u32, u32, u32) = (0, 80, 4);
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
+    if opts.fork {
+        return Err(AgentError::Protocol(
+            "session fork is not supported for this provider".into(),
+        ));
+    }
     let (commands_tx, commands_rx) = async_channel::unbounded();
     let (events_tx, events_rx) = async_channel::unbounded();
     let (ready_tx, ready_rx) = async_channel::bounded(1);
