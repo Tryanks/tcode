@@ -285,9 +285,19 @@ fn main() {
             #[cfg(target_os = "macos")]
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
 
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let application_fonts: Vec<Cow<'static, [u8]>> = vec![
+                Cow::Borrowed(assets::DM_SANS),
+                Cow::Borrowed(assets::LILEX_REGULAR),
+                Cow::Borrowed(assets::LILEX_BOLD),
+                Cow::Borrowed(assets::LILEX_ITALIC),
+                Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
+            ];
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
             cx.text_system()
-                .add_fonts(vec![Cow::Borrowed(assets::DM_SANS)])
-                .expect("failed to register bundled DM Sans font");
+                .add_fonts(application_fonts)
+                .expect("failed to register bundled application fonts");
             // The theme's canvas color is translucent so the macOS vibrancy
             // material shows through (docs/visual-redesign.md). Elsewhere the
             // window is opaque and that alpha would composite against black,

@@ -243,7 +243,8 @@ thread_local! {
 
 /// The interactive shell to spawn, as `(program, args)`.
 ///
-/// - Unix: `$SHELL` (falling back to `/bin/zsh`) as a **login** shell.
+/// - Unix: `$SHELL` as a **login** shell. macOS falls back to `/bin/zsh`;
+///   other Unix platforms fall back to the portable `/bin/sh`.
 /// - Windows: `%COMSPEC%` (falling back to `powershell.exe`). `SHELL` is unset
 ///   there and `-l` is not a thing — passing either would spawn nothing.
 fn default_shell() -> (String, Vec<String>) {
@@ -254,9 +255,21 @@ fn default_shell() -> (String, Vec<String>) {
     }
     #[cfg(not(windows))]
     {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = unix_shell(std::env::var("SHELL").ok().as_deref());
         (shell, vec!["-l".to_string()])
     }
+}
+
+#[cfg(not(windows))]
+fn unix_shell(configured_shell: Option<&str>) -> String {
+    configured_shell
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or(if cfg!(target_os = "macos") {
+            "/bin/zsh"
+        } else {
+            "/bin/sh"
+        })
+        .to_string()
 }
 
 /// The tab label for a shell path: its file stem (`/bin/zsh` → `zsh`,
@@ -930,6 +943,20 @@ mod tests {
             assert_eq!(args, vec!["-l".to_string()]);
             assert!(program.starts_with('/'), "unexpected Unix shell {program}");
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shell_uses_explicit_shell() {
+        assert_eq!(unix_shell(Some("/usr/bin/fish")), "/usr/bin/fish");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_shell_falls_back_to_bin_sh_when_unset_or_empty() {
+        assert_eq!(unix_shell(None), "/bin/sh");
+        assert_eq!(unix_shell(Some("")), "/bin/sh");
+        assert_eq!(unix_shell(Some("  \t")), "/bin/sh");
     }
 
     #[test]
