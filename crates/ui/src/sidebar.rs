@@ -19,7 +19,7 @@ use gpui_component::{
 use serde::Deserialize;
 
 use tcode_core::project::SessionMeta;
-use tcode_runtime::app::{AppState, ProjectGroup};
+use tcode_runtime::app::{AppEvent, AppState, ProjectGroup, RuntimeError};
 
 use crate::time::now_secs;
 use crate::window_drag_area;
@@ -166,6 +166,9 @@ fn toggle_parent_for_row_click(
 struct ThreadRename(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
+struct ThreadFork(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
 struct ThreadMarkUnread(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
@@ -267,6 +270,50 @@ impl SessionsSidebar {
             _sub: sub,
         });
         cx.notify();
+    }
+
+    fn on_fork(&mut self, action: &ThreadFork, _window: &mut Window, cx: &mut Context<Self>) {
+        let (source_title, refusal) = {
+            let state = self.app_state.read(cx);
+            let meta = state.sessions.iter().find(|meta| meta.id == action.0);
+            let source_title = meta.map(|meta| meta.title.clone());
+            let refusal = meta.and_then(|meta| {
+                if !meta.provider.supports_fork() {
+                    Some(tcode_i18n::tr!("sidebar.fork_unsupported").into_owned())
+                } else if meta.resume_cursor.is_none() {
+                    Some(tcode_i18n::tr!("sidebar.fork_empty").into_owned())
+                } else if state.turn_running_for(&action.0) {
+                    Some(tcode_i18n::tr!("sidebar.fork_running").into_owned())
+                } else {
+                    None
+                }
+            });
+            (source_title, refusal)
+        };
+        self.app_state.update(cx, |state, cx| {
+            if let Some(message) = refusal {
+                cx.emit(AppEvent::Error(RuntimeError::External(message)));
+                return;
+            }
+            state.fork_thread(&action.0, cx);
+            let fork_id = state.active_session_id().map(str::to_owned).and_then(|id| {
+                state
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == id)
+                    .and_then(|meta| {
+                        (meta.forked_from.as_deref() == Some(action.0.as_str())).then_some(id)
+                    })
+            });
+            if let (Some(source_title), Some(fork_id)) = (source_title, fork_id) {
+                let title = format!(
+                    "{} {}",
+                    source_title,
+                    tcode_i18n::tr!("sidebar.fork_title_suffix")
+                );
+                state.rename_session(&fork_id, &title, cx);
+            }
+        });
     }
 
     fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -918,6 +965,7 @@ impl SessionsSidebar {
         // Menu-builder captures.
         let menu_id = session_id.clone();
         let menu_running = working;
+        let menu_can_fork = meta.provider.supports_fork();
 
         let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
         let row = crate::material::accessible_clickable(
@@ -1136,6 +1184,12 @@ impl SessionsSidebar {
                 tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
                 Box::new(ThreadRename(id.clone())),
             )
+            .when(menu_can_fork, |menu| {
+                menu.menu(
+                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
+                    Box::new(ThreadFork(id.clone())),
+                )
+            })
             .menu(
                 tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
                 Box::new(ThreadMarkUnread(id.clone())),
@@ -1343,6 +1397,7 @@ impl Render for SessionsSidebar {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_fork))
             .on_action(cx.listener(Self::on_mark_unread))
             .on_action(cx.listener(Self::on_copy_path))
             .on_action(cx.listener(Self::on_copy_id))

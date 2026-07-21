@@ -33,6 +33,7 @@ fn main() {
             cwd,
             model: None,
             resume: None,
+            fork: false,
             binary_path: None,
             approval_mode: ApprovalMode::Supervised,
             option_selections: Vec::new(),

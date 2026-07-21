@@ -47,6 +47,12 @@ impl ProviderKind {
         }
     }
 
+    /// Whether the provider can duplicate a resumed native session into a new
+    /// provider-owned session rather than continuing the original in place.
+    pub fn supports_fork(&self) -> bool {
+        matches!(self, ProviderKind::ClaudeCode | ProviderKind::Codex)
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             ProviderKind::Codex => "Codex",
@@ -112,6 +118,9 @@ pub struct SessionOptions {
     /// Provider-native model id; `None` = provider default.
     pub model: Option<String>,
     pub resume: Option<ResumeCursor>,
+    /// Fork the resumed provider session instead of continuing it in place.
+    /// This is meaningful only when `resume` is present.
+    pub fork: bool,
     /// Override for the CLI binary; `None` = resolve from PATH.
     pub binary_path: Option<PathBuf>,
     /// How much the agent may do without asking (mirrors the three-mode

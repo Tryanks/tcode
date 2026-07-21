@@ -85,6 +85,14 @@ pub struct SessionMeta {
     pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
+    /// The tcode thread whose transcript and provider context this thread
+    /// forked from. A fork is a sibling, not an orchestrator child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    /// Whether the next provider start must fork `resume_cursor` rather than
+    /// resume it in place.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_fork: bool,
     /// Set when this thread was imported from another tool's local history
     /// ("claude:<id>" / "codex:<id>"). Used to keep re-imports idempotent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +137,8 @@ impl SessionMeta {
             worktree: None,
             approval_mode: ApprovalMode::default(),
             resume_cursor: None,
+            forked_from: None,
+            pending_fork: false,
             imported_from: None,
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::default(),
@@ -394,5 +404,24 @@ mod tests {
                 "parent-old"
             ]
         );
+    }
+
+    #[test]
+    fn fork_metadata_is_legacy_safe_and_roundtrips() {
+        let legacy = serde_json::json!({
+            "id": "legacy", "title": "Legacy", "provider": "codex",
+            "cwd": "/work", "created_at": 1, "updated_at": 2
+        });
+        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.forked_from, None);
+        assert!(!meta.pending_fork);
+
+        let mut meta = meta;
+        meta.forked_from = Some("source".into());
+        meta.pending_fork = true;
+        let json = serde_json::to_string(&meta).unwrap();
+        let roundtrip: SessionMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.forked_from.as_deref(), Some("source"));
+        assert!(roundtrip.pending_fork);
     }
 }

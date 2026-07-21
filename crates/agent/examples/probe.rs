@@ -131,6 +131,7 @@ fn main() {
             cwd,
             model,
             resume: None,
+            fork: false,
             binary_path: None,
             approval_mode,
             option_selections,
