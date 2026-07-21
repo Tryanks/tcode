@@ -642,7 +642,7 @@ errors:
   update_unknown: "Don't know how to update %{provider} automatically — please update it manually."
   worktree_add: "Failed to create worktree: %{error}"
   worktree_remove: "Failed to remove worktree: %{error}"
-  zed_cli_missing: "Zed CLI not found (install via Zed → Install CLI)"
+  zed_cli_missing: "Zed CLI not found (tried `zed`, `zeditor`, `zed-cli`; install via Zed → Install CLI)"
 notice:
   switched_branch: "Switched to %{branch}"
   dirty_tree: "Working tree has uncommitted changes"
