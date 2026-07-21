@@ -38,7 +38,7 @@ const TERMINAL_FONT_FAMILY: &str = "Menlo";
 #[cfg(target_os = "windows")]
 const TERMINAL_FONT_FAMILY: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const TERMINAL_FONT_FAMILY: &str = "DejaVu Sans Mono";
+const TERMINAL_FONT_FAMILY: &str = "Lilex";
 const PANE_PADDING_X: f32 = 8.;
 const PANE_PADDING_Y: f32 = 5.;
 const PANE_BORDER: f32 = 1.;
@@ -59,6 +59,12 @@ struct TerminalClear(u64);
 #[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tcode_terminal, no_json)]
 struct TerminalAddContext(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipboardShortcut {
+    Copy,
+    Paste,
+}
 
 #[derive(Clone, Copy)]
 struct GridGeometry {
@@ -143,6 +149,7 @@ pub struct TerminalDrawer {
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
     selecting: Option<u64>,
+    pending_simple_selection: Option<(u64, (usize, usize), SelectionSide)>,
     mouse_down_position: Option<(u64, Point<Pixels>)>,
     last_mouse_point: HashMap<u64, (usize, usize)>,
     focus_subscriptions: Vec<gpui::Subscription>,
@@ -170,6 +177,7 @@ impl TerminalDrawer {
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
             selecting: None,
+            pending_simple_selection: None,
             mouse_down_position: None,
             last_mouse_point: HashMap::new(),
             focus_subscriptions: Vec::new(),
@@ -225,11 +233,7 @@ impl TerminalDrawer {
     fn paste_to_terminal(&self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
         self.with_terminal_id(terminal_id, cx, |terminal| {
             let mode = terminal.snapshot().mode;
-            let text = if mode.bracketed_paste {
-                format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
-            } else {
-                text.replace("\r\n", "\r").replace('\n', "\r")
-            };
+            let text = prepare_terminal_paste(text, mode.bracketed_paste);
             terminal.write_input(text.into_bytes());
         });
     }
@@ -400,39 +404,42 @@ impl TerminalDrawer {
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.note_input(cx);
         let keystroke = &event.keystroke;
-        if event.prefer_character_input {
+        if let Some(shortcut) = terminal_clipboard_shortcut(
+            &keystroke.key,
+            keystroke.modifiers,
+            cfg!(target_os = "macos"),
+        ) {
+            match shortcut {
+                ClipboardShortcut::Copy => {
+                    if let Some(text) = self
+                        .app_state
+                        .read(cx)
+                        .active
+                        .as_ref()
+                        .and_then(|a| a.terminal_workspace.active())
+                        .and_then(|entry| entry.terminal.selected_text())
+                        .map(|selection| selection.text)
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                }
+                ClipboardShortcut::Paste => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                        && let Some(terminal_id) = self
+                            .app_state
+                            .read(cx)
+                            .active
+                            .as_ref()
+                            .and_then(|active| active.terminal_workspace.active_id)
+                    {
+                        self.paste_to_terminal(terminal_id, &text, cx);
+                    }
+                }
+            }
+            cx.stop_propagation();
             return;
         }
-        if keystroke.modifiers.platform {
-            if keystroke.key.eq_ignore_ascii_case("c") {
-                if let Some(text) = self
-                    .app_state
-                    .read(cx)
-                    .active
-                    .as_ref()
-                    .and_then(|a| a.terminal_workspace.active())
-                    .and_then(|entry| entry.terminal.selected_text())
-                    .map(|selection| selection.text)
-                {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    cx.stop_propagation();
-                }
-                return;
-            }
-            if keystroke.key.eq_ignore_ascii_case("v")
-                && let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
-            {
-                if let Some(terminal_id) = self
-                    .app_state
-                    .read(cx)
-                    .active
-                    .as_ref()
-                    .and_then(|active| active.terminal_workspace.active_id)
-                {
-                    self.paste_to_terminal(terminal_id, &text, cx);
-                }
-                cx.stop_propagation();
-            }
+        if event.prefer_character_input {
             return;
         }
 
@@ -798,10 +805,19 @@ impl TerminalDrawer {
                     }
                     return;
                 }
+                #[cfg(target_os = "linux")]
+                if event.button == MouseButton::Middle {
+                    if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
+                        let text = prepare_terminal_paste(&text, snapshot.mode.bracketed_paste);
+                        entry.terminal.write_input(text.into_bytes());
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.button != MouseButton::Left {
                     return;
                 }
-                if event.modifiers.platform
+                if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos"))
                     && let Some(link) = entry.terminal.hyperlink_at(point.0, point.1)
                 {
                     self.pressed_link = Some((terminal_id, link.url));
@@ -809,6 +825,7 @@ impl TerminalDrawer {
                 }
                 self.mouse_down_position = Some((terminal_id, event.position));
                 self.selecting = None;
+                self.pending_simple_selection = None;
                 let kind = match event.click_count {
                     1 => SelectionKind::Simple,
                     2 => SelectionKind::Semantic,
@@ -817,6 +834,11 @@ impl TerminalDrawer {
                 };
                 if kind == SelectionKind::Simple && event.modifiers.shift {
                     entry.terminal.update_selection(point, side);
+                    return;
+                }
+                if kind == SelectionKind::Simple {
+                    entry.terminal.clear_selection();
+                    self.pending_simple_selection = Some((terminal_id, point, side));
                     return;
                 }
                 entry.terminal.start_selection(kind, point, side);
@@ -861,7 +883,7 @@ impl TerminalDrawer {
                 }
                 return;
             }
-            if event.modifiers.platform {
+            if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos")) {
                 if self
                     .last_link_hover
                     .is_none_or(|last| last.elapsed() >= Duration::from_millis(16))
@@ -884,8 +906,20 @@ impl TerminalDrawer {
                     {
                         let dx = f32::from(event.position.x - mouse_down_position.x);
                         let dy = f32::from(event.position.y - mouse_down_position.y);
-                        if dx.hypot(dy) <= SELECTION_DRAG_THRESHOLD {
+                        if !selection_drag_started(dx, dy) {
                             return;
+                        }
+                        if self
+                            .pending_simple_selection
+                            .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
+                            && let Some((_, anchor, anchor_side)) =
+                                self.pending_simple_selection.take()
+                        {
+                            entry.terminal.start_selection(
+                                SelectionKind::Simple,
+                                anchor,
+                                anchor_side,
+                            );
                         }
                     }
                     self.selecting = Some(terminal_id);
@@ -937,7 +971,9 @@ impl TerminalDrawer {
                 {
                     entry.terminal.write_raw(bytes);
                 }
-            } else if event.button == MouseButton::Left && event.modifiers.platform {
+            } else if event.button == MouseButton::Left
+                && terminal_link_modifier(event.modifiers, cfg!(target_os = "macos"))
+            {
                 let released = entry
                     .terminal
                     .hyperlink_at(point.0, point.1)
@@ -953,12 +989,30 @@ impl TerminalDrawer {
         }
         if self.selecting == Some(terminal_id) {
             self.selecting = None;
+            #[cfg(target_os = "linux")]
+            if let Some(text) = self
+                .app_state
+                .read(cx)
+                .active
+                .as_ref()
+                .and_then(|active| active.terminal_workspace.terminal(terminal_id))
+                .and_then(|entry| entry.terminal.selected_text())
+                .map(|selection| selection.text)
+            {
+                cx.write_to_primary(ClipboardItem::new_string(text));
+            }
         }
         if self
             .mouse_down_position
             .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
         {
             self.mouse_down_position = None;
+        }
+        if self
+            .pending_simple_selection
+            .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
+        {
+            self.pending_simple_selection = None;
         }
         self.pressed_link = None;
         self.last_mouse_point.remove(&terminal_id);
@@ -1518,6 +1572,10 @@ impl Render for TerminalDrawer {
                 )
                 .track_focus(&self.focus_handle)
                 .on_key_down(cx.listener(Self::on_key_down))
+                // The accessibility focus ring is painted as a shadow behind this
+                // element. Keep the terminal surface opaque so the shadow cannot
+                // show through the otherwise transparent grid as a solid blue fill.
+                .bg(cx.theme().background)
                 .flex_1()
                 .min_h_0()
                 .child(body),
@@ -1814,6 +1872,52 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
+fn terminal_clipboard_shortcut(
+    key: &str,
+    modifiers: gpui::Modifiers,
+    use_platform_modifier: bool,
+) -> Option<ClipboardShortcut> {
+    let expected_modifiers = if use_platform_modifier {
+        modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && !modifiers.function
+    } else {
+        modifiers.control
+            && modifiers.shift
+            && !modifiers.platform
+            && !modifiers.alt
+            && !modifiers.function
+    };
+    if !expected_modifiers {
+        return None;
+    }
+    if key.eq_ignore_ascii_case("c") {
+        Some(ClipboardShortcut::Copy)
+    } else if key.eq_ignore_ascii_case("v") {
+        Some(ClipboardShortcut::Paste)
+    } else {
+        None
+    }
+}
+
+fn terminal_link_modifier(modifiers: gpui::Modifiers, use_platform_modifier: bool) -> bool {
+    if use_platform_modifier {
+        modifiers.platform
+    } else {
+        modifiers.control
+    }
+}
+
+fn prepare_terminal_paste(text: &str, bracketed_paste: bool) -> String {
+    if bracketed_paste {
+        format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r")
+    }
+}
+
 fn term_modifiers(modifiers: gpui::Modifiers) -> TermModifiers {
     TermModifiers {
         shift: modifiers.shift,
@@ -1867,6 +1971,10 @@ fn grid_point_and_side(
     }
 
     ((row.max(0) as usize, column.min(last_column)), side)
+}
+
+fn selection_drag_started(dx: f32, dy: f32) -> bool {
+    dx.hypot(dy) > SELECTION_DRAG_THRESHOLD
 }
 
 fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32) -> Option<i32> {
@@ -1964,10 +2072,132 @@ mod tests {
     }
 
     #[test]
+    fn simple_selection_waits_until_drag_crosses_threshold() {
+        assert!(!selection_drag_started(0., 0.));
+        assert!(!selection_drag_started(SELECTION_DRAG_THRESHOLD, 0.));
+        assert!(selection_drag_started(SELECTION_DRAG_THRESHOLD + 0.01, 0.));
+        assert!(selection_drag_started(2., 2.));
+    }
+
+    #[test]
+    fn unselected_default_grid_has_no_selection_or_ansi_background_paint() {
+        let state = TermState {
+            cols: 1,
+            rows: 1,
+            cells: vec![cell('x', "x", false, false)],
+            cursor: None,
+            cursor_shape: CursorShape::Block,
+            cursor_blinking: false,
+            title: String::new(),
+            exited: false,
+            exit_code: None,
+            display_offset: 0,
+            history_size: 0,
+            mode: term::ModeSnapshot::default(),
+        };
+        let palette = TerminalPalette {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            selection: rgb(0x336699).into(),
+        };
+
+        let paint = layout_grid(&state, palette, false, None, true, true);
+        assert!(paint.selections.is_empty());
+        assert!(paint.backgrounds.is_empty());
+    }
+
+    #[test]
     fn shell_quotes_paths() {
         assert_eq!(shell_quote("/tmp/a"), "'/tmp/a'");
         assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn clipboard_shortcuts_are_platform_specific() {
+        let command = gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        let control_shift = gpui::Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            terminal_clipboard_shortcut("c", command, true),
+            Some(ClipboardShortcut::Copy)
+        );
+        assert_eq!(
+            terminal_clipboard_shortcut("v", command, true),
+            Some(ClipboardShortcut::Paste)
+        );
+        assert_eq!(terminal_clipboard_shortcut("c", control_shift, true), None);
+        assert_eq!(terminal_clipboard_shortcut("c", command, false), None);
+        assert_eq!(
+            terminal_clipboard_shortcut("C", control_shift, false),
+            Some(ClipboardShortcut::Copy)
+        );
+        assert_eq!(
+            terminal_clipboard_shortcut("V", control_shift, false),
+            Some(ClipboardShortcut::Paste)
+        );
+        assert_eq!(
+            terminal_clipboard_shortcut(
+                "c",
+                gpui::Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn hyperlink_modifier_matches_the_platform_shortcut_convention() {
+        let command = gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        let control = gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+
+        assert!(terminal_link_modifier(command, true));
+        assert!(!terminal_link_modifier(control, true));
+        assert!(terminal_link_modifier(control, false));
+        assert!(!terminal_link_modifier(command, false));
+    }
+
+    #[test]
+    fn terminal_paste_preparation_is_shared_by_clipboard_paths() {
+        assert_eq!(prepare_terminal_paste("a\r\nb\nc", false), "a\rb\rc");
+        assert_eq!(
+            prepare_terminal_paste("a\x1bb", true),
+            "\x1b[200~ab\x1b[201~"
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn unix_terminal_font_uses_the_bundled_lilex_family() {
+        assert_eq!(TERMINAL_FONT_FAMILY, "Lilex");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_terminal_font_remains_menlo() {
+        assert_eq!(TERMINAL_FONT_FAMILY, "Menlo");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_terminal_font_remains_consolas() {
+        assert_eq!(TERMINAL_FONT_FAMILY, "Consolas");
     }
 
     #[test]
