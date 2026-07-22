@@ -102,3 +102,28 @@ impl AssetSource for Assets {
         Ok(paths)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_caption_icons_load_through_assets_facade() {
+        for path in [
+            "icons/window-minimize.svg",
+            "icons/window-maximize.svg",
+            "icons/window-restore.svg",
+            "icons/window-close.svg",
+        ] {
+            let bytes = AssetSource::load(&Assets, path)
+                .unwrap_or_else(|error| panic!("failed to load {path}: {error}"))
+                .unwrap_or_else(|| panic!("asset was not found: {path}"));
+
+            assert!(!bytes.is_empty(), "asset was empty: {path}");
+            assert!(
+                String::from_utf8_lossy(&bytes).contains("<svg"),
+                "asset was not an SVG document: {path}"
+            );
+        }
+    }
+}
