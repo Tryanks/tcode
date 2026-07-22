@@ -26,6 +26,7 @@ chat:
   total_command_one: "执行 1 条命令"
   total_commands: "执行 %{count} 条命令"
   command_run: "执行命令"
+  file_edit: "编辑代码"
   thinking: "思考中"
   changed_files: "已更改文件（%{count}）"
   changed_files_partial: "· 部分归因"

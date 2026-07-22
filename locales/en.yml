@@ -26,6 +26,7 @@ chat:
   total_command_one: "Ran 1 command"
   total_commands: "Ran %{count} commands"
   command_run: "Command run"
+  file_edit: "Code edit"
   thinking: "Thinking"
   changed_files: "CHANGED FILES (%{count})"
   changed_files_partial: "· PARTIAL"
