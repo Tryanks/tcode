@@ -375,6 +375,7 @@ jobs:
       - name: Commit and push to AUR
         working-directory: aur-repo
         run: |
+          git config --global --add safe.directory "$PWD"
           if git diff --quiet; then
             echo "No changes. AUR package is already up to date."
             exit 0
