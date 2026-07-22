@@ -321,7 +321,7 @@ jobs:
   publish-aur:
     name: Publish to AUR
     needs: [setup, finalize]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.setup.outputs.prerelease == 'false'
+    if: needs.setup.outputs.prerelease == 'false' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     env:
@@ -376,6 +376,8 @@ jobs:
         working-directory: aur-repo
         run: |
           git config --global --add safe.directory "$PWD"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git diff --quiet; then
             echo "No changes. AUR package is already up to date."
             exit 0
