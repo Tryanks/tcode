@@ -100,7 +100,7 @@ pub fn primary_button_fill(cx: &App) -> gpui::Background {
     )
 }
 
-/// Applies the T3 overlay contour: near-opaque fill, hairline border and a
+/// Applies the T3 overlay contour: fully opaque fill, hairline border and a
 /// large soft shadow. Radius stays the caller's choice (`radius_overlay`).
 pub fn overlay_contour(el: Div, cx: &App) -> Div {
     el.bg(cx.theme().popover)
@@ -109,7 +109,7 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
         .shadow_xl()
 }
 
-/// A floating content card in chat's composer-console idiom: near-opaque
+/// A floating content card in chat's composer-console idiom: fully opaque
 /// `popover` fill, a hairline border, `radius_card` corners and the composer
 /// console's soft `shadow_md`, so the card reads as genuinely lifted off the
 /// T1 paper — the same depth chat's cards carry. This is the group container

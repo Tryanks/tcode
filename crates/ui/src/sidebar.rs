@@ -281,7 +281,8 @@ impl SessionsSidebar {
             state.update_settings(settings, cx);
         });
         let app_state = self.app_state.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             alert
                 .title(tcode_i18n::tr!("sidebar.auto_archive_dialog.title"))
@@ -482,7 +483,8 @@ impl SessionsSidebar {
             return;
         }
         let count = session_ids.len();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             let session_ids = session_ids.clone();
             alert
@@ -533,7 +535,8 @@ impl SessionsSidebar {
                 .count();
             (project.name.clone(), count)
         };
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             let project_id = project_id.clone();
             alert
@@ -596,7 +599,8 @@ impl SessionsSidebar {
             return;
         }
         let title = title.to_string();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             let session_id = session_id.clone();
             alert
@@ -636,7 +640,8 @@ impl SessionsSidebar {
             return;
         }
         let title = title.to_string();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             let session_id = session_id.clone();
             alert
@@ -1411,7 +1416,8 @@ fn proceed_delete(
         return;
     };
     let path = worktree.root_project_path.display().to_string();
-    window.open_alert_dialog(cx, move |alert, _, _| {
+    window.open_alert_dialog(cx, move |alert, _, cx| {
+        let alert = alert.bg(cx.theme().popover);
         let app_state = app_state.clone();
         let session_id = session_id.clone();
         let remove = session_id.clone();

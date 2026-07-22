@@ -55,7 +55,9 @@ reserved for transient surfaces such as menus and popovers, not the main
 window. Both native materials retain the embedded theme's translucent canvas so
 the system backdrop can show through. `TCODE_NO_VIBRANCY=1` keeps its macOS-only
 diagnostic behavior: an opaque window with a flattened canvas. Linux and other
-platforms remain opaque and flatten that canvas to its solid RGB base.
+platforms remain opaque and flatten that canvas to its solid RGB base. In-app
+T3 child surfaces (popovers, menus, dialogs, drawers and toasts) use the fully
+opaque `popover.background` token so lower layers never show through.
 
 ## Layout metrics (at 1440×900)
 

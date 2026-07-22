@@ -595,7 +595,8 @@ impl SettingsPage {
     fn confirm_restore(&self, window: &mut Window, cx: &mut Context<Self>) {
         let app_state = self.app_state.clone();
         let page = cx.entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             let page = page.clone();
             alert
@@ -992,7 +993,8 @@ impl SettingsPage {
         let app_state = self.app_state.clone();
         let session_id = session_id.to_string();
         let title = title.to_string();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
             let app_state = app_state.clone();
             let session_id = session_id.clone();
             alert

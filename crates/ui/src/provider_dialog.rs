@@ -876,7 +876,8 @@ pub fn render_footer(
                 .on_click(move |_, window, cx| {
                     let delete_id = delete_id.clone();
                     let delete_state = delete_state.clone();
-                    window.open_alert_dialog(cx, move |alert, _, _| {
+                    window.open_alert_dialog(cx, move |alert, _, cx| {
+                        let alert = alert.bg(cx.theme().popover);
                         let delete_id = delete_id.clone();
                         let delete_state = delete_state.clone();
                         alert

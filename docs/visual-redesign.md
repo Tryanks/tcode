@@ -37,7 +37,7 @@
 | T0 玻璃机壳 | 侧栏、窗口边缘 | Root（`background`） | 唯一刻意透明层 ~78%；全屏时压平为实色 |
 | T1 纸面 | 聊天区、右面板、设置页 | shell.rs（`material::content_surface`） | 近实 94-95% |
 | T2 浮起 | 气泡、卡片、输入域 | 组件（muted/secondary 叠色） | 半透明墨色叠加 |
-| T3 悬浮 | popover/menu/dialog/drawer/toast | `popover.background` | ≥97% + 发丝边 + 大软阴影 |
+| T3 悬浮 | popover/menu/dialog/drawer/toast | `popover.background` | 100% 实底 + 发丝边 + 大软阴影 |
 
 - 侧栏不涂底（`sidebar.background` 全透明），直接露玻璃。
 - 正文文字永远坐在 ≥94% 的表面上；侧栏短标签除外。
@@ -54,7 +54,7 @@
 | input.border | `#1F23281F` | |
 | accent/secondary/muted .background | `#24344D0F` | 墨蓝 6% 叠色（弃纯黑叠色） |
 | accent/secondary .foreground | `#1F2328` | |
-| popover.background | `#FFFFFFFA` | T3 |
+| popover.background | `#FFFFFFFF` | T3，全不透明 |
 | list.background | `#FFFFFF00` | 列表不自带底，坐在所在层上 |
 | list.hover.background | `#24344D0A` | |
 | list.active.background | `#1447E614` | 主色 8% 着色胶囊 |
@@ -79,7 +79,7 @@
 | border | `#C9D4E80F` | 冷光发丝线 |
 | input.border | `#C9D4E817` | |
 | accent/secondary/muted .background | `#C9D8F00D` | 冷光 5% 叠色 |
-| popover.background | `#22262EFA` | T3，比纸面抬一档 |
+| popover.background | `#22262EFF` | T3，全不透明，比纸面抬一档 |
 | list.background | `#FFFFFF00` | |
 | list.hover.background | `#C9D8F00A` | |
 | list.active.background | `#155DFC26` | 主色 15% 胶囊 |
