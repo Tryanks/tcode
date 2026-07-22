@@ -30,6 +30,7 @@ mod sidebar;
 mod terminal_drawer;
 pub mod time;
 pub(crate) mod toast;
+mod window_caption;
 mod workspace_walk;
 
 pub(crate) use shell::window_drag_area;
