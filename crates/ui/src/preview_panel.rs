@@ -78,7 +78,7 @@ mod native {
 
     use gpui::{
         AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-        Styled as _, Subscription, Window, div,
+        Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
     };
     use gpui_component::{
         ActiveTheme as _, IconName, Sizable as _,
@@ -94,6 +94,7 @@ mod native {
     use super::{
         ReplyTx, normalize_url, preview_key_for_session, unavailable_message, visible_preview_key,
     };
+    use crate::window_caption;
     use tcode_runtime::app::AppState;
 
     pub struct PreviewPanel {
@@ -691,19 +692,35 @@ mod native {
 
             v_flex()
                 .size_full()
-                .child(self.render_chrome(cx))
+                .child(self.render_chrome(window, cx))
                 .children(self.render_port_row(cx))
                 .child(body)
         }
     }
 
     impl PreviewPanel {
-        fn render_chrome(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render_chrome(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // Windows: an open Preview tab is the rightmost column, so its
+            // chrome row hosts the caption buttons. The row is normally only as
+            // tall as its controls — pin it to the shell's 52px top strip and
+            // drop the trailing/vertical padding on the caption side so the
+            // buttons reach the window's true top-right corner.
+            let hosts_caption = window_caption::hosts_caption(
+                window_caption::CaptionSurface::Preview,
+                self.app_state.read(cx),
+            );
             h_flex()
                 .flex_none()
                 .w_full()
                 .gap_1()
                 .p_1()
+                .when(hosts_caption, |chrome| {
+                    chrome
+                        .h(px(window_caption::CAPTION_STRIP_HEIGHT))
+                        .pt_0()
+                        .pb_0()
+                        .pr_0()
+                })
                 .child(
                     Button::new("preview-back")
                         .ghost()
@@ -750,6 +767,8 @@ mod native {
                         .tooltip(tcode_i18n::tr!("preview.open_external"))
                         .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
                 )
+                // Last child, so the chrome's own controls stay to its left.
+                .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
         }
 
         /// A row of quick-pick buttons for discovered localhost dev ports.

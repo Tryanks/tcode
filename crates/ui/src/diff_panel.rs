@@ -33,6 +33,7 @@ use gpui_component::{
 };
 
 use crate::plan_panel::PlanPanel;
+use crate::window_caption;
 use crate::{highlight, material};
 use tcode_core::session::{ReviewComment, ReviewSide};
 use tcode_runtime::app::{AppState, RightTab};
@@ -1091,10 +1092,16 @@ impl DiffPanel {
 
     // -- top strip (tab look + right icon cluster) --------------------------
 
-    fn render_tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tab_strip(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
         let expanded = state.diff_panel_expanded();
         let active = state.right_tab();
+        // Windows: the open Diff/Plan panel is the rightmost column, so this
+        // strip hosts the caption buttons. It is shorter than the 52px shell
+        // header, so grow it to match — the buttons must reach the window top,
+        // and a taller strip keeps the tabs aligned with the chat header.
+        let hosts_caption =
+            window_caption::hosts_caption(window_caption::CaptionSurface::RightPanel, state);
         // The second tab is "Plan" when a plan exists or the session is in Plan
         // mode, else "Tasks" (S1 §6).
         let plan_label = if state.plan_tab_active_label() {
@@ -1138,9 +1145,14 @@ impl DiffPanel {
             .role(Role::TabList)
             .aria_label(tcode_i18n::tr!("diff.panel_tabs"))
             .flex_none()
-            .h(px(40.))
+            .h(px(if hosts_caption {
+                window_caption::CAPTION_STRIP_HEIGHT
+            } else {
+                40.
+            }))
             .w_full()
             .px_2()
+            .when(hosts_caption, |strip| strip.pr_0())
             .gap_1()
             .items_center()
             .child(
@@ -1167,8 +1179,12 @@ impl DiffPanel {
                     app_plan.update(cx, |state, cx| state.set_right_tab(RightTab::Plan, cx));
                 }),
             )
+            // The gap between the tabs and the icon cluster holds nothing, so
+            // it doubles as the window's native drag handle where one is needed.
+            // `h_full` is load-bearing: the strip centers its children, so
+            // without it the drag hitbox collapses to zero height.
+            .child(window_caption::drag_region(div().flex_1().h_full()))
             // Right icon cluster: expand toggle, a layout no-op, close.
-            .child(div().flex_1())
             .child(
                 Button::new("diff-expand")
                     .ghost()
@@ -1207,6 +1223,8 @@ impl DiffPanel {
                         app2.update(cx, |state, cx| state.close_diff_panel(cx));
                     }),
             )
+            // Last child: the panel's own actions keep their places to its left.
+            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
             .into_any_element()
     }
 
@@ -2212,14 +2230,14 @@ impl DiffPanel {
 }
 
 impl Render for DiffPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
         let tab = self.app_state.read(cx).right_tab();
         let mut root = v_flex()
             .size_full()
             .min_w_0()
             .text_color(cx.theme().foreground)
-            .child(self.render_tab_strip(cx));
+            .child(self.render_tab_strip(window, cx));
         root = match tab {
             // Preview is rendered by its own panel (see ui/mod.rs); the diff
             // container only handles Diff/Plan, so treat Preview as the diff view
