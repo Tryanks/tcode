@@ -789,7 +789,8 @@ impl Composer {
         if let Some((from, to)) = self.app_state.read(cx).relay_confirmation() {
             let composer = cx.entity();
             let input = input.clone();
-            window.open_alert_dialog(cx, move |alert, _, _| {
+            window.open_alert_dialog(cx, move |alert, _, cx| {
+                let alert = alert.bg(cx.theme().popover);
                 let composer = composer.clone();
                 let input = input.clone();
                 let sent_text = sent_text.clone();

@@ -1575,7 +1575,7 @@ impl Render for TerminalDrawer {
                 // The accessibility focus ring is painted as a shadow behind this
                 // element. Keep the terminal surface opaque so the shadow cannot
                 // show through the otherwise transparent grid as a solid blue fill.
-                .bg(cx.theme().background)
+                .bg(cx.theme().popover)
                 .flex_1()
                 .min_h_0()
                 .child(body),
