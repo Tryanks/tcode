@@ -36,6 +36,7 @@ use crate::settings::{
 };
 use crate::shell::Quit;
 use crate::time::now_secs;
+use crate::window_caption;
 use crate::window_drag_area;
 
 /// Left inset so branding clears the native macOS 26 traffic lights near x=72.
@@ -524,6 +525,16 @@ impl SettingsPage {
     // -- content ------------------------------------------------------------
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Windows: the settings route replaces the workspace, so this header is
+        // the window's top-right corner and hosts the caption buttons. The
+        // centered column must keep its position (it aligns with the content
+        // below), so the cluster is placed out of flow at the strip's right edge
+        // and the column reserves matching trailing room for it — its actions
+        // therefore end left of the buttons rather than under them.
+        let hosts_caption = window_caption::hosts_caption(
+            window_caption::CaptionSurface::Settings,
+            self.app_state.read(cx),
+        );
         // The 52px strip spans the paper full-width (drag area), but its title
         // and actions ride the same centered 768px column as the content below,
         // the way the chat header aligns with its timeline column.
@@ -535,7 +546,8 @@ impl SettingsPage {
                 .w_full()
                 .px_6()
                 .justify_center()
-                .items_center(),
+                .items_center()
+                .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
@@ -543,15 +555,20 @@ impl SettingsPage {
             gpui_component::h_flex()
                 .w(px(CONTENT_MAX_WIDTH))
                 .max_w_full()
+                .when(hosts_caption, |column| {
+                    column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
+                })
                 .items_center()
                 .gap_3()
-                .child(
+                // The title stretch carries no controls, so it doubles as the
+                // window's native drag handle where the platform needs one.
+                .child(window_caption::drag_region(
                     div()
                         .flex_1()
                         .text_size(px(15.))
                         .font_medium()
                         .child(tcode_i18n::tr!("settings.title")),
-                )
+                ))
                 .child(
                     Button::new("restore-defaults")
                         .outline()
@@ -563,6 +580,15 @@ impl SettingsPage {
                         })),
                 ),
         )
+        // Painted last so the cluster stays on top of the strip.
+        .children(hosts_caption.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .h_full()
+                .child(window_caption::caption_controls(window, cx))
+        }))
         .into_any_element()
     }
 

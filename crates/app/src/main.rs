@@ -8,7 +8,7 @@ use std::{borrow::Cow, time::Duration};
 
 use gpui::{
     App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px, size,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
 use tcode_runtime::app::AppState;
 use tcode_services::{shell_env, store::SessionStore};
@@ -427,16 +427,25 @@ fn main() {
                 // macOS: seamless titlebar — transparent, with the traffic lights
                 // nudged down to sit vertically centered in the 52px top strip.
                 //
-                // Windows/Linux: a transparent titlebar means a *client-decorated*
-                // window, and we draw no minimize/maximize/close controls of our
-                // own (traffic_light_position is a macOS no-op) — the window would
-                // have no way to be closed from the chrome. So there we keep the
-                // native system titlebar; our top strip simply sits below it.
+                // Windows: also client-decorated — a transparent titlebar hides
+                // the system one — and `tcode_ui`'s window caption cluster draws
+                // the minimize/maximize/close controls into whichever top strip
+                // is rightmost (`crates/ui/src/window_caption.rs`).
+                //
+                // Linux: we draw no controls of our own there, so a transparent
+                // titlebar would leave the window with no way to be closed from
+                // the chrome. Keep the native system titlebar; our top strip
+                // simply sits below it.
                 titlebar: Some(TitlebarOptions {
                     title: None,
-                    appears_transparent: cfg!(target_os = "macos"),
+                    appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
                     traffic_light_position: Some(point(px(12.), px(19.))),
                 }),
+                // Spell out that Windows is client-decorated. (This field is
+                // advisory off Wayland; leaving it `None` elsewhere keeps Linux
+                // on whatever its compositor/backend already chose.)
+                window_decorations: cfg!(target_os = "windows")
+                    .then_some(WindowDecorations::Client),
                 // macOS vibrancy: blur whatever is behind the window; theme
                 // background colors carry alpha so the material shows through.
                 window_background: if vibrancy_enabled() {

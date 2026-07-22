@@ -38,6 +38,7 @@ use crate::git::{git_action_label_key, git_hint_key};
 use crate::markdown::{MarkdownState, MarkdownView};
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_millis;
+use crate::window_caption;
 use crate::window_drag_area;
 
 /// Content-column max width (T3 centers the timeline at ~760px). Shared with
@@ -2388,16 +2389,26 @@ impl ChatView {
         // lights (which sit at the window's top-left) overhang into the chat
         // header — inset the header content so the title clears them.
         let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        // Windows: with no right panel open this header is the window's
+        // top-right corner, so it hosts the caption buttons — flush to the
+        // right edge, past the header's usual inset.
+        let hosts_caption = window_caption::hosts_caption(
+            window_caption::CaptionSurface::Chat,
+            self.app_state.read(cx),
+        );
         let base = h_flex()
             .flex_shrink_0()
             .h(px(52.))
             .px_4()
             .when(collapsed, |this| this.pl(px(40.)))
+            .when(hosts_caption, |this| this.pr_0())
             .gap_2()
             .items_center();
 
         // A draft shows a muted "New thread" label; an open thread its title;
-        // nothing active shows "No active thread".
+        // nothing active shows "No active thread". The title stretch carries no
+        // controls, so it doubles as the window's native drag handle where the
+        // platform needs one.
         let title_el = if is_draft {
             div()
                 .flex_1()
@@ -2440,7 +2451,7 @@ impl ChatView {
         let preview_showing = self.app_state.read(cx).preview_panel_showing();
         let terminal_open = self.app_state.read(cx).terminal_panel_open();
         window_drag_area("chat-header-drag", base, window, cx)
-            .child(title_el)
+            .child(window_caption::drag_region(title_el))
             .when(show_actions, |this| {
                 this.children(self.render_git_button(cx))
                     .children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
@@ -2503,6 +2514,9 @@ impl ChatView {
                             ),
                     )
             })
+            // Last child, so the header's own actions keep their places to the
+            // left of it.
+            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
             .into_any_element()
     }
 
