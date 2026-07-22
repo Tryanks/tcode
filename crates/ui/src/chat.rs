@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use agent::{ChangeCompleteness, FileChange, ItemStatus, RewindMode};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, ObjectFit, ParentElement as _,
-    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
-    Subscription, Task, Window, div, img, list, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, FollowMode,
+    Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState, ObjectFit,
+    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Task, Window, div, img, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -869,6 +869,7 @@ impl ChatView {
                         index,
                         segment_id,
                         turn,
+                        cwd,
                         activities,
                         &turn_counts,
                         last_activity_segment == Some(segment_index),
@@ -939,6 +940,7 @@ impl ChatView {
                 index,
                 &segment_id,
                 turn,
+                cwd,
                 &[],
                 &turn_counts,
                 true,
@@ -1631,6 +1633,7 @@ impl ChatView {
         index: usize,
         segment_id: &str,
         turn: &TurnMeta,
+        cwd: &Path,
         activities: &[&TimelineEntry],
         turn_counts: &WorkLogCounts,
         is_last: bool,
@@ -1638,9 +1641,10 @@ impl ChatView {
     ) -> AnyElement {
         let section_key = format!("worklog-{index}-{segment_id}");
         let rows_key = format!("worklog-rows-{index}-{segment_id}");
+        // Only the final segment carries the live "Working for" footer.
         let running = is_last && turn.running;
-        // Only the final segment can be live; finished segments collapse by default.
-        let expanded = running || self.expanded.contains(&section_key);
+        let expanded = work_log_auto_expands(activities, turn.running, is_last)
+            || self.expanded.contains(&section_key);
         let muted = cx.theme().muted_foreground;
         let subagent_count = activities
             .iter()
@@ -1676,11 +1680,7 @@ impl ChatView {
                 );
             }
 
-            let display_activities: Vec<&TimelineEntry> = activities
-                .iter()
-                .copied()
-                .filter(|entry| !matches!(entry.content, EntryContent::FileChange { .. }))
-                .collect();
+            let display_activities = work_log_row_entries(activities, turn.running);
             let total = display_activities.len();
             let rows_expanded = self.expanded.contains(&rows_key);
             let hidden = total.saturating_sub(WORKLOG_VISIBLE_ROWS);
@@ -1691,7 +1691,15 @@ impl ChatView {
             };
 
             for entry in &visible {
-                section = section.child(self.render_activity_row(entry, false, cx));
+                // A file-change entry is a snapshot of several files; each one
+                // gets its own row so the log names what was edited.
+                if let EntryContent::FileChange { changes } = &entry.content {
+                    for row in live_edit_rows(changes, cwd) {
+                        section = section.child(self.render_file_edit_row(&row, cx));
+                    }
+                } else {
+                    section = section.child(self.render_activity_row(entry, false, cx));
+                }
             }
 
             if let Some(toggle_label) = previous_logs_toggle_label(hidden, rows_expanded) {
@@ -1784,6 +1792,10 @@ impl ChatView {
         }
 
         section.into_any_element()
+    }
+
+    fn render_file_edit_row(&self, row: &LiveEditRow, cx: &mut Context<Self>) -> AnyElement {
+        file_edit_row(row, &FileEditRowStyle::from_theme(cx)).into_any_element()
     }
 
     /// One Work Log activity row: a muted status icon + a one-line summary.
@@ -3251,6 +3263,71 @@ struct FileRow {
     deleted: u32,
 }
 
+/// One live Work Log row for an edited file: the workspace-relative display
+/// path plus `+added` / `-deleted` counts. The counts are `None` when the entry
+/// carries no diff — "+0 -0" would read as "this edit changed nothing".
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveEditRow {
+    path: String,
+    counts: Option<(u32, u32)>,
+}
+
+/// The `+N` / `-N` a live edit row should display, if any.
+///
+/// A diff that carries no added or removed lines — absent, empty,
+/// whitespace-only, or nothing but `+++`/`---` headers — has nothing truthful
+/// to show: "+0 -0" reads as "this edit changed nothing". The finished-turn
+/// CHANGED FILES card keeps its own `diff_stats` totals unchanged.
+fn live_edit_counts(diff: Option<&str>) -> Option<(u32, u32)> {
+    let (added, deleted) = diff_stats(Some(diff?));
+    (added != 0 || deleted != 0).then_some((added, deleted))
+}
+
+/// Expand a file-change snapshot into one live row per file, so a single
+/// multi-file entry names every file instead of collapsing to an "N files"
+/// label. Paths use the same workspace-relative display as CHANGED FILES.
+fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEditRow> {
+    changes
+        .iter()
+        .map(|change| LiveEditRow {
+            path: tcode_runtime::ui_facade::relativize_to_workspace(&change.path, cwd),
+            counts: live_edit_counts(change.diff.as_deref()),
+        })
+        .collect()
+}
+
+/// Whether a Work Log segment opens on its own, before any user toggle.
+///
+/// The final segment of a running turn is live, as it always was. A segment
+/// holding file edits also stays open for as long as the turn runs, even once
+/// assistant output has pushed it out of final position — otherwise the paths
+/// and line counts it exists to show would collapse out of view mid-turn.
+/// Finished turns force nothing open: the CHANGED FILES card takes over.
+fn work_log_auto_expands(activities: &[&TimelineEntry], turn_running: bool, is_last: bool) -> bool {
+    turn_running
+        && (is_last
+            || activities
+                .iter()
+                .any(|entry| matches!(entry.content, EntryContent::FileChange { .. })))
+}
+
+/// The activity entries a Work Log segment renders as rows.
+///
+/// File edits are shown only while the turn is still running, so a live turn
+/// names the files it is touching. Once the turn finishes, the turn-level
+/// CHANGED FILES card is the sole per-file presentation and these rows drop out
+/// rather than duplicating it. Either way they still count toward the summary.
+fn work_log_row_entries<'a>(
+    activities: &[&'a TimelineEntry],
+    turn_running: bool,
+) -> Vec<&'a TimelineEntry> {
+    activities
+        .iter()
+        .copied()
+        .filter(|entry| turn_running || !matches!(entry.content, EntryContent::FileChange { .. }))
+        .collect()
+}
+
 /// Group file changes by their parent directory (preserving first-seen order),
 /// so the CHANGED FILES card can render a folder → files tree. Paths are shown
 /// relative to the session `cwd` when they live under it.
@@ -3279,21 +3356,86 @@ fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>
 }
 
 fn diff_counts(added: u32, deleted: u32, cx: &Context<ChatView>) -> AnyElement {
+    diff_counts_colored(added, deleted, cx.theme().success, cx.theme().danger).into_any_element()
+}
+
+/// The `+N -N` pair, `flex_none` so it never gives ground to a long path.
+fn diff_counts_colored(added: u32, deleted: u32, added_color: Hsla, deleted_color: Hsla) -> Div {
     h_flex()
         .flex_none()
         .gap_2()
         .text_size(px(13.))
+        .child(div().text_color(added_color).child(format!("+{added}")))
+        .child(div().text_color(deleted_color).child(format!("-{deleted}")))
+}
+
+/// The theme tokens a file-edit row needs. Reading them at the call site keeps
+/// the row builder a plain function, so a layout test can render the very row
+/// the Work Log renders instead of a hand-copied mock that can drift from it.
+#[derive(Clone)]
+struct FileEditRowStyle {
+    muted: Hsla,
+    added: Hsla,
+    deleted: Hsla,
+    mono: SharedString,
+}
+
+impl FileEditRowStyle {
+    fn from_theme(cx: &App) -> Self {
+        Self {
+            muted: cx.theme().muted_foreground,
+            added: cx.theme().success,
+            deleted: cx.theme().danger,
+            mono: cx.theme().mono_font_family.clone(),
+        }
+    }
+}
+
+/// One live file-edit row: "Code edit  src/foo.rs  +12  -3".
+///
+/// Shares the activity row's typography and the CHANGED FILES count colors.
+/// The path owns the row's flexible space and ellipsizes; the counts are
+/// `flex_none`, so at any chat width they stay whole and to the right of it.
+fn file_edit_row(row: &LiveEditRow, style: &FileEditRowStyle) -> Div {
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_center()
+        .py_0p5()
+        .text_size(px(13.))
+        .debug_selector(|| "file-edit-row".into())
+        .child(Icon::new(IconName::File).xsmall().text_color(style.muted))
         .child(
-            div()
-                .text_color(cx.theme().success)
-                .child(format!("+{added}")),
+            h_flex()
+                .min_w_0()
+                .flex_1()
+                .gap_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(tcode_i18n::tr!("chat.file_edit")),
+                )
+                .child(
+                    // `truncate` (nowrap + ellipsis), not just `text_ellipsis`:
+                    // a long path must clip, never wrap the row onto a second
+                    // line and push the counts out of alignment.
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(style.muted)
+                        .font_family(style.mono.clone())
+                        .debug_selector(|| "file-edit-path".into())
+                        .child(row.path.clone()),
+                ),
         )
-        .child(
-            div()
-                .text_color(cx.theme().danger)
-                .child(format!("-{deleted}")),
-        )
-        .into_any_element()
+        .when_some(row.counts, |element, (added, deleted)| {
+            element.child(
+                diff_counts_colored(added, deleted, style.added, style.deleted)
+                    .debug_selector(|| "file-edit-counts".into()),
+            )
+        })
 }
 
 /// Format a unix-ms timestamp as a local 12-hour clock, e.g. "2:39 AM".
@@ -3324,10 +3466,11 @@ fn twelve_hour(hour24: i32, minute: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatView, ListSync, MdState, MdSync, Segment, WorkLogCounts, copy_payload,
-        displayed_error_text, finished_work_log_label, index_turns, list_sync, md_sync,
-        plain_text_as_markdown, previous_logs_toggle_label, segment_entries, timeline_overdraw,
-        turn_work_log_summary, work_log_counts, work_log_summary,
+        ChatView, FileEditRowStyle, ListSync, LiveEditRow, MdState, MdSync, Segment, WorkLogCounts,
+        copy_payload, diff_stats, displayed_error_text, file_edit_row, finished_work_log_label,
+        index_turns, list_sync, live_edit_counts, live_edit_rows, md_sync, plain_text_as_markdown,
+        previous_logs_toggle_label, segment_entries, timeline_overdraw, turn_work_log_summary,
+        work_log_auto_expands, work_log_counts, work_log_row_entries, work_log_summary,
     };
     use crate::markdown::MarkdownState;
     use agent::{FileChange, FileChangeKind, ItemStatus};
@@ -4102,6 +4245,250 @@ This begins after the hard break."#;
         ];
 
         assert_eq!(work_log_counts(&refs(&entries)).files, 2);
+    }
+
+    /// A running turn names the files it is touching; once it finishes, the
+    /// CHANGED FILES card is the only per-file presentation.
+    #[test]
+    fn work_log_rows_keep_file_changes_only_while_the_turn_runs() {
+        let entries = [
+            command("cargo test"),
+            file_change("edit", &["src/foo.rs"]),
+            command("cargo fmt"),
+        ];
+        let activities = refs(&entries);
+        let ids = |rows: Vec<&TimelineEntry>| {
+            rows.iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<String>>()
+        };
+
+        assert_eq!(
+            ids(work_log_row_entries(&activities, true)),
+            ["cargo test", "edit", "cargo fmt"]
+        );
+        assert_eq!(
+            ids(work_log_row_entries(&activities, false)),
+            ["cargo test", "cargo fmt"]
+        );
+        // Filtering rows never touches the summary counts.
+        assert_eq!(work_log_counts(&activities).files, 1);
+    }
+
+    #[test]
+    fn live_edit_rows_expand_every_file_and_relativize_to_the_workspace() {
+        let cwd = Path::new("/work/repo");
+        let changes = vec![
+            FileChange {
+                path: "/work/repo/src/foo.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: None,
+            },
+            FileChange {
+                path: "/work/repo/crates/ui/src/chat.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: None,
+            },
+            FileChange {
+                path: "/elsewhere/vendor/bar.rs".into(),
+                kind: FileChangeKind::Create,
+                diff: None,
+            },
+        ];
+
+        let rows = live_edit_rows(&changes, cwd);
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            [
+                "src/foo.rs",
+                "crates/ui/src/chat.rs",
+                "/elsewhere/vendor/bar.rs"
+            ]
+        );
+        // No diff means no counts: "+0 -0" would claim the edit changed nothing.
+        assert!(rows.iter().all(|row| row.counts.is_none()));
+    }
+
+    const REAL_DIFF: &str = "--- a/src/foo.rs\n\
+                             +++ b/src/foo.rs\n\
+                             @@ -1,3 +1,4 @@\n\
+                             \x20context\n\
+                             +added one\n\
+                             +added two\n\
+                             -removed one\n";
+
+    #[test]
+    fn live_edit_counts_only_survive_when_a_diff_has_real_edits() {
+        // A real diff counts accurately, ignoring the `+++`/`---` headers.
+        assert_eq!(live_edit_counts(Some(REAL_DIFF)), Some((2, 1)));
+        assert_eq!(live_edit_counts(Some("+only added\n")), Some((1, 0)));
+        assert_eq!(live_edit_counts(Some("-only removed\n")), Some((0, 1)));
+
+        // Nothing displayable: "+0 -0" would claim the edit changed nothing.
+        assert_eq!(live_edit_counts(None), None);
+        assert_eq!(live_edit_counts(Some("")), None);
+        assert_eq!(live_edit_counts(Some("   \n\t\n \n")), None);
+        assert_eq!(
+            live_edit_counts(Some("--- a/src/foo.rs\n+++ b/src/foo.rs\n")),
+            None
+        );
+        assert_eq!(
+            live_edit_counts(Some("--- a/f\n+++ b/f\n@@ -1 +1 @@\n unchanged\n")),
+            None
+        );
+
+        // The finished CHANGED FILES card keeps its own totals semantics, so a
+        // header-only diff still contributes (0, 0) there rather than vanishing.
+        assert_eq!(diff_stats(Some("--- a/f\n+++ b/f\n")), (0, 0));
+        assert_eq!(diff_stats(Some(REAL_DIFF)), (2, 1));
+    }
+
+    #[test]
+    fn live_edit_rows_carry_counts_only_for_files_with_real_edits() {
+        let cwd = Path::new("/work/repo");
+        let changes = vec![
+            FileChange {
+                path: "/work/repo/src/foo.rs".into(),
+                kind: FileChangeKind::Modify,
+                diff: Some(REAL_DIFF.into()),
+            },
+            FileChange {
+                path: "/work/repo/src/bar.rs".into(),
+                kind: FileChangeKind::Create,
+                diff: Some(String::new()),
+            },
+        ];
+
+        assert_eq!(
+            live_edit_rows(&changes, cwd),
+            vec![
+                LiveEditRow {
+                    path: "src/foo.rs".into(),
+                    counts: Some((2, 1)),
+                },
+                LiveEditRow {
+                    path: "src/bar.rs".into(),
+                    counts: None,
+                },
+            ]
+        );
+    }
+
+    /// Renders the production row builder itself, so this layout test cannot
+    /// drift from what the Work Log actually paints.
+    struct FileEditRowProbe {
+        row: LiveEditRow,
+    }
+
+    impl gpui::Render for FileEditRowProbe {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            // The Work Log stacks rows in a full-width column, so the row is
+            // content-height there; reproduce that rather than letting the
+            // window stretch the row and mask a wrap.
+            use gpui::{ParentElement as _, Styled as _};
+            gpui_component::v_flex()
+                .size_full()
+                .child(file_edit_row(&self.row, &FileEditRowStyle::from_theme(cx)))
+        }
+    }
+
+    #[gpui::test]
+    fn long_edit_path_and_counts_stay_inside_the_row_at_narrow_widths(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| FileEditRowProbe {
+            row: LiveEditRow {
+                path: "crates/ui/src/deeply/nested/module/tree/with/an/absurdly/long/name/live_file_edit_row.rs".into(),
+                counts: Some((128, 96)),
+            },
+        });
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+        };
+
+        // A comfortable width the path fits in: the single-line baseline.
+        cx.simulate_resize(size(px(900.), px(80.)));
+        draw(cx);
+        let baseline = cx.debug_bounds("file-edit-row").expect("row bounds");
+        let baseline_counts = cx.debug_bounds("file-edit-counts").expect("count bounds");
+
+        // The chat column gets narrow when the sidebar and a right panel are
+        // both open; sweep down to well below any practical chat width.
+        for width in 280..=900 {
+            cx.simulate_resize(size(px(width as f32), px(80.)));
+            draw(cx);
+
+            let row = cx.debug_bounds("file-edit-row").expect("row bounds");
+            let path = cx.debug_bounds("file-edit-path").expect("path bounds");
+            let counts = cx.debug_bounds("file-edit-counts").expect("count bounds");
+
+            assert!(
+                path.left() >= row.left() && path.right() <= row.right(),
+                "path escaped the row at {width}px: row={row:?}, path={path:?}"
+            );
+            assert!(
+                counts.left() >= row.left() && counts.right() <= row.right(),
+                "+/- counts escaped the row at {width}px: row={row:?}, counts={counts:?}"
+            );
+            assert!(
+                counts.left() >= path.right(),
+                "+/- counts overlapped the path at {width}px: path={path:?}, counts={counts:?}"
+            );
+            // `flex_none`: the counts never give up width to the path.
+            assert_eq!(
+                counts.size.width, baseline_counts.size.width,
+                "+/- counts were squeezed at {width}px: {counts:?}"
+            );
+            // The path truncates instead of wrapping the row onto a second line.
+            assert_eq!(
+                row.size.height, baseline.size.height,
+                "row grew taller at {width}px, so the long path wrapped: row={row:?}"
+            );
+        }
+    }
+
+    /// A file-edit segment must stay open for the whole live turn: once later
+    /// assistant output makes it non-final, auto-collapsing would hide the very
+    /// paths and counts it exists to show.
+    #[test]
+    fn live_file_change_segments_stay_expanded_after_they_stop_being_final() {
+        let file_edits = [command("cargo check"), file_change("edit", &["src/a.rs"])];
+        let ordinary = [command("cargo check"), command("cargo test")];
+        let file_edits = refs(&file_edits);
+        let ordinary = refs(&ordinary);
+
+        // Live, no longer the final segment: only the file-edit run is forced.
+        assert!(work_log_auto_expands(&file_edits, true, false));
+        assert!(!work_log_auto_expands(&ordinary, true, false));
+
+        // The final live segment keeps opening on its own, as it always did.
+        assert!(work_log_auto_expands(&file_edits, true, true));
+        assert!(work_log_auto_expands(&ordinary, true, true));
+
+        // Finished turns force nothing open; CHANGED FILES takes over.
+        assert!(!work_log_auto_expands(&file_edits, false, true));
+        assert!(!work_log_auto_expands(&file_edits, false, false));
+        assert!(!work_log_auto_expands(&ordinary, false, true));
+    }
+
+    #[test]
+    fn live_edit_row_label_is_exact_in_both_locales() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(tcode_i18n::tr!("chat.file_edit"), "Code edit");
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(tcode_i18n::tr!("chat.file_edit"), "编辑代码");
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
     }
 
     #[test]
