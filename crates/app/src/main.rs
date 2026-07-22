@@ -8,7 +8,7 @@ use std::{borrow::Cow, time::Duration};
 
 use gpui::{
     App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px, size,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
 use tcode_runtime::app::AppState;
 use tcode_services::{shell_env, store::SessionStore};
@@ -23,15 +23,29 @@ use gpui_component::{
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
-/// On platforms with an opaque window the translucent canvas colors would
-/// composite against black; flatten them to their solid RGB. Keep the literals
-/// in sync with themes/tcode.json (checked by `smoke` builds via debug_assert).
-/// Vibrancy is macOS-only and can be disabled with `TCODE_NO_VIBRANCY=1`
-/// (diagnostic escape hatch: opaque window + flattened palette).
+/// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
+/// escape hatch (opaque window + flattened palette).
 fn vibrancy_enabled() -> bool {
     cfg!(target_os = "macos") && !std::env::var("TCODE_NO_VIBRANCY").is_ok_and(|v| v == "1")
 }
 
+fn translucent_canvas_enabled() -> bool {
+    cfg!(target_os = "windows") || vibrancy_enabled()
+}
+
+fn main_window_background() -> WindowBackgroundAppearance {
+    if cfg!(target_os = "windows") {
+        WindowBackgroundAppearance::MicaBackdrop
+    } else if vibrancy_enabled() {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        WindowBackgroundAppearance::Opaque
+    }
+}
+
+/// With an opaque window the translucent canvas colors would composite against
+/// black; flatten them to their solid RGB. Keep the literals in sync with
+/// themes/tcode.json (checked by `smoke` builds via debug_assert).
 fn flatten_canvas_for_opaque_window(theme_json: &str) -> String {
     let flattened = theme_json
         .replace("#F2F4F7C7", "#F2F4F7")
@@ -298,12 +312,11 @@ fn main() {
             cx.text_system()
                 .add_fonts(application_fonts)
                 .expect("failed to register bundled application fonts");
-            // The theme's canvas color is translucent so the macOS vibrancy
-            // material shows through (docs/visual-redesign.md). Elsewhere the
-            // window is opaque and that alpha would composite against black,
-            // so flatten the canvas onto each mode's solid base first. (macOS
-            // fullscreen flattens at paint time instead: material::opaque_canvas.)
-            let theme_json: Cow<'_, str> = if vibrancy_enabled() {
+            // The theme's canvas color stays translucent over macOS vibrancy
+            // and Windows Mica (docs/visual-redesign.md). Opaque windows flatten
+            // it onto each mode's solid base first. (macOS fullscreen flattens
+            // at paint time instead: material::opaque_canvas.)
+            let theme_json: Cow<'_, str> = if translucent_canvas_enabled() {
                 Cow::Borrowed(TCODE_THEME)
             } else {
                 Cow::Owned(flatten_canvas_for_opaque_window(TCODE_THEME))
@@ -427,23 +440,28 @@ fn main() {
                 // macOS: seamless titlebar — transparent, with the traffic lights
                 // nudged down to sit vertically centered in the 52px top strip.
                 //
-                // Windows/Linux: a transparent titlebar means a *client-decorated*
-                // window, and we draw no minimize/maximize/close controls of our
-                // own (traffic_light_position is a macOS no-op) — the window would
-                // have no way to be closed from the chrome. So there we keep the
-                // native system titlebar; our top strip simply sits below it.
+                // Windows: also client-decorated — a transparent titlebar hides
+                // the system one — and `tcode_ui`'s window caption cluster draws
+                // the minimize/maximize/close controls into whichever top strip
+                // is rightmost (`crates/ui/src/window_caption.rs`).
+                //
+                // Linux: we draw no controls of our own there, so a transparent
+                // titlebar would leave the window with no way to be closed from
+                // the chrome. Keep the native system titlebar; our top strip
+                // simply sits below it.
                 titlebar: Some(TitlebarOptions {
                     title: None,
-                    appears_transparent: cfg!(target_os = "macos"),
+                    appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
                     traffic_light_position: Some(point(px(12.), px(19.))),
                 }),
-                // macOS vibrancy: blur whatever is behind the window; theme
-                // background colors carry alpha so the material shows through.
-                window_background: if vibrancy_enabled() {
-                    WindowBackgroundAppearance::Blurred
-                } else {
-                    WindowBackgroundAppearance::Opaque
-                },
+                // Spell out that Windows is client-decorated. (This field is
+                // advisory off Wayland; leaving it `None` elsewhere keeps Linux
+                // on whatever its compositor/backend already chose.)
+                window_decorations: cfg!(target_os = "windows")
+                    .then_some(WindowDecorations::Client),
+                // Persistent windows use the platform's system material:
+                // macOS blur, Windows 11 base Mica, or an opaque fallback.
+                window_background: main_window_background(),
                 ..Default::default()
             };
 

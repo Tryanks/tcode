@@ -7,7 +7,8 @@
 ## 核心理念
 
 玻璃机壳 + 纸面阅读区 + 一条蓝色墨线贯穿。
-侧栏与窗口边缘是毛玻璃"机壳"（macOS vibrancy），正文坐在一块近实的"纸面"上；
+侧栏与窗口边缘是系统材质"机壳"（macOS vibrancy / Windows 11 Mica），
+正文坐在一块近实的"纸面"上；
 蓝色从单一按钮色升级为贯穿选中、聚焦、强调的墨线体系。
 观感目标：一台精密仪器，而不是一个网页。用户气泡保持中性灰（用户已拍板）。
 
@@ -15,14 +16,19 @@
 
 - gpui `WindowBackgroundAppearance::Blurred`（仅 macOS）在 Metal 层下垫
   `NSVisualEffectView`；合成后 alpha < 1 的区域透出桌面毛玻璃。
+- Windows 11 的持久主窗口使用 base Mica
+  （`WindowBackgroundAppearance::MicaBackdrop` / `DWMSBT_MAINWINDOW`）；Acrylic
+  仅用于菜单、弹层等瞬态表面，不用于长驻主窗口。
 - 全窗口仅一层 blur；悬浮层半透明与其下窗口内容做普通 alpha 合成。
 - gpui-component `Root` 用 `colors.background` 涂画布，支持 8 位 hex alpha。
   **AppShell 不得重复涂 `background`**（已移除）——全屏例外：全屏 Space 的
   vibrancy 背景是纯黑，AppShell 根节点仅在全屏时垫一层不透明基色
   （`material::opaque_canvas`，把画布 alpha 提到 1），窗口模式仍由 Root 独自涂玻璃。
-  与 Windows Acrylic `FallbackColor`、macOS「降低透明度」同一降级策略。
-- 非 macOS：窗口 Opaque；main.rs 的 `flatten_canvas_for_opaque_window`
-  把画布色压平为实色（与 JSON 字面量保持同步）。
+  与 Windows 材质不可用时的回退、macOS「降低透明度」同一降级策略。
+- macOS vibrancy 与 Windows Mica 保留画布 alpha，使系统材质可见；Linux
+  及其他平台使用 Opaque，main.rs 的 `flatten_canvas_for_opaque_window`
+  把画布色压平为实色（与 JSON 字面量保持同步）。`TCODE_NO_VIBRANCY=1`
+  仍只在 macOS 上切换为 Opaque 并压平画布。
 
 ## 1. 材质分层
 
@@ -31,7 +37,7 @@
 | T0 玻璃机壳 | 侧栏、窗口边缘 | Root（`background`） | 唯一刻意透明层 ~78%；全屏时压平为实色 |
 | T1 纸面 | 聊天区、右面板、设置页 | shell.rs（`material::content_surface`） | 近实 94-95% |
 | T2 浮起 | 气泡、卡片、输入域 | 组件（muted/secondary 叠色） | 半透明墨色叠加 |
-| T3 悬浮 | popover/menu/dialog/drawer/toast | `popover.background` | ≥97% + 发丝边 + 大软阴影 |
+| T3 悬浮 | popover/menu/dialog/drawer/toast | `popover.background` | 100% 实底 + 发丝边 + 大软阴影 |
 
 - 侧栏不涂底（`sidebar.background` 全透明），直接露玻璃。
 - 正文文字永远坐在 ≥94% 的表面上；侧栏短标签除外。
@@ -48,7 +54,7 @@
 | input.border | `#1F23281F` | |
 | accent/secondary/muted .background | `#24344D0F` | 墨蓝 6% 叠色（弃纯黑叠色） |
 | accent/secondary .foreground | `#1F2328` | |
-| popover.background | `#FFFFFFFA` | T3 |
+| popover.background | `#FFFFFFFF` | T3，全不透明 |
 | list.background | `#FFFFFF00` | 列表不自带底，坐在所在层上 |
 | list.hover.background | `#24344D0A` | |
 | list.active.background | `#1447E614` | 主色 8% 着色胶囊 |
@@ -73,7 +79,7 @@
 | border | `#C9D4E80F` | 冷光发丝线 |
 | input.border | `#C9D4E817` | |
 | accent/secondary/muted .background | `#C9D8F00D` | 冷光 5% 叠色 |
-| popover.background | `#22262EFA` | T3，比纸面抬一档 |
+| popover.background | `#22262EFF` | T3，全不透明，比纸面抬一档 |
 | list.background | `#FFFFFF00` | |
 | list.hover.background | `#C9D8F00A` | |
 | list.active.background | `#155DFC26` | 主色 15% 胶囊 |
