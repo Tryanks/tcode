@@ -34,9 +34,7 @@ fn translucent_canvas_enabled() -> bool {
 }
 
 fn main_window_background() -> WindowBackgroundAppearance {
-    if cfg!(target_os = "windows") {
-        WindowBackgroundAppearance::MicaBackdrop
-    } else if vibrancy_enabled() {
+    if cfg!(target_os = "windows") || vibrancy_enabled() {
         WindowBackgroundAppearance::Blurred
     } else {
         WindowBackgroundAppearance::Opaque
@@ -313,7 +311,7 @@ fn main() {
                 .add_fonts(application_fonts)
                 .expect("failed to register bundled application fonts");
             // The theme's canvas color stays translucent over macOS vibrancy
-            // and Windows Mica (docs/visual-redesign.md). Opaque windows flatten
+            // and Windows Acrylic (docs/visual-redesign.md). Opaque windows flatten
             // it onto each mode's solid base first. (macOS fullscreen flattens
             // at paint time instead: material::opaque_canvas.)
             let theme_json: Cow<'_, str> = if translucent_canvas_enabled() {
@@ -460,7 +458,7 @@ fn main() {
                 window_decorations: cfg!(target_os = "windows")
                     .then_some(WindowDecorations::Client),
                 // Persistent windows use the platform's system material:
-                // macOS blur, Windows 11 base Mica, or an opaque fallback.
+                // macOS blur, Windows Acrylic, or an opaque fallback.
                 window_background: main_window_background(),
                 ..Default::default()
             };
