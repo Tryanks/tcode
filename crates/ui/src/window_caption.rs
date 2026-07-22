@@ -22,7 +22,7 @@ use gpui::{
     App, InteractiveElement, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, Window, WindowControlArea, div, px,
 };
-use gpui_component::ActiveTheme as _;
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
 use tcode_runtime::app::{AppState, RightTab, Route};
 
 /// Height of a caption strip. Matches the shell's 52px top rows so the cluster
@@ -33,9 +33,6 @@ const CAPTION_BUTTON_WIDTH: f32 = 46.;
 /// Horizontal space the whole cluster occupies, for surfaces that must reserve
 /// room for it rather than simply place it last in a row.
 pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
-/// The system icon font Windows 11 ships; it carries the caption glyphs below.
-const CAPTION_FONT: &str = "Segoe Fluent Icons";
-
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
 
@@ -107,14 +104,12 @@ impl CaptionButton {
         }
     }
 
-    /// Segoe Fluent Icons: ChromeMinimize, ChromeMaximize, ChromeRestore,
-    /// ChromeClose — the glyphs Windows' own caption buttons use.
-    const fn glyph(self, maximized: bool) -> &'static str {
+    fn icon(self, maximized: bool) -> IconName {
         match self {
-            Self::Minimize => "\u{e921}",
-            Self::MaximizeRestore if maximized => "\u{e923}",
-            Self::MaximizeRestore => "\u{e922}",
-            Self::Close => "\u{e8bb}",
+            Self::Minimize => IconName::WindowMinimize,
+            Self::MaximizeRestore if maximized => IconName::WindowRestore,
+            Self::MaximizeRestore => IconName::WindowMaximize,
+            Self::Close => IconName::WindowClose,
         }
     }
 }
@@ -192,11 +187,9 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
         // header's drag listeners nor any enclosing `Drag` control area is in
         // the hit set — the platform sees a caption button, never a drag area.
         .occlude()
-        .font_family(CAPTION_FONT)
-        .text_size(px(10.))
         .hover(move |style| style.bg(hover_bg).text_color(active_fg))
         .active(move |style| style.bg(pressed_bg).text_color(active_fg))
-        .child(button.glyph(maximized))
+        .child(Icon::new(button.icon(maximized)).small())
 }
 
 #[cfg(test)]
