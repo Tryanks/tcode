@@ -48,16 +48,19 @@ Canonical values live in `themes/tcode.json` (embedded at build time).
 
 ## Window material
 
-The persistent main window uses the native long-lived-window material: macOS
-uses its existing blurred vibrancy, while Windows 11 uses base Mica
-(`WindowBackgroundAppearance::MicaBackdrop`, `DWMSBT_MAINWINDOW`). Acrylic is
-reserved for transient surfaces such as menus and popovers, not the main
-window. Both native materials retain the embedded theme's translucent canvas so
-the system backdrop can show through. `TCODE_NO_VIBRANCY=1` keeps its macOS-only
+The persistent main window uses native backdrop material: macOS keeps its
+existing blurred vibrancy, while Windows deliberately uses GPUI's
+`WindowBackgroundAppearance::Blurred`, which the locked Windows backend maps to
+Acrylic Accent state 4. Mica was rejected because it did not provide the
+perceptible live background-through blur required in the exposed T0 sidebar and
+window-edge regions. Both native materials retain the embedded theme's
+translucent canvas so the system backdrop can show through.
+`TCODE_NO_VIBRANCY=1` keeps its macOS-only
 diagnostic behavior: an opaque window with a flattened canvas. Linux and other
 platforms remain opaque and flatten that canvas to its solid RGB base. In-app
 T3 child surfaces (popovers, menus, dialogs, drawers and toasts) use the fully
-opaque `popover.background` token so lower layers never show through.
+opaque `popover.background` token so lower layers never show through; they do
+not receive native Acrylic.
 
 ## Layout metrics (at 1440×900)
 

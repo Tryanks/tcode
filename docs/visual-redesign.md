@@ -7,25 +7,27 @@
 ## 核心理念
 
 玻璃机壳 + 纸面阅读区 + 一条蓝色墨线贯穿。
-侧栏与窗口边缘是系统材质"机壳"（macOS vibrancy / Windows 11 Mica），
+侧栏与窗口边缘是系统材质"机壳"（macOS vibrancy / Windows 11 Acrylic），
 正文坐在一块近实的"纸面"上；
 蓝色从单一按钮色升级为贯穿选中、聚焦、强调的墨线体系。
 观感目标：一台精密仪器，而不是一个网页。用户气泡保持中性灰（用户已拍板）。
 
 ## 0. 技术底座（已验证）
 
-- gpui `WindowBackgroundAppearance::Blurred`（仅 macOS）在 Metal 层下垫
+- gpui `WindowBackgroundAppearance::Blurred` 在 macOS Metal 层下垫
   `NSVisualEffectView`；合成后 alpha < 1 的区域透出桌面毛玻璃。
-- Windows 11 的持久主窗口使用 base Mica
-  （`WindowBackgroundAppearance::MicaBackdrop` / `DWMSBT_MAINWINDOW`）；Acrylic
-  仅用于菜单、弹层等瞬态表面，不用于长驻主窗口。
-- 全窗口仅一层 blur；悬浮层半透明与其下窗口内容做普通 alpha 合成。
+- Windows 11 的持久主窗口也刻意使用
+  `WindowBackgroundAppearance::Blurred`；锁定的 GPUI Windows 后端将其映射为
+  Acrylic Accent state 4，使暴露的 T0 侧栏／窗口边缘能感知窗口后方实时变化并保持模糊。
+  Mica 因无法达到本产品所需的可感知实时 background-through blur 而被否决。
+- 全窗口仅一层原生 blur；应用内 popover/menu/dialog/drawer/toast 保持全不透明，
+  不会各自获得原生 Acrylic。
 - gpui-component `Root` 用 `colors.background` 涂画布，支持 8 位 hex alpha。
   **AppShell 不得重复涂 `background`**（已移除）——全屏例外：全屏 Space 的
   vibrancy 背景是纯黑，AppShell 根节点仅在全屏时垫一层不透明基色
   （`material::opaque_canvas`，把画布 alpha 提到 1），窗口模式仍由 Root 独自涂玻璃。
   与 Windows 材质不可用时的回退、macOS「降低透明度」同一降级策略。
-- macOS vibrancy 与 Windows Mica 保留画布 alpha，使系统材质可见；Linux
+- macOS vibrancy 与 Windows Acrylic 保留画布 alpha，使系统材质可见；Linux
   及其他平台使用 Opaque，main.rs 的 `flatten_canvas_for_opaque_window`
   把画布色压平为实色（与 JSON 字面量保持同步）。`TCODE_NO_VIBRANCY=1`
   仍只在 macOS 上切换为 Opaque 并压平画布。
@@ -182,7 +184,7 @@ material.rs 常量，禁止再写魔法数字：
 
 ## 9. 实施地图
 
-1. ✅ main.rs：Blurred 窗口（macOS gate）+ flatten fallback
+1. ✅ main.rs：Blurred 窗口（macOS vibrancy / Windows Acrylic）+ flatten fallback
 2. ✅ shell.rs：去重复涂底；chat/right/settings 涂纸面
 3. ✅ token 层：theme JSON 全表 + material.rs（常量与 helper）
 4. 组件清扫（并行，文件禁区严格隔离）：
