@@ -697,23 +697,10 @@ impl SessionsSidebar {
                 .font_semibold()
                 .child("DEV"),
         )
+        // The collapse toggle lives in the chat header (`crate::chat`), not
+        // here: collapsing takes the sidebar to zero width, so a control that
+        // rode the sidebar would take itself off screen.
         .child(div().flex_1())
-        // Far right of the sidebar header (macOS sidebar-toggle convention);
-        // sitting next to the traffic lights it reads as a misaligned fourth
-        // light.
-        .child(
-            Button::new("collapse-sidebar")
-                .ghost()
-                .small()
-                .compact()
-                .icon(IconName::PanelLeft)
-                .tooltip(tcode_i18n::tr!("sidebar.collapse"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state.update(cx, |state, cx| {
-                        state.toggle_sidebar_collapsed(cx);
-                    });
-                })),
-        )
     }
 
     fn render_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1357,48 +1344,6 @@ impl SessionsSidebar {
                 ),
             )
     }
-
-    fn render_collapsed(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            // No seam against the content column: material contrast does the work.
-            .bg(cx.theme().sidebar)
-            .items_center()
-            .pb_2()
-            .gap_2()
-            .child(window_drag_area(
-                "sidebar-collapsed-drag",
-                h_flex().h(px(52.)).w_full().flex_none(),
-                window,
-                cx,
-            ))
-            .child(
-                Button::new("expand-sidebar")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::PanelLeftOpen)
-                    .tooltip(tcode_i18n::tr!("sidebar.expand"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| {
-                            state.toggle_sidebar_collapsed(cx);
-                        });
-                    })),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("collapsed-settings")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Settings)
-                    .tooltip(tcode_i18n::tr!("settings.title"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.open_settings(cx));
-                    })),
-            )
-    }
 }
 
 /// Delete `session_id`, first asking whether to also remove an orphaned worktree.
@@ -1453,10 +1398,6 @@ fn proceed_delete(
 
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.app_state.read(cx).sidebar_collapsed {
-            return self.render_collapsed(window, cx).into_any_element();
-        }
-
         let (groups, active_id, turn_running) = {
             let state = self.app_state.read(cx);
             let active_id = state.active_session_id().map(str::to_string);

@@ -61,10 +61,13 @@ opaque `popover.background` token so lower layers never show through.
 
 ## Layout metrics (at 1440×900)
 
-- Sidebar 255px, resizable; 1px right border; collapses to a 48px icon strip.
+- Sidebar 255px, resizable; 1px right border. Collapsed it occupies **0px** —
+  no icon strip, no layout node at all: the chat (and right panel) run to the
+  window's left edge. Collapsed, entering the first 12px at the window's left
+  edge reveals the sidebar as an **overlay** (see Sidebar below).
 - Window top is seamless: no app titlebar — the sidebar's first row (traffic
-  lights inset 74px, collapse button, wordmark + channel pill) and the chat
-  header (52px) form the top strip; both are window-drag areas.
+  lights inset 74px, wordmark + channel pill) and the chat header (52px) form
+  the top strip; both are window-drag areas.
 - Chat content column: max-width 768px, centered, ≥24px horizontal padding
   (must reflow, never clip, when the diff panel narrows the chat region).
 - Composer: floating card, radius 16, 1px border, subtle shadow; bottom control
@@ -88,7 +91,22 @@ remains.
 ## Surface anatomy
 
 ### Sidebar
-1. App row: collapse icon button, "tcode" bold 14px, channel pill ("DEV").
+Expanded, it is the first panel of the workspace resizable group (220–380px,
+dragged width remembered across collapse/expand and window resizes). Collapsed,
+it is **not in the layout at all**. A fixed, invisible 12px-wide element-level
+hover trigger sits at the left edge and only opens the sidebar. The revealed
+sidebar is a separate absolute sibling at its remembered width, rendered as a
+shadowed overlay
+*painted on top of* the chat: the content columns never reflow when it appears
+or disappears. The trigger ignores hover-exit; the overlay's own occluding
+hitbox and hover listener keep it open while occupied and close it when the
+pointer leaves. It is strictly transient state, never persisted, and command
+palette / dialogs / toasts still layer above it. Its own contents are identical
+in both states.
+
+1. App row: "tcode" bold 14px, channel pill ("DEV"). No collapse button — the
+   toggle lives in the chat header, since a collapsed sidebar has no width to
+   host it.
 2. Search row: magnifier + "Search" muted + ⌘K kbd chip → opens the palette.
 3. "PROJECTS" header: 11px uppercase muted + sort (no-op) + add-project button
    (native directory picker).
@@ -104,8 +122,14 @@ remains.
 5. Footer: gear + "Settings" → settings route.
 
 ### Chat header
-52px; thread title 16px medium left ("No active thread" muted when empty);
-right: two icon buttons (layout placeholder · diff-panel toggle).
+52px. The first control is the **sidebar toggle**, immediately left of the
+title: `PanelLeft` + "Collapse sidebar" while expanded, `PanelLeftOpen` +
+"Expand sidebar" while collapsed. Then the thread title 16px medium ("No active
+thread" muted when empty); right: the git/Open actions and the terminal · plan ·
+preview · diff panel toggles. The title stretch is the window-drag handle; the
+toggle is a real button and never arms a drag. Collapsed on macOS (windowed) the
+row is inset 80px so the toggle clears the native traffic lights; no other
+platform pays that inset.
 
 ### Timeline
 - **Turn separation is rhythm, not rules.** Turns are 44px apart; inside a turn

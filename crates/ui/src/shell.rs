@@ -4,11 +4,12 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, Styled as _,
-    Subscription, Window, actions, div, prelude::FluentBuilder as _, px,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, WindowExt as _, h_flex,
+    ActiveTheme as _, Root, WindowExt as _,
     notification::Notification,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
@@ -115,12 +116,42 @@ pub struct AppShell {
     /// Keep restoring the sidebar width until the panel reports it, then stop
     /// so the restore never fights an in-progress drag.
     sidebar_restore_pending: bool,
+    /// Collapsed-only overlay visibility. Purely transient and never persisted;
+    /// expanded/non-workspace renders clear it synchronously.
+    sidebar_overlay_visible: bool,
     _subscriptions: Vec<Subscription>,
 }
 
 /// The right panel's default width (`docs/DESIGN.md`).
 const RIGHT_PANEL_WIDTH: f32 = 560.;
 const SIDEBAR_WIDTH: f32 = 255.;
+/// Collapsed only: width of the window's left-edge activation region.
+const SIDEBAR_HOVER_EDGE: f32 = 12.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarHoverTransition {
+    Trigger(bool),
+    Overlay(bool),
+}
+
+/// Apply the asymmetric sibling-hover contract. The fixed trigger can open the
+/// overlay but cannot close it; once mounted, the overlay owns closing itself.
+fn next_sidebar_overlay_visibility(
+    currently_visible: bool,
+    transition: SidebarHoverTransition,
+    collapsed: bool,
+    route: Route,
+) -> bool {
+    if !collapsed || route != Route::Chat {
+        return false;
+    }
+
+    match transition {
+        SidebarHoverTransition::Trigger(true) | SidebarHoverTransition::Overlay(true) => true,
+        SidebarHoverTransition::Trigger(false) => currently_visible,
+        SidebarHoverTransition::Overlay(false) => false,
+    }
+}
 
 impl AppShell {
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -188,6 +219,7 @@ impl AppShell {
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             last_viewport_width: None,
             sidebar_restore_pending: false,
+            sidebar_overlay_visible: false,
             _subscriptions: vec![subscription, event_subscription],
         }
     }
@@ -314,6 +346,11 @@ impl Render for AppShell {
         }
         self.palette_was_open = palette_open;
         let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        // The overlay is workspace-only transient state. Clear it synchronously
+        // on route/expanded transitions rather than waiting for pointer input.
+        if !collapsed || route != Route::Chat {
+            self.sidebar_overlay_visible = false;
+        }
         let diff_open = self.app_state.read(cx).diff_panel_open();
         let right_tab = self.app_state.read(cx).right_tab();
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
@@ -475,19 +512,81 @@ impl Render for AppShell {
         };
 
         let workspace: AnyElement = if collapsed {
-            // `h_flex` centers its children on the cross axis, so the icon strip
-            // needs an explicit full height — without it it (and the whole chat
-            // column) float vertically centered in the window.
-            h_flex()
+            // Zero layout width: the chat/right group owns the whole workspace
+            // and runs to the window's left edge. The trigger and overlay are
+            // independent absolute siblings, so neither reflows the columns.
+            let overlay_width = self.sidebar_width.get();
+            div()
+                .relative()
                 .size_full()
+                .child(group("chat-diff-panels").child(chat_panel).child(right))
+                // This fixed transparent strip only opens the overlay. Its
+                // inevitable false transition when the overlay occludes it is
+                // deliberately ignored by the state machine.
                 .child(
                     div()
-                        .flex_none()
-                        .w(px(48.))
+                        .id("sidebar-hover-trigger")
+                        .absolute()
+                        .left_0()
+                        .top_0()
                         .h_full()
-                        .child(self.sidebar.clone()),
+                        .w(px(SIDEBAR_HOVER_EDGE))
+                        .occlude()
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            let (collapsed, route) = {
+                                let state = this.app_state.read(cx);
+                                (state.sidebar_collapsed, state.route)
+                            };
+                            let visible = next_sidebar_overlay_visibility(
+                                this.sidebar_overlay_visible,
+                                SidebarHoverTransition::Trigger(*hovered),
+                                collapsed,
+                                route,
+                            );
+                            if this.sidebar_overlay_visible != visible {
+                                this.sidebar_overlay_visible = visible;
+                                cx.notify();
+                            }
+                        })),
                 )
-                .child(group("chat-diff-panels").child(chat_panel).child(right))
+                .when(self.sidebar_overlay_visible, |this| {
+                    this.child(
+                        div()
+                            .id("sidebar-hover-overlay")
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .h_full()
+                            .w(overlay_width)
+                            // The sidebar fill is translucent, so back the
+                            // floating layer with the near-opaque popover surface
+                            // to prevent the chat beneath from bleeding through.
+                            .bg(cx.theme().popover)
+                            .shadow_lg()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            // The blocker and hover listener share this hitbox:
+                            // the overlay owns its full visible lifetime.
+                            .occlude()
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                let (collapsed, route) = {
+                                    let state = this.app_state.read(cx);
+                                    (state.sidebar_collapsed, state.route)
+                                };
+                                let visible = next_sidebar_overlay_visibility(
+                                    this.sidebar_overlay_visible,
+                                    SidebarHoverTransition::Overlay(*hovered),
+                                    collapsed,
+                                    route,
+                                );
+                                if this.sidebar_overlay_visible != visible {
+                                    this.sidebar_overlay_visible = visible;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(self.sidebar.clone()),
+                    )
+                })
                 .into_any_element()
         } else {
             group("workspace-panels")
@@ -533,5 +632,56 @@ impl Render for AppShell {
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transition(current: bool, transition: SidebarHoverTransition) -> bool {
+        next_sidebar_overlay_visibility(current, transition, true, Route::Chat)
+    }
+
+    #[test]
+    fn trigger_true_opens_overlay() {
+        assert!(transition(false, SidebarHoverTransition::Trigger(true)));
+    }
+
+    #[test]
+    fn trigger_false_preserves_current_visibility() {
+        assert!(!transition(false, SidebarHoverTransition::Trigger(false)));
+        assert!(transition(true, SidebarHoverTransition::Trigger(false)));
+    }
+
+    #[test]
+    fn overlay_true_opens_or_keeps_overlay_open() {
+        assert!(transition(false, SidebarHoverTransition::Overlay(true)));
+        assert!(transition(true, SidebarHoverTransition::Overlay(true)));
+    }
+
+    #[test]
+    fn overlay_false_closes_overlay() {
+        assert!(!transition(true, SidebarHoverTransition::Overlay(false)));
+    }
+
+    #[test]
+    fn expanded_sidebar_forces_overlay_closed() {
+        assert!(!next_sidebar_overlay_visibility(
+            true,
+            SidebarHoverTransition::Overlay(true),
+            false,
+            Route::Chat,
+        ));
+    }
+
+    #[test]
+    fn non_workspace_route_forces_overlay_closed() {
+        assert!(!next_sidebar_overlay_visibility(
+            true,
+            SidebarHoverTransition::Overlay(true),
+            true,
+            Route::Settings,
+        ));
     }
 }

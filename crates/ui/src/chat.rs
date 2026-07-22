@@ -48,6 +48,10 @@ pub(crate) const CONTENT_MAX_WIDTH: f32 = 768.;
 /// Minimum horizontal padding around the content column so bubbles/cards never
 /// clip when the chat region is narrowed (e.g. the diff panel is open).
 pub(crate) const CONTENT_MIN_PADDING: f32 = 24.;
+/// Left padding on the chat header while the sidebar is collapsed, so its
+/// leading control clears the native macOS traffic lights (which end near x=72
+/// on macOS 26). Only applied on macOS: see `render_header`.
+const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// How many activity rows to show before the "+N previous log entrys" expander.
 const WORKLOG_VISIBLE_ROWS: usize = 2;
 
@@ -2385,10 +2389,14 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // With the sidebar collapsed to its 48px strip, the native traffic
-        // lights (which sit at the window's top-left) overhang into the chat
-        // header — inset the header content so the title clears them.
+        // Collapsed, the sidebar has zero width and this header starts at the
+        // window's left edge. On macOS the native traffic lights sit there, so
+        // the row's leading content (the sidebar toggle) is inset past them —
+        // but only when the platform actually draws them: they are hidden in
+        // fullscreen, and other platforms never had them.
         let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        let clears_traffic_lights =
+            cfg!(target_os = "macos") && collapsed && !window.is_fullscreen();
         // Windows: with no right panel open this header is the window's
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
@@ -2400,10 +2408,35 @@ impl ChatView {
             .flex_shrink_0()
             .h(px(52.))
             .px_4()
-            .when(collapsed, |this| this.pl(px(40.)))
+            .when(clears_traffic_lights, |this| {
+                this.pl(px(TRAFFIC_LIGHT_INSET))
+            })
             .when(hosts_caption, |this| this.pr_0())
             .gap_2()
             .items_center();
+
+        // The sidebar toggle: the header's first control, immediately left of
+        // the title. It lives here rather than in the sidebar because a
+        // collapsed sidebar occupies no width at all (`crate::shell`), so a
+        // control mounted inside it would have nowhere to be.
+        let sidebar_toggle = Button::new("toggle-sidebar")
+            .ghost()
+            .small()
+            .compact()
+            .icon(if collapsed {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeft
+            })
+            .tooltip(if collapsed {
+                tcode_i18n::tr!("sidebar.expand")
+            } else {
+                tcode_i18n::tr!("sidebar.collapse")
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.app_state
+                    .update(cx, |state, cx| state.toggle_sidebar_collapsed(cx));
+            }));
 
         // A draft shows a muted "New thread" label; an open thread its title;
         // nothing active shows "No active thread". The title stretch carries no
@@ -2451,6 +2484,7 @@ impl ChatView {
         let preview_showing = self.app_state.read(cx).preview_panel_showing();
         let terminal_open = self.app_state.read(cx).terminal_panel_open();
         window_drag_area("chat-header-drag", base, window, cx)
+            .child(sidebar_toggle)
             .child(window_caption::drag_region(title_el))
             .when(show_actions, |this| {
                 this.children(self.render_git_button(cx))
