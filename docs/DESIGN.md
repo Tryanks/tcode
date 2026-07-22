@@ -46,6 +46,17 @@ success-fg / destructive-fg.
 
 Canonical values live in `themes/tcode.json` (embedded at build time).
 
+## Window material
+
+The persistent main window uses the native long-lived-window material: macOS
+uses its existing blurred vibrancy, while Windows 11 uses base Mica
+(`WindowBackgroundAppearance::MicaBackdrop`, `DWMSBT_MAINWINDOW`). Acrylic is
+reserved for transient surfaces such as menus and popovers, not the main
+window. Both native materials retain the embedded theme's translucent canvas so
+the system backdrop can show through. `TCODE_NO_VIBRANCY=1` keeps its macOS-only
+diagnostic behavior: an opaque window with a flattened canvas. Linux and other
+platforms remain opaque and flatten that canvas to its solid RGB base.
+
 ## Layout metrics (at 1440×900)
 
 - Sidebar 255px, resizable; 1px right border; collapses to a 48px icon strip.

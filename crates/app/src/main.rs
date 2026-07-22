@@ -23,15 +23,29 @@ use gpui_component::{
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
-/// On platforms with an opaque window the translucent canvas colors would
-/// composite against black; flatten them to their solid RGB. Keep the literals
-/// in sync with themes/tcode.json (checked by `smoke` builds via debug_assert).
-/// Vibrancy is macOS-only and can be disabled with `TCODE_NO_VIBRANCY=1`
-/// (diagnostic escape hatch: opaque window + flattened palette).
+/// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
+/// escape hatch (opaque window + flattened palette).
 fn vibrancy_enabled() -> bool {
     cfg!(target_os = "macos") && !std::env::var("TCODE_NO_VIBRANCY").is_ok_and(|v| v == "1")
 }
 
+fn translucent_canvas_enabled() -> bool {
+    cfg!(target_os = "windows") || vibrancy_enabled()
+}
+
+fn main_window_background() -> WindowBackgroundAppearance {
+    if cfg!(target_os = "windows") {
+        WindowBackgroundAppearance::MicaBackdrop
+    } else if vibrancy_enabled() {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        WindowBackgroundAppearance::Opaque
+    }
+}
+
+/// With an opaque window the translucent canvas colors would composite against
+/// black; flatten them to their solid RGB. Keep the literals in sync with
+/// themes/tcode.json (checked by `smoke` builds via debug_assert).
 fn flatten_canvas_for_opaque_window(theme_json: &str) -> String {
     let flattened = theme_json
         .replace("#F2F4F7C7", "#F2F4F7")
@@ -298,12 +312,11 @@ fn main() {
             cx.text_system()
                 .add_fonts(application_fonts)
                 .expect("failed to register bundled application fonts");
-            // The theme's canvas color is translucent so the macOS vibrancy
-            // material shows through (docs/visual-redesign.md). Elsewhere the
-            // window is opaque and that alpha would composite against black,
-            // so flatten the canvas onto each mode's solid base first. (macOS
-            // fullscreen flattens at paint time instead: material::opaque_canvas.)
-            let theme_json: Cow<'_, str> = if vibrancy_enabled() {
+            // The theme's canvas color stays translucent over macOS vibrancy
+            // and Windows Mica (docs/visual-redesign.md). Opaque windows flatten
+            // it onto each mode's solid base first. (macOS fullscreen flattens
+            // at paint time instead: material::opaque_canvas.)
+            let theme_json: Cow<'_, str> = if translucent_canvas_enabled() {
                 Cow::Borrowed(TCODE_THEME)
             } else {
                 Cow::Owned(flatten_canvas_for_opaque_window(TCODE_THEME))
@@ -446,13 +459,9 @@ fn main() {
                 // on whatever its compositor/backend already chose.)
                 window_decorations: cfg!(target_os = "windows")
                     .then_some(WindowDecorations::Client),
-                // macOS vibrancy: blur whatever is behind the window; theme
-                // background colors carry alpha so the material shows through.
-                window_background: if vibrancy_enabled() {
-                    WindowBackgroundAppearance::Blurred
-                } else {
-                    WindowBackgroundAppearance::Opaque
-                },
+                // Persistent windows use the platform's system material:
+                // macOS blur, Windows 11 base Mica, or an opaque fallback.
+                window_background: main_window_background(),
                 ..Default::default()
             };
 

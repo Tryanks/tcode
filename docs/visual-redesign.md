@@ -7,7 +7,8 @@
 ## 核心理念
 
 玻璃机壳 + 纸面阅读区 + 一条蓝色墨线贯穿。
-侧栏与窗口边缘是毛玻璃"机壳"（macOS vibrancy），正文坐在一块近实的"纸面"上；
+侧栏与窗口边缘是系统材质"机壳"（macOS vibrancy / Windows 11 Mica），
+正文坐在一块近实的"纸面"上；
 蓝色从单一按钮色升级为贯穿选中、聚焦、强调的墨线体系。
 观感目标：一台精密仪器，而不是一个网页。用户气泡保持中性灰（用户已拍板）。
 
@@ -15,14 +16,19 @@
 
 - gpui `WindowBackgroundAppearance::Blurred`（仅 macOS）在 Metal 层下垫
   `NSVisualEffectView`；合成后 alpha < 1 的区域透出桌面毛玻璃。
+- Windows 11 的持久主窗口使用 base Mica
+  （`WindowBackgroundAppearance::MicaBackdrop` / `DWMSBT_MAINWINDOW`）；Acrylic
+  仅用于菜单、弹层等瞬态表面，不用于长驻主窗口。
 - 全窗口仅一层 blur；悬浮层半透明与其下窗口内容做普通 alpha 合成。
 - gpui-component `Root` 用 `colors.background` 涂画布，支持 8 位 hex alpha。
   **AppShell 不得重复涂 `background`**（已移除）——全屏例外：全屏 Space 的
   vibrancy 背景是纯黑，AppShell 根节点仅在全屏时垫一层不透明基色
   （`material::opaque_canvas`，把画布 alpha 提到 1），窗口模式仍由 Root 独自涂玻璃。
-  与 Windows Acrylic `FallbackColor`、macOS「降低透明度」同一降级策略。
-- 非 macOS：窗口 Opaque；main.rs 的 `flatten_canvas_for_opaque_window`
-  把画布色压平为实色（与 JSON 字面量保持同步）。
+  与 Windows 材质不可用时的回退、macOS「降低透明度」同一降级策略。
+- macOS vibrancy 与 Windows Mica 保留画布 alpha，使系统材质可见；Linux
+  及其他平台使用 Opaque，main.rs 的 `flatten_canvas_for_opaque_window`
+  把画布色压平为实色（与 JSON 字面量保持同步）。`TCODE_NO_VIBRANCY=1`
+  仍只在 macOS 上切换为 Opaque 并压平画布。
 
 ## 1. 材质分层
 
