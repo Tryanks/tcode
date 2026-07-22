@@ -317,3 +317,69 @@ jobs:
           RELEASE_TAG: ${{ needs.setup.outputs.tag }}
           REPOSITORY: ${{ github.repository }}
         run: gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name'
+
+  publish-aur:
+    name: Publish to AUR
+    needs: [setup, finalize]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.setup.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    env:
+      GIT_SSH_COMMAND: ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new
+    steps:
+      - name: Initialize pacman and install dependencies
+        run: |
+          pacman-key --init && pacman-key --populate
+          pacman -Syu --noconfirm --needed git openssh
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: package-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Calculate SHA256 checksums
+        id: checksums
+        working-directory: dist
+        run: |
+          sha256_x64=$(sha256sum "tcode-${{ needs.setup.outputs.version }}-linux-x64.tar.gz" | cut -d' ' -f1)
+          sha256_arm64=$(sha256sum "tcode-${{ needs.setup.outputs.version }}-linux-arm64.tar.gz" | cut -d' ' -f1)
+          echo "x64=$sha256_x64" >> "$GITHUB_OUTPUT"
+          echo "arm64=$sha256_arm64" >> "$GITHUB_OUTPUT"
+
+      - name: Install SSH key for AUR
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+
+      - name: Clone AUR repository
+        run: git clone aur@aur.archlinux.org:tcode-bin.git aur-repo
+
+      - name: Update pkgver and checksums
+        working-directory: aur-repo
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ needs.setup.outputs.version }}/" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${{ steps.checksums.outputs.x64 }}')/" PKGBUILD
+          sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${{ steps.checksums.outputs.arm64 }}')/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+
+      - name: Generate .SRCINFO
+        working-directory: aur-repo
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+          runuser -u builder -- makepkg --printsrcinfo > .SRCINFO
+
+      - name: Commit and push to AUR
+        working-directory: aur-repo
+        run: |
+          if git diff --quiet; then
+            echo "No changes. AUR package is already up to date."
+            exit 0
+          fi
+          git add PKGBUILD .SRCINFO
+          git commit -m "upstream v${{ needs.setup.outputs.version }}"
+          git push origin master
+          echo "::notice::Published tcode-bin v${{ needs.setup.outputs.version }} to AUR"
