@@ -2389,15 +2389,11 @@ impl ChatView {
         timing: Option<TurnTiming>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        h_flex()
-            .w_full()
-            .gap_1p5()
-            .items_center()
-            .text_size(px(13.))
-            .text_color(cx.theme().muted_foreground)
-            .child(Icon::new(IconName::Info).xsmall())
-            .child(turn_time_row(format_local_time(ts), timing))
-            .into_any_element()
+        turn_time_footer(
+            turn_time_parts(format_local_time(ts), timing),
+            cx.theme().muted_foreground,
+        )
+        .into_any_element()
     }
 
     // -- top-level surfaces -------------------------------------------------
@@ -3262,21 +3258,81 @@ fn format_span(secs: u64) -> String {
     }
 }
 
-/// The text of a finished turn's bottom row: the completion clock, plus the
-/// turn's wall-clock breakdown when one was derivable. Legacy sessions without
-/// timestamps keep exactly the clock they showed before.
-fn turn_time_row(clock: String, timing: Option<TurnTiming>) -> String {
+/// A finished turn's bottom row, one clause per renderable unit: the completion
+/// clock, plus the turn's wall-clock breakdown when one was derivable. Legacy
+/// sessions without timestamps keep exactly the clock they showed before.
+///
+/// The row reads as the same middle-dot sentence it always did — the split only
+/// tells the layout where it may break the line.
+fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
     let Some(timing) = timing else {
-        return clock;
+        return vec![clock];
     };
     let parts = timing.secs();
-    [
+    vec![
         clock,
         tcode_i18n::tr!("chat.turn_total", duration = format_span(parts.total)).into_owned(),
         tcode_i18n::tr!("chat.turn_ai", duration = format_span(parts.ai)).into_owned(),
         tcode_i18n::tr!("chat.turn_tools", duration = format_span(parts.tools)).into_owned(),
     ]
-    .join(" · ")
+}
+
+/// The finished turn's bottom row, laid out from [`turn_time_parts`]. Each
+/// clause is its own item in a wrapping flow rather than one long string, so a
+/// narrow chat column (a diff panel is open, say) reflows the row at the middle
+/// dots instead of clipping the last clause at the divider. On a comfortable
+/// width the items pack onto one line and the row reads exactly as before.
+fn turn_time_footer(clauses: Vec<String>, muted: Hsla) -> Div {
+    /// Layout handles for the clauses, in render order (the last three only
+    /// exist when the turn had a derivable breakdown).
+    const SELECTORS: [&str; 4] = [
+        "turn-time-clock",
+        "turn-time-total",
+        "turn-time-ai",
+        "turn-time-tools",
+    ];
+
+    let last = clauses.len().saturating_sub(1);
+    h_flex()
+        .w_full()
+        .gap_1p5()
+        .items_start()
+        .text_size(px(13.))
+        .text_color(muted)
+        .debug_selector(|| "turn-time-row".into())
+        // The icon sits outside the wrapping flow, nudged onto the first line's
+        // optical center: wrapped clauses then hang under the clock rather than
+        // sliding under the icon.
+        .child(
+            div()
+                .flex_none()
+                .mt(px(3.))
+                .debug_selector(|| "turn-time-icon".into())
+                .child(Icon::new(IconName::Info).xsmall()),
+        )
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .flex_wrap()
+                .gap_x(px(4.))
+                .gap_y(px(2.))
+                .children(clauses.into_iter().enumerate().map(|(ix, clause)| {
+                    // Each clause carries the dot that follows it, so a line
+                    // break never strands a separator at the start of the next
+                    // line. `min_w_0` lets a clause too wide for a line of its
+                    // own wrap inside itself instead of spilling out of the row.
+                    let selector = SELECTORS.get(ix).copied().unwrap_or("turn-time-clause");
+                    div()
+                        .min_w_0()
+                        .debug_selector(move || selector.into())
+                        .child(if ix == last {
+                            clause
+                        } else {
+                            format!("{clause} ·")
+                        })
+                })),
+        )
 }
 
 /// Count added / removed lines in a unified diff (ignoring the `+++`/`---`
@@ -3514,8 +3570,8 @@ mod tests {
         copy_payload, diff_stats, displayed_error_text, file_edit_row, finished_work_log_label,
         format_duration, format_span, index_turns, list_sync, live_edit_counts, live_edit_rows,
         md_sync, plain_text_as_markdown, previous_logs_toggle_label, segment_entries,
-        timeline_overdraw, turn_time_row, turn_work_log_summary, work_log_auto_expands,
-        work_log_counts, work_log_row_entries, work_log_summary,
+        timeline_overdraw, turn_time_footer, turn_time_parts, turn_work_log_summary,
+        work_log_auto_expands, work_log_counts, work_log_row_entries, work_log_summary,
     };
     use crate::markdown::MarkdownState;
     use agent::{FileChange, FileChangeKind, ItemStatus};
@@ -4883,6 +4939,145 @@ This begins after the hard break."#;
     }
 
     // -- finished turn time row --------------------------------------------
+
+    /// The row as the reader sees it on one line: the clauses joined by the
+    /// middle dot the layout also draws between them.
+    fn turn_time_row(clock: String, timing: Option<TurnTiming>) -> String {
+        turn_time_parts(clock, timing).join(" · ")
+    }
+
+    /// Renders the production footer builder itself, so this layout test cannot
+    /// drift from what a finished turn actually paints.
+    struct TurnTimeFooterProbe {
+        clauses: Vec<String>,
+    }
+
+    impl gpui::Render for TurnTimeFooterProbe {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            // The turn column stacks the footer under the answer, so the row is
+            // content-height there; reproduce that rather than letting the window
+            // stretch it and mask a wrap.
+            use gpui::{ParentElement as _, Styled as _};
+            use gpui_component::ActiveTheme as _;
+            gpui_component::v_flex().size_full().child(turn_time_footer(
+                self.clauses.clone(),
+                cx.theme().muted_foreground,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn the_time_row_wraps_its_clauses_instead_of_clipping_at_narrow_widths(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{VisualTestContext, px, size};
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        let clauses = turn_time_parts("10:18 AM".into(), Some(TurnTiming::new(99_000, 0)));
+        // The footer's clauses, in render order (mirrors `turn_time_footer`).
+        let selectors = [
+            "turn-time-clock",
+            "turn-time-total",
+            "turn-time-ai",
+            "turn-time-tools",
+        ];
+        assert_eq!(clauses.len(), selectors.len());
+
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| TurnTimeFooterProbe { clauses });
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+        };
+
+        // A comfortable chat width: the restrained single-line baseline.
+        cx.simulate_resize(size(px(900.), px(120.)));
+        draw(cx);
+        let baseline = cx.debug_bounds("turn-time-row").expect("row bounds");
+        let first = cx.debug_bounds(selectors[0]).expect("clock bounds");
+        let icon = cx.debug_bounds("turn-time-icon").expect("icon bounds");
+        assert!(
+            (icon.center().y - first.center().y).abs() <= px(1.5),
+            "the icon is not anchored to the first line: icon={icon:?}, clock={first:?}"
+        );
+        for selector in &selectors[1..] {
+            let clause = cx.debug_bounds(selector).expect("clause bounds");
+            assert_eq!(
+                clause.top(),
+                first.top(),
+                "{selector} left the single line at 900px: {clause:?}"
+            );
+        }
+
+        // Opening the diff panel squeezes the chat column; sweep well below any
+        // practical width. Every clause must stay inside the row and hang under
+        // the clock instead of spilling past the divider.
+        let mut wrapped = false;
+        for width in 260..=900 {
+            cx.simulate_resize(size(px(width as f32), px(120.)));
+            draw(cx);
+
+            let row = cx.debug_bounds("turn-time-row").expect("row bounds");
+            for selector in &selectors {
+                let clause = cx.debug_bounds(selector).expect("clause bounds");
+                assert!(
+                    clause.left() >= row.left() && clause.right() <= row.right(),
+                    "{selector} escaped the row at {width}px: row={row:?}, clause={clause:?}"
+                );
+                assert!(
+                    clause.left() >= first.left(),
+                    "{selector} broke the hanging indent at {width}px: {clause:?}"
+                );
+                assert!(
+                    clause.size.width > px(0.) && clause.size.height > px(0.),
+                    "{selector} was squeezed away at {width}px: {clause:?}"
+                );
+            }
+            wrapped |= row.size.height > baseline.size.height;
+        }
+        assert!(
+            wrapped,
+            "the row never reflowed onto a second line, so a narrow column must be clipping it"
+        );
+    }
+
+    #[test]
+    fn the_time_row_breaks_into_one_wrappable_unit_per_clause() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        // The footer wraps at clause boundaries, so each clause has to be its
+        // own unit — never one string the narrow column would have to clip.
+        assert_eq!(
+            turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(80_000, 35_000))),
+            vec![
+                "3:04 PM",
+                "Total 1m 20s",
+                "AI thinking & response 45s",
+                "Tool calls 35s",
+            ]
+        );
+        // No clause carries a separator of its own: the row's dots belong to the
+        // layout, so a wrapped line can never open with an orphaned one.
+        for clause in turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(80_000, 35_000))) {
+            assert!(
+                !clause.contains('·'),
+                "clause {clause:?} embeds a separator"
+            );
+        }
+        // The legacy fallback stays a single unit, so it renders dot-free.
+        assert_eq!(
+            turn_time_parts("9:00 AM".into(), None),
+            vec!["9:00 AM".to_string()]
+        );
+    }
 
     #[test]
     fn finished_time_row_spells_out_the_turn_breakdown_in_both_locales() {
