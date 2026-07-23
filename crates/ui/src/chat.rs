@@ -27,7 +27,7 @@ use gpui_component::{
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{
-    EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta,
+    EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming,
     parse_orchestrate_callback,
 };
 use tcode_runtime::app::{AppState, RightTab};
@@ -471,6 +471,8 @@ fn index_turns(
                 turn.start_ts.hash(&mut content);
                 turn.end_ts.hash(&mut content);
                 turn.running.hash(&mut content);
+                // The finished bottom row renders the turn's breakdown.
+                turn.timing.hash(&mut content);
                 turn.status
                     .as_ref()
                     .map(std::mem::discriminant)
@@ -986,7 +988,7 @@ impl ChatView {
         if !turn.running
             && let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts))
         {
-            column = column.child(self.render_timestamp(ts, cx));
+            column = column.child(self.render_timestamp(ts, turn.timing, cx));
         }
 
         // Pending steers float below every live transcript/work-log element.
@@ -2379,7 +2381,14 @@ impl ChatView {
         cx.notify();
     }
 
-    fn render_timestamp(&self, ts: u64, cx: &mut Context<Self>) -> AnyElement {
+    /// The finished turn's bottom row: the local completion clock, followed by
+    /// the wall-clock breakdown when the turn's events supported deriving one.
+    fn render_timestamp(
+        &self,
+        ts: u64,
+        timing: Option<TurnTiming>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         h_flex()
             .w_full()
             .gap_1p5()
@@ -2387,7 +2396,7 @@ impl ChatView {
             .text_size(px(13.))
             .text_color(cx.theme().muted_foreground)
             .child(Icon::new(IconName::Info).xsmall())
-            .child(format_local_time(ts))
+            .child(turn_time_row(format_local_time(ts), timing))
             .into_any_element()
     }
 
@@ -3235,6 +3244,41 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
+/// A finished turn's duration. Long turns roll up into hours rather than
+/// growing an unreadable minute count (a full day reads `24h 00m 59s`, not
+/// `1440m 59s`), keeping the seconds because this row reports actual elapsed
+/// time. The live "Working for" indicator keeps [`format_duration`].
+fn format_span(secs: u64) -> String {
+    if secs >= 3600 {
+        tcode_i18n::tr!(
+            "time.duration_hours",
+            hours = secs / 3600,
+            minutes = format!("{:02}", (secs % 3600) / 60),
+            seconds = format!("{:02}", secs % 60)
+        )
+        .into_owned()
+    } else {
+        format_duration(secs)
+    }
+}
+
+/// The text of a finished turn's bottom row: the completion clock, plus the
+/// turn's wall-clock breakdown when one was derivable. Legacy sessions without
+/// timestamps keep exactly the clock they showed before.
+fn turn_time_row(clock: String, timing: Option<TurnTiming>) -> String {
+    let Some(timing) = timing else {
+        return clock;
+    };
+    let parts = timing.secs();
+    [
+        clock,
+        tcode_i18n::tr!("chat.turn_total", duration = format_span(parts.total)).into_owned(),
+        tcode_i18n::tr!("chat.turn_ai", duration = format_span(parts.ai)).into_owned(),
+        tcode_i18n::tr!("chat.turn_tools", duration = format_span(parts.tools)).into_owned(),
+    ]
+    .join(" · ")
+}
+
 /// Count added / removed lines in a unified diff (ignoring the `+++`/`---`
 /// file headers).
 fn diff_stats(diff: Option<&str>) -> (u32, u32) {
@@ -3468,9 +3512,10 @@ mod tests {
     use super::{
         ChatView, FileEditRowStyle, ListSync, LiveEditRow, MdState, MdSync, Segment, WorkLogCounts,
         copy_payload, diff_stats, displayed_error_text, file_edit_row, finished_work_log_label,
-        index_turns, list_sync, live_edit_counts, live_edit_rows, md_sync, plain_text_as_markdown,
-        previous_logs_toggle_label, segment_entries, timeline_overdraw, turn_work_log_summary,
-        work_log_auto_expands, work_log_counts, work_log_row_entries, work_log_summary,
+        format_duration, format_span, index_turns, list_sync, live_edit_counts, live_edit_rows,
+        md_sync, plain_text_as_markdown, previous_logs_toggle_label, segment_entries,
+        timeline_overdraw, turn_time_row, turn_work_log_summary, work_log_auto_expands,
+        work_log_counts, work_log_row_entries, work_log_summary,
     };
     use crate::markdown::MarkdownState;
     use agent::{FileChange, FileChangeKind, ItemStatus};
@@ -3478,7 +3523,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     use std::sync::Arc;
-    use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
+    use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
 
     #[gpui::test]
     fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
@@ -4835,5 +4880,79 @@ This begins after the hard break."#;
             (0, px(0.)),
             "the timeline list must not co-scroll under the card"
         );
+    }
+
+    // -- finished turn time row --------------------------------------------
+
+    #[test]
+    fn finished_time_row_spells_out_the_turn_breakdown_in_both_locales() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // 1m 20s total, 35s of it inside tool calls.
+        let timing = TurnTiming::new(80_000, 35_000);
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(
+            turn_time_row("3:04 PM".into(), Some(timing)),
+            "3:04 PM · Total 1m 20s · AI thinking & response 45s · Tool calls 35s"
+        );
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(
+            turn_time_row("3:04 PM".into(), Some(timing)),
+            "3:04 PM · 总计 1 分 20 秒 · AI 思考与回答 45 秒 · 工具调用 35 秒"
+        );
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+    }
+
+    #[test]
+    fn an_ai_only_turn_still_shows_all_three_durations() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(
+            turn_time_row("9:00 AM".into(), Some(TurnTiming::new(8_000, 0))),
+            "9:00 AM · Total 8s · AI thinking & response 8s · Tool calls 0s"
+        );
+    }
+
+    #[test]
+    fn a_turn_without_a_derivable_breakdown_keeps_the_bare_clock() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(turn_time_row("9:00 AM".into(), None), "9:00 AM");
+    }
+
+    #[test]
+    fn day_long_turns_read_in_hours_in_both_locales() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // 24h 00m 59s total, 23h 30m 00s of it waiting on tools. The seconds
+        // survive the hour rollup — this row reports real elapsed time.
+        let timing = TurnTiming::new(86_459_000, 84_600_000);
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        assert_eq!(
+            turn_time_row("1:00 AM".into(), Some(timing)),
+            "1:00 AM · Total 24h 00m 59s · AI thinking & response 30m 59s · Tool calls 23h 30m 00s"
+        );
+
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(
+            turn_time_row("1:00 AM".into(), Some(timing)),
+            "1:00 AM · 总计 24 小时 00 分 59 秒 · AI 思考与回答 30 分 59 秒 · 工具调用 23 小时 30 分 00 秒"
+        );
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+    }
+
+    #[test]
+    fn the_live_working_indicator_keeps_its_own_format() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        // The running row is untouched by the breakdown's hour rollup.
+        assert_eq!(format_duration(3_600), "60m 00s");
+        assert_eq!(format_duration(90_061), "1501m 01s");
+        // The finished row rolls up, and keeps every second it claims.
+        assert_eq!(format_span(3_600), "1h 00m 00s");
+        assert_eq!(format_span(90_061), "25h 01m 01s");
+        assert_eq!(format_span(59), "59s");
+        assert_eq!(format_span(90), "1m 30s");
     }
 }
