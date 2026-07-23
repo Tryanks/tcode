@@ -217,7 +217,12 @@ platform pays that inset.
   (N) · +A -D" + "Collapse all" ghost + "View diff" bordered button; body =
   directory tree, file rows with right-aligned per-file +a/-d; paths relative to
   the session cwd.
-- Small muted local-time row after each finished turn.
+- Finished turn's bottom row keeps the muted local completion clock; when the
+  turn has a trustworthy timestamped breakdown, it appends "Total", "AI
+  thinking & response", and "Tool calls" durations via the row's existing
+  middle-dot grammar, rolling hour-scale spans up to `Hh MMm SSs` so they stay
+  readable. Turns with legacy or untrustworthy timestamps show just the bare
+  clock.
 - Floating "⌄ Scroll to end" pill when not at bottom.
 
 ### Composer
