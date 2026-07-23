@@ -12,6 +12,9 @@ chat:
   subagent_row: "%{agent}：%{description}"
   earlier_steps_truncated: "+更早的步骤已截断"
   working_for: "已工作 %{duration}"
+  turn_total: "总计 %{duration}"
+  turn_ai: "AI 思考与回答 %{duration}"
+  turn_tools: "工具调用 %{duration}"
   summary_command_one: "已执行 1 条命令"
   summary_commands: "已执行 %{count} 条命令"
   summary_file_one: "编辑 1 个文件"
@@ -619,6 +622,7 @@ time:
   days_ago: "%{count} 天前"
   duration_minutes: "%{minutes} 分 %{seconds} 秒"
   duration_seconds: "%{seconds} 秒"
+  duration_hours: "%{hours} 小时 %{minutes} 分 %{seconds} 秒"
 errors:
   terminal_start: "启动终端失败：%{error}"
   terminal_restart: "重新启动终端失败：%{error}"

@@ -12,6 +12,9 @@ chat:
   subagent_row: "%{agent}: %{description}"
   earlier_steps_truncated: "+earlier steps truncated"
   working_for: "Working for %{duration}"
+  turn_total: "Total %{duration}"
+  turn_ai: "AI thinking & response %{duration}"
+  turn_tools: "Tool calls %{duration}"
   summary_command_one: "Ran 1 command"
   summary_commands: "Ran %{count} commands"
   summary_file_one: "Edited 1 file"
@@ -625,6 +628,7 @@ time:
   days_ago: "%{count}d ago"
   duration_minutes: "%{minutes}m %{seconds}s"
   duration_seconds: "%{seconds}s"
+  duration_hours: "%{hours}h %{minutes}m %{seconds}s"
 errors:
   terminal_start: "Failed to start terminal: %{error}"
   terminal_restart: "Failed to restart terminal: %{error}"

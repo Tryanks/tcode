@@ -177,6 +177,12 @@ pub struct TurnMeta {
     /// snapshots replace this wholesale; structured file-operation items form
     /// a partial fallback without consulting the ambient Git working tree.
     pub changes: Option<TurnChangeSet>,
+    /// Wall-clock breakdown of the finished turn. `None` while the turn runs,
+    /// whenever the turn lacks a timestamped `TurnStarted`/`TurnCompleted` pair
+    /// to measure against, and whenever the recorded clock regressed across the
+    /// turn's end — a missing or untrustworthy timestamp yields no breakdown
+    /// rather than an invented one.
+    pub timing: Option<TurnTiming>,
 }
 
 impl TurnMeta {
@@ -186,6 +192,223 @@ impl TurnMeta {
             (Some(start), Some(end)) if end >= start => Some((end - start) / 1000),
             _ => None,
         }
+    }
+}
+
+/// How a finished turn's wall clock divided between waiting on tools and
+/// everything else (the model thinking and answering). Millisecond based, and
+/// derived purely from the timestamps already recorded on the event stream, so
+/// a live session and a replay of its log agree exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TurnTiming {
+    /// The observed `TurnStarted`..`TurnCompleted` span.
+    pub total_ms: u64,
+    /// The union of the intervals in which at least one tool-like item was in
+    /// progress. Tools running in parallel are counted once, never summed.
+    pub tool_ms: u64,
+}
+
+impl TurnTiming {
+    /// Build a breakdown. Tool time is already intersected with the turn's
+    /// bounds by [`ToolClock`]; the clamp here is only a last-resort guard that
+    /// keeps `ai_ms() + tool_ms == total_ms` true for hand-built values.
+    pub fn new(total_ms: u64, tool_ms: u64) -> Self {
+        Self {
+            total_ms,
+            tool_ms: tool_ms.min(total_ms),
+        }
+    }
+
+    /// The complement of the tool time inside the turn: the model thinking and
+    /// responding, plus any provider overhead between tool calls.
+    pub fn ai_ms(&self) -> u64 {
+        self.total_ms - self.tool_ms
+    }
+
+    /// The three durations in whole seconds. Truncation is absorbed by the AI
+    /// part so the rendered parts still sum to the rendered total.
+    pub fn secs(&self) -> TurnTimingSecs {
+        let total = self.total_ms / 1000;
+        let tools = (self.tool_ms / 1000).min(total);
+        TurnTimingSecs {
+            total,
+            ai: total - tools,
+            tools,
+        }
+    }
+}
+
+/// A [`TurnTiming`] rounded down to whole seconds for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnTimingSecs {
+    pub total: u64,
+    pub ai: u64,
+    pub tools: u64,
+}
+
+/// Running union-of-intervals accounting for the tool-like items of the open
+/// turn, intersected with the turn's own `TurnStarted`..`TurnCompleted` bounds.
+/// Only the current turn can have items in flight, so one accumulator is
+/// enough; it resets whenever a turn opens.
+#[derive(Debug, Clone, Default)]
+struct ToolClock {
+    /// Item ids currently known to be in progress.
+    open: HashSet<String>,
+    /// Start of the interval that opened when `open` became non-empty.
+    union_start: Option<u64>,
+    /// Union of the closed tool-active intervals so far, in ms.
+    tool_ms: u64,
+    /// Latest timestamp observed anywhere inside the turn — tool lifecycle
+    /// events, ordinary items, and deltas alike. It clamps a clock that steps
+    /// backwards, and it is the watermark a completion must not precede.
+    clock: Option<u64>,
+    /// The authoritative turn start: the timestamp of the observed
+    /// `TurnStarted`. Tool time is measured from here, never earlier, and its
+    /// absence means the turn gets no breakdown at all.
+    turn_start: Option<u64>,
+    /// A tool-like item was observed without a timestamp, so this turn cannot
+    /// produce a trustworthy breakdown.
+    untimed: bool,
+}
+
+impl ToolClock {
+    /// Anchor the clock to the authoritative `TurnStarted` time. Anything
+    /// accumulated before it belonged to earlier work and is discarded; a tool
+    /// still open across the boundary is rebased to begin exactly at the turn
+    /// start, so only the in-bounds part of its interval counts.
+    fn begin_turn(&mut self, ts: u64) {
+        self.advance(ts);
+        self.turn_start = Some(ts);
+        self.tool_ms = 0;
+        if let Some(start) = self.union_start {
+            self.union_start = Some(start.max(ts));
+        }
+    }
+
+    /// Note a timestamp seen inside the turn, whatever event carried it. The
+    /// turn's own completion is the one event excluded: it is measured
+    /// *against* this watermark rather than folded into it.
+    fn observe(&mut self, ts: Option<u64>) {
+        if let Some(ts) = ts {
+            self.advance(ts);
+        }
+    }
+
+    /// Record a tool-like lifecycle transition. `active` marks the item as in
+    /// progress; otherwise it is finished.
+    fn mark(&mut self, ts: Option<u64>, item_id: &str, active: bool) {
+        let Some(ts) = ts else {
+            self.untimed = true;
+            return;
+        };
+        let ts = self.advance(ts);
+        if active {
+            // Repeated updates for an already-open item change nothing; the
+            // first sighting opens it.
+            if self.open.insert(item_id.to_owned()) && self.open.len() == 1 {
+                self.union_start = Some(ts);
+            }
+        } else if self.open.remove(item_id) && self.open.is_empty() {
+            self.close(ts);
+        }
+    }
+
+    /// Accept a timestamp, never letting it move the clock backwards: a
+    /// backward stamp contributes a zero-length step instead of underflowing.
+    fn advance(&mut self, ts: u64) -> u64 {
+        let clamped = self.clock.map_or(ts, |clock| ts.max(clock));
+        self.clock = Some(clamped);
+        clamped
+    }
+
+    /// Charge the open interval up to `ts`, intersected with the turn start.
+    fn close(&mut self, ts: u64) {
+        if let Some(start) = self.union_start.take() {
+            let start = self.turn_start.map_or(start, |bound| start.max(bound));
+            self.tool_ms = self.tool_ms.saturating_add(ts.saturating_sub(start));
+        }
+    }
+
+    /// Close the turn at `end`, charging any still-open tools up to it. `end`
+    /// is the turn's own upper bound, so the interval never extends past it.
+    fn finish(mut self, end: u64) -> u64 {
+        self.close(end);
+        self.tool_ms
+    }
+}
+
+/// Derive the finished turn's breakdown, or `None` when the events cannot
+/// support one: no timestamped `TurnStarted`/`TurnCompleted` pair (legacy logs,
+/// or a turn opened only by a user message), a tool-like item seen without a
+/// timestamp, or a completion that precedes work already recorded inside the
+/// turn.
+///
+/// That last case is a wall clock that regressed across the turn boundary: some
+/// event inside the turn is stamped later than the turn's own end, so the true
+/// bounds are unknowable. Clamping the aggregate would keep the total honest
+/// while silently misattributing the split between the buckets — a tool that
+/// "ran" past the end would eat AI time that may never have been tool time at
+/// all. There is no defensible attribution to guess at, so the breakdown is
+/// withheld and the UI falls back to the bare completion clock.
+fn finish_timing(clock: ToolClock, end: Option<u64>) -> Option<TurnTiming> {
+    let (start, end) = (clock.turn_start?, end?);
+    if clock.untimed || end < start || clock.clock.is_some_and(|latest| end < latest) {
+        return None;
+    }
+    Some(TurnTiming::new(end - start, clock.finish(end)))
+}
+
+/// Which lifecycle event carried a tool-like item. The variant is authoritative
+/// over the item's own `status` field, which several providers drop entirely
+/// (Codex maps `webSearch` and unmodeled items to statusless content).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolLifecycle {
+    Started,
+    Updated,
+    Completed,
+}
+
+/// A tool-like item's own view of its state. `Unknown` is a tool-like item that
+/// reports no status of its own (`WebSearch`, `Other`); `None` from
+/// [`tool_item_state`] means the item is model output and is never timed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolState {
+    Active,
+    Finished,
+    Unknown,
+}
+
+/// Classify an item as tool-like — a command, file edit, tool call, subagent,
+/// web search, or an unmodeled provider item — and read the status it carries.
+fn tool_item_state(content: &ItemContent) -> Option<ToolState> {
+    let status = match content {
+        ItemContent::CommandExecution { status, .. }
+        | ItemContent::FileChange { status, .. }
+        | ItemContent::ToolCall { status, .. }
+        | ItemContent::Subagent { status, .. } => *status,
+        ItemContent::WebSearch { .. } | ItemContent::Other { .. } => {
+            return Some(ToolState::Unknown);
+        }
+        ItemContent::UserMessage { .. }
+        | ItemContent::AssistantMessage { .. }
+        | ItemContent::Reasoning { .. } => return None,
+    };
+    Some(match status {
+        ItemStatus::InProgress => ToolState::Active,
+        ItemStatus::Completed | ItemStatus::Failed | ItemStatus::Declined => ToolState::Finished,
+    })
+}
+
+/// Whether a tool-like item is in progress after this transition. The lifecycle
+/// variant wins: a start always opens the interval and a completion always
+/// closes it, whatever status the snapshot carries (or fails to carry). Only an
+/// update defers to an explicit status, and a statusless update keeps the item
+/// active.
+fn tool_is_active(lifecycle: ToolLifecycle, state: ToolState) -> bool {
+    match lifecycle {
+        ToolLifecycle::Started => true,
+        ToolLifecycle::Completed => false,
+        ToolLifecycle::Updated => state != ToolState::Finished,
     }
 }
 
@@ -311,6 +534,8 @@ pub struct Timeline {
     /// FileChange items known to have completed successfully. The ids rebuild
     /// deterministically from persisted ItemCompleted events during replay.
     committed_file_change_items: HashSet<String>,
+    /// Tool-time accounting for the open turn (see [`TurnMeta::timing`]).
+    tool_clock: ToolClock,
 }
 
 impl Timeline {
@@ -355,6 +580,14 @@ impl Timeline {
 
     /// Apply one event recorded at `ts` (unix ms). Mutates in place.
     pub fn apply_at(&mut self, ts: Option<u64>, event: &AgentEvent) {
+        // Every timestamped event inside the open turn raises the turn's
+        // watermark, not just tool lifecycle ones: a completion stamped before
+        // any of them means the wall clock regressed, and the breakdown is
+        // withheld rather than guessed at. The completion itself is excluded —
+        // it is what gets compared against the watermark.
+        if self.turn_is_open() && !matches!(event, AgentEvent::TurnCompleted { .. }) {
+            self.tool_clock.observe(ts);
+        }
         match event {
             AgentEvent::ProviderRelay {
                 from_provider,
@@ -395,9 +628,11 @@ impl Timeline {
                     _ => self.push_turn(ts),
                 };
                 // TurnStarted is the authoritative turn start; prefer it over
-                // the opening user message's time when known.
-                if ts.is_some() {
-                    self.turns[turn].start_ts = ts;
+                // the opening user message's time when known. It is also the
+                // only start the timing breakdown will measure from.
+                if let Some(ts) = ts {
+                    self.turns[turn].start_ts = Some(ts);
+                    self.tool_clock.begin_turn(ts);
                 }
                 self.turns[turn].provider_turn_id = Some(turn_id.clone());
                 self.turns[turn].running = true;
@@ -456,6 +691,12 @@ impl Timeline {
                     }
                     self.turns[turn].status = Some(*status);
                     self.turns[turn].running = false;
+                    let clock = std::mem::take(&mut self.tool_clock);
+                    // A repeated completion finds an already-spent clock; it
+                    // must not erase the breakdown the first one derived.
+                    if let Some(timing) = finish_timing(clock, self.turns[turn].end_ts) {
+                        self.turns[turn].timing = Some(timing);
+                    }
                 }
                 if usage.is_some() {
                     self.usage = *usage;
@@ -464,11 +705,17 @@ impl Timeline {
                 self.pending_approvals.clear();
                 self.pending_user_input = None;
             }
-            AgentEvent::ItemStarted(item) | AgentEvent::ItemUpdated(item) => {
-                self.upsert_item(ts, item)
+            AgentEvent::ItemStarted(item) => {
+                self.upsert_item(ts, item);
+                self.track_tool_item(ts, item, ToolLifecycle::Started);
+            }
+            AgentEvent::ItemUpdated(item) => {
+                self.upsert_item(ts, item);
+                self.track_tool_item(ts, item, ToolLifecycle::Updated);
             }
             AgentEvent::ItemCompleted(item) => {
                 self.upsert_item(ts, item);
+                self.track_tool_item(ts, item, ToolLifecycle::Completed);
                 if matches!(
                     &item.content,
                     ItemContent::FileChange {
@@ -610,9 +857,36 @@ impl Timeline {
         }
     }
 
+    /// Whether the current turn is still accumulating. A turn is finished once
+    /// a `TurnCompleted` has been folded, which records a status even when the
+    /// event carried no timestamp to store as `end_ts`; both must be checked or
+    /// a stray later transition would leak into the next turn's accounting
+    /// (`TurnStarted` reuses a turn whose `end_ts` is unset).
+    fn turn_is_open(&self) -> bool {
+        self.current_turn.is_some_and(|turn| {
+            let turn = &self.turns[turn];
+            turn.end_ts.is_none() && turn.status.is_none()
+        })
+    }
+
+    /// Feed one item lifecycle transition to the open turn's clock, ignoring
+    /// items that are not tool-like. Transitions arriving after the turn has
+    /// already been finalized are ignored too, so a settled breakdown cannot be
+    /// reopened.
+    fn track_tool_item(&mut self, ts: Option<u64>, item: &ThreadItem, lifecycle: ToolLifecycle) {
+        let Some(state) = tool_item_state(&item.content) else {
+            return;
+        };
+        if self.turn_is_open() {
+            self.tool_clock
+                .mark(ts, &item.id, tool_is_active(lifecycle, state));
+        }
+    }
+
     /// Push a new (open) turn and make it current. `start_ts` seeds the turn's
     /// start time (refined later by a TurnStarted event if one arrives).
     fn push_turn(&mut self, start_ts: Option<u64>) -> usize {
+        self.tool_clock = ToolClock::default();
         self.turns.push(TurnMeta {
             provider_turn_id: None,
             provider_checkpoint_id: None,
@@ -621,6 +895,7 @@ impl Timeline {
             status: None,
             running: false,
             changes: None,
+            timing: None,
         });
         let idx = self.turns.len() - 1;
         self.current_turn = Some(idx);
@@ -649,6 +924,7 @@ impl Timeline {
             .retain(|parent_id| self.children.contains_key(parent_id));
         self.turns.truncate(target_turn);
         self.current_turn = self.turns.len().checked_sub(1);
+        self.tool_clock = ToolClock::default();
         self.turn_running = false;
         self.pending_approvals.clear();
         self.pending_user_input = None;
@@ -2276,5 +2552,522 @@ mod tests {
                 attachments: Vec::new(),
             },
         })
+    }
+
+    // -- turn timing --------------------------------------------------------
+
+    fn at(ts: u64, event: AgentEvent) -> StoredEvent {
+        StoredEvent {
+            ts: Some(ts),
+            event,
+        }
+    }
+
+    fn started(ts: u64, item: ThreadItem) -> StoredEvent {
+        at(ts, AgentEvent::ItemStarted(item))
+    }
+
+    fn updated(ts: u64, item: ThreadItem) -> StoredEvent {
+        at(ts, AgentEvent::ItemUpdated(item))
+    }
+
+    fn completed(ts: u64, item: ThreadItem) -> StoredEvent {
+        at(ts, AgentEvent::ItemCompleted(item))
+    }
+
+    fn command(id: &str, status: ItemStatus) -> ThreadItem {
+        ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::CommandExecution {
+                command: "ls".into(),
+                output: String::new(),
+                exit_code: None,
+                status,
+            },
+        }
+    }
+
+    /// A shell command that is still running.
+    fn running(id: &str) -> ThreadItem {
+        command(id, ItemStatus::InProgress)
+    }
+
+    /// The same command, finished.
+    fn ran(id: &str) -> ThreadItem {
+        command(id, ItemStatus::Completed)
+    }
+
+    fn subagent(id: &str, status: ItemStatus) -> ThreadItem {
+        ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "explore".into(),
+                description: "look around".into(),
+                status,
+                summary: None,
+            },
+        }
+    }
+
+    fn assistant(id: &str, text: &str) -> AgentEvent {
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage { text: text.into() },
+        })
+    }
+
+    /// A statusless tool-like item: its lifecycle is only knowable from the
+    /// event variant that carried it (Codex maps `webSearch` this way).
+    fn web_search(id: &str) -> ThreadItem {
+        ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::WebSearch {
+                query: "rust union of intervals".into(),
+            },
+        }
+    }
+
+    /// The other statusless shape: a provider item canonicalization does not
+    /// model yet.
+    fn other_item(id: &str) -> ThreadItem {
+        ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: ItemContent::Other {
+                provider_kind: "customTool".into(),
+                summary: "doing something".into(),
+            },
+        }
+    }
+
+    fn turn_started() -> AgentEvent {
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        }
+    }
+
+    fn turn_completed() -> AgentEvent {
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        }
+    }
+
+    /// Fold timestamped events and return the first turn's breakdown.
+    fn timing_of(events: Vec<StoredEvent>) -> Option<TurnTiming> {
+        Timeline::fold_events(events).turns[0].timing
+    }
+
+    #[test]
+    fn sequential_tools_leave_the_remaining_span_to_the_model() {
+        let timing = timing_of(vec![
+            at(1_000, turn_started()),
+            started(2_000, running("a")),
+            completed(3_000, ran("a")),
+            started(5_000, running("b")),
+            completed(6_000, ran("b")),
+            at(10_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.total_ms, 9_000);
+        assert_eq!(timing.tool_ms, 2_000);
+        assert_eq!(timing.ai_ms(), 7_000);
+        assert_eq!(timing.ai_ms() + timing.tool_ms, timing.total_ms);
+    }
+
+    #[test]
+    fn overlapping_tools_count_as_a_union_not_a_sum() {
+        let timing = timing_of(vec![
+            at(0, turn_started()),
+            started(1_000, running("a")),
+            // A second tool starts while the first still runs, and a third
+            // opens and closes wholly inside their overlap.
+            started(1_500, subagent("b", ItemStatus::InProgress)),
+            started(1_800, running("c")),
+            completed(2_000, ran("c")),
+            completed(2_500, ran("a")),
+            completed(3_000, subagent("b", ItemStatus::Completed)),
+            at(4_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        // Summing the three intervals would give 1500 + 1500 + 200 = 3200ms;
+        // the union [1000, 3000] is 2000ms.
+        assert_eq!(timing.tool_ms, 2_000);
+        assert_eq!(timing.total_ms, 4_000);
+        assert_eq!(timing.ai_ms(), 2_000);
+    }
+
+    #[test]
+    fn repeated_updates_do_not_restart_an_open_tool_interval() {
+        let timing = timing_of(vec![
+            at(0, turn_started()),
+            started(1_000, running("a")),
+            updated(1_400, running("a")),
+            updated(2_200, running("a")),
+            completed(3_000, ran("a")),
+            // Re-using the same id after completion opens a fresh interval.
+            started(4_000, running("a")),
+            completed(4_500, ran("a")),
+            at(6_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.tool_ms, 2_500);
+        assert_eq!(timing.total_ms, 6_000);
+    }
+
+    #[test]
+    fn a_tool_first_seen_as_an_in_progress_update_still_opens_its_interval() {
+        let timing = timing_of(vec![
+            at(0, turn_started()),
+            // No ItemStarted: some providers announce the item mid-flight.
+            updated(1_000, running("a")),
+            completed(2_500, ran("a")),
+            at(5_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.tool_ms, 1_500);
+        assert_eq!(timing.ai_ms(), 3_500);
+    }
+
+    #[test]
+    fn a_failed_tool_still_closes_its_interval() {
+        let timing = timing_of(vec![
+            at(0, turn_started()),
+            started(1_000, running("a")),
+            updated(2_000, command("a", ItemStatus::Failed)),
+            at(5_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.tool_ms, 1_000);
+    }
+
+    #[test]
+    fn an_ai_only_turn_reports_a_zero_tool_share() {
+        let timing = timing_of(vec![
+            at(1_000, turn_started()),
+            at(2_000, assistant("m1", "thinking out loud")),
+            at(9_000, turn_completed()),
+        ])
+        .expect("an AI-only turn still has a breakdown");
+
+        assert_eq!(timing.total_ms, 8_000);
+        assert_eq!(timing.tool_ms, 0);
+        assert_eq!(timing.ai_ms(), 8_000);
+    }
+
+    #[test]
+    fn a_tool_left_open_is_charged_up_to_the_turn_end() {
+        let timing = timing_of(vec![
+            at(1_000, turn_started()),
+            started(2_000, running("a")),
+            at(5_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.tool_ms, 3_000);
+        assert_eq!(timing.ai_ms(), 1_000);
+    }
+
+    #[test]
+    fn legacy_events_without_timestamps_invent_no_breakdown() {
+        let legacy = Timeline::fold_events([
+            user_msg("u1", "hi"),
+            turn_started(),
+            AgentEvent::ItemStarted(running("a")),
+            AgentEvent::ItemCompleted(ran("a")),
+            turn_completed(),
+        ]);
+        assert_eq!(legacy.turns[0].timing, None);
+
+        // A turn whose bounds are timestamped but whose tool activity is not
+        // cannot be trusted either.
+        let mixed = timing_of(vec![
+            at(1_000, turn_started()),
+            AgentEvent::ItemStarted(running("a")).into(),
+            AgentEvent::ItemCompleted(ran("a")).into(),
+            at(9_000, turn_completed()),
+        ]);
+        assert_eq!(mixed, None);
+    }
+
+    #[test]
+    fn a_running_turn_has_no_breakdown_yet() {
+        let live = Timeline::fold_events(vec![
+            at(1_000, turn_started()),
+            started(2_000, running("a")),
+        ]);
+        assert!(live.turns[0].running);
+        assert_eq!(live.turns[0].timing, None);
+    }
+
+    #[test]
+    fn a_backward_timestamp_neither_underflows_nor_inflates_a_bucket() {
+        let timing = timing_of(vec![
+            at(10_000, turn_started()),
+            started(12_000, running("a")),
+            // The clock steps backwards: the interval is clamped to zero rather
+            // than wrapping around or crediting negative time.
+            completed(11_000, ran("a")),
+            started(13_000, running("b")),
+            completed(15_000, ran("b")),
+            // The clock recovered, and the turn end is still at or past every
+            // timestamp seen inside the turn, so clamping the one backward step
+            // is enough — this turn keeps its breakdown.
+            at(20_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.total_ms, 10_000);
+        assert_eq!(timing.tool_ms, 2_000);
+        assert_eq!(timing.ai_ms(), 8_000);
+
+        // A turn that ends before it started yields no breakdown at all.
+        let inverted = timing_of(vec![at(9_000, turn_started()), at(1_000, turn_completed())]);
+        assert_eq!(inverted, None);
+    }
+
+    #[test]
+    fn a_tool_interval_wholly_before_the_turn_start_is_discarded() {
+        // Work from the previous exchange closes while this turn's user message
+        // is already open; only the in-bounds interval may be charged.
+        let timing = timing_of(vec![
+            at(1_000, user_msg("u1", "go")),
+            started(1_100, running("stale")),
+            completed(2_000, ran("stale")),
+            at(5_000, turn_started()),
+            started(6_000, running("a")),
+            completed(6_500, ran("a")),
+            at(9_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.total_ms, 4_000);
+        assert_eq!(timing.tool_ms, 500);
+        // The pre-start second is real AI/idle time and must survive.
+        assert_eq!(timing.ai_ms(), 3_500);
+    }
+
+    #[test]
+    fn a_tool_straddling_the_turn_start_counts_only_from_the_start() {
+        let timing = timing_of(vec![
+            at(1_000, user_msg("u1", "go")),
+            started(1_100, running("a")),
+            at(5_000, turn_started()),
+            completed(6_000, ran("a")),
+            at(9_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.total_ms, 4_000);
+        // [1_100, 6_000] intersected with [5_000, 9_000] is 1_000ms, not 4_900.
+        assert_eq!(timing.tool_ms, 1_000);
+        assert_eq!(timing.ai_ms(), 3_000);
+    }
+
+    #[test]
+    fn statusless_tool_items_are_timed_by_their_lifecycle_events() {
+        for (label, item) in [
+            ("web search", web_search as fn(&str) -> ThreadItem),
+            ("other", other_item as fn(&str) -> ThreadItem),
+        ] {
+            let timing = timing_of(vec![
+                at(1_000, turn_started()),
+                started(2_000, item("t")),
+                // A statusless update keeps the item active rather than
+                // silently closing it.
+                updated(3_000, item("t")),
+                completed(4_500, item("t")),
+                at(6_000, turn_completed()),
+            ])
+            .unwrap_or_else(|| panic!("{label}: a timestamped turn has a breakdown"));
+
+            assert_eq!(timing.total_ms, 5_000, "{label}");
+            assert_eq!(timing.tool_ms, 2_500, "{label}");
+            assert_eq!(timing.ai_ms(), 2_500, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_started_tool_opens_even_when_its_snapshot_claims_to_be_finished() {
+        // Providers that stamp a terminal status on the opening snapshot still
+        // describe a real interval; the lifecycle variant is authoritative.
+        let timing = timing_of(vec![
+            at(0, turn_started()),
+            started(1_000, ran("a")),
+            completed(3_000, ran("a")),
+            at(5_000, turn_completed()),
+        ])
+        .expect("a fully timestamped turn has a breakdown");
+
+        assert_eq!(timing.tool_ms, 2_000);
+    }
+
+    #[test]
+    fn a_tool_completing_after_the_turn_end_withholds_the_breakdown() {
+        // The wall clock regressed across the turn boundary: tool B is stamped
+        // as finishing 5s after the turn itself finished. Charging the union as
+        // recorded would report 7s of tool time against a 20s turn, and even
+        // clamping the aggregate to the total cannot fix the attribution — the
+        // 18s the model may actually have spent is unknowable. Withhold it.
+        let timing = timing_of(vec![
+            at(0, turn_started()),
+            started(1_000, running("a")),
+            completed(2_000, ran("a")),
+            started(19_000, running("b")),
+            completed(25_000, ran("b")),
+            at(20_000, turn_completed()),
+        ]);
+        assert_eq!(timing, None);
+    }
+
+    #[test]
+    fn a_model_item_stamped_after_the_turn_end_withholds_the_breakdown() {
+        // The watermark is not tool-only: an assistant or reasoning item stamped
+        // past the turn end regresses the clock just as badly.
+        for (label, item) in [
+            ("assistant", assistant("m1", "late answer")),
+            (
+                "reasoning",
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id: "r1".into(),
+                    parent_item_id: None,
+                    content: ItemContent::Reasoning {
+                        text: "late thought".into(),
+                    },
+                }),
+            ),
+        ] {
+            let timing = timing_of(vec![
+                at(1_000, turn_started()),
+                at(30_000, item),
+                at(20_000, turn_completed()),
+            ]);
+            assert_eq!(timing, None, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_turn_finalized_without_a_timestamp_rejects_later_tool_transitions() {
+        // An untimestamped TurnCompleted records a status but no end_ts, and a
+        // following TurnStarted therefore *reuses* that turn. A stray tool
+        // transition in between must not survive into the reopened turn's
+        // accounting — otherwise the ghost item stays open and eats the whole
+        // next turn.
+        let timeline = Timeline::fold_events(vec![
+            at(1_000, turn_started()),
+            turn_completed().into(),
+            started(3_000, running("ghost")),
+            at(4_000, turn_started()),
+            at(10_000, turn_completed()),
+        ]);
+
+        let timing = timeline.turns[0]
+            .timing
+            .expect("the reopened turn is fully timestamped");
+        assert_eq!(timing.total_ms, 6_000);
+        assert_eq!(timing.tool_ms, 0);
+        assert_eq!(timing.ai_ms(), 6_000);
+    }
+
+    #[test]
+    fn a_breakdown_needs_an_observed_timestamped_turn_start() {
+        // A user message seeds start_ts, but it is not an observed TurnStarted.
+        let no_turn_started = timing_of(vec![
+            at(1_000, user_msg("u1", "go")),
+            started(2_000, running("a")),
+            completed(3_000, ran("a")),
+            at(9_000, turn_completed()),
+        ]);
+        assert_eq!(no_turn_started, None);
+
+        // A TurnStarted that carries no timestamp is no anchor either.
+        let untimed_turn_started = timing_of(vec![
+            at(1_000, user_msg("u1", "go")),
+            turn_started().into(),
+            at(9_000, turn_completed()),
+        ]);
+        assert_eq!(untimed_turn_started, None);
+
+        // The user message's start_ts is untouched by any of this.
+        let timeline = Timeline::fold_events(vec![
+            at(1_000, user_msg("u1", "go")),
+            at(9_000, turn_completed()),
+        ]);
+        assert_eq!(timeline.turns[0].start_ts, Some(1_000));
+        assert_eq!(timeline.turns[0].duration_secs(), Some(8));
+        assert_eq!(timeline.turns[0].timing, None);
+    }
+
+    #[test]
+    fn replaying_a_stored_turn_reproduces_the_live_breakdown() {
+        let events = vec![
+            at(1_000, user_msg("u1", "run it")),
+            at(1_100, turn_started()),
+            started(2_000, running("a")),
+            started(2_500, subagent("b", ItemStatus::InProgress)),
+            completed(4_000, ran("a")),
+            completed(4_800, subagent("b", ItemStatus::Completed)),
+            at(7_100, turn_completed()),
+        ];
+
+        let mut live = Timeline::default();
+        for stored in &events {
+            live.apply_at(stored.ts, &stored.event);
+        }
+        let replayed = Timeline::fold_events(events);
+
+        assert_eq!(live.turns[0].timing, replayed.turns[0].timing);
+        let timing = replayed.turns[0].timing.expect("breakdown");
+        assert_eq!(timing.total_ms, 6_000);
+        assert_eq!(timing.tool_ms, 2_800);
+        assert_eq!(timing.ai_ms(), 3_200);
+    }
+
+    #[test]
+    fn each_turn_gets_its_own_breakdown() {
+        let timeline = Timeline::fold_events(vec![
+            at(0, turn_started()),
+            started(1_000, running("a")),
+            completed(2_000, ran("a")),
+            at(4_000, turn_completed()),
+            at(5_000, user_msg("u2", "again")),
+            at(5_000, turn_started()),
+            at(9_000, turn_completed()),
+        ]);
+
+        assert_eq!(timeline.turns.len(), 2);
+        assert_eq!(timeline.turns[0].timing.unwrap().tool_ms, 1_000);
+        // The second turn starts from a clean clock — no leakage across turns.
+        assert_eq!(timeline.turns[1].timing.unwrap().tool_ms, 0);
+        assert_eq!(timeline.turns[1].timing.unwrap().total_ms, 4_000);
+    }
+
+    #[test]
+    fn rendered_second_parts_sum_to_the_rendered_total() {
+        let timing = TurnTiming::new(10_500, 3_600);
+        let secs = timing.secs();
+        assert_eq!((secs.total, secs.ai, secs.tools), (10, 7, 3));
+        assert_eq!(secs.ai + secs.tools, secs.total);
+
+        // Tool time is clamped into the observed total, so the invariant holds
+        // even for a nonsensical accumulation.
+        let clamped = TurnTiming::new(1_000, 5_000);
+        assert_eq!(clamped.tool_ms, 1_000);
+        assert_eq!(clamped.ai_ms(), 0);
+        let clamped_secs = clamped.secs();
+        assert_eq!(
+            (clamped_secs.total, clamped_secs.ai, clamped_secs.tools),
+            (1, 0, 1)
+        );
     }
 }
