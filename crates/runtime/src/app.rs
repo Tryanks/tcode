@@ -870,6 +870,14 @@ pub enum WorkspaceMode {
     },
 }
 
+pub struct ScheduledMessage {
+    pub id: u64,
+    pub session_id: String,
+    pub text: String,
+    pub fire_at: std::time::SystemTime,
+    pub steer: bool,
+}
+
 pub struct AppState {
     store: SessionStore,
     settings_store: SettingsStore,
@@ -892,6 +900,9 @@ pub struct AppState {
     /// timer, just "finish what you were given, then rest". (The parked
     /// `timeline` goes stale by design; re-adoption replays the JSONL.)
     background: HashMap<String, ActiveSession>,
+    scheduled: Vec<ScheduledMessage>,
+    next_scheduled_id: u64,
+    schedule_tick_running: bool,
     /// Right/bottom workspace resources parked by conversation destination.
     /// This mirrors the composer's per-thread/project-draft text cache.
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
@@ -1093,6 +1104,9 @@ impl AppState {
             projects,
             active: None,
             background: HashMap::new(),
+            scheduled: Vec::new(),
+            next_scheduled_id: 0,
+            schedule_tick_running: false,
             conversation_ui: HashMap::new(),
             pending_native_rewinds: HashMap::new(),
             native_rewind_prefills: HashMap::new(),
@@ -5299,6 +5313,113 @@ impl AppState {
         // `sessions` is kept sorted newest-first by `load_index`.
         if let Some(id) = self.sessions.first().map(|m| m.id.clone()) {
             self.select_session(&id, cx);
+        }
+    }
+
+    pub fn schedule_message(
+        &mut self,
+        text: String,
+        fire_at: std::time::SystemTime,
+        steer: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.active.as_ref().map(|active| active.meta.id.clone()) else {
+            return;
+        };
+        let id = self.next_scheduled_id;
+        self.next_scheduled_id += 1;
+        self.scheduled.push(ScheduledMessage {
+            id,
+            session_id,
+            text,
+            fire_at,
+            steer,
+        });
+        self.ensure_schedule_tick(cx);
+        cx.notify();
+    }
+
+    pub fn cancel_scheduled(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.scheduled.retain(|message| message.id != id);
+        cx.notify();
+    }
+
+    pub fn fire_scheduled_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.scheduled.iter().position(|message| message.id == id) else {
+            return;
+        };
+        let message = self.scheduled.remove(index);
+        self.deliver_scheduled(message, cx);
+        cx.notify();
+    }
+
+    pub fn scheduled_for(&self, session_id: &str) -> impl Iterator<Item = &ScheduledMessage> {
+        self.scheduled
+            .iter()
+            .filter(move |message| message.session_id == session_id)
+    }
+
+    fn ensure_schedule_tick(&mut self, cx: &mut Context<Self>) {
+        if self.schedule_tick_running {
+            return;
+        }
+        self.schedule_tick_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_secs(1)).await;
+                let Ok(has_scheduled) = this.update(cx, |state, cx| {
+                    state.fire_due_scheduled(cx);
+                    !state.scheduled.is_empty()
+                }) else {
+                    return;
+                };
+                if !has_scheduled {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |state, _| {
+                state.schedule_tick_running = false;
+            });
+        })
+        .detach();
+    }
+
+    fn fire_due_scheduled(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now();
+        let (due, pending) = std::mem::take(&mut self.scheduled)
+            .into_iter()
+            .partition(|message| message.fire_at <= now);
+        self.scheduled = pending;
+        if due.is_empty() {
+            return;
+        }
+        for message in due {
+            self.deliver_scheduled(message, cx);
+        }
+        cx.notify();
+    }
+
+    fn deliver_scheduled(&mut self, message: ScheduledMessage, cx: &mut Context<Self>) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.id == message.session_id)
+        {
+            if message.steer {
+                self.steer(message.text, Vec::new(), cx);
+            } else {
+                self.send_turn(message.text, Vec::new(), cx);
+            }
+            cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledFired {
+                parked: false,
+            }));
+        } else if let Some(parked) = self.background.get_mut(&message.session_id) {
+            parked.push_queued(message.text, Vec::new());
+            cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledFired {
+                parked: true,
+            }));
+        } else {
+            cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledDropped));
         }
     }
 
@@ -10649,6 +10770,174 @@ mod tests {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
+    }
+
+    fn scheduled_message(id: u64, session_id: &str, text: &str, steer: bool) -> ScheduledMessage {
+        ScheduledMessage {
+            id,
+            session_id: session_id.into(),
+            text: text.into(),
+            fire_at: std::time::SystemTime::UNIX_EPOCH,
+            steer,
+        }
+    }
+
+    #[gpui::test]
+    fn scheduled_due_message_dispatches_to_idle_active_session(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            state
+                .scheduled
+                .push(scheduled_message(0, "active", "send later", false));
+
+            state.fire_due_scheduled(cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.queue.len(), 1);
+            assert_eq!(active.queue[0].text, "send later");
+            assert!(active.delivery_in_flight.is_some());
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::SendTurn { text, .. }) if text == "send later"
+            ));
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_due_steer_degrades_to_send_for_idle_active_session(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            state
+                .scheduled
+                .push(scheduled_message(0, "active", "steer later", true));
+
+            state.fire_due_scheduled(cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.queue.len(), 1);
+            assert_eq!(active.queue[0].text, "steer later");
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::SendTurn { text, .. }) if text == "steer later"
+            ));
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_due_message_queues_on_parked_bound_session(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            let mut parked = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            parked.meta.id = "parked".into();
+            state.background.insert(parked.meta.id.clone(), parked);
+            state
+                .scheduled
+                .push(scheduled_message(0, "parked", "background later", false));
+
+            state.fire_due_scheduled(cx);
+
+            assert!(state.active.as_ref().unwrap().queue.is_empty());
+            let parked = state.background.get("parked").unwrap();
+            assert_eq!(parked.queue.len(), 1);
+            assert_eq!(parked.queue[0].text, "background later");
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_due_message_drops_when_bound_session_is_missing(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            state
+                .scheduled
+                .push(scheduled_message(0, "missing", "drop later", false));
+
+            state.fire_due_scheduled(cx);
+
+            assert!(state.active.as_ref().unwrap().queue.is_empty());
+            assert!(state.background.is_empty());
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_cancel_removes_entry_and_scheduled_for_filters(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state
+                .scheduled
+                .push(scheduled_message(1, "active", "first", false));
+            state
+                .scheduled
+                .push(scheduled_message(2, "active", "second", false));
+            state
+                .scheduled
+                .push(scheduled_message(3, "other", "third", false));
+
+            state.cancel_scheduled(2, cx);
+
+            assert_eq!(
+                state
+                    .scheduled_for("active")
+                    .map(|message| message.id)
+                    .collect::<Vec<_>>(),
+                vec![1]
+            );
+            assert_eq!(
+                state
+                    .scheduled_for("other")
+                    .map(|message| message.id)
+                    .collect::<Vec<_>>(),
+                vec![3]
+            );
+            assert_eq!(state.scheduled.len(), 2);
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]

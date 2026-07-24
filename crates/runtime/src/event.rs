@@ -112,4 +112,8 @@ pub enum RuntimeNotice {
     SwitchedBranch {
         branch: String,
     },
+    ScheduledFired {
+        parked: bool,
+    },
+    ScheduledDropped,
 }
