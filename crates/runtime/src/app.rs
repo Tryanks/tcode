@@ -81,6 +81,17 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::OpenCode,
 ];
 
+#[derive(Debug, Clone, Copy)]
+enum TimelineLoadTarget {
+    Active {
+        mark_idle: bool,
+        read_git_branch: bool,
+    },
+    Background {
+        mark_idle: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
     open: bool,
@@ -832,6 +843,11 @@ pub struct AppState {
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
+    /// Monotonic watermark for JSONL appends. Timeline loads retry when this
+    /// changes while their background read is in flight.
+    store_append_generation: u64,
+    /// Per-session token used to discard superseded timeline loads.
+    timeline_load_generations: HashMap<String, u64>,
     /// Screenshot-only (`--debug-git-dialog`): open the commit dialog once the
     /// git status has loaded (clicking the header button cannot be driven
     /// headlessly). Consumed by `ChatView` on its next render.
@@ -959,6 +975,8 @@ impl AppState {
             git_busy: false,
             next_operation_id: 1,
             git_status_generation: 0,
+            store_append_generation: 0,
+            timeline_load_generations: HashMap::new(),
             debug_open_commit_dialog: false,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
@@ -1030,11 +1048,11 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             while let Ok(request) = requests.recv().await {
                 let orchestrate_mcp::BrokerRequest { op, reply } = request;
-                let Ok(result) = this.update(cx, |state, cx| state.handle_orchestrate_op(op, cx))
+                let Ok(()) =
+                    this.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx))
                 else {
                     break;
                 };
-                let _ = reply.send(result).await;
             }
         })
         .detach();
@@ -1238,6 +1256,28 @@ impl AppState {
     pub fn handle_orchestrate_op(
         &mut self,
         op: orchestrate_mcp::OrchestrateOp,
+        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        match op {
+            orchestrate_mcp::OrchestrateOp::Status {
+                parent_id,
+                thread_id,
+            } => self.handle_orchestrate_status(parent_id, thread_id, reply, cx),
+            orchestrate_mcp::OrchestrateOp::Result {
+                parent_id,
+                thread_id,
+            } => self.handle_orchestrate_result(parent_id, thread_id, reply, cx),
+            op => {
+                let result = self.handle_orchestrate_sync_op(op, cx);
+                let _ = reply.try_send(result);
+            }
+        }
+    }
+
+    fn handle_orchestrate_sync_op(
+        &mut self,
+        op: orchestrate_mcp::OrchestrateOp,
         cx: &mut Context<Self>,
     ) -> Result<serde_json::Value, String> {
         use orchestrate_mcp::OrchestrateOp;
@@ -1281,23 +1321,9 @@ impl AppState {
                 Ok(serde_json::json!({ "thread_id": id }))
             }
             OrchestrateOp::Status {
-                parent_id,
-                thread_id,
-            } => {
-                let mut children: Vec<_> = self
-                    .sessions
-                    .iter()
-                    .filter(|meta| meta.parent_session_id.as_deref() == Some(&parent_id))
-                    .filter(|meta| thread_id.as_ref().is_none_or(|id| id == &meta.id))
-                    .map(|meta| self.child_status_json(meta))
-                    .collect();
-                if thread_id.is_some() && children.is_empty() {
-                    return Err("unknown thread or not a child of this parent".into());
-                }
-                children.sort_by_key(|value| value["updated_at"].as_u64().unwrap_or_default());
-                children.reverse();
-                Ok(serde_json::Value::Array(children))
-            }
+                parent_id: _,
+                thread_id: _,
+            } => unreachable!("status operations are handled asynchronously"),
             OrchestrateOp::Send {
                 parent_id,
                 thread_id,
@@ -1345,7 +1371,7 @@ impl AppState {
                     }
                     return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                 }
-                self.ensure_child_loaded(&thread_id)?;
+                self.ensure_child_loaded(&thread_id, cx)?;
                 let child = self.background.get_mut(&thread_id).unwrap();
                 child.push_queued(message, Vec::new());
                 let idle = matches!(child.runtime, Runtime::Idle);
@@ -1358,23 +1384,9 @@ impl AppState {
                 Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
             }
             OrchestrateOp::Result {
-                parent_id,
-                thread_id,
-            } => {
-                let meta = self.require_child(&parent_id, &thread_id)?;
-                let (state, final_message, usage) = self.child_result(meta);
-                if state == "running" {
-                    return Err("thread is still running".into());
-                }
-                let mut result = serde_json::json!({
-                    "state": state,
-                    "final_message": final_message,
-                });
-                if let Some(usage) = usage.as_ref() {
-                    result["tokens"] = token_usage_json(usage);
-                }
-                Ok(result)
-            }
+                parent_id: _,
+                thread_id: _,
+            } => unreachable!("result operations are handled asynchronously"),
             OrchestrateOp::Cancel {
                 parent_id,
                 thread_id,
@@ -1467,7 +1479,11 @@ impl AppState {
             .map_err(|err| format!("failed to respond to approval: {err}"))
     }
 
-    fn ensure_child_loaded(&mut self, thread_id: &str) -> Result<(), String> {
+    fn ensure_child_loaded(
+        &mut self,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if self.background.contains_key(thread_id) {
             return Ok(());
         }
@@ -1480,11 +1496,11 @@ impl AppState {
         if self.active_session_id() == Some(thread_id) {
             return Err("child thread is currently open in the foreground".into());
         }
-        self.load_background_session(meta);
+        self.load_background_session(meta, cx);
         Ok(())
     }
 
-    fn load_background_session(&mut self, meta: SessionMeta) {
+    fn load_background_session(&mut self, meta: SessionMeta, cx: &mut Context<Self>) {
         let thread_id = meta.id.clone();
         let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         let mut child = Self::build_draft_session(
@@ -1497,16 +1513,114 @@ impl AppState {
         );
         child.meta = meta;
         child.draft = false;
-        child.timeline = Timeline::fold_events(self.store.read_events(&thread_id));
-        child.timeline.mark_idle();
-        self.background.insert(thread_id, child);
+        self.background.insert(thread_id.clone(), child);
+        self.schedule_timeline_load(
+            thread_id,
+            TimelineLoadTarget::Background { mark_idle: true },
+            cx,
+        );
+    }
+
+    fn handle_orchestrate_status(
+        &mut self,
+        parent_id: String,
+        thread_id: Option<String>,
+        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let children: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.parent_session_id.as_deref() == Some(&parent_id))
+            .filter(|meta| thread_id.as_ref().is_none_or(|id| id == &meta.id))
+            .cloned()
+            .collect();
+        if thread_id.is_some() && children.is_empty() {
+            let _ = reply.try_send(Err("unknown thread or not a child of this parent".into()));
+            return;
+        }
+        let unloaded: Vec<_> = children
+            .iter()
+            .filter(|meta| self.loaded_child_timeline(&meta.id).is_none())
+            .map(|meta| meta.id.clone())
+            .collect();
+        if unloaded.is_empty() {
+            let result = self.orchestrate_status_json(&children, &HashMap::new());
+            let _ = reply.try_send(Ok(result));
+            return;
+        }
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let timelines = unblock(cx.background_executor(), move || {
+                unloaded
+                    .into_iter()
+                    .map(|id| {
+                        let timeline = Timeline::fold_events(store.read_events(&id));
+                        (id, timeline)
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .await;
+            let result = this
+                .update(cx, |state, _| {
+                    state.orchestrate_status_json(&children, &timelines)
+                })
+                .map_err(|_| "tcode orchestrator is not available".to_string());
+            let _ = reply.send(result).await;
+        })
+        .detach();
+    }
+
+    fn handle_orchestrate_result(
+        &mut self,
+        parent_id: String,
+        thread_id: String,
+        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let meta = match self.require_child(&parent_id, &thread_id) {
+            Ok(meta) => meta.clone(),
+            Err(error) => {
+                let _ = reply.try_send(Err(error));
+                return;
+            }
+        };
+        if let Some(timeline) = self.loaded_child_timeline(&thread_id) {
+            let result = self.orchestrate_result_json(&meta, timeline);
+            let _ = reply.try_send(result);
+            return;
+        }
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let read_id = thread_id.clone();
+            let timeline = unblock(cx.background_executor(), move || {
+                Timeline::fold_events(store.read_events(&read_id))
+            })
+            .await;
+            let result = this
+                .update(cx, |state, _| {
+                    let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
+                    state.orchestrate_result_json(&meta, timeline)
+                })
+                .unwrap_or_else(|_| Err("tcode orchestrator is not available".to_string()));
+            let _ = reply.send(result).await;
+        })
+        .detach();
+    }
+
+    fn loaded_child_timeline(&self, session_id: &str) -> Option<&Timeline> {
+        self.active
+            .as_ref()
+            .filter(|child| child.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))
+            .map(|child| &child.timeline)
     }
 
     fn child_result(
         &self,
         meta: &SessionMeta,
+        timeline: &Timeline,
     ) -> (&'static str, String, Option<agent::TokenUsage>) {
-        let timeline = Timeline::fold_events(self.store.read_events(&meta.id));
         let running = self
             .active
             .as_ref()
@@ -1528,11 +1642,48 @@ impl AppState {
                 None => "idle",
             }
         };
-        (state, final_assistant_message(&timeline), timeline.usage)
+        (state, final_assistant_message(timeline), timeline.usage)
     }
 
-    fn child_status_json(&self, meta: &SessionMeta) -> serde_json::Value {
-        let (state, final_message, usage) = self.child_result(meta);
+    fn orchestrate_result_json(
+        &self,
+        meta: &SessionMeta,
+        timeline: &Timeline,
+    ) -> Result<serde_json::Value, String> {
+        let (state, final_message, usage) = self.child_result(meta, timeline);
+        if state == "running" {
+            return Err("thread is still running".into());
+        }
+        let mut result = serde_json::json!({
+            "state": state,
+            "final_message": final_message,
+        });
+        if let Some(usage) = usage.as_ref() {
+            result["tokens"] = token_usage_json(usage);
+        }
+        Ok(result)
+    }
+
+    fn orchestrate_status_json(
+        &self,
+        children: &[SessionMeta],
+        disk_timelines: &HashMap<String, Timeline>,
+    ) -> serde_json::Value {
+        let mut children: Vec<_> = children
+            .iter()
+            .filter_map(|meta| {
+                self.loaded_child_timeline(&meta.id)
+                    .or_else(|| disk_timelines.get(&meta.id))
+                    .map(|timeline| self.child_status_json(meta, timeline))
+            })
+            .collect();
+        children.sort_by_key(|value| value["updated_at"].as_u64().unwrap_or_default());
+        children.reverse();
+        serde_json::Value::Array(children)
+    }
+
+    fn child_status_json(&self, meta: &SessionMeta, timeline: &Timeline) -> serde_json::Value {
+        let (state, final_message, usage) = self.child_result(meta, timeline);
         let pending_approval = self.pending_approval_for(&meta.id);
         let waiting_approval = pending_approval.as_ref().map(approval_request_summary);
         let approval_request_id = pending_approval.as_ref().map(|request| request.id.as_str());
@@ -2316,6 +2467,29 @@ impl AppState {
         .detach();
     }
 
+    fn refresh_session_git_branch(
+        &mut self,
+        session_id: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let branch = unblock(cx.background_executor(), move || read_git_branch(&cwd)).await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(session) = state
+                    .active
+                    .as_mut()
+                    .filter(|session| session.meta.id == session_id)
+                    .or_else(|| state.background.get_mut(&session_id))
+                {
+                    session.git_branch = branch;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The resolved primary quick-action for the active session, or `None` when
     /// there is no active session or its status has not been computed yet (so
     /// the button stays hidden rather than flashing "Initialize Git" on a repo).
@@ -2417,15 +2591,17 @@ impl AppState {
         }));
 
         cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
-                perform_action(
+            let (result, git_branch) = unblock(cx.background_executor(), move || {
+                let result = perform_action(
                     &cwd,
                     action,
                     message.as_deref(),
                     included.as_deref(),
                     feature_branch.as_deref(),
                     current_branch.as_deref(),
-                )
+                );
+                let git_branch = read_git_branch(&cwd);
+                (result, git_branch)
             })
             .await;
             let _ = this.update(cx, |state, cx| {
@@ -2442,7 +2618,7 @@ impl AppState {
                     })),
                 }
                 if let Some(active) = state.active.as_mut() {
-                    active.git_branch = read_git_branch(&active.meta.cwd);
+                    active.git_branch = git_branch;
                 }
                 state.refresh_git_status(cx);
                 cx.notify();
@@ -4091,6 +4267,10 @@ impl AppState {
                     &branch_for_task,
                     &base_for_task,
                 )
+                .map(|worktree_path| {
+                    let git_branch = read_git_branch(&worktree_path);
+                    (worktree_path, git_branch)
+                })
             })
             .await;
             let _ = this.update(cx, |state, cx| {
@@ -4103,7 +4283,7 @@ impl AppState {
                 };
                 active.preparing_worktree = false;
                 match result {
-                    Ok(worktree_path) => {
+                    Ok((worktree_path, git_branch)) => {
                         active.meta.cwd = worktree_path.clone();
                         active.meta.worktree = Some(WorktreeInfo {
                             root_project_path: root,
@@ -4111,7 +4291,7 @@ impl AppState {
                             branch,
                         });
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
-                        active.git_branch = read_git_branch(&worktree_path);
+                        active.git_branch = git_branch;
                         // Now that the worktree exists, run the deferred send.
                         state.send_turn(text, attachments, cx);
                     }
@@ -4170,13 +4350,14 @@ impl AppState {
         }
         self.sessions = self.store.load_index();
         self.park_active();
-        let git_branch = read_git_branch(&meta.cwd);
+        let session_id = meta.id.clone();
+        let cwd = meta.cwd.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline: Timeline::default(),
-            git_branch,
+            git_branch: None,
             branches: Vec::new(),
             draft: false,
             pending_relay: None,
@@ -4204,6 +4385,7 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.refresh_session_git_branch(session_id, cwd, cx);
         self.ensure_started(cx);
         self.refresh_git_status(cx);
         cx.notify();
@@ -4225,11 +4407,10 @@ impl AppState {
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.project_id = Some(project_id);
         meta.acp_agent_id = acp_agent_id;
-        let git_branch = read_git_branch(&meta.cwd);
         ActiveSession {
             meta,
             timeline: Timeline::default(),
-            git_branch,
+            git_branch: None,
             branches: Vec::new(),
             draft: true,
             pending_relay: None,
@@ -4340,6 +4521,9 @@ impl AppState {
             draft.terminal_workspace.height = preferences.height.clamp(120., 600.);
         }
         self.active = Some(draft);
+        if let Some(active) = self.active.as_ref() {
+            self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
+        }
         if !restored_ui {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
@@ -4380,6 +4564,122 @@ impl AppState {
         Ok(())
     }
 
+    fn schedule_timeline_load(
+        &mut self,
+        session_id: String,
+        target: TimelineLoadTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = {
+            let generation = self
+                .timeline_load_generations
+                .entry(session_id.clone())
+                .or_default();
+            *generation += 1;
+            *generation
+        };
+        self.spawn_timeline_load_attempt(
+            session_id,
+            target,
+            generation,
+            self.store_append_generation,
+            1,
+            cx,
+        );
+    }
+
+    fn spawn_timeline_load_attempt(
+        &mut self,
+        session_id: String,
+        target: TimelineLoadTarget,
+        generation: u64,
+        watermark: u64,
+        attempt: u8,
+        cx: &mut Context<Self>,
+    ) {
+        let intended = match target {
+            TimelineLoadTarget::Active { .. } => self
+                .active
+                .as_ref()
+                .filter(|session| session.meta.id == session_id),
+            TimelineLoadTarget::Background { .. } => self.background.get(&session_id),
+        };
+        let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
+            return;
+        };
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let read_id = session_id.clone();
+            let (timeline, git_branch) = unblock(cx.background_executor(), move || {
+                let mut timeline = Timeline::fold_events(store.read_events(&read_id));
+                let (mark_idle, load_branch) = match target {
+                    TimelineLoadTarget::Active {
+                        mark_idle,
+                        read_git_branch,
+                    } => (mark_idle, read_git_branch),
+                    TimelineLoadTarget::Background { mark_idle } => (mark_idle, false),
+                };
+                if mark_idle {
+                    timeline.mark_idle();
+                }
+                let git_branch = load_branch.then(|| read_git_branch(&cwd));
+                (timeline, git_branch)
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                let generation_matches = state
+                    .timeline_load_generations
+                    .get(&session_id)
+                    .copied()
+                    == Some(generation);
+                let target_matches = match target {
+                    TimelineLoadTarget::Active { .. } => {
+                        state.active_session_id() == Some(session_id.as_str())
+                    }
+                    TimelineLoadTarget::Background { .. } => {
+                        state.background.contains_key(&session_id)
+                    }
+                };
+                if !generation_matches || !target_matches {
+                    return;
+                }
+                if state.store_append_generation != watermark && attempt < 4 {
+                    state.spawn_timeline_load_attempt(
+                        session_id,
+                        target,
+                        generation,
+                        state.store_append_generation,
+                        attempt + 1,
+                        cx,
+                    );
+                    return;
+                }
+                if state.store_append_generation != watermark {
+                    log::warn!(
+                        "timeline load for {session_id} remained racy after {attempt} attempts; applying the last fold"
+                    );
+                }
+                match target {
+                    TimelineLoadTarget::Active { .. } => {
+                        if let Some(active) = state.active.as_mut() {
+                            active.timeline = timeline;
+                            if let Some(git_branch) = git_branch {
+                                active.git_branch = git_branch;
+                            }
+                        }
+                    }
+                    TimelineLoadTarget::Background { .. } => {
+                        if let Some(background) = state.background.get_mut(&session_id) {
+                            background.timeline = timeline;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Make a stored session active: replay its JSONL log only. The provider
     /// process starts lazily on the next send (with the stored resume cursor).
     pub fn select_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
@@ -4404,8 +4704,6 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
-            parked.timeline = Timeline::fold_events(self.store.read_events(session_id));
-            parked.git_branch = read_git_branch(&parked.meta.cwd);
             // Background events may have auto-opened or otherwise changed the
             // panel after it was parked; that live state wins over the snapshot
             // captured when the user switched away.
@@ -4420,6 +4718,14 @@ impl AppState {
             }
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
             self.active = Some(parked);
+            self.schedule_timeline_load(
+                session_id.to_string(),
+                TimelineLoadTarget::Active {
+                    mark_idle: false,
+                    read_git_branch: true,
+                },
+                cx,
+            );
             if !restored_ui {
                 self.reopen_persisted_terminals(terminal_preferences, cx);
             }
@@ -4437,24 +4743,18 @@ impl AppState {
             return;
         }
 
-        let events = self.store.read_events(&meta.id);
-        let mut timeline = Timeline::fold_events(events);
-        // The provider process is gone; stale approvals / running turns can't
-        // continue, so drop them.
-        timeline.mark_idle();
         log::info!(
-            "opened session {} ({} timeline entries, resume cursor: {})",
+            "opening session {} (resume cursor: {})",
             meta.id,
-            timeline.entries.len(),
             meta.resume_cursor.is_some()
         );
-        let git_branch = read_git_branch(&meta.cwd);
+        let session_id = meta.id.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         let mut active = ActiveSession {
             meta,
-            timeline,
-            git_branch,
+            timeline: Timeline::default(),
+            git_branch: None,
             branches: Vec::new(),
             draft: false,
             pending_relay: None,
@@ -4488,6 +4788,14 @@ impl AppState {
             active.terminal_workspace.height = preferences.height.clamp(120., 600.);
         }
         self.active = Some(active);
+        self.schedule_timeline_load(
+            session_id,
+            TimelineLoadTarget::Active {
+                mark_idle: true,
+                read_git_branch: true,
+            },
+            cx,
+        );
         if !restored_ui {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
@@ -4740,23 +5048,32 @@ impl AppState {
             }
             if parked.meta.parent_session_id.is_some() {
                 let child_id = session_id.to_string();
-                let idle_turns = Timeline::fold_events(self.store.read_events(session_id))
-                    .turns
-                    .len();
+                let store = self.store.clone();
                 cx.spawn(async move |this, cx| {
+                    let first_store = store.clone();
+                    let first_id = child_id.clone();
+                    let idle_turns = unblock(cx.background_executor(), move || {
+                        Timeline::fold_events(first_store.read_events(&first_id))
+                            .turns
+                            .len()
+                    })
+                    .await;
                     cx.background_executor()
                         .timer(std::time::Duration::from_secs(30 * 60))
                         .await;
+                    let second_id = child_id.clone();
+                    let current_turns = unblock(cx.background_executor(), move || {
+                        Timeline::fold_events(store.read_events(&second_id))
+                            .turns
+                            .len()
+                    })
+                    .await;
                     let _ = this.update(cx, |state, cx| {
-                        let still_idle =
-                            state.background.get(&child_id).is_some_and(|child| {
-                                child.queue.is_empty()
-                                    && !child.turn_in_flight
-                                    && child.background_task_count == 0
-                            }) && Timeline::fold_events(state.store.read_events(&child_id))
-                                .turns
-                                .len()
-                                == idle_turns;
+                        let still_idle = state.background.get(&child_id).is_some_and(|child| {
+                            child.queue.is_empty()
+                                && !child.turn_in_flight
+                                && child.background_task_count == 0
+                        }) && current_turns == idle_turns;
                         if still_idle {
                             state.drop_background(&child_id);
                             cx.notify();
@@ -4812,21 +5129,40 @@ impl AppState {
         {
             return;
         }
-        let timeline = Timeline::fold_events(self.store.read_events(child_id));
-        let turn = timeline.turns.len();
-        if self.callback_last_turn.get(child_id).copied() == Some(turn) {
-            return;
-        }
+        let child_id = child_id.to_string();
         let parent_id = child.parent_session_id.clone().unwrap();
-        self.callback_last_turn.insert(child_id.to_string(), turn);
-        let text = assemble_callback_text(
-            child_id,
-            &child.title,
-            status,
-            &final_assistant_message(&timeline),
-            timeline.usage.as_ref(),
-        );
-        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+        let title = child.title;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let read_id = child_id.clone();
+            let timeline = unblock(cx.background_executor(), move || {
+                Timeline::fold_events(store.read_events(&read_id))
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                let child_still_exists = state.sessions.iter().any(|meta| {
+                    meta.id == child_id
+                        && meta.parent_session_id.as_deref() == Some(parent_id.as_str())
+                });
+                if !child_still_exists {
+                    return;
+                }
+                let turn = timeline.turns.len();
+                if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
+                    return;
+                }
+                let text = assemble_callback_text(
+                    &child_id,
+                    &title,
+                    status,
+                    &final_assistant_message(&timeline),
+                    timeline.usage.as_ref(),
+                );
+                state.callback_last_turn.insert(child_id, turn);
+                state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+            });
+        })
+        .detach();
     }
 
     fn deliver_child_approval_callback(
@@ -4944,7 +5280,7 @@ impl AppState {
                 .find(|meta| meta.id == parent_id)
                 .cloned()
         {
-            self.load_background_session(parent);
+            self.load_background_session(parent, cx);
         }
         if let Some(parent) = self.background.get_mut(parent_id) {
             parent.push_or_merge_orchestrate_callback(text);
@@ -5406,13 +5742,14 @@ impl AppState {
         }
         self.sessions = self.store.load_index();
         self.park_active();
-        let git_branch = read_git_branch(&meta.cwd);
+        let session_id = meta.id.clone();
+        let cwd = meta.cwd.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline: Timeline::default(),
-            git_branch,
+            git_branch: None,
             branches: Vec::new(),
             draft: false,
             pending_relay: None,
@@ -5440,6 +5777,7 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.refresh_session_git_branch(session_id, cwd, cx);
         self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
         cx.notify();
     }
@@ -5678,10 +6016,13 @@ impl AppState {
             let _ = this.update(cx, |state, cx| {
                 match result {
                     Ok(()) => {
-                        if let Some(active) = state.active.as_mut()
-                            && active.meta.id == session_id
+                        if let Some(cwd) = state
+                            .active
+                            .as_ref()
+                            .filter(|active| active.meta.id == session_id)
+                            .map(|active| active.meta.cwd.clone())
                         {
-                            active.git_branch = read_git_branch(&active.meta.cwd);
+                            state.refresh_session_git_branch(session_id.clone(), cwd, cx);
                         }
                         cx.emit(AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }));
                     }
@@ -6245,10 +6586,13 @@ impl AppState {
                 // The turn may have switched branches (checkout) or made the
                 // first commit; refresh the display-only branch label and the
                 // git quick-action status.
-                if let Some(active) = self.active.as_mut()
-                    && active.meta.id == session_id
+                if let Some((session_id, cwd)) = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.meta.id == session_id)
+                    .map(|active| (active.meta.id.clone(), active.meta.cwd.clone()))
                 {
-                    active.git_branch = read_git_branch(&active.meta.cwd);
+                    self.refresh_session_git_branch(session_id, cwd, cx);
                 }
                 if self.active_session_id() == Some(session_id) {
                     self.refresh_git_status(cx);
@@ -6452,6 +6796,7 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded so the on-disk
     /// log and the live timeline agree.
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
+        self.store_append_generation += 1;
         let ts = now_millis();
         if let Err(err) = self.store.append_event(session_id, ts, event) {
             self.report_error(
@@ -9091,7 +9436,7 @@ mod tests {
             assert!(text.contains("decide with the approve tool"));
             assert!(receiver.try_recv().is_err(), "callback was delivered twice");
 
-            let status = state.child_status_json(&child);
+            let status = state.child_status_json(&child, &Timeline::default());
             assert_eq!(
                 status["waiting_approval"],
                 serde_json::json!("command `touch blocked`")
@@ -9245,17 +9590,18 @@ mod tests {
                 }],
             );
 
-            let result = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "parent".into(),
-                        thread_id: "child".into(),
-                        request_id: None,
-                        decision: " APPROVE ".into(),
-                    },
-                    cx,
-                )
-                .unwrap();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: None,
+                    decision: " APPROVE ".into(),
+                },
+                reply,
+                cx,
+            );
+            let result = response.try_recv().unwrap().unwrap();
             assert_eq!(
                 result,
                 serde_json::json!({ "ok": true, "request_id": "approval-op" })
@@ -9268,46 +9614,49 @@ mod tests {
                 }) if request_id == "approval-op"
             ));
 
-            let unknown_request = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "parent".into(),
-                        thread_id: "child".into(),
-                        request_id: Some("missing".into()),
-                        decision: "deny".into(),
-                    },
-                    cx,
-                )
-                .unwrap_err();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some("missing".into()),
+                    decision: "deny".into(),
+                },
+                reply,
+                cx,
+            );
+            let unknown_request = response.try_recv().unwrap().unwrap_err();
             assert_eq!(unknown_request, "no pending approval with that request_id");
 
-            let bad_decision = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "parent".into(),
-                        thread_id: "child".into(),
-                        request_id: Some("approval-op".into()),
-                        decision: "later".into(),
-                    },
-                    cx,
-                )
-                .unwrap_err();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some("approval-op".into()),
+                    decision: "later".into(),
+                },
+                reply,
+                cx,
+            );
+            let bad_decision = response.try_recv().unwrap().unwrap_err();
             assert_eq!(
                 bad_decision,
                 "unknown decision: later; expected approve, approve_for_session, or deny"
             );
 
-            let non_child = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "other-parent".into(),
-                        thread_id: "child".into(),
-                        request_id: Some("approval-op".into()),
-                        decision: "deny".into(),
-                    },
-                    cx,
-                )
-                .unwrap_err();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "other-parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some("approval-op".into()),
+                    decision: "deny".into(),
+                },
+                reply,
+                cx,
+            );
+            let non_child = response.try_recv().unwrap().unwrap_err();
             assert_eq!(non_child, "unknown thread or not a child of this parent");
         });
 
@@ -10525,6 +10874,166 @@ mod tests {
         (session, receiver)
     }
 
+    fn persisted_assistant_event(text: &str) -> AgentEvent {
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: format!("item-{text}"),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage { text: text.into() },
+        })
+    }
+
+    #[gpui::test]
+    fn cold_select_installs_immediately_then_loads_persisted_timeline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-cold-select-async-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/cold"), None);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &persisted_assistant_event("persisted cold output"),
+            )
+            .unwrap();
+        let id = meta.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&id, cx);
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, id);
+            assert!(active.timeline.entries.is_empty());
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "persisted cold output")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn parked_readopt_refolds_events_appended_while_parked(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-parked-readopt-async-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/parked"), None);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(&meta.id, 1, &persisted_assistant_event("before parking"))
+            .unwrap();
+        let id = meta.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| state.select_session(&id, cx));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            let active = state.active.as_mut().unwrap();
+            active.turn_in_flight = true;
+            active.runtime = Runtime::Starting { generation: 1 };
+            state.start_draft("other".into(), PathBuf::from("/tmp/other"), cx);
+            state
+                .store
+                .append_event(&id, 2, &persisted_assistant_event("while parked"))
+                .unwrap();
+            state.select_session(&id, cx);
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "while parked")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn stale_timeline_completion_cannot_land_on_another_session(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-stale-timeline-load-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
+        let b = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
+        store.upsert_meta(&a).unwrap();
+        store.upsert_meta(&b).unwrap();
+        store
+            .append_event(&a.id, 1, &persisted_assistant_event("only session A"))
+            .unwrap();
+        store
+            .append_event(&b.id, 1, &persisted_assistant_event("only session B"))
+            .unwrap();
+        let (id_a, id_b) = (a.id.clone(), b.id.clone());
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&id_a, cx);
+            state.select_session(&id_b, cx);
+            assert_eq!(state.active_session_id(), Some(id_b.as_str()));
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, id_b);
+            assert!(active.timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "only session B")
+            ));
+            assert!(!active.timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "only session A")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn timeline_load_retries_when_append_watermark_moves(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-timeline-watermark-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/watermark"), None);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(&meta.id, 1, &persisted_assistant_event("before load"))
+            .unwrap();
+        let id = meta.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&id, cx);
+            state.record_event(&id, &persisted_assistant_event("raced append"), cx);
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            let timeline = &state.active.as_ref().unwrap().timeline;
+            assert!(timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "before load")
+            ));
+            assert!(timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "raced append")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The T3 Code regression this app must not inherit: send a message, hit
     /// stop, get an error, then immediately open a new thread and send — and the
     /// new thread's FIRST user message must be in its timeline (T3 loses the
@@ -10772,6 +11281,11 @@ mod tests {
             // Coming back re-adopts the live session: everything that happened
             // while parked is in the timeline, and the turn is still running.
             state.select_session(&id_a, cx);
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, cx| {
             let active = state.active.as_ref().unwrap();
             assert_eq!(active.meta.id, id_a);
             assert!(matches!(active.runtime, Runtime::Live(_)));
