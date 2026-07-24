@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, ChangeCompleteness, FileChange,
@@ -75,6 +76,13 @@ pub use crate::terminal::{
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
 const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Anthropic's prompt cache expires after one hour, so a provider kept longer
+/// cannot preserve a useful cached conversation prefix.
+const RESIDENT_IDLE_GRACE: Duration = Duration::from_secs(60 * 60);
+/// Runaway backstop for unusually large resident fleets; the grace reaper is
+/// the primary bound, while this comfortably preserves typical orchestrate
+/// fleets whose idle children may be re-messaged.
+const MAX_IDLE_RESIDENTS: usize = 16;
 const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::ClaudeCode,
     ProviderKind::Codex,
@@ -542,6 +550,9 @@ pub struct ActiveSession {
     /// Provider-owned background tasks which outlive a completed model turn.
     /// Claude currently supplies this transient liveness signal.
     background_task_count: usize,
+    /// When this parked, fully idle provider became eligible for grace-period
+    /// retention and LRU eviction. Active or working sessions keep this clear.
+    idle_since: Option<Instant>,
     /// Provider-native commands / skills discovered at session start (Claude
     /// `slash_commands` + `skills`; Codex `skills/list` + custom prompts).
     /// Seeded from the per-provider cache, then replaced by live updates.
@@ -652,6 +663,7 @@ impl ActiveSession {
         self.delivery_in_flight = None;
         self.turn_in_flight = false;
         self.background_task_count = 0;
+        self.idle_since = None;
         self._pump = None;
     }
 
@@ -724,6 +736,7 @@ impl ActiveSession {
     /// Append a message to the queue, consuming the armed Ultrathink flag (it is
     /// per-send, so it belongs to this message, not to whatever is sent later).
     fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
+        self.idle_since = None;
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let ultrathink = std::mem::take(&mut self.pending_ultrathink);
@@ -745,6 +758,7 @@ impl ActiveSession {
     /// drive the orchestrator before the rest are visible, and the leftovers may
     /// not run until much later.
     fn push_or_merge_orchestrate_callback(&mut self, text: String) -> u64 {
+        self.idle_since = None;
         let delivery_in_flight = self.delivery_in_flight;
         if let Some(pending) = self.queue.iter_mut().find(|message| {
             message.kind == QueuedMessageKind::OrchestrateCallback
@@ -795,6 +809,7 @@ impl ActiveSession {
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
+        self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
         Ok(true)
     }
@@ -809,6 +824,7 @@ impl ActiveSession {
         }
         self.delivery_in_flight = None;
         self.turn_in_flight = true;
+        self.idle_since = None;
         Some(self.queue.remove(0))
     }
 
@@ -4859,6 +4875,7 @@ impl AppState {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -4912,6 +4929,7 @@ impl AppState {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -5194,6 +5212,7 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
+            parked.idle_since = None;
             // Background events may have auto-opened or otherwise changed the
             // panel after it was parked; that live state wins over the snapshot
             // captured when the user switched away.
@@ -5262,6 +5281,7 @@ impl AppState {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -5505,9 +5525,8 @@ impl AppState {
         cx.notify();
     }
 
-    /// A parked session finished a turn: keep working through its queue, and
-    /// shut it down once nothing is left. A parked session already has its
-    /// title, so this mirrors `dispatch_next_queued` without title adoption.
+    /// A parked session finished a turn: keep working through its queue, then
+    /// retain its provider for the bounded resident-idle grace period.
     fn on_background_turn_completed(&mut self, session_id: &str, cx: &mut Context<Self>) {
         let Some(parked) = self.background.get_mut(session_id) else {
             return;
@@ -5536,46 +5555,7 @@ impl AppState {
                 cx.notify();
                 return;
             }
-            if parked.meta.parent_session_id.is_some() {
-                let child_id = session_id.to_string();
-                let store = self.store.clone();
-                cx.spawn(async move |this, cx| {
-                    let first_store = store.clone();
-                    let first_id = child_id.clone();
-                    let idle_turns = unblock(cx.background_executor(), move || {
-                        Timeline::fold_events(first_store.read_events(&first_id))
-                            .turns
-                            .len()
-                    })
-                    .await;
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(30 * 60))
-                        .await;
-                    let second_id = child_id.clone();
-                    let current_turns = unblock(cx.background_executor(), move || {
-                        Timeline::fold_events(store.read_events(&second_id))
-                            .turns
-                            .len()
-                    })
-                    .await;
-                    let _ = this.update(cx, |state, cx| {
-                        let still_idle = state.background.get(&child_id).is_some_and(|child| {
-                            child.queue.is_empty()
-                                && !child.turn_in_flight
-                                && child.background_task_count == 0
-                        }) && current_turns == idle_turns;
-                        if still_idle {
-                            state.drop_background(&child_id);
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-                cx.notify();
-                return;
-            }
-            log::info!("parked session {session_id} finished its work; shutting down");
-            self.drop_background(session_id);
+            self.mark_resident_idle(session_id, cx);
             cx.notify();
             return;
         }
@@ -6256,6 +6236,7 @@ impl AppState {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
             diff_open: false,
@@ -6722,6 +6703,7 @@ impl AppState {
             .or_else(|| self.background.get_mut(session_id))
             .unwrap();
         active.runtime = Runtime::Starting { generation };
+        active.idle_since = None;
         // Remember the model + approval mode this process is being launched
         // with so a later switch can detect the mismatch and restart.
         active.live_model = active.meta.model.clone();
@@ -6922,6 +6904,16 @@ impl AppState {
                 active.background_task_count = *count;
             } else if let Some(parked) = self.background.get_mut(session_id) {
                 parked.background_task_count = *count;
+                if *count > 0 {
+                    parked.idle_since = None;
+                }
+                if *count == 0
+                    && !parked.turn_in_flight
+                    && parked.delivery_in_flight.is_none()
+                    && parked.queue.is_empty()
+                {
+                    self.mark_resident_idle(session_id, cx);
+                }
             }
             cx.notify();
             return;
@@ -7065,6 +7057,7 @@ impl AppState {
                     active.turn_in_flight = true;
                 } else if let Some(parked) = self.background.get_mut(session_id) {
                     parked.turn_in_flight = true;
+                    parked.idle_since = None;
                 }
             }
             AgentEvent::SessionStarted { resume, model, .. } => {
@@ -7477,11 +7470,9 @@ impl AppState {
         self.native_rewind_prefills.clear();
     }
 
-    /// Leave the active session without killing its work: a live session with a
-    /// turn in flight, queued/unaccepted messages, or provider-owned background
-    /// tasks is parked in `background` (process, pump and queue intact — see the
-    /// field docs); an idle one is shut down as before. Every "switch away" path
-    /// goes through here; only destructive paths use `shutdown_active` directly.
+    /// Leave the active session without killing its provider or in-memory work.
+    /// Every "switch away" path goes through here; only destructive paths use
+    /// `shutdown_active` directly.
     fn park_active(&mut self, cx: &mut Context<Self>) {
         self.pending_diff_focus = None;
         self.persist_terminal_preferences(cx);
@@ -7495,11 +7486,8 @@ impl AppState {
             || !active.queue.is_empty()
             || active.background_task_count > 0
             || native_rewind_pending;
-        // Live with work, or still Starting with messages waiting (the start
-        // attempt finds and adopts the parked entry when it completes) — both
-        // carry state that must not die with a thread switch.
         let parkable = matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. });
-        if has_work && parkable {
+        if parkable {
             log::info!(
                 "parking session {} (turn in flight: {}, queued: {}, background tasks: {})",
                 active.meta.id,
@@ -7507,10 +7495,76 @@ impl AppState {
                 active.queue.len(),
                 active.background_task_count
             );
-            self.background.insert(active.meta.id.clone(), active);
-        } else if let Runtime::Live(commands) = active.runtime {
-            let _ = commands.try_send(SessionCommand::Shutdown);
+            let session_id = active.meta.id.clone();
+            if has_work {
+                active.idle_since = None;
+            }
+            self.background.insert(session_id.clone(), active);
+            if !has_work {
+                self.mark_resident_idle(&session_id, cx);
+            }
         }
+    }
+
+    /// Start a fresh idle grace period, enforce the resident LRU bound, and
+    /// reap only if no intervening work or re-adoption made the timer stale.
+    fn mark_resident_idle(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let fully_idle = self.background.get(session_id).is_some_and(|session| {
+            session.queue.is_empty()
+                && !session.turn_in_flight
+                && session.delivery_in_flight.is_none()
+                && session.background_task_count == 0
+        }) && !self.pending_native_rewinds.contains_key(session_id);
+        if !fully_idle {
+            return;
+        }
+
+        let idle_since = Instant::now();
+        self.background.get_mut(session_id).unwrap().idle_since = Some(idle_since);
+
+        let oldest = {
+            let mut residents: Vec<_> = self
+                .background
+                .iter()
+                .filter(|(id, session)| {
+                    session.queue.is_empty()
+                        && !session.turn_in_flight
+                        && session.delivery_in_flight.is_none()
+                        && session.background_task_count == 0
+                        && !self.pending_native_rewinds.contains_key(id.as_str())
+                })
+                .filter_map(|(id, session)| session.idle_since.map(|idle| (id.clone(), idle)))
+                .collect();
+            if residents.len() > MAX_IDLE_RESIDENTS {
+                residents.sort_unstable_by_key(|(_, idle)| *idle);
+                residents.first().map(|(id, _)| id.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(oldest) = oldest {
+            log::info!("evicting idle resident {oldest}");
+            self.drop_background(&oldest);
+        }
+
+        let session_id = session_id.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RESIDENT_IDLE_GRACE).await;
+            let _ = this.update(cx, |state, cx| {
+                let still_idle = state.background.get(&session_id).is_some_and(|session| {
+                    session.idle_since == Some(idle_since)
+                        && session.queue.is_empty()
+                        && !session.turn_in_flight
+                        && session.delivery_in_flight.is_none()
+                        && session.background_task_count == 0
+                }) && !state.pending_native_rewinds.contains_key(&session_id);
+                if still_idle {
+                    state.drop_background(&session_id);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Shut down and forget a parked session (archive/delete paths).
@@ -10478,6 +10532,7 @@ mod tests {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -10528,6 +10583,7 @@ mod tests {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 2,
+            idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -10571,6 +10627,7 @@ mod tests {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -10640,6 +10697,7 @@ mod tests {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands: Vec::new(),
             diff_open: false,
             diff_expanded: false,
@@ -10987,6 +11045,7 @@ mod tests {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -11202,6 +11261,166 @@ mod tests {
     }
 
     #[gpui::test]
+    fn park_active_retains_idle_live_provider(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-idle-resident-park-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "idle-resident".into();
+
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.park_active(cx);
+
+            assert!(state.active.is_none());
+            assert!(matches!(
+                state.background["idle-resident"].runtime,
+                Runtime::Live(_)
+            ));
+            assert!(state.background["idle-resident"].idle_since.is_some());
+            assert!(actor.try_recv().is_err(), "parking sent Shutdown");
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn select_session_readopts_idle_resident_without_shutdown(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-idle-resident-readopt-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "idle-resident".into();
+        let meta = session.meta.clone();
+
+        state.update(cx, |state, cx| {
+            state.sessions.push(meta);
+            state.active = Some(session);
+            state.park_active(cx);
+            state.select_session("idle-resident", cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, "idle-resident");
+            assert!(matches!(active.runtime, Runtime::Live(_)));
+            assert!(active.idle_since.is_none());
+            assert!(!state.background.contains_key("idle-resident"));
+            assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn resident_idle_reaper_shuts_down_untouched_provider(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-idle-resident-reaper-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "idle-resident".into();
+
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.park_active(cx);
+        });
+        cx.executor()
+            .advance_clock(RESIDENT_IDLE_GRACE + Duration::from_secs(1));
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            assert!(!state.background.contains_key("idle-resident"));
+            assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn resident_idle_reaper_ignores_readopted_session(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-idle-resident-stale-timer-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, actor) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "idle-resident".into();
+        let meta = session.meta.clone();
+
+        state.update(cx, |state, cx| {
+            state.sessions.push(meta);
+            state.active = Some(session);
+            state.park_active(cx);
+            state.select_session("idle-resident", cx);
+        });
+        cx.executor()
+            .advance_clock(RESIDENT_IDLE_GRACE + Duration::from_secs(1));
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, "idle-resident");
+            assert!(matches!(active.runtime, Runtime::Live(_)));
+            assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn resident_idle_lru_evicts_only_oldest_provider(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-idle-resident-lru-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let base = Instant::now();
+        let mut actors = Vec::new();
+
+        state.update(cx, |state, cx| {
+            for index in 0..MAX_IDLE_RESIDENTS {
+                let (commands, actor) = async_channel::unbounded();
+                let mut resident = live_session(ProviderKind::ClaudeCode, commands);
+                resident.meta.id = format!("resident-{index}");
+                resident.idle_since =
+                    Some(base - Duration::from_secs((MAX_IDLE_RESIDENTS - index) as u64));
+                state.background.insert(resident.meta.id.clone(), resident);
+                actors.push(actor);
+            }
+
+            let (commands, newest_actor) = async_channel::unbounded();
+            let mut newest = live_session(ProviderKind::ClaudeCode, commands);
+            newest.meta.id = "resident-newest".into();
+            state.active = Some(newest);
+            state.park_active(cx);
+            actors.push(newest_actor);
+
+            assert!(!state.background.contains_key("resident-0"));
+            assert_eq!(state.background.len(), MAX_IDLE_RESIDENTS);
+        });
+
+        assert!(matches!(actors[0].try_recv(), Ok(SessionCommand::Shutdown)));
+        for actor in &actors[1..] {
+            assert!(actor.try_recv().is_err(), "non-LRU resident was shut down");
+        }
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
     fn settings_restart_waits_for_background_follow_up(cx: &mut gpui::TestAppContext) {
         let data = std::env::temp_dir().join(format!(
             "tcode-background-restart-test-{}",
@@ -11288,6 +11507,7 @@ mod tests {
             delivery_in_flight: None,
             turn_in_flight: false,
             background_task_count: 0,
+            idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
             diff_open: false,
@@ -12045,11 +12265,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    /// A parked session that runs out of work shuts down for real (no zombie
-    /// processes), and a parked session whose process dies is recorded and
-    /// forgotten.
+    /// A parked session that runs out of work becomes an idle resident instead
+    /// of immediately rebuilding its provider on the next selection.
     #[gpui::test]
-    fn parked_session_shuts_down_when_its_work_is_done(cx: &mut gpui::TestAppContext) {
+    fn drained_parked_session_stays_resident(cx: &mut gpui::TestAppContext) {
         let cwd = std::env::temp_dir().join(format!("tcode-parkend-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let data =
@@ -12075,7 +12294,7 @@ mod tests {
             state.start_draft("proj".into(), cwd.clone(), cx);
             assert!(state.turn_running_for(&id));
 
-            // The parked turn finishes with an empty queue → real shutdown.
+            // The parked turn finishes with an empty queue → resident grace.
             state.on_event(
                 &id,
                 AgentEvent::TurnCompleted {
@@ -12085,7 +12304,9 @@ mod tests {
                 },
                 cx,
             );
-            assert!(matches!(commands.try_recv(), Ok(SessionCommand::Shutdown)));
+            assert!(commands.try_recv().is_err(), "drain sent Shutdown");
+            assert!(state.background.contains_key(&id));
+            assert!(state.background[&id].idle_since.is_some());
             assert!(!state.turn_running_for(&id));
         });
 
