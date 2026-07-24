@@ -1094,6 +1094,9 @@ impl ChatView {
         let app_state = self.app_state.clone();
         Some(
             Popover::new(("rewind-menu", turn))
+                // T3 overlay contour (shadow_xl at the 14px overlay radius).
+                .rounded(crate::material::radius_overlay())
+                .shadow_xl()
                 .anchor(Anchor::TopRight)
                 .trigger(trigger)
                 .content(move |_state, _window, cx| {
@@ -1115,18 +1118,13 @@ impl ChatView {
                         RewindMode::Files,
                         tcode_i18n::tr!("chat.rewind_files").into_owned(),
                     ));
-                    let mut menu = crate::material::overlay_contour(
-                        v_flex()
-                            .w(px(240.))
-                            .p_1()
-                            .gap_0p5()
-                            .rounded(crate::material::radius_overlay())
-                            .overflow_hidden(),
-                        cx,
-                    )
-                    .id(("rewind-options", turn))
-                    .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("chat.rewind"));
+                    let mut menu = v_flex()
+                        .w(px(240.))
+                        .p_1()
+                        .gap_0p5()
+                        .id(("rewind-options", turn))
+                        .role(Role::Menu)
+                        .aria_label(tcode_i18n::tr!("chat.rewind"));
                     for (index, (mode, label)) in modes.into_iter().enumerate() {
                         let app_state = app_state.clone();
                         let popover = popover.clone();
@@ -2634,6 +2632,9 @@ impl ChatView {
         // context, so `cx.listener` is unavailable here).
         let chat = cx.entity();
         let chevron = Popover::new("git-menu")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("git-menu-trigger")
@@ -2686,12 +2687,7 @@ impl ChatView {
                     }
                     menu = menu.child(row);
                 }
-                crate::material::overlay_contour(
-                    menu.rounded(crate::material::radius_overlay())
-                        .overflow_hidden(),
-                    cx,
-                )
-                .into_any_element()
+                menu.into_any_element()
             });
 
         Some(
@@ -2758,6 +2754,9 @@ impl ChatView {
         let menu_cwd = cwd;
 
         let chevron = Popover::new("open-menu")
+            // T3 overlay contour (shadow_xl at the 14px overlay radius).
+            .rounded(crate::material::radius_overlay())
+            .shadow_xl()
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("open-menu-trigger")
@@ -2790,53 +2789,48 @@ impl ChatView {
                         .child(Icon::new(icon).xsmall().text_color(muted))
                         .child(label)
                 };
-                crate::material::overlay_contour(
-                    v_flex()
-                        .w(px(180.))
-                        .p_1()
-                        .gap_0p5()
-                        .rounded(crate::material::radius_overlay())
-                        .overflow_hidden()
-                        .child(
-                            menu_item(
-                                "open-zed",
-                                IconName::ExternalLink,
-                                tcode_i18n::tr!("chat.open_zed").into_owned().into(),
-                            )
-                            .on_click(move |_, window, cx| {
-                                open_in_zed(&zed_cwd, window, cx);
-                                p1.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
+                v_flex()
+                    .w(px(180.))
+                    .p_1()
+                    .gap_0p5()
+                    .child(
+                        menu_item(
+                            "open-zed",
+                            IconName::ExternalLink,
+                            tcode_i18n::tr!("chat.open_zed").into_owned().into(),
                         )
-                        .child(
-                            menu_item(
-                                "reveal-in-file-manager",
-                                IconName::FolderOpen,
-                                tcode_i18n::tr!("chat.reveal_in_file_manager")
-                                    .into_owned()
-                                    .into(),
-                            )
-                            .on_click(move |_, window, cx| {
-                                reveal_in_file_manager(&reveal_cwd, cx);
-                                p2.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
+                        .on_click(move |_, window, cx| {
+                            open_in_zed(&zed_cwd, window, cx);
+                            p1.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
+                    )
+                    .child(
+                        menu_item(
+                            "reveal-in-file-manager",
+                            IconName::FolderOpen,
+                            tcode_i18n::tr!("chat.reveal_in_file_manager")
+                                .into_owned()
+                                .into(),
                         )
-                        .child(
-                            menu_item(
-                                "copy-path",
-                                IconName::Copy,
-                                tcode_i18n::tr!("chat.copy_path").into_owned().into(),
-                            )
-                            .on_click(move |_, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    copy_cwd.display().to_string(),
-                                ));
-                                p3.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
-                        ),
-                    cx,
-                )
-                .into_any_element()
+                        .on_click(move |_, window, cx| {
+                            reveal_in_file_manager(&reveal_cwd, cx);
+                            p2.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
+                    )
+                    .child(
+                        menu_item(
+                            "copy-path",
+                            IconName::Copy,
+                            tcode_i18n::tr!("chat.copy_path").into_owned().into(),
+                        )
+                        .on_click(move |_, window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                copy_cwd.display().to_string(),
+                            ));
+                            p3.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
+                    )
+                    .into_any_element()
             });
 
         h_flex()
