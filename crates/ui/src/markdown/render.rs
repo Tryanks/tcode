@@ -1038,6 +1038,7 @@ fn render_scroll_table(
 ) -> AnyElement {
     const CELL_PAD_PX: f32 = 16.;
     const CELL_MIN_PX: f32 = 48.;
+    const COL_MIN_PX: f32 = 100.;
 
     let text_style = window.text_style();
     let font_size = text_style.font_size.to_pixels(window.rem_size());
@@ -1084,7 +1085,11 @@ fn render_scroll_table(
             *slot = slot.max(f32::from(width) + CELL_PAD_PX);
         }
     }
-    let total_width = table_track_width(&widths);
+    let minimums = widths
+        .iter()
+        .map(|width| width.min(COL_MIN_PX))
+        .collect::<Vec<_>>();
+    let total_width = table_track_width(&minimums);
     let row_count = table.children.len();
     let rows = table
         .children
@@ -1105,12 +1110,25 @@ fn render_scroll_table(
                 })
                 .children(row.children.iter().enumerate().map(|(ix, cell)| {
                     let align = table.column_align(ix);
+                    let width = widths.get(ix).copied().unwrap_or(CELL_MIN_PX);
+                    let minimum = minimums.get(ix).copied().unwrap_or(CELL_MIN_PX);
+                    let cell_content = div().min_w_0().child(render_paragraph(
+                        &cell.children,
+                        &format!("{}-{row_ix}-{ix}", options.path),
+                        view,
+                        style,
+                        cx,
+                    ));
+                    #[cfg(test)]
+                    let cell_content = cell_content.debug_selector(move || {
+                        format!("markdown-table-cell-content-{row_ix}-{ix}")
+                    });
                     let rendered_cell = div()
                         .id(("table-cell", ix))
-                        .flex_basis(px(widths.get(ix).copied().unwrap_or(CELL_MIN_PX)))
-                        .flex_grow(widths.get(ix).copied().unwrap_or(CELL_MIN_PX))
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
+                        .flex_basis(px(width))
+                        .flex_grow(width)
+                        .min_w(px(minimum))
+                        .whitespace_normal()
                         .flex()
                         .px_2()
                         .py_1()
@@ -1124,13 +1142,7 @@ fn render_scroll_table(
                             this.border_r_1().border_color(cx.theme().border)
                         })
                         .refine_style(&style.table_cell)
-                        .child(render_paragraph(
-                            &cell.children,
-                            &format!("{}-{row_ix}-{ix}", options.path),
-                            view,
-                            style,
-                            cx,
-                        ));
+                        .child(cell_content);
                     #[cfg(test)]
                     let rendered_cell = rendered_cell
                         .debug_selector(move || format!("markdown-table-cell-{row_ix}-{ix}"));
