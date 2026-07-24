@@ -475,7 +475,6 @@ composer:
   drop_queued: "Remove from queue"
   schedule_usage: "Usage: /schedule [-q] <10m|1h30m|18:30|2026-07-25 18:30> <message>"
   scheduled_toast: "Scheduled · sends at %{when}"
-  scheduled_count: "Scheduled (%{count})"
   cancel_scheduled: "Cancel scheduled message"
   send_scheduled_now: "Send now"
   scheduled_steer_badge: "Steer at fire time"

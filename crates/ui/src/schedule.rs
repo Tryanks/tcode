@@ -64,6 +64,18 @@ pub fn format_fire_time(fire_at: SystemTime) -> String {
     }
 }
 
+pub fn format_countdown(fire_at: SystemTime, now: SystemTime) -> String {
+    let seconds = fire_at.duration_since(now).unwrap_or_default().as_secs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours == 0 {
+        format!("{minutes}:{seconds:02}")
+    } else {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    }
+}
+
 fn take_token(value: &str) -> Option<(&str, &str)> {
     let value = value.trim_start();
     if value.is_empty() {
@@ -260,6 +272,42 @@ mod tests {
         assert_eq!(
             format_fire_time(other.into()),
             other.format("%m-%d %H:%M").to_string()
+        );
+    }
+
+    #[test]
+    fn countdown_clamps_zero_and_negative_remaining() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        assert_eq!(format_countdown(now, now), "0:00");
+        assert_eq!(format_countdown(now - Duration::from_secs(1), now), "0:00");
+    }
+
+    #[test]
+    fn countdown_formats_sub_minute() {
+        let now = SystemTime::UNIX_EPOCH;
+        assert_eq!(format_countdown(now + Duration::from_secs(42), now), "0:42");
+    }
+
+    #[test]
+    fn countdown_formats_minute_boundary() {
+        let now = SystemTime::UNIX_EPOCH;
+        assert_eq!(format_countdown(now + Duration::from_secs(60), now), "1:00");
+        assert_eq!(
+            format_countdown(now + Duration::from_secs(3_599), now),
+            "59:59"
+        );
+    }
+
+    #[test]
+    fn countdown_formats_hour_boundary() {
+        let now = SystemTime::UNIX_EPOCH;
+        assert_eq!(
+            format_countdown(now + Duration::from_secs(3_600), now),
+            "1:00:00"
+        );
+        assert_eq!(
+            format_countdown(now + Duration::from_secs(3_723), now),
+            "1:02:03"
         );
     }
 }

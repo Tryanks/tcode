@@ -469,7 +469,6 @@ composer:
   drop_queued: "从队列中移除"
   schedule_usage: "用法：/schedule [-q] <10m|1h30m|18:30|2026-07-25 18:30> <消息>"
   scheduled_toast: "已定时 · %{when} 发送"
-  scheduled_count: "定时消息 (%{count})"
   cancel_scheduled: "取消定时"
   send_scheduled_now: "立即发送"
   scheduled_steer_badge: "到点引导"
