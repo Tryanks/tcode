@@ -6,6 +6,15 @@ pub(super) enum LinkTarget {
     Local(PathBuf),
 }
 
+impl LinkTarget {
+    pub(super) fn tooltip_text(&self) -> String {
+        match self {
+            Self::Web(url) => url.clone(),
+            Self::Local(path) => path.display().to_string(),
+        }
+    }
+}
+
 pub(super) fn resolve_link(url: &str, base_dir: Option<&Path>) -> LinkTarget {
     if let Some(path) = url.strip_prefix("file://") {
         return LinkTarget::Local(PathBuf::from(path));
@@ -205,6 +214,44 @@ mod tests {
         assert_eq!(
             resolve_link("missing/file.rs:42", Some(temp.path())),
             LinkTarget::Web("missing/file.rs:42".to_string())
+        );
+    }
+
+    #[test]
+    fn web_tooltip_preserves_raw_url() {
+        let url = "https://example.com/docs?view=raw#section";
+        assert_eq!(resolve_link(url, None).tooltip_text(), url);
+    }
+
+    #[test]
+    fn local_tooltips_show_resolved_relative_absolute_and_file_paths() {
+        let temp = TempDir::new();
+        let relative = temp.create_file("src/main.rs");
+        let absolute = temp.create_file("README.md");
+        let file_url = format!("file://{}", absolute.display());
+
+        assert_eq!(
+            resolve_link("src/main.rs", Some(temp.path())).tooltip_text(),
+            relative.display().to_string()
+        );
+        assert_eq!(
+            resolve_link(absolute.to_str().expect("UTF-8 temp path"), None).tooltip_text(),
+            absolute.display().to_string()
+        );
+        assert_eq!(
+            resolve_link(&file_url, None).tooltip_text(),
+            absolute.display().to_string()
+        );
+    }
+
+    #[test]
+    fn line_suffixed_local_tooltip_shows_actual_opened_file() {
+        let temp = TempDir::new();
+        let path = temp.create_file("src/lib.rs");
+
+        assert_eq!(
+            resolve_link("src/lib.rs:42:7", Some(temp.path())).tooltip_text(),
+            path.display().to_string()
         );
     }
 }

@@ -9,11 +9,12 @@ use std::{
 
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
-    TextLayout, Window, point, px, quad,
+    HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    StyledText, TextLayout, Window, point, px, quad,
 };
 use gpui_component::ActiveTheme as _;
+use gpui_component::tooltip::Tooltip;
 
 use super::{
     link_target::{LinkTarget, resolve_link},
@@ -51,7 +52,8 @@ pub(super) struct Inline {
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     font_overrides: Vec<(Range<usize>, SharedString)>,
-    styled_text: StyledText,
+    interactive_text: InteractiveText,
+    text_layout: TextLayout,
     state: Arc<Mutex<InlineState>>,
 }
 
@@ -64,18 +66,22 @@ impl Inline {
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         font_overrides: Vec<(Range<usize>, SharedString)>,
     ) -> Self {
+        let id = id.into();
         let text = state
             .lock()
             .map(|state| state.text.clone())
             .unwrap_or_default();
+        let styled_text = StyledText::new(text.clone());
+        let text_layout = styled_text.layout().clone();
         Self {
-            id: id.into(),
+            id: id.clone(),
             view,
             text: text.clone(),
             links: Rc::new(links),
             highlights,
             font_overrides,
-            styled_text: StyledText::new(text),
+            interactive_text: InteractiveText::new(id, styled_text),
+            text_layout,
             state,
         }
     }
@@ -315,11 +321,21 @@ impl Element for Inline {
         if ix < self.text.len() {
             runs.push(text_style.to_run(self.text.len() - ix));
         }
-        self.styled_text = StyledText::new(self.text.clone())
+        let styled_text = StyledText::new(self.text.clone())
             .with_runs(runs)
             .with_font_family_overrides(self.font_overrides.clone());
+        self.text_layout = styled_text.layout().clone();
+        let links = self.links.clone();
+        let view = self.view.clone();
+        self.interactive_text = InteractiveText::new(self.id.clone(), styled_text).tooltip(
+            move |position, window, cx| {
+                let (_, link) = links.iter().find(|(range, _)| range.contains(&position))?;
+                let text = resolve_link(&link.url, view.read(cx).base_dir()).tooltip_text();
+                Some(Tooltip::new(text).build(window, cx))
+            },
+        );
         let (layout, _) = self
-            .styled_text
+            .interactive_text
             .request_layout(global_id, inspector_id, window, cx);
         (layout, ())
     }
@@ -333,9 +349,8 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        self.styled_text
-            .prepaint(id, inspector_id, bounds, &mut (), window, cx);
-        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        self.interactive_text
+            .prepaint(id, inspector_id, bounds, &mut (), window, cx)
     }
 
     fn paint(
@@ -349,9 +364,9 @@ impl Element for Inline {
         cx: &mut App,
     ) {
         let current_view = window.current_view();
-        let text_layout = self.styled_text.layout().clone();
-        self.styled_text
-            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+        let text_layout = self.text_layout.clone();
+        self.interactive_text
+            .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
 
         let (selectable, has_selection, selection) =
             self.layout_selection(&text_layout, bounds, window, cx);
