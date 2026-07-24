@@ -65,13 +65,21 @@ pub struct FileDiffInput<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisibleItem {
-    Gap { count: u32, expandable: bool },
+    Gap {
+        count: u32,
+        new_lines: Range<u32>,
+        expandable: bool,
+    },
     Row(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisibleSplitItem {
-    Gap { count: u32, expandable: bool },
+    Gap {
+        count: u32,
+        new_lines: Range<u32>,
+        expandable: bool,
+    },
     Pair(usize),
 }
 
@@ -777,6 +785,7 @@ pub fn visible_unified(file: &RenderedFile) -> Vec<VisibleItem> {
             if !emitted_gaps[gap_index] && anchor.is_some_and(|line| line >= gap.end) {
                 output.push(VisibleItem::Gap {
                     count: gap.end - gap.start,
+                    new_lines: gap.clone(),
                     expandable: file.expandable,
                 });
                 emitted_gaps[gap_index] = true;
@@ -790,6 +799,7 @@ pub fn visible_unified(file: &RenderedFile) -> Vec<VisibleItem> {
         if !emitted_gaps[gap_index] {
             output.push(VisibleItem::Gap {
                 count: gap.end - gap.start,
+                new_lines: gap.clone(),
                 expandable: file.expandable,
             });
         }
@@ -810,6 +820,7 @@ pub fn visible_split(file: &RenderedFile) -> Vec<VisibleSplitItem> {
             if !emitted_gaps[gap_index] && anchor.is_some_and(|line| line >= gap.end) {
                 output.push(VisibleSplitItem::Gap {
                     count: gap.end - gap.start,
+                    new_lines: gap.clone(),
                     expandable: file.expandable,
                 });
                 emitted_gaps[gap_index] = true;
@@ -829,6 +840,7 @@ pub fn visible_split(file: &RenderedFile) -> Vec<VisibleSplitItem> {
         if !emitted_gaps[gap_index] {
             output.push(VisibleSplitItem::Gap {
                 count: gap.end - gap.start,
+                new_lines: gap.clone(),
                 expandable: file.expandable,
             });
         }
@@ -1036,6 +1048,7 @@ mod tests {
                 VisibleItem::Row(0),
                 VisibleItem::Gap {
                     count: 1,
+                    new_lines: 2..3,
                     expandable: true
                 },
                 VisibleItem::Row(3)
@@ -1277,6 +1290,7 @@ mod tests {
             visible_unified(&file).first(),
             Some(&VisibleItem::Gap {
                 count: 9,
+                new_lines: 1..10,
                 expandable: false,
             })
         );
