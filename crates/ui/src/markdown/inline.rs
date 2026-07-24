@@ -16,9 +16,10 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 
 use super::{
+    link_target::{LinkTarget, resolve_link},
     nodes::LinkMark,
     selection::word_range_at,
-    state::{MarkdownMultiClickKind, MarkdownState},
+    state::{MarkdownMultiClickKind, MarkdownState, PendingLinkMenu},
     window_selection,
 };
 
@@ -84,11 +85,19 @@ impl Inline {
         links: &[(Range<usize>, LinkMark)],
         position: Point<Pixels>,
     ) -> Option<LinkMark> {
+        Self::link_and_range_for_position(layout, links, position).map(|(_, link)| link)
+    }
+
+    fn link_and_range_for_position(
+        layout: &TextLayout,
+        links: &[(Range<usize>, LinkMark)],
+        position: Point<Pixels>,
+    ) -> Option<(Range<usize>, LinkMark)> {
         let offset = layout.index_for_position(position).ok()?;
         links
             .iter()
             .find(|(range, _)| range.contains(&offset))
-            .map(|(_, link)| link.clone())
+            .map(|(range, link)| (range.clone(), link.clone()))
     }
 
     fn layout_selection(
@@ -426,6 +435,33 @@ impl Element for Inline {
             }
         });
 
+        window.on_mouse_event({
+            let hitbox = hitbox.clone();
+            let layout = text_layout.clone();
+            let links = self.links.clone();
+            let text = self.text.clone();
+            let view = self.view.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble()
+                    || event.button != MouseButton::Right
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let pending = Self::link_and_range_for_position(&layout, &links, event.position)
+                    .map(|(range, link)| {
+                        let target = resolve_link(&link.url, view.read(cx).base_dir());
+                        let text = text.get(range).map(SharedString::from).unwrap_or_default();
+                        PendingLinkMenu {
+                            target,
+                            text,
+                            raw_url: link.url,
+                        }
+                    });
+                view.update(cx, |state, cx| state.set_pending_context_link(pending, cx));
+            }
+        });
+
         if !has_selection {
             window.on_mouse_event({
                 let links = self.links.clone();
@@ -443,7 +479,10 @@ impl Element for Inline {
                     if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
                         window_selection::finish_drag(window, cx);
                         cx.stop_propagation();
-                        cx.open_url(&link.url);
+                        match resolve_link(&link.url, view.read(cx).base_dir()) {
+                            LinkTarget::Web(url) => cx.open_url(&url),
+                            LinkTarget::Local(path) => cx.open_with_system(&path),
+                        }
                     }
                 }
             });

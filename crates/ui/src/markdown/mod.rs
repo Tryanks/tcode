@@ -6,6 +6,7 @@
 
 mod inline;
 mod inline_flow;
+mod link_target;
 pub(crate) mod nodes;
 pub(crate) mod parse;
 mod render;

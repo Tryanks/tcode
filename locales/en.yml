@@ -65,6 +65,11 @@ chat:
   rewind_all_done: "Claude Code restored the code and conversation."
   rewind_conversation_done: "Claude Code restored the conversation. The original prompt is ready to edit."
   rewind_files_done: "Claude Code restored the tracked files."
+markdown:
+  link_open: "Open link"
+  link_copy_address: "Copy link address"
+  link_copy_text: "Copy link text"
+  path_copy_relative: "Copy relative path"
 sidebar:
   collapse: "Collapse sidebar"
   expand: "Expand sidebar"

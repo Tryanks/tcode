@@ -65,6 +65,11 @@ chat:
   rewind_all_done: "Claude Code 已恢复代码和对话。"
   rewind_conversation_done: "Claude Code 已恢复对话，原始提示已放回输入框，可编辑后重发。"
   rewind_files_done: "Claude Code 已恢复其跟踪的文件。"
+markdown:
+  link_open: "打开链接"
+  link_copy_address: "复制链接地址"
+  link_copy_text: "复制链接文字"
+  path_copy_relative: "复制相对路径"
 sidebar:
   collapse: "折叠侧边栏"
   expand: "展开侧边栏"

@@ -1,15 +1,50 @@
 //! Markdown view element adapted from gpui-component's Apache-2.0
 //! `text/text_view.rs` implementation.
 
-use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
-};
-use gpui_component::StyledExt as _;
-use gpui_component::input::{Copy, SelectAll};
+use std::path::{Path, PathBuf};
 
-use super::{state::MarkdownState, style::TextViewStyle, window_selection};
+use gpui::{
+    Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
+    Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _,
+};
+use gpui_component::{
+    StyledExt as _, WindowExt as _,
+    input::{Copy, SelectAll},
+    menu::ContextMenuExt as _,
+    notification::Notification,
+};
+use serde::Deserialize;
+
+use super::{
+    link_target::LinkTarget, state::MarkdownState, style::TextViewStyle, window_selection,
+};
+
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct OpenLink(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct CopyLinkAddress(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct CopyLinkText(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct OpenPath(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct OpenPathInZed(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct RevealPath(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct CopyPath(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_markdown_link, no_json)]
+struct CopyRelativePath(String);
 
 /// A GPUI element that renders an [`Entity<MarkdownState>`].
 #[derive(Clone)]
@@ -19,6 +54,7 @@ pub struct MarkdownView {
     text_view_style: TextViewStyle,
     style: StyleRefinement,
     selectable: Option<bool>,
+    base_dir: Option<PathBuf>,
 }
 
 impl MarkdownView {
@@ -30,6 +66,7 @@ impl MarkdownView {
             text_view_style: TextViewStyle::default(),
             style: StyleRefinement::default(),
             selectable: None,
+            base_dir: None,
         }
     }
 
@@ -42,6 +79,12 @@ impl MarkdownView {
     /// Set whether text participates in window-level selection.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = Some(selectable);
+        self
+    }
+
+    /// Set the directory used to resolve relative Markdown links.
+    pub fn base_dir(mut self, base_dir: impl Into<PathBuf>) -> Self {
+        self.base_dir = Some(base_dir.into());
         self
     }
 }
@@ -85,6 +128,9 @@ impl Element for MarkdownView {
             if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
             }
+            if let Some(base_dir) = &self.base_dir {
+                state.set_base_dir(Some(base_dir.clone()), cx);
+            }
         });
         let focus_handle = state.read(cx).focus_handle.clone();
         let copy_state = state.clone();
@@ -116,8 +162,83 @@ impl Element for MarkdownView {
                     state.update(cx, |state, cx| state.select_all(cx));
                 }
             })
+            .on_action(|action: &OpenLink, _, cx| cx.open_url(&action.0))
+            .on_action(|action: &CopyLinkAddress, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            })
+            .on_action(|action: &CopyLinkText, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            })
+            .on_action(|action: &OpenPath, _, cx| cx.open_with_system(Path::new(&action.0)))
+            .on_action(|action: &OpenPathInZed, window, cx| {
+                open_in_zed(Path::new(&action.0), window, cx)
+            })
+            .on_action(|action: &RevealPath, _, cx| cx.reveal_path(Path::new(&action.0)))
+            .on_action(|action: &CopyPath, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            })
+            .on_action(|action: &CopyRelativePath, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(action.0.clone()))
+            })
             .child(state.clone())
             .refine_style(&self.style)
+            .context_menu({
+                let state = state.clone();
+                move |menu, _window, cx| {
+                    let markdown = state.read(cx);
+                    let Some(pending) = markdown.pending_context_link.clone() else {
+                        return menu;
+                    };
+                    match pending.target {
+                        LinkTarget::Web(url) => menu
+                            .menu(
+                                tcode_i18n::tr!("markdown.link_open").into_owned(),
+                                Box::new(OpenLink(url)),
+                            )
+                            .separator()
+                            .menu(
+                                tcode_i18n::tr!("markdown.link_copy_address").into_owned(),
+                                Box::new(CopyLinkAddress(pending.raw_url.to_string())),
+                            )
+                            .menu(
+                                tcode_i18n::tr!("markdown.link_copy_text").into_owned(),
+                                Box::new(CopyLinkText(pending.text.to_string())),
+                            ),
+                        LinkTarget::Local(path) => {
+                            let path = path.to_string_lossy().into_owned();
+                            let relative_path = markdown.base_dir().map(|base_dir| {
+                                tcode_runtime::ui_facade::relativize_to_workspace(&path, base_dir)
+                            });
+                            menu.menu(
+                                tcode_i18n::tr!("chat.open").into_owned(),
+                                Box::new(OpenPath(path.clone())),
+                            )
+                            .menu(
+                                tcode_i18n::tr!("chat.open_zed").into_owned(),
+                                Box::new(OpenPathInZed(path.clone())),
+                            )
+                            .menu(
+                                tcode_i18n::tr!("chat.reveal_in_file_manager").into_owned(),
+                                Box::new(RevealPath(path.clone())),
+                            )
+                            .separator()
+                            .menu(
+                                tcode_i18n::tr!("chat.copy_path").into_owned(),
+                                Box::new(CopyPath(path)),
+                            )
+                            .when_some(
+                                relative_path,
+                                |menu, relative_path| {
+                                    menu.menu(
+                                        tcode_i18n::tr!("markdown.path_copy_relative").into_owned(),
+                                        Box::new(CopyRelativePath(relative_path)),
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
+            })
             .into_any_element();
         let layout_id = element.request_layout(window, cx);
         (layout_id, (state, element))
@@ -149,7 +270,31 @@ impl Element for MarkdownView {
         if request_layout.0.read(cx).is_selectable() {
             window_selection::register_selectable_text_view(&request_layout.0, hitbox, window, cx);
         }
+        // Capture-phase so this runs before the Inline children's bubble-phase
+        // handlers repopulate the pending link: a right-click on a non-link
+        // area must not resurface the previous link's context menu.
+        window.on_mouse_event({
+            let hitbox = hitbox.clone();
+            let state = request_layout.0.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if phase.capture()
+                    && event.button == MouseButton::Right
+                    && hitbox.is_hovered(window)
+                {
+                    state.update(cx, |state, cx| state.set_pending_context_link(None, cx));
+                }
+            }
+        });
         request_layout.1.paint(window, cx);
+    }
+}
+
+fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
+    if tcode_runtime::ui_facade::open_in_zed(path).is_err() {
+        window.push_notification(
+            Notification::error(tcode_i18n::tr!("errors.zed_cli_missing")),
+            cx,
+        );
     }
 }
 

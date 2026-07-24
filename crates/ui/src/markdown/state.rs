@@ -1,13 +1,24 @@
 //! Synchronous Markdown state, structurally adapted from gpui-component's
 //! Apache-2.0 `text/state.rs` implementation.
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
     App, Bounds, Context, EntityId, FocusHandle, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Pixels, Point, Render, Styled as _, Window, px,
+    ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Window, px,
 };
 use gpui_component::{ElementExt as _, v_flex};
 
-use super::{nodes::BlockNode, render, style::TextViewStyle, window_selection};
+use super::{
+    link_target::LinkTarget, nodes::BlockNode, render, style::TextViewStyle, window_selection,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingLinkMenu {
+    pub(super) target: LinkTarget,
+    pub(super) text: SharedString,
+    pub(super) raw_url: SharedString,
+}
 
 /// State backing a [`super::MarkdownView`].
 pub struct MarkdownState {
@@ -15,6 +26,8 @@ pub struct MarkdownState {
     pub(super) entity_id: EntityId,
     pub(super) bounds: Bounds<Pixels>,
     pub(super) selectable: bool,
+    pub(super) base_dir: Option<PathBuf>,
+    pub(super) pending_context_link: Option<PendingLinkMenu>,
     pub(super) style: TextViewStyle,
     pub(super) is_selecting: bool,
     multi_click_selection: Option<MarkdownMultiClickSelection>,
@@ -36,6 +49,8 @@ impl MarkdownState {
             entity_id: cx.entity_id(),
             bounds: Bounds::default(),
             selectable: false,
+            base_dir: None,
+            pending_context_link: None,
             style: TextViewStyle::default(),
             is_selecting: false,
             multi_click_selection: None,
@@ -110,6 +125,31 @@ impl MarkdownState {
             self.reset_selection();
             window_selection::clear_selection_for_view(self.entity_id, cx);
         }
+        cx.notify();
+    }
+
+    /// Set the directory used to resolve relative Markdown links.
+    pub fn set_base_dir(&mut self, base_dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.base_dir == base_dir {
+            return;
+        }
+        self.base_dir = base_dir;
+        cx.notify();
+    }
+
+    pub(super) fn base_dir(&self) -> Option<&Path> {
+        self.base_dir.as_deref()
+    }
+
+    pub(super) fn set_pending_context_link(
+        &mut self,
+        pending_context_link: Option<PendingLinkMenu>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_context_link == pending_context_link {
+            return;
+        }
+        self.pending_context_link = pending_context_link;
         cx.notify();
     }
 

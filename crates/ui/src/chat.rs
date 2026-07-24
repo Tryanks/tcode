@@ -903,6 +903,7 @@ impl ChatView {
                             index,
                             &entry.id,
                             text,
+                            cwd,
                             *context_len,
                             attachments,
                             *steering,
@@ -921,6 +922,7 @@ impl ChatView {
                     column = column.child(self.render_assistant(
                         &entry.id,
                         text,
+                        cwd,
                         pinned.1 == Some(entry.id.as_str()),
                         !streaming,
                         cx,
@@ -960,7 +962,8 @@ impl ChatView {
                 .filter(|plan| plan.turn == index)
                 .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
         } {
-            column = column.child(self.render_proposed_plan_card(index, &item_id, &markdown, cx));
+            column =
+                column.child(self.render_proposed_plan_card(index, &item_id, &markdown, cwd, cx));
         }
 
         // 4. CHANGED FILES card (aggregated across the turn's file changes).
@@ -1008,6 +1011,7 @@ impl ChatView {
                 index,
                 &entry.id,
                 text,
+                cwd,
                 *context_len,
                 attachments,
                 *steering,
@@ -1170,6 +1174,7 @@ impl ChatView {
         turn: usize,
         entry_id: &str,
         text: &str,
+        cwd: &Path,
         context_len: Option<usize>,
         attachments: &[String],
         steering: Option<SteeringStatus>,
@@ -1259,6 +1264,7 @@ impl ChatView {
             |md| {
                 MarkdownView::new(&md.state)
                     .selectable(true)
+                    .base_dir(cwd)
                     .into_any_element()
             },
         );
@@ -1471,6 +1477,7 @@ impl ChatView {
         &self,
         id: &str,
         text: &str,
+        cwd: &Path,
         pinned: bool,
         show_actions: bool,
         cx: &mut Context<Self>,
@@ -1480,6 +1487,7 @@ impl ChatView {
             (
                 MarkdownView::new(&md.state)
                     .selectable(true)
+                    .base_dir(cwd)
                     .into_any_element(),
                 md.synced.clone(),
             )
@@ -2218,6 +2226,7 @@ impl ChatView {
         turn: usize,
         item_id: &str,
         markdown: &str,
+        cwd: &Path,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = tcode_core::session::plan_title(markdown)
@@ -2233,7 +2242,7 @@ impl ChatView {
                 .w_full()
                 .text_size(px(15.))
                 .line_height(px(22.))
-                .child(MarkdownView::new(&md.state).selectable(true))
+                .child(MarkdownView::new(&md.state).selectable(true).base_dir(cwd))
                 .into_any_element()
         } else {
             div()
