@@ -582,6 +582,7 @@ plan:
   expand: "展开计划"
   collapse: "折叠计划"
   ready: "计划就绪"
+  dismiss: "忽略计划"
   refine_placeholder: "添加反馈以完善计划，或留空以直接实施。"
   refine: "完善"
   implement: "实施"

@@ -491,6 +491,9 @@ pub enum SteeringStatus {
 pub struct ProposedPlan {
     pub item_id: String,
     pub markdown: String,
+    /// Final plans are actionable; streamed deltas remain display-only until
+    /// their provider emits the matching `ProposedPlan`.
+    pub ready: bool,
     /// Index into [`Timeline::turns`] of the turn that produced it.
     pub turn: usize,
 }
@@ -514,6 +517,10 @@ pub struct Timeline {
     /// The latest proposed plan captured this session, if any. Survives replay
     /// (it is the accept/refine anchor) until a newer plan supersedes it.
     pub proposed_plan: Option<ProposedPlan>,
+    /// Plan decisions keyed by provider item id. The value is the conversation
+    /// turn at which the decision took effect, so a rewind can drop decisions
+    /// made in the discarded future.
+    plan_resolutions: HashMap<String, usize>,
     /// The latest structured plan/task list (`PlanUpdated`), if any.
     pub plan_steps: Vec<PlanStep>,
     /// The explanation string from the latest `PlanUpdated`, if any.
@@ -565,9 +572,18 @@ impl Timeline {
         self.turn_running = false;
         self.pending_approvals.clear();
         self.pending_user_input = None;
+        self.discard_unready_plan();
         for turn in &mut self.turns {
             turn.running = false;
         }
+    }
+
+    /// The latest finalized plan, unless that exact provider item has already
+    /// been implemented, handed off, or dismissed.
+    pub fn plan_ready(&self) -> Option<&ProposedPlan> {
+        self.proposed_plan
+            .as_ref()
+            .filter(|plan| plan.ready && !self.plan_resolutions.contains_key(plan.item_id.as_str()))
     }
 
     /// First user message in the timeline, if any (used for session titles).
@@ -608,6 +624,13 @@ impl Timeline {
                     ts,
                     turn,
                 }));
+            }
+            AgentEvent::PlanResolved {
+                item_id,
+                resolution: _,
+            } => {
+                let turn = self.resolution_turn();
+                self.plan_resolutions.insert(item_id.clone(), turn);
             }
             AgentEvent::SessionStarted {
                 provider_session_id,
@@ -704,6 +727,7 @@ impl Timeline {
                 // A finished turn can no longer be waiting on approvals or input.
                 self.pending_approvals.clear();
                 self.pending_user_input = None;
+                self.discard_unready_plan();
             }
             AgentEvent::ItemStarted(item) => {
                 self.upsert_item(ts, item);
@@ -809,6 +833,7 @@ impl Timeline {
                 self.turn_running = false;
                 self.pending_approvals.clear();
                 self.pending_user_input = None;
+                self.discard_unready_plan();
                 if let Some(turn) = self.current_turn {
                     self.turns[turn].running = false;
                 }
@@ -820,23 +845,34 @@ impl Timeline {
                 self.plan_explanation = explanation.clone();
             }
             AgentEvent::ProposedPlanDelta { item_id, text } => {
+                if self.plan_resolutions.contains_key(item_id) {
+                    return;
+                }
                 let turn = self.ensure_turn(ts);
                 match &mut self.proposed_plan {
-                    Some(plan) if plan.item_id == *item_id => plan.markdown.push_str(text),
+                    Some(plan) if plan.item_id == *item_id && !plan.ready => {
+                        plan.markdown.push_str(text);
+                    }
+                    Some(plan) if plan.item_id == *item_id => {}
                     _ => {
                         self.proposed_plan = Some(ProposedPlan {
                             item_id: item_id.clone(),
                             markdown: text.clone(),
+                            ready: false,
                             turn,
                         });
                     }
                 }
             }
             AgentEvent::ProposedPlan { item_id, markdown } => {
+                if self.plan_resolutions.contains_key(item_id) {
+                    return;
+                }
                 let turn = self.ensure_turn(ts);
                 self.proposed_plan = Some(ProposedPlan {
                     item_id: item_id.clone(),
                     markdown: markdown.clone(),
+                    ready: true,
                     turn,
                 });
             }
@@ -867,6 +903,22 @@ impl Timeline {
             let turn = &self.turns[turn];
             turn.end_ts.is_none() && turn.status.is_none()
         })
+    }
+
+    /// A resolution recorded between turns belongs to the next user turn. This
+    /// lets rewinding that implementation turn revive the earlier ready plan
+    /// without manufacturing a transcript entry for a mere decision.
+    fn resolution_turn(&self) -> usize {
+        match self.current_turn {
+            Some(turn) if self.turn_is_open() => turn,
+            _ => self.turns.len(),
+        }
+    }
+
+    fn discard_unready_plan(&mut self) {
+        if self.proposed_plan.as_ref().is_some_and(|plan| !plan.ready) {
+            self.proposed_plan = None;
+        }
     }
 
     /// Feed one item lifecycle transition to the open turn's clock, ignoring
@@ -932,6 +984,8 @@ impl Timeline {
             .proposed_plan
             .take()
             .filter(|plan| plan.turn < target_turn);
+        self.plan_resolutions
+            .retain(|_, resolution_turn| *resolution_turn < target_turn);
         self.plan_steps.clear();
         self.plan_explanation = None;
         self.usage = None;
@@ -2261,6 +2315,8 @@ mod tests {
         );
         let plan = timeline.proposed_plan.as_ref().unwrap();
         assert_eq!(plan.markdown, "# Plan\nstep one");
+        assert!(!plan.ready);
+        assert!(timeline.plan_ready().is_none());
         assert_eq!(plan.turn, 0);
 
         // The final ProposedPlan replaces the accumulated text.
@@ -2275,9 +2331,163 @@ mod tests {
             timeline.proposed_plan.as_ref().unwrap().markdown,
             "# Plan\nstep one\nstep two"
         );
+        assert!(timeline.proposed_plan.as_ref().unwrap().ready);
+        assert!(timeline.plan_ready().is_some());
         // The proposed plan survives replay's mark_idle (it is the accept anchor).
         timeline.mark_idle();
         assert!(timeline.proposed_plan.is_some());
+    }
+
+    #[test]
+    fn proposed_plan_delta_alone_is_not_ready() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
+            AgentEvent::ProposedPlanDelta {
+                item_id: "plan-1".into(),
+                text: "# Partial plan".into(),
+            },
+        ]);
+
+        assert!(timeline.proposed_plan.is_some());
+        assert!(timeline.plan_ready().is_none());
+    }
+
+    #[test]
+    fn unfinished_streaming_plan_is_discarded_when_turn_ends() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
+            AgentEvent::ProposedPlanDelta {
+                item_id: "plan-1".into(),
+                text: "# Truncated plan".into(),
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+        ]);
+
+        assert!(timeline.proposed_plan.is_none());
+    }
+
+    #[test]
+    fn implemented_plan_stays_resolved_after_event_log_replay() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::TurnStarted {
+                turn_id: "plan-turn".into(),
+            },
+            AgentEvent::ProposedPlan {
+                item_id: "plan-1".into(),
+                markdown: "# Final plan".into(),
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "plan-turn".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            AgentEvent::PlanResolved {
+                item_id: "plan-1".into(),
+                resolution: agent::PlanResolution::Implemented,
+            },
+        ]);
+
+        assert!(timeline.proposed_plan.is_some());
+        assert!(timeline.plan_ready().is_none());
+    }
+
+    #[test]
+    fn resolved_plan_ignores_late_or_duplicate_provider_events() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::ProposedPlan {
+                item_id: "plan-1".into(),
+                markdown: "# Final plan".into(),
+            },
+            AgentEvent::PlanResolved {
+                item_id: "plan-1".into(),
+                resolution: agent::PlanResolution::Dismissed,
+            },
+            AgentEvent::ProposedPlanDelta {
+                item_id: "plan-1".into(),
+                text: "\nlate delta".into(),
+            },
+            AgentEvent::ProposedPlan {
+                item_id: "plan-1".into(),
+                markdown: "# Duplicate plan".into(),
+            },
+        ]);
+
+        assert_eq!(
+            timeline.proposed_plan.as_ref().unwrap().markdown,
+            "# Final plan"
+        );
+        assert!(timeline.plan_ready().is_none());
+    }
+
+    #[test]
+    fn rewind_drops_resolutions_from_target_turn_but_keeps_earlier_ones() {
+        fn history(rewind_checkpoint: &str) -> Timeline {
+            Timeline::fold_events([
+                user_msg("plan-request", "make a plan"),
+                AgentEvent::TurnStarted {
+                    turn_id: "plan-turn".into(),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: "plan-turn".into(),
+                    checkpoint_id: "plan-checkpoint".into(),
+                },
+                AgentEvent::ProposedPlan {
+                    item_id: "plan-1".into(),
+                    markdown: "# Final plan".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "plan-turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                AgentEvent::PlanResolved {
+                    item_id: "plan-1".into(),
+                    resolution: agent::PlanResolution::Implemented,
+                },
+                user_msg("implementation-request", "implement it"),
+                AgentEvent::TurnStarted {
+                    turn_id: "implementation-turn".into(),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: "implementation-turn".into(),
+                    checkpoint_id: "implementation-checkpoint".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "implementation-turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                user_msg("later-request", "follow up"),
+                AgentEvent::TurnStarted {
+                    turn_id: "later-turn".into(),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: "later-turn".into(),
+                    checkpoint_id: "later-checkpoint".into(),
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "later-turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                AgentEvent::RewindCompleted {
+                    checkpoint_id: rewind_checkpoint.into(),
+                    mode: RewindMode::Conversation,
+                    prefill: None,
+                },
+            ])
+        }
+
+        assert!(history("implementation-checkpoint").plan_ready().is_some());
+        assert!(history("later-checkpoint").plan_ready().is_none());
     }
 
     #[test]

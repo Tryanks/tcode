@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, ChangeCompleteness, FileChange,
     InteractionMode, ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
-    ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions, ThreadItem,
-    TurnOptions, TurnStatus, list_models, start_session,
+    PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions,
+    ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
 };
 use gpui::{BackgroundExecutor, Context, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
@@ -388,6 +388,9 @@ pub struct QueuedMessage {
     /// user event continues to record only `text`.
     relay_transcript: Option<String>,
     pub attachments: Vec<Attachment>,
+    /// Per-turn settings captured with the user's send gesture. A later mode
+    /// toggle must affect later messages, not rewrite work already in the FIFO.
+    options: TurnOptions,
     /// Ultrathink was armed when this message was written. It is a per-send
     /// prompt-prefix mode, so it rides with the message rather than with the
     /// session, and is applied only to the text sent on the wire (the user
@@ -455,6 +458,7 @@ impl From<&str> for QueuedMessage {
             text: text.to_string(),
             relay_transcript: None,
             attachments: Vec::new(),
+            options: TurnOptions::default(),
             ultrathink: false,
             context_len: None,
             kind: QueuedMessageKind::User,
@@ -529,9 +533,6 @@ pub struct ActiveSession {
     /// per-send annotation, consumed by the next `push_queued`, and never
     /// persisted on the session.
     pending_context_len: Option<usize>,
-    /// Whether the current proposed plan has been accepted for implementation
-    /// (drives the composer back out of its plan-ready state).
-    plan_implemented: bool,
     /// Draft-only (Group C): run in the current checkout or a new dedicated
     /// worktree. Chosen in the checkout row before the first send; locked after.
     pub draft_workspace: WorkspaceMode,
@@ -739,6 +740,7 @@ impl ActiveSession {
         self.idle_since = None;
         let id = self.next_queue_id;
         self.next_queue_id += 1;
+        let options = self.turn_options();
         let ultrathink = std::mem::take(&mut self.pending_ultrathink);
         let context_len = std::mem::take(&mut self.pending_context_len);
         self.queue.push(QueuedMessage {
@@ -746,6 +748,7 @@ impl ActiveSession {
             text,
             relay_transcript: None,
             attachments,
+            options,
             ultrathink,
             context_len,
             kind: QueuedMessageKind::User,
@@ -770,11 +773,13 @@ impl ActiveSession {
         }
         let id = self.next_queue_id;
         self.next_queue_id += 1;
+        let options = self.turn_options();
         self.queue.push(QueuedMessage {
             id,
             text,
             relay_transcript: None,
             attachments: Vec::new(),
+            options,
             ultrathink: false,
             context_len: None,
             kind: QueuedMessageKind::OrchestrateCallback,
@@ -800,12 +805,11 @@ impl ActiveSession {
         let Some(send) = self.queue.first().cloned() else {
             return Ok(false);
         };
-        let options = Some(self.turn_options());
         commands
             .try_send(SessionCommand::SendTurn {
                 delivery_id: send.id,
                 text: send.wire_text(),
-                options,
+                options: Some(send.options),
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
@@ -4867,7 +4871,6 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -4921,7 +4924,6 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -5273,7 +5275,6 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -6151,30 +6152,67 @@ impl AppState {
     // -- proposed-plan flow -------------------------------------------------
 
     /// The active session's captured proposed plan (markdown), if it is in the
-    /// composer's "plan ready" state (present and not yet implemented).
+    /// composer's finalized, unresolved "plan ready" state.
     pub fn plan_ready_markdown(&self) -> Option<String> {
-        let active = self.active.as_ref()?;
-        if active.plan_implemented {
-            return None;
-        }
-        active
+        self.active
+            .as_ref()?
             .timeline
-            .proposed_plan
-            .as_ref()
-            .map(|p| p.markdown.clone())
+            .plan_ready()
+            .map(|plan| plan.markdown.clone())
     }
 
     /// Accept the proposed plan: send the verbatim implementation prompt, switch
-    /// to Build mode, and clear the composer's plan-ready state.
+    /// to Build mode, and persist the decision before dispatching the turn.
     pub fn implement_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(markdown) = self.plan_ready_markdown() else {
+        // A pending provider handoff makes `send_turn` defer. Validate it before
+        // resolving the plan or changing mode, or the implementation prompt can
+        // vanish while the UI claims the plan was accepted.
+        if self.relay_confirmation().is_some() {
+            return;
+        }
+        let Some((session_id, item_id, markdown)) = self.active.as_ref().and_then(|active| {
+            active.timeline.plan_ready().map(|plan| {
+                (
+                    active.meta.id.clone(),
+                    plan.item_id.clone(),
+                    plan.markdown.clone(),
+                )
+            })
+        }) else {
             return;
         };
-        if let Some(active) = self.active.as_mut() {
-            active.plan_implemented = true;
-        }
+        self.record_event(
+            &session_id,
+            &AgentEvent::PlanResolved {
+                item_id,
+                resolution: PlanResolution::Implemented,
+            },
+            cx,
+        );
         self.set_interaction_mode(InteractionMode::Build, cx);
         self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
+    }
+
+    /// Leave the plan captured in history while removing its actionable
+    /// composer state.
+    pub fn dismiss_plan(&mut self, cx: &mut Context<Self>) {
+        let Some((session_id, item_id)) = self.active.as_ref().and_then(|active| {
+            active
+                .timeline
+                .plan_ready()
+                .map(|plan| (active.meta.id.clone(), plan.item_id.clone()))
+        }) else {
+            return;
+        };
+        self.record_event(
+            &session_id,
+            &AgentEvent::PlanResolved {
+                item_id,
+                resolution: PlanResolution::Dismissed,
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     /// Accept the proposed plan in a fresh thread in the same project (same
@@ -6183,9 +6221,11 @@ impl AppState {
         let Some(active) = self.active.as_ref() else {
             return;
         };
-        let Some(plan) = active.timeline.proposed_plan.as_ref() else {
+        let Some(plan) = active.timeline.plan_ready() else {
             return;
         };
+        let source_session_id = active.meta.id.clone();
+        let plan_item_id = plan.item_id.clone();
         let markdown = plan.markdown.clone();
         let provider = active.meta.provider;
         let cwd = active.meta.cwd.clone();
@@ -6194,6 +6234,7 @@ impl AppState {
         let approval_mode = active.meta.approval_mode;
         let project_id = active.meta.project_id.clone();
         let acp_agent_id = active.meta.acp_agent_id.clone();
+        let profile_id = active.meta.profile_id.clone();
 
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.title = title;
@@ -6202,6 +6243,18 @@ impl AppState {
         meta.interaction_mode = InteractionMode::Build;
         meta.project_id = project_id;
         meta.acp_agent_id = acp_agent_id;
+        meta.profile_id = profile_id;
+        let destination_session_id = meta.id.clone();
+        self.record_event(
+            &source_session_id,
+            &AgentEvent::PlanResolved {
+                item_id: plan_item_id,
+                resolution: PlanResolution::HandedOff {
+                    session_id: destination_session_id,
+                },
+            },
+            cx,
+        );
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),
@@ -6228,7 +6281,6 @@ impl AppState {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -7023,11 +7075,7 @@ impl AppState {
             selections,
         } = &event
         {
-            if let Some(active) = self
-                .active
-                .as_mut()
-                .filter(|active| active.meta.id == session_id)
-            {
+            let apply = |active: &mut ActiveSession| {
                 active.provider_options = descriptors.clone();
                 for selection in selections {
                     active
@@ -7036,12 +7084,43 @@ impl AppState {
                         .retain(|s| s.id != selection.id);
                     active.meta.option_selections.push(selection.clone());
                 }
-                active.live_option_selections = active.meta.option_selections.clone();
-                let meta = active.meta.clone();
-                if meta.acp_agent_id.is_some() {
-                    self.persist_meta(&meta, cx);
+                if active.meta.provider == ProviderKind::Acp {
+                    let plan_mode = descriptors.iter().find_map(|descriptor| match descriptor {
+                        OptionDescriptor::Select { id, options, .. } if id == "acp:mode" => options
+                            .iter()
+                            .find(|option| option.value.eq_ignore_ascii_case("plan"))
+                            .map(|option| option.value.as_str()),
+                        _ => None,
+                    });
+                    let current_mode = selections
+                        .iter()
+                        .find(|selection| selection.id == "acp:mode")
+                        .and_then(|selection| selection.value.as_str());
+                    active.meta.interaction_mode = match (plan_mode, current_mode) {
+                        (Some(plan), Some(current)) if current.eq_ignore_ascii_case(plan) => {
+                            InteractionMode::Plan
+                        }
+                        _ => InteractionMode::Build,
+                    };
                 }
+                active.live_option_selections = active.meta.option_selections.clone();
+            };
+            let meta = if let Some(active) = self
+                .active
+                .as_mut()
+                .filter(|active| active.meta.id == session_id)
+            {
+                apply(active);
                 cx.notify();
+                Some(active.meta.clone())
+            } else if let Some(parked) = self.background.get_mut(session_id) {
+                apply(parked);
+                Some(parked.meta.clone())
+            } else {
+                None
+            };
+            if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
+                self.persist_meta(&meta, cx);
             }
             return;
         }
@@ -7154,9 +7233,9 @@ impl AppState {
             _ => {}
         }
 
-        // Plan surfaces: a fresh proposed plan re-arms the composer's plan-ready
-        // state; a new turn clears the per-turn auto-open suppression; the first
-        // structured plan update of a turn may auto-open the task panel.
+        // Plan surfaces: a new turn clears the per-turn auto-open suppression;
+        // the first structured plan update of a turn may auto-open the task
+        // panel. Proposed-plan readiness is entirely folded by Timeline.
         let auto_open = self.settings.auto_open_task_panel;
         if let Some(active) = self
             .active
@@ -7165,9 +7244,6 @@ impl AppState {
         {
             match &event {
                 AgentEvent::TurnStarted { .. } => active.auto_open_suppressed = false,
-                AgentEvent::ProposedPlan { .. } | AgentEvent::ProposedPlanDelta { .. } => {
-                    active.plan_implemented = false;
-                }
                 AgentEvent::PlanUpdated { .. } => {
                     let already_showing = active.diff_open && active.right_tab == RightTab::Plan;
                     if auto_open && !active.auto_open_suppressed && !already_showing {
@@ -10588,7 +10664,6 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -10639,7 +10714,6 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -10683,7 +10757,6 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -10734,6 +10807,105 @@ mod tests {
         assert!(active.queue.is_empty());
     }
 
+    #[gpui::test]
+    fn implement_plan_waits_for_pending_relay_without_mutating_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-plan-relay-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "plan-relay".into();
+            active.meta.interaction_mode = InteractionMode::Plan;
+            active.pending_relay = Some(PendingRelay {
+                from_provider: ProviderKind::ClaudeCode,
+                from_model: Some("opus".into()),
+            });
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "user-1".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "make a plan".into(),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }),
+            );
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::ProposedPlan {
+                    item_id: "plan-1".into(),
+                    markdown: "# Plan".into(),
+                },
+            );
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::TurnCompleted {
+                    turn_id: "plan-turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            );
+            state.active = Some(active);
+
+            state.implement_plan(cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.interaction_mode, InteractionMode::Plan);
+            assert!(state.plan_ready_markdown().is_some());
+            assert!(receiver.try_recv().is_err());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn queued_turns_keep_the_interaction_mode_selected_at_submit_time() {
+        let (commands, receiver) = async_channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.turn_in_flight = true;
+        active.meta.interaction_mode = InteractionMode::Plan;
+        active.push_queued("plan turn".into(), Vec::new());
+        active.meta.interaction_mode = InteractionMode::Build;
+        active.turn_in_flight = false;
+
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        let first_delivery = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id,
+                options: Some(options),
+                ..
+            }) => {
+                assert_eq!(options.interaction_mode, Some(InteractionMode::Plan));
+                delivery_id
+            }
+            other => panic!("expected queued Plan turn, got {other:?}"),
+        };
+        active.accept_turn_delivery(first_delivery).unwrap();
+        active.turn_in_flight = false;
+
+        active.meta.interaction_mode = InteractionMode::Build;
+        active.push_queued("build turn".into(), Vec::new());
+        active.meta.interaction_mode = InteractionMode::Plan;
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn {
+                options: Some(TurnOptions {
+                    interaction_mode: Some(InteractionMode::Build),
+                    ..
+                }),
+                ..
+            })
+        ));
+    }
+
     /// A live session with `provider`, nothing queued, no turn in flight.
     fn live_session(
         provider: ProviderKind,
@@ -10753,7 +10925,6 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -11101,7 +11272,6 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -11563,7 +11733,6 @@ mod tests {
             live_option_selections: Vec::new(),
             pending_ultrathink: false,
             pending_context_len: None,
-            plan_implemented: false,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: vec!["do it".into()],

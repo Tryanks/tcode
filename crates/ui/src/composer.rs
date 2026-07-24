@@ -719,6 +719,21 @@ impl Composer {
         cx.notify();
     }
 
+    /// Whether `submit` has anything to send. Keep the primary-action choice on
+    /// this same predicate so attachment/context-only drafts never masquerade
+    /// as an empty plan that Enter would implement.
+    fn has_sendable_content(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().trim().is_empty()
+            || !self.pending_images.is_empty()
+            || self
+                .app_state
+                .read(cx)
+                .active
+                .as_ref()
+                .is_some_and(|active| !active.terminal_workspace.contexts.is_empty())
+            || !self.app_state.read(cx).review_comments().is_empty()
+    }
+
     /// Send the composer's contents. `steer` is set by the ⌘/Ctrl+Enter gesture:
     /// inject into the running turn rather than queue behind it. It is a no-op
     /// when no turn is running (`AppState::steer` just sends), and degrades to
@@ -738,7 +753,6 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        let has_images = !self.pending_images.is_empty();
         let terminal_contexts = self
             .app_state
             .read(cx)
@@ -747,11 +761,7 @@ impl Composer {
             .map(|active| active.terminal_workspace.contexts.clone())
             .unwrap_or_default();
         let review_comments = self.app_state.read(cx).review_comments().to_vec();
-        if text.is_empty()
-            && !has_images
-            && terminal_contexts.is_empty()
-            && review_comments.is_empty()
-        {
+        if !self.has_sendable_content(cx) {
             return;
         }
         if self.app_state.read(cx).active.is_none() {
@@ -1698,6 +1708,7 @@ impl Composer {
         let muted = cx.theme().muted_foreground;
         let mode = self.app_state.read(cx).active_approval_mode();
         let interaction = self.app_state.read(cx).active_interaction_mode();
+        let app_entity = self.app_state.clone();
 
         let trigger = Button::new("overflow-controls")
             .ghost()
@@ -1711,7 +1722,9 @@ impl Composer {
             .shadow_xl()
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
-            .content(move |_, _, cx| render_overflow_pane(usage, mode, interaction, cx))
+            .content(move |_, _, cx| {
+                render_overflow_pane(usage, mode, interaction, &app_entity, &cx.entity(), cx)
+            })
             .into_any_element()
     }
 
@@ -2144,8 +2157,7 @@ impl Composer {
             return self.render_send_or_stop(true, cx);
         }
         if self.app_state.read(cx).plan_ready_markdown().is_some() {
-            let has_text = !self.input.read(cx).value().trim().is_empty();
-            if has_text {
+            if self.has_sendable_content(cx) && self.refines_the_plan(cx) {
                 // Refine: send the feedback and stay in Plan mode (a normal send
                 // while the session is in Plan mode continues planning).
                 return Button::new("plan-refine")
@@ -2157,9 +2169,18 @@ impl Composer {
                     }))
                     .into_any_element();
             }
-            return self.render_implement_split(cx);
+            if !self.has_sendable_content(cx) {
+                return self.render_implement_split(cx);
+            }
         }
         self.render_send_or_stop(turn_running, cx)
+    }
+
+    /// Whether a send right now continues planning rather than starting work.
+    /// The plan stays implementable from either mode, but only Plan mode turns
+    /// typed feedback into refinement.
+    fn refines_the_plan(&self, cx: &App) -> bool {
+        self.app_state.read(cx).active_interaction_mode() == InteractionMode::Plan
     }
 
     /// The Implement split-button: primary "Implement" + a chevron menu with
@@ -2256,6 +2277,7 @@ impl Composer {
     /// The "Plan Ready" header strip shown atop the composer while a proposed
     /// plan awaits a decision (S1 §5).
     fn render_plan_ready_header(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
+        let app_state = self.app_state.clone();
         h_flex()
             .w_full()
             .px_4()
@@ -2284,6 +2306,16 @@ impl Composer {
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     .child(title),
+            )
+            .child(
+                Button::new("dismiss-plan")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Close)
+                    .tooltip(tcode_i18n::tr!("plan.dismiss"))
+                    .on_click(move |_, _, cx| {
+                        app_state.update(cx, |state, cx| state.dismiss_plan(cx));
+                    }),
             )
             .into_any_element()
     }
@@ -3358,7 +3390,9 @@ impl Render for Composer {
                     .unwrap_or_else(|| tcode_i18n::tr!("plan.proposed_plan").into_owned())
             })
         };
-        let desired_placeholder = if plan_ready_title.is_some() {
+        // Only Plan mode refines: in Build a typed message is an ordinary build
+        // turn, so promising refinement there would misdescribe what Enter does.
+        let desired_placeholder = if plan_ready_title.is_some() && self.refines_the_plan(cx) {
             tcode_i18n::tr!("plan.refine_placeholder").into_owned()
         } else {
             tcode_i18n::tr!("composer.placeholder").into_owned()
@@ -4195,6 +4229,8 @@ fn render_overflow_pane(
     usage: Option<TokenUsage>,
     mode: ApprovalMode,
     interaction: InteractionMode,
+    app_entity: &Entity<AppState>,
+    popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -4218,16 +4254,48 @@ fn render_overflow_pane(
         InteractionMode::Build => ("icons/box.svg", tcode_i18n::tr!("composer.build")),
         InteractionMode::Plan => ("icons/ruler.svg", tcode_i18n::tr!("composer.plan")),
     };
+    let next_interaction = match interaction {
+        InteractionMode::Build => InteractionMode::Plan,
+        InteractionMode::Plan => InteractionMode::Build,
+    };
+    let interaction_app = app_entity.clone();
+    let interaction_popover = popover.clone();
     v_flex()
         .w(px(220.))
         .p_1()
         .gap_0p5()
         .child(item(Icon::new(IconName::Info), context_label(usage)))
+        // The permission row stays display-only: its full-width counterpart is
+        // an explicit picker, and cycling here would let two stray clicks
+        // escalate a Supervised session all the way to Full access.
         .child(item(Icon::empty().path(mode_icon), mode_label))
-        .child(item(
-            Icon::empty().path(interaction_icon),
-            interaction_label.into_owned(),
-        ))
+        .child(
+            h_flex()
+                .id("overflow-interaction")
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .gap_1p5()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .text_color(muted)
+                .hover(|style| style.bg(cx.theme().muted))
+                .child(
+                    Icon::empty()
+                        .path(interaction_icon)
+                        .small()
+                        .text_color(muted),
+                )
+                .child(interaction_label)
+                .on_click(move |_, window, cx| {
+                    interaction_app.update(cx, |state, cx| {
+                        state.set_interaction_mode(next_interaction, cx)
+                    });
+                    interaction_popover.update(cx, |state, cx| state.dismiss(window, cx));
+                }),
+        )
         .into_any_element()
 }
 

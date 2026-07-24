@@ -63,6 +63,37 @@ pub(crate) fn permission_mode_flag(mode: ApprovalMode) -> &'static str {
     }
 }
 
+/// Permission mode placed on the internal launch argv. Persisted Plan sessions
+/// must enter the CLI's plan sandbox before their first message, without
+/// depending on an unchecked live control request.
+fn initial_permission_mode(
+    approval_mode: ApprovalMode,
+    interaction_mode: InteractionMode,
+) -> &'static str {
+    match interaction_mode {
+        InteractionMode::Plan => "plan",
+        InteractionMode::Build => permission_mode_flag(approval_mode),
+    }
+}
+
+/// Resolve the last permission-mode value on the effective argv. Provider
+/// launch arguments intentionally follow internal arguments and may use either
+/// CLI spelling, so the mode tracker must honor both.
+fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
+    let mut effective = internal.to_owned();
+    let mut args = extra_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--permission-mode" {
+            if let Some(value) = args.next() {
+                effective.clone_from(value);
+            }
+        } else if let Some(value) = arg.strip_prefix("--permission-mode=") {
+            effective = value.to_owned();
+        }
+    }
+    effective
+}
+
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let native_rewind = version_ge(
@@ -78,6 +109,12 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // (effort/context/fast/thinking are launch-time only; mid-session changes
     // ride the resume-restart machinery).
     let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
+    let base_permission_mode = permission_mode_flag(opts.approval_mode);
+    let launch_permission_mode = initial_permission_mode(opts.approval_mode, opts.interaction_mode);
+    // Launch arguments are deliberately appended last, so the tracker must
+    // follow their effective value rather than the internal flag they replace.
+    let applied_permission_mode =
+        effective_permission_mode(launch_permission_mode, &opts.extra_args);
 
     let mut cmd = crate::process::async_command(&binary);
     cmd.arg("--print")
@@ -90,7 +127,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .arg("--permission-prompt-tool")
         .arg("stdio")
         .arg("--permission-mode")
-        .arg(permission_mode_flag(opts.approval_mode));
+        .arg(launch_permission_mode);
 
     if native_rewind {
         // User-message UUIDs are Claude's native checkpoint ids. SDK file
@@ -127,12 +164,13 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         cmd.arg(arg);
     }
     log::debug!(
-        "claude spawn args: model={:?} effort={:?} settings={:?} ultrathink={} permission-mode={}",
+        "claude spawn args: model={:?} effort={:?} settings={:?} ultrathink={} permission-mode={} effective-permission-mode={}",
         launch.model_id,
         launch.effort,
         launch.settings_json,
         launch.ultrathink,
-        permission_mode_flag(opts.approval_mode),
+        launch_permission_mode,
+        applied_permission_mode,
     );
 
     cmd.current_dir(&opts.cwd)
@@ -219,7 +257,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let session_config = SessionConfig {
         ultrathink: launch.ultrathink,
         interaction_mode: opts.interaction_mode,
-        base_permission_mode: permission_mode_flag(opts.approval_mode),
+        base_permission_mode,
+        applied_permission_mode,
         approval_mode: opts.approval_mode,
         native_rewind,
         claude_dir: opts
@@ -351,6 +390,7 @@ struct SessionConfig {
     ultrathink: bool,
     interaction_mode: InteractionMode,
     base_permission_mode: &'static str,
+    applied_permission_mode: String,
     approval_mode: ApprovalMode,
     native_rewind: bool,
     claude_dir: Option<PathBuf>,
@@ -633,7 +673,6 @@ async fn handle_command(
                         .await;
                     return Flow::Break("provider stdin write failed");
                 }
-                mapper.applied_permission_mode = desired.to_string();
             }
 
             // `ultrathink` is a prompt-prefix mode, not a `--effort` value.
@@ -707,20 +746,25 @@ async fn handle_command(
         SessionCommand::SetApprovalMode(mode) => {
             // The CLI's control protocol switches permission mode live via a
             // `set_permission_mode` control_request (same shape the Agent SDK
-            // sends). On success we emit nothing — the UI updated optimistically;
-            // only a stdin write failure warrants a Warning.
+            // sends). Plan mode is a stricter overlay: approval changes update
+            // only the Build mode to restore later.
             let flag = permission_mode_flag(mode);
             mapper.base_permission_mode = flag;
             mapper.approval_mode = mode;
-            let msg = mapper.set_permission_mode_request(mode);
-            if write_line(stdin, &msg).await.is_err() {
-                let _ = event_tx
-                    .send(AgentEvent::Warning {
-                        message: format!("claude: failed to switch permission mode to {mode:?}"),
-                    })
-                    .await;
-            } else {
-                mapper.applied_permission_mode = flag.to_string();
+            if mapper.interaction_mode == InteractionMode::Build {
+                let msg = mapper.set_permission_mode_request(mode);
+                if write_line(stdin, &msg).await.is_err() {
+                    if let Some(request_id) = msg.get("request_id").and_then(Value::as_str) {
+                        mapper.pending_permission_modes.remove(request_id);
+                    }
+                    let _ = event_tx
+                        .send(AgentEvent::Warning {
+                            message: format!(
+                                "claude: failed to write permission-mode switch for {mode:?}"
+                            ),
+                        })
+                        .await;
+                }
             }
             Flow::Continue
         }
@@ -975,8 +1019,11 @@ pub(crate) struct Mapper {
     base_permission_mode: &'static str,
     /// Permission mode currently applied on the CLI, so we only switch on change.
     applied_permission_mode: String,
-    /// Dedupe keys for captured `ExitPlanMode` plans (tool id, else plan text).
-    exit_plan_captures: HashSet<String>,
+    /// Live permission-mode requests awaiting Claude's correlated response.
+    /// A successful stdin write is not proof that the CLI applied the mode.
+    pending_permission_modes: HashMap<String, String>,
+    /// Whether an `ExitPlanMode` plan has already been captured this turn.
+    exit_plan_captured: bool,
     /// Control responses to write back (e.g. the auto-deny for `ExitPlanMode`).
     outgoing: Vec<Value>,
     /// Cumulative tokens processed across every completed turn this session
@@ -1021,7 +1068,8 @@ impl Mapper {
             interaction_mode: InteractionMode::Build,
             base_permission_mode: "default",
             applied_permission_mode: "default".to_string(),
-            exit_plan_captures: HashSet::new(),
+            pending_permission_modes: HashMap::new(),
+            exit_plan_captured: false,
             outgoing: Vec::new(),
             cumulative_processed: 0,
             pending_steers: VecDeque::new(),
@@ -1037,7 +1085,7 @@ impl Mapper {
         self.ultrathink = config.ultrathink;
         self.interaction_mode = config.interaction_mode;
         self.base_permission_mode = config.base_permission_mode;
-        self.applied_permission_mode = config.base_permission_mode.to_string();
+        self.applied_permission_mode = config.applied_permission_mode;
         self.approval_mode = config.approval_mode;
         self.native_rewind = config.native_rewind;
     }
@@ -1057,6 +1105,7 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
+        self.exit_plan_captured = false;
         id
     }
 
@@ -1066,6 +1115,7 @@ impl Mapper {
         self.turn_counter += 1;
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
+        self.exit_plan_captured = false;
         id
     }
 
@@ -1147,9 +1197,12 @@ impl Mapper {
 
     /// `set_permission_mode` with a raw wire mode string (e.g. `"plan"`).
     fn set_permission_mode_request_str(&mut self, mode: &str) -> Value {
+        let request_id = self.next_control_id();
+        self.pending_permission_modes
+            .insert(request_id.clone(), mode.to_owned());
         json!({
             "type": "control_request",
-            "request_id": self.next_control_id(),
+            "request_id": request_id,
             "request": {
                 "subtype": "set_permission_mode",
                 "mode": mode,
@@ -1260,25 +1313,22 @@ impl Mapper {
             .collect()
     }
 
-    /// Emit a [`AgentEvent::ProposedPlan`] for a captured plan, deduping across
-    /// the assistant-block and permission-callback capture paths (T3 captures
-    /// from both). Returns `None` if this plan was already captured.
+    /// Emit at most one [`AgentEvent::ProposedPlan`] per turn. Claude can retry
+    /// `ExitPlanMode` after tcode's auto-deny with a fresh tool id; deduping by
+    /// id therefore re-arms the plan UI for the same turn.
     fn capture_proposed_plan(
         &mut self,
         tool_use_id: Option<&str>,
         markdown: String,
     ) -> Option<AgentEvent> {
-        let key = match tool_use_id.filter(|id| !id.is_empty()) {
-            Some(id) => format!("tool:{id}"),
-            None => format!("plan:{markdown}"),
-        };
-        if !self.exit_plan_captures.insert(key) {
+        if self.exit_plan_captured {
             return None;
         }
+        self.exit_plan_captured = true;
         let item_id = tool_use_id
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("plan-{}", self.exit_plan_captures.len()));
+            .unwrap_or_else(|| format!("plan-{}", self.turn_counter));
         Some(AgentEvent::ProposedPlan { item_id, markdown })
     }
 
@@ -1933,6 +1983,19 @@ impl Mapper {
         let Some(request_id) = response.get("request_id").and_then(Value::as_str) else {
             return Vec::new();
         };
+        if let Some(mode) = self.pending_permission_modes.remove(request_id) {
+            if response.get("subtype").and_then(Value::as_str) == Some("success") {
+                self.applied_permission_mode = mode;
+                return Vec::new();
+            }
+            let error = response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Claude Code rejected the permission-mode request");
+            return vec![AgentEvent::Warning {
+                message: format!("claude: failed to switch permission mode: {error}"),
+            }];
+        }
         let Some(pending) = self.pending_rewinds.remove(request_id) else {
             return Vec::new();
         };
@@ -3288,6 +3351,110 @@ mod tests {
     }
 
     #[test]
+    fn plan_session_launches_with_plan_permission_mode() {
+        let launch_mode = initial_permission_mode(ApprovalMode::Supervised, InteractionMode::Plan);
+        assert_eq!(launch_mode, "plan");
+
+        let mut m = Mapper::new();
+        m.configure(SessionConfig {
+            ultrathink: false,
+            interaction_mode: InteractionMode::Plan,
+            base_permission_mode: "default",
+            applied_permission_mode: launch_mode.into(),
+            approval_mode: ApprovalMode::Supervised,
+            native_rewind: false,
+            claude_dir: None,
+        });
+
+        assert_eq!(m.applied_permission_mode, "plan");
+    }
+
+    #[test]
+    fn set_approval_mode_while_in_plan_keeps_plan_permission_mode() {
+        smol::block_on(async {
+            let mut child = crate::process::async_command("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let (event_tx, _event_rx) = async_channel::unbounded();
+            let mut m = Mapper::new();
+            m.interaction_mode = InteractionMode::Plan;
+            m.applied_permission_mode = "plan".into();
+
+            let flow = handle_command(
+                SessionCommand::SetApprovalMode(ApprovalMode::FullAccess),
+                &mut m,
+                &mut stdin,
+                &event_tx,
+                &mut child,
+            )
+            .await;
+
+            assert!(matches!(flow, Flow::Continue));
+            assert_eq!(m.base_permission_mode, "bypassPermissions");
+            assert_eq!(m.applied_permission_mode, "plan");
+            assert!(m.pending_permission_modes.is_empty());
+            stdin.close().await.unwrap();
+            child.kill().unwrap();
+            child.status().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn extra_permission_mode_arg_updates_launch_tracker() {
+        let extra_args = vec!["--permission-mode".into(), "plan".into()];
+        assert_eq!(
+            effective_permission_mode("default", &extra_args),
+            "plan",
+            "the last provider launch argument overrides the internal flag"
+        );
+
+        let extra_args = vec!["--permission-mode=bypassPermissions".into()];
+        assert_eq!(
+            effective_permission_mode("plan", &extra_args),
+            "bypassPermissions"
+        );
+    }
+
+    #[test]
+    fn exit_plan_mode_captures_once_per_turn() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let first = feed(
+            &mut m,
+            r##"{"type":"control_request","request_id":"req-plan-1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# First plan"}}}"##,
+        );
+        assert!(matches!(
+            first.as_slice(),
+            [AgentEvent::ProposedPlan { .. }]
+        ));
+        assert_eq!(m.take_outgoing().len(), 1);
+
+        let second = feed(
+            &mut m,
+            r##"{"type":"control_request","request_id":"req-plan-2","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Retried plan"}}}"##,
+        );
+        assert!(
+            second.is_empty(),
+            "a retry in the same turn must not emit another ProposedPlan"
+        );
+        assert_eq!(m.take_outgoing().len(), 1, "the retry is still denied");
+
+        m.start_turn();
+        let next_turn = feed(
+            &mut m,
+            r##"{"type":"control_request","request_id":"req-plan-3","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# New turn plan"}}}"##,
+        );
+        assert!(matches!(
+            next_turn.as_slice(),
+            [AgentEvent::ProposedPlan { .. }]
+        ));
+        assert_eq!(m.take_outgoing().len(), 1);
+    }
+
+    #[test]
     fn user_message_carries_image_content_blocks() {
         let attachments = vec![
             Attachment {
@@ -4273,14 +4440,41 @@ mod tests {
     fn set_permission_mode_request_shape() {
         let mut m = Mapper::new();
         let req = m.set_permission_mode_request(ApprovalMode::AutoAcceptEdits);
+        let request_id = req["request_id"].as_str().unwrap().to_owned();
         assert_eq!(req["type"], "control_request");
         assert!(req["request_id"].is_string());
         assert_eq!(req["request"]["subtype"], "set_permission_mode");
         assert_eq!(req["request"]["mode"], "acceptEdits");
+        assert_eq!(m.applied_permission_mode, "default");
+
+        let events = m.on_message(json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {},
+            }
+        }));
+        assert!(events.is_empty());
+        assert_eq!(m.applied_permission_mode, "acceptEdits");
 
         // FullAccess maps to bypassPermissions on the wire.
         let req = m.set_permission_mode_request(ApprovalMode::FullAccess);
         assert_eq!(req["request"]["mode"], "bypassPermissions");
+        let events = m.on_message(json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "error",
+                "request_id": req["request_id"],
+                "error": "unsupported mode",
+            }
+        }));
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::Warning { message }]
+                if message.contains("unsupported mode")
+        ));
+        assert_eq!(m.applied_permission_mode, "acceptEdits");
     }
 
     #[test]

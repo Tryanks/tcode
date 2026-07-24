@@ -481,7 +481,7 @@ pub enum InteractionMode {
 /// Per-turn overrides layered on top of the session's persisted options.
 /// Codex and OpenCode apply effort/variant per turn; Claude and pi use their
 /// session-level option selection.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnOptions {
     pub effort: Option<String>,
     pub interaction_mode: Option<InteractionMode>,
@@ -638,6 +638,17 @@ pub async fn start_session(
 // Canonical event model: one normalized stream all providers map into
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanResolution {
+    /// Accepted in this thread.
+    Implemented,
+    /// Accepted in a fresh thread.
+    HandedOff { session_id: String },
+    /// Explicitly dismissed by the user.
+    Dismissed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -648,6 +659,12 @@ pub enum AgentEvent {
         from_model: Option<String>,
         to_provider: ProviderKind,
         to_model: Option<String>,
+    },
+    /// A tcode-level decision about a captured plan. Never emitted by an
+    /// adapter; the runtime persists it so plan acceptance survives replay.
+    PlanResolved {
+        item_id: String,
+        resolution: PlanResolution,
     },
     /// The agent's self-described options (ACP `modes` / `models` /
     /// `configOptions`), pushed at session start and on every change. Reuses
