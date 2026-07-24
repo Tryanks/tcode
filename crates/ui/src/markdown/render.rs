@@ -26,6 +26,7 @@ use crate::highlight;
 use super::{
     inline::{Inline, InlineState},
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
+    link_target::{LinkTarget, resolve_link},
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
     state::MarkdownState,
     style::TextViewStyle,
@@ -512,12 +513,14 @@ fn render_paragraph(
             .children
             .iter()
             .filter_map(|child| child.image.as_ref());
+        let view = view.clone();
         return h_flex()
             .id(id.to_string())
             .flex_wrap()
             .gap_1()
-            .children(images.enumerate().map(|(ix, image)| {
+            .children(images.enumerate().map(move |(ix, image)| {
                 let title = image.title();
+                let view = view.clone();
                 img(image.url.clone())
                     .id(ix)
                     .object_fit(ObjectFit::Contain)
@@ -535,7 +538,10 @@ fn render_paragraph(
                             .on_click(move |_, window, cx| {
                                 window_selection::finish_drag(window, cx);
                                 cx.stop_propagation();
-                                cx.open_url(&link.url);
+                                match resolve_link(&link.url, view.read(cx).base_dir()) {
+                                    LinkTarget::Web(url) => cx.open_url(&url),
+                                    LinkTarget::Local(path) => cx.open_with_system(&path),
+                                }
                             })
                     })
             }))

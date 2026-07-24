@@ -18,6 +18,7 @@ use gpui_component::tooltip::Tooltip;
 
 use super::{
     inline::{Inline, InlineState},
+    link_target::{LinkTarget, resolve_link},
     nodes::LinkMark,
     state::MarkdownState,
     window_selection,
@@ -144,6 +145,7 @@ impl InlineFlow {
 
     fn image_element(
         ix: usize,
+        view: Entity<MarkdownState>,
         url: &SharedUri,
         link: &Option<LinkMark>,
         title: &str,
@@ -162,7 +164,10 @@ impl InlineFlow {
                     .on_click(move |_, window, cx| {
                         window_selection::finish_drag(window, cx);
                         cx.stop_propagation();
-                        cx.open_url(&link.url);
+                        match resolve_link(&link.url, view.read(cx).base_dir()) {
+                            LinkTarget::Web(url) => cx.open_url(&url),
+                            LinkTarget::Local(path) => cx.open_with_system(&path),
+                        }
                     })
             })
             .into_any_element()
@@ -333,8 +338,14 @@ impl Element for InlineFlow {
                     else {
                         continue;
                     };
-                    let mut element =
-                        Self::image_element(elements.len(), url, link, title, fragment_size);
+                    let mut element = Self::image_element(
+                        elements.len(),
+                        self.view.clone(),
+                        url,
+                        link,
+                        title,
+                        fragment_size,
+                    );
                     element.prepaint_as_root(
                         bounds.origin + origin,
                         size(
