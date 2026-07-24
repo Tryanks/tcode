@@ -466,7 +466,7 @@ composer:
   send: "Send message"
   stop: "Stop current turn"
   wait_turn: "Wait for the current turn"
-  queue_hint: "Enter to queue · %{modifier}Enter to steer"
+  queue_hint: "Enter to queue · %{shortcut} to steer"
   queued_title: "Queued"
   queued_count: "%{count} queued"
   steer_queued: "Steer into the running turn"

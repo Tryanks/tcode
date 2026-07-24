@@ -40,6 +40,7 @@ use crate::composer_trigger::{
 use crate::context_meter;
 use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
+use crate::shortcut::format_secondary_shortcut;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
 use tcode_core::session::append_review_comments_to_prompt;
@@ -126,16 +127,6 @@ struct ModelRow {
     /// This row starts a session with an installed ACP agent rather than
     /// selecting a model (ACP agents own their model list).
     acp: bool,
-}
-
-/// The platform's "secondary" modifier as the composer spells it: gpui binds
-/// `secondary-enter` to ⌘+Enter on macOS and Ctrl+Enter everywhere else.
-fn steer_modifier() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "⌘"
-    } else {
-        "Ctrl+"
-    }
 }
 
 /// Queue-strip rows are single-line: collapse whitespace and clip long messages
@@ -3363,11 +3354,11 @@ impl Render for Composer {
             // token would render as a murky translucent wash here.
             .bg(cx.theme().popover)
             .shadow_md()
-            // ⌘V with image clipboard content, and arrow/Escape trigger-menu
+            // Secondary+V with image clipboard content, and arrow/Escape trigger-menu
             // navigation (fires after the input's own key actions).
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 let key = ev.keystroke.key.as_str();
-                if key == "v" && ev.keystroke.modifiers.platform {
+                if key == "v" && ev.keystroke.modifiers.secondary() {
                     this.paste_clipboard_image(window, cx);
                     return;
                 }
@@ -3431,7 +3422,7 @@ impl Render for Composer {
                         .text_color(cx.theme().muted_foreground)
                         .child(tcode_i18n::tr!(
                             "composer.queue_hint",
-                            modifier = steer_modifier()
+                            shortcut = format_secondary_shortcut("enter")
                         )),
                 )
             })
@@ -3651,7 +3642,7 @@ fn render_model_pane(
         );
     }
 
-    // ⌘1-9 selects the corresponding row while the popover is open.
+    // Secondary+1-9 selects the corresponding row while the popover is open.
     let key_rows: Vec<ModelRow> = rows.iter().take(9).cloned().collect();
     let app_key = app_entity.clone();
     let popover_key = popover.clone();
@@ -3663,7 +3654,7 @@ fn render_model_pane(
         .rounded(px(12.))
         .overflow_hidden()
         .on_key_down(move |ev, window, cx| {
-            if !ev.keystroke.modifiers.platform {
+            if !ev.keystroke.modifiers.secondary() {
                 return;
             }
             if let Ok(n) = ev.keystroke.key.parse::<usize>()
@@ -3775,7 +3766,7 @@ fn render_model_row(
                     .border_color(cx.theme().border)
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(format!("⌘{}", index + 1)),
+                    .child(format_secondary_shortcut(&(index + 1).to_string())),
             )
         })
         .child(
