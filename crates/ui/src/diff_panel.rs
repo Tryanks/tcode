@@ -34,7 +34,7 @@ use gpui_component::{
 
 use crate::diff::model::{
     DiffColors, FileDiffInput, PairedRow, RenderedFile, RenderedRow, VisibleItem, VisibleSplitItem,
-    build_file, diff_content_widths, visible_split, visible_unified,
+    build_file, diff_content_widths, reconstruct_from_disk, visible_split, visible_unified,
 };
 pub use crate::diff::parse::RowKind;
 use crate::plan_panel::PlanPanel;
@@ -43,7 +43,7 @@ use crate::{highlight, material};
 use tcode_core::session::{ReviewComment, ReviewSide};
 use tcode_runtime::app::{AppState, RightTab};
 use tcode_runtime::ui_facade::{
-    GitDiffResult, GitDiffScope, load_git_diff, relativize_to_workspace,
+    GitDiffResult, GitDiffScope, GitFileText, load_git_diff, relativize_to_workspace,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,17 +55,34 @@ enum DiffScope {
 
 fn render_file(
     change: &FileChange,
+    texts: Option<&GitFileText>,
     cwd: &Path,
     theme: &HighlightTheme,
     colors: &DiffColors,
     whitespace_style: &HighlightStyle,
 ) -> RenderedFile {
+    let needs_reconstruction = texts.is_none_or(|texts| texts.old.is_none() || texts.new.is_none());
+    let reconstructed = needs_reconstruction
+        .then(|| {
+            change
+                .diff
+                .as_deref()
+                .and_then(|patch| reconstruct_from_disk(Path::new(&change.path), patch))
+        })
+        .flatten();
+    let old_text = texts
+        .and_then(|texts| texts.old.as_deref())
+        .or_else(|| reconstructed.as_ref().map(|(old, _)| old.as_str()));
+    let new_text = texts
+        .and_then(|texts| texts.new.as_deref())
+        .or_else(|| reconstructed.as_ref().map(|(_, new)| new.as_str()));
+
     build_file(
         &FileDiffInput {
             path: &change.path,
             kind: change.kind,
-            old_text: None,
-            new_text: None,
+            old_text,
+            new_text,
             patch: change.diff.as_deref(),
             ignore_whitespace: false,
             show_invisibles: false,
@@ -346,6 +363,7 @@ impl DiffPanel {
         &mut self,
         key: RenderKey,
         changes: Vec<FileChange>,
+        texts: Vec<GitFileText>,
         cwd: PathBuf,
         appearance: RenderAppearance,
         cx: &mut Context<Self>,
@@ -367,9 +385,11 @@ impl DiffPanel {
             ) = tcode_runtime::blocking::unblock(cx.background_executor(), move || {
                 let files = changes
                     .iter()
-                    .map(|change| {
+                    .enumerate()
+                    .map(|(index, change)| {
                         render_file(
                             change,
+                            texts.get(index),
                             &cwd,
                             &appearance.theme,
                             &appearance.colors,
@@ -465,7 +485,7 @@ impl DiffPanel {
             }
         }
         let dark = cx.theme().mode.is_dark();
-        let (session, scope, revision, mut changes, cwd) = {
+        let (session, scope, revision, mut changes, mut texts, cwd) = {
             let state = self.app_state.read(cx);
             let Some(active) = state.active.as_ref() else {
                 self.cache = None;
@@ -491,6 +511,7 @@ impl DiffPanel {
                 scope,
                 state.diff_refresh_generation,
                 changes,
+                Vec::new(),
                 active.meta.cwd.clone(),
             )
         };
@@ -516,6 +537,7 @@ impl DiffPanel {
                 return false;
             };
             changes = preview.result.changes.clone();
+            texts = preview.result.texts.clone();
         }
 
         let fresh = self.cache.as_ref().is_none_or(|c| {
@@ -541,6 +563,7 @@ impl DiffPanel {
                     dark,
                 },
                 changes,
+                texts,
                 cwd,
                 appearance,
                 cx,

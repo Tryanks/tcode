@@ -1,12 +1,15 @@
 use std::ops::Range;
+use std::path::Path;
 
 use agent::FileChangeKind;
 use gpui::{HighlightStyle, Hsla};
 use gpui_component::highlighter::HighlightTheme;
 
 use super::algorithm::{line_diff, word_diff_ranges};
-use super::parse::{RowKind, parse_unified_diff};
+use super::parse::{RowKind, parse_hunk_header, parse_unified_diff};
 use crate::highlight;
+
+const MAX_RECONSTRUCT_FILE_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct DiffColors {
@@ -107,6 +110,150 @@ fn text_lines(text: &str) -> Vec<TextLine<'_>> {
             result
         })
         .collect()
+}
+
+pub fn reconstruct_from_disk(abs_path: &Path, patch: &str) -> Option<(String, String)> {
+    let metadata = std::fs::metadata(abs_path).ok()?;
+    if metadata.len() > MAX_RECONSTRUCT_FILE_BYTES {
+        return None;
+    }
+    let new_text = std::fs::read_to_string(abs_path).ok()?;
+    if new_text.len() as u64 > MAX_RECONSTRUCT_FILE_BYTES {
+        return None;
+    }
+
+    let old_text = if patch.lines().any(|line| line.starts_with("@@")) {
+        reconstruct_unified(&new_text, patch)?
+    } else {
+        reconstruct_bare(&new_text, patch)?
+    };
+    Some((old_text, new_text))
+}
+
+fn reconstruct_unified(new_text: &str, patch: &str) -> Option<String> {
+    let parsed = parse_unified_diff(patch);
+    let new_starts = patch
+        .lines()
+        .filter_map(parse_hunk_header)
+        .map(|(_, new_start)| new_start)
+        .collect::<Vec<_>>();
+    if parsed.hunks.len() != new_starts.len() {
+        return None;
+    }
+
+    let new_lines = text_lines(new_text)
+        .into_iter()
+        .map(|line| line.text.to_string())
+        .collect::<Vec<_>>();
+    for (hunk, new_start) in parsed.hunks.iter().zip(&new_starts) {
+        let expected = hunk
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::Context | RowKind::Added))
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>();
+        let start = unified_new_index(*new_start, expected.len());
+        let end = start.checked_add(expected.len())?;
+        if end > new_lines.len()
+            || new_lines[start..end]
+                .iter()
+                .map(String::as_str)
+                .ne(expected)
+        {
+            return None;
+        }
+    }
+
+    let mut old_lines = new_lines;
+    for (hunk, new_start) in parsed.hunks.iter().zip(&new_starts).rev() {
+        let new_len = hunk
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::Context | RowKind::Added))
+            .count();
+        let start = unified_new_index(*new_start, new_len);
+        let end = start.checked_add(new_len)?;
+        if end > old_lines.len() {
+            return None;
+        }
+        let replacement = hunk
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::Removed | RowKind::Context))
+            .map(|row| row.text.clone());
+        old_lines.splice(start..end, replacement);
+    }
+    Some(join_reconstructed_lines(&old_lines, new_text))
+}
+
+fn unified_new_index(new_start: u32, new_len: usize) -> usize {
+    if new_len == 0 {
+        new_start as usize
+    } else {
+        new_start.saturating_sub(1) as usize
+    }
+}
+
+fn reconstruct_bare(new_text: &str, patch: &str) -> Option<String> {
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    for line in patch.lines() {
+        if line == r"\ No newline at end of file" {
+            continue;
+        }
+        if let Some(line) = line.strip_prefix('-') {
+            removed.push(line.to_string());
+        } else if let Some(line) = line.strip_prefix('+') {
+            added.push(line.to_string());
+        }
+    }
+
+    if removed.is_empty() {
+        let candidate = format!("{}\n", added.join("\n"));
+        return same_except_trailing_newline(&candidate, new_text).then(String::new);
+    }
+    if added.is_empty() {
+        return None;
+    }
+
+    let mut new_lines = text_lines(new_text)
+        .into_iter()
+        .map(|line| line.text.to_string())
+        .collect::<Vec<_>>();
+    let matches = new_lines
+        .windows(added.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == added).then_some(index))
+        .collect::<Vec<_>>();
+    let [start] = matches.as_slice() else {
+        return None;
+    };
+    new_lines.splice(*start..*start + added.len(), removed);
+    Some(join_reconstructed_lines(&new_lines, new_text))
+}
+
+fn same_except_trailing_newline(left: &str, right: &str) -> bool {
+    strip_one_trailing_newline(left) == strip_one_trailing_newline(right)
+}
+
+fn strip_one_trailing_newline(text: &str) -> &str {
+    let Some(text) = text.strip_suffix('\n') else {
+        return text;
+    };
+    text.strip_suffix('\r').unwrap_or(text)
+}
+
+fn join_reconstructed_lines(lines: &[String], template: &str) -> String {
+    let newline = if template.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut text = lines.join(newline);
+    if template.ends_with('\n') {
+        text.push_str(newline);
+    }
+    text
 }
 
 pub fn build_file(
@@ -776,7 +923,39 @@ pub fn display_columns(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tcode-diff-model-{}-{}",
+                std::process::id(),
+                NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).expect("create temporary test directory");
+            Self { path }
+        }
+
+        fn file(&self, name: &str, content: &str) -> std::path::PathBuf {
+            let path = self.path.join(name);
+            std::fs::write(&path, content).expect("write temporary test file");
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.path).expect("remove temporary test directory");
+        }
+    }
 
     fn colors() -> DiffColors {
         DiffColors {
@@ -932,6 +1111,93 @@ mod tests {
         let (unified, split) = diff_content_widths(&files);
         assert!(unified >= 24. * 8. + 106.);
         assert!(split >= (5. + 24.) * 8. + 117.);
+    }
+
+    #[test]
+    fn reconstructs_matching_unified_patch_into_expandable_full_text() {
+        let temp = TempDir::new();
+        let new = "one\ntwo\nthree\nfour\nnew value\nsix\nseven\neight\nnine\nten\n";
+        let old = "one\ntwo\nthree\nfour\nold value\nsix\nseven\neight\nnine\nten\n";
+        let path = temp.file("unified.txt", new);
+        let patch = "@@ -3,5 +3,5 @@\n three\n four\n-old value\n+new value\n six\n seven\n";
+
+        let (reconstructed_old, reconstructed_new) =
+            reconstruct_from_disk(&path, patch).expect("matching patch should reconstruct");
+        assert_eq!(reconstructed_old, old);
+        assert_eq!(reconstructed_new, new);
+
+        let file = build_file(
+            &FileDiffInput {
+                path: path.to_str().expect("UTF-8 test path"),
+                kind: FileChangeKind::Modify,
+                old_text: Some(&reconstructed_old),
+                new_text: Some(&reconstructed_new),
+                patch: Some(patch),
+                ignore_whitespace: false,
+                show_invisibles: false,
+            },
+            "unified.txt".into(),
+            "text",
+            &HighlightTheme::default_dark(),
+            &colors(),
+            &HighlightStyle::default(),
+        );
+        assert!(file.expandable);
+        assert_eq!(file.added, 1);
+        assert_eq!(file.removed, 1);
+        assert!(!file.collapsed.is_empty());
+    }
+
+    #[test]
+    fn rejects_unified_patch_when_disk_is_stale() {
+        let temp = TempDir::new();
+        let path = temp.file("stale.txt", "one\nchanged again\nthree\n");
+        let patch = "@@ -1,3 +1,3 @@\n one\n-old\n+new\n three\n";
+        assert_eq!(reconstruct_from_disk(&path, patch), None);
+    }
+
+    #[test]
+    fn reconstructs_matching_bare_write() {
+        let temp = TempDir::new();
+        let content = "alpha\nbeta\n";
+        let path = temp.file("write.txt", content);
+        assert_eq!(
+            reconstruct_from_disk(&path, "+alpha\n+beta"),
+            Some((String::new(), content.to_string()))
+        );
+    }
+
+    #[test]
+    fn reconstructs_bare_edit_with_unique_added_block() {
+        let temp = TempDir::new();
+        let new = "before\nnew one\nnew two\nafter\n";
+        let old = "before\nold one\nold two\nafter\n";
+        let path = temp.file("edit.txt", new);
+        let patch = "-old one\n-old two\n+new one\n+new two";
+        assert_eq!(
+            reconstruct_from_disk(&path, patch),
+            Some((old.to_string(), new.to_string()))
+        );
+    }
+
+    #[test]
+    fn rejects_bare_edit_with_ambiguous_added_block() {
+        let temp = TempDir::new();
+        let path = temp.file("ambiguous.txt", "new\nbetween\nnew\n");
+        assert_eq!(
+            reconstruct_from_disk(&path, "-old\n+new"),
+            None,
+            "the added block must occur exactly once"
+        );
+    }
+
+    #[test]
+    fn reconstruction_returns_none_for_missing_file() {
+        let temp = TempDir::new();
+        assert_eq!(
+            reconstruct_from_disk(&temp.path.join("missing.txt"), "+content"),
+            None
+        );
     }
 
     #[test]
