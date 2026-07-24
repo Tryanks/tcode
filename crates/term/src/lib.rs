@@ -309,13 +309,21 @@ fn with_pty_creation<T>(create: impl FnOnce() -> T) -> T {
 }
 
 impl Terminal {
+    /// Resolve the cwd that a subsequent `Terminal::spawn` should use.
+    ///
+    /// Call this before moving terminal creation to another thread so the
+    /// thread-local test/UI override is captured on the calling thread.
+    pub fn resolve_spawn_cwd(cwd: impl AsRef<Path>) -> PathBuf {
+        SPAWN_CWD_OVERRIDE
+            .with(|override_cwd| override_cwd.borrow().clone())
+            .unwrap_or_else(|| cwd.as_ref().to_path_buf())
+    }
+
     /// Spawn the platform's default interactive shell in `cwd`.
     pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
         let (shell, args) = default_shell();
         let shell_name = shell_label(&shell);
-        let cwd = SPAWN_CWD_OVERRIDE
-            .with(|override_cwd| override_cwd.borrow().clone())
-            .unwrap_or_else(|| cwd.as_ref().to_path_buf());
+        let cwd = Self::resolve_spawn_cwd(cwd);
         Self::spawn_command(cwd, shell, args, shell_name)
     }
 

@@ -194,8 +194,8 @@ impl TerminalDrawer {
     }
 
     pub fn resize(&self, _width: f32, height: f32, cx: &mut Context<Self>) {
-        self.app_state.update(cx, |state, _| {
-            state.set_terminal_height(height);
+        self.app_state.update(cx, |state, cx| {
+            state.set_terminal_height(height, cx);
         });
     }
 

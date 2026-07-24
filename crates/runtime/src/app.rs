@@ -1,7 +1,8 @@
 //! Application state: session registry, active session runtime, event pump.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, ChangeCompleteness, FileChange,
@@ -9,7 +10,7 @@ use agent::{
     ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions, ThreadItem,
     TurnOptions, TurnStatus, list_models, start_session,
 };
-use gpui::{Context, EventEmitter, Task};
+use gpui::{BackgroundExecutor, Context, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::blocking::unblock;
@@ -81,11 +82,170 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::OpenCode,
 ];
 
+#[derive(Debug, Clone, Copy)]
+enum TimelineLoadTarget {
+    Active {
+        mark_idle: bool,
+        read_git_branch: bool,
+    },
+    Background {
+        mark_idle: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct TerminalPreferences {
     open: bool,
     height: f32,
     count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TerminalSpawnAction {
+    Open {
+        split_after: Option<TerminalSplitDirection>,
+    },
+    Restart {
+        terminal_id: Option<u64>,
+    },
+    New,
+    Split {
+        first: u64,
+        direction: TerminalSplitDirection,
+    },
+}
+
+enum StoreWrite {
+    AppendEvent {
+        id: String,
+        ts: u64,
+        event: Box<AgentEvent>,
+    },
+    UpsertMeta {
+        meta: Box<SessionMeta>,
+        initial: bool,
+    },
+    UpsertProject(Project),
+    RemoveSession(String),
+    RemoveProject(String),
+    CloneEvents {
+        src: String,
+        dst: String,
+        completion: async_channel::Sender<Result<(), String>>,
+    },
+    SaveCommands {
+        provider: ProviderKind,
+        acp_agent_id: Option<String>,
+        commands: Vec<ProviderCommand>,
+    },
+    WriteTerminalUi(Vec<u8>),
+    WriteSettings(Vec<u8>),
+    SetProfileSecret {
+        profile_id: String,
+        key: String,
+        value: Option<String>,
+    },
+    ClearProfileSecrets(String),
+    Flush(async_channel::Sender<()>),
+}
+
+enum StoreWriteFailure {
+    PersistEvent(String),
+    PersistSession(String),
+    PersistSessionIndex(String),
+    PersistProject(String),
+    DeleteSession(String),
+    DeleteProject(String),
+    PersistSettings(String),
+    Log(String),
+}
+
+fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(tmp, path)
+}
+
+fn run_store_write(
+    store: &SessionStore,
+    settings_store: &SettingsStore,
+    terminal_preferences_path: &Path,
+    write: StoreWrite,
+) -> Option<StoreWriteFailure> {
+    match write {
+        StoreWrite::AppendEvent { id, ts, event } => store
+            .append_event(&id, ts, &event)
+            .err()
+            .map(|err| StoreWriteFailure::PersistEvent(err.to_string())),
+        StoreWrite::UpsertMeta { meta, initial } => store.upsert_meta(&meta).err().map(|err| {
+            if initial {
+                StoreWriteFailure::PersistSession(err.to_string())
+            } else {
+                StoreWriteFailure::PersistSessionIndex(err.to_string())
+            }
+        }),
+        StoreWrite::UpsertProject(project) => store
+            .upsert_project(&project)
+            .err()
+            .map(|err| StoreWriteFailure::PersistProject(err.to_string())),
+        StoreWrite::RemoveSession(id) => store
+            .remove_session(&id)
+            .err()
+            .map(|err| StoreWriteFailure::DeleteSession(err.to_string())),
+        StoreWrite::RemoveProject(id) => store
+            .remove_project(&id)
+            .err()
+            .map(|err| StoreWriteFailure::DeleteProject(err.to_string())),
+        StoreWrite::CloneEvents {
+            src,
+            dst,
+            completion,
+        } => {
+            let result = store
+                .clone_events(&src, &dst)
+                .map_err(|err| err.to_string());
+            let _ = completion.try_send(result);
+            None
+        }
+        StoreWrite::SaveCommands {
+            provider,
+            acp_agent_id,
+            commands,
+        } => store
+            .save_commands(provider, acp_agent_id.as_deref(), &commands)
+            .err()
+            .map(|err| {
+                StoreWriteFailure::Log(format!(
+                    "failed to persist {provider:?} command cache: {err}"
+                ))
+            }),
+        StoreWrite::WriteTerminalUi(bytes) => {
+            atomic_write(terminal_preferences_path.to_path_buf(), bytes)
+                .err()
+                .map(|err| {
+                    StoreWriteFailure::Log(format!("failed to persist terminal UI state: {err}"))
+                })
+        }
+        StoreWrite::WriteSettings(bytes) => atomic_write(store.root().join("settings.json"), bytes)
+            .err()
+            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+        StoreWrite::SetProfileSecret {
+            profile_id,
+            key,
+            value,
+        } => settings_store
+            .set_profile_secret(&profile_id, &key, value.as_deref())
+            .err()
+            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+        StoreWrite::ClearProfileSecrets(profile_id) => settings_store
+            .clear_profile_secrets(&profile_id)
+            .err()
+            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+        StoreWrite::Flush(completion) => {
+            let _ = completion.try_send(());
+            None
+        }
+    }
 }
 
 /// Stable destination for conversation-owned UI. A stored thread uses its
@@ -713,6 +873,10 @@ pub enum WorkspaceMode {
 pub struct AppState {
     store: SessionStore,
     settings_store: SettingsStore,
+    store_writes: async_channel::Sender<StoreWrite>,
+    store_write_receiver: Option<async_channel::Receiver<StoreWrite>>,
+    store_write_failures: async_channel::Sender<StoreWriteFailure>,
+    store_write_failure_receiver: Option<async_channel::Receiver<StoreWriteFailure>>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
     pub active: Option<ActiveSession>,
@@ -760,6 +924,8 @@ pub struct AppState {
     pub models_loading: HashMap<ProviderKind, bool>,
     terminal_preferences_path: PathBuf,
     terminal_preferences: HashMap<String, TerminalPreferences>,
+    next_terminal_spawn_id: u64,
+    pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
     next_start_generation: u64,
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
@@ -832,6 +998,11 @@ pub struct AppState {
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
+    /// Monotonic watermark for JSONL appends. Timeline loads retry when this
+    /// changes while their background read is in flight.
+    store_append_generation: u64,
+    /// Per-session token used to discard superseded timeline loads.
+    timeline_load_generations: HashMap<String, u64>,
     /// Screenshot-only (`--debug-git-dialog`): open the commit dialog once the
     /// git status has loaded (clicking the header button cannot be driven
     /// headlessly). Consumed by `ChatView` on its next render.
@@ -909,9 +1080,15 @@ impl AppState {
             projects.len(),
             store.root().display()
         );
+        let (store_writes, store_write_receiver) = async_channel::unbounded();
+        let (store_write_failures, store_write_failure_receiver) = async_channel::unbounded();
         Self {
             store,
             settings_store,
+            store_writes,
+            store_write_receiver: Some(store_write_receiver),
+            store_write_failures,
+            store_write_failure_receiver: Some(store_write_failure_receiver),
             sessions,
             projects,
             active: None,
@@ -930,6 +1107,8 @@ impl AppState {
             models_loading: HashMap::new(),
             terminal_preferences_path,
             terminal_preferences,
+            next_terminal_spawn_id: 0,
+            pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
             ai_title_generation_enabled: !cfg!(test),
             debug_compose: None,
@@ -959,6 +1138,8 @@ impl AppState {
             git_busy: false,
             next_operation_id: 1,
             git_status_generation: 0,
+            store_append_generation: 0,
+            timeline_load_generations: HashMap::new(),
             debug_open_commit_dialog: false,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
@@ -972,6 +1153,102 @@ impl AppState {
             provider_snapshots: HashMap::new(),
             pending_relaunch,
         }
+    }
+
+    fn start_store_writer(&mut self, cx: &mut Context<Self>) {
+        if let Some(writes) = self.store_write_receiver.take() {
+            let store = self.store.clone();
+            let settings_store = self.settings_store.clone();
+            let terminal_preferences_path = self.terminal_preferences_path.clone();
+            let failures = self.store_write_failures.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    while let Ok(write) = writes.recv().await {
+                        if let Some(failure) = run_store_write(
+                            &store,
+                            &settings_store,
+                            &terminal_preferences_path,
+                            write,
+                        ) {
+                            let _ = failures.send(failure).await;
+                        }
+                    }
+                })
+                .detach();
+        }
+        if let Some(failures) = self.store_write_failure_receiver.take() {
+            cx.spawn(async move |this, cx| {
+                while let Ok(failure) = failures.recv().await {
+                    let Ok(()) = this.update(cx, |state, cx| match failure {
+                        StoreWriteFailure::PersistEvent(error) => {
+                            state.report_error(RuntimeError::PersistEvent { error }, cx);
+                        }
+                        StoreWriteFailure::PersistSession(error) => {
+                            state.report_error(RuntimeError::PersistSession { error }, cx);
+                        }
+                        StoreWriteFailure::PersistSessionIndex(error) => {
+                            state.report_error(RuntimeError::PersistSessionIndex { error }, cx);
+                        }
+                        StoreWriteFailure::PersistProject(error) => {
+                            state.report_error(RuntimeError::PersistProject { error }, cx);
+                        }
+                        StoreWriteFailure::DeleteSession(error) => {
+                            state.report_error(RuntimeError::DeleteSession { error }, cx);
+                        }
+                        StoreWriteFailure::DeleteProject(error) => {
+                            state.report_error(RuntimeError::DeleteProject { error }, cx);
+                        }
+                        StoreWriteFailure::PersistSettings(error) => {
+                            state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        }
+                        StoreWriteFailure::Log(message) => log::warn!("{message}"),
+                    }) else {
+                        break;
+                    };
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut Context<Self>) {
+        self.start_store_writer(cx);
+        if self.store_writes.try_send(write).is_err() {
+            log::error!("session store writer stopped before accepting a write");
+        }
+    }
+
+    fn enqueue_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
+        match serde_json::to_vec_pretty(settings) {
+            Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
+            Err(err) => self.report_error(
+                RuntimeError::PersistSettings {
+                    error: err.to_string(),
+                },
+                cx,
+            ),
+        }
+    }
+
+    fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
+        match self
+            .sessions
+            .iter_mut()
+            .find(|existing| existing.id == meta.id)
+        {
+            Some(existing) => *existing = meta,
+            None => self.sessions.push(meta),
+        }
+        self.sessions
+            .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+    }
+
+    /// Enqueue a FIFO barrier used by the application quit hook. The returned
+    /// receiver resolves only after every earlier store write has completed.
+    pub fn store_write_barrier(&mut self, cx: &mut Context<Self>) -> async_channel::Receiver<()> {
+        let (completion, barrier) = async_channel::bounded(1);
+        self.enqueue_store_write(StoreWrite::Flush(completion), cx);
+        barrier
     }
 
     /// Open the Preview tab and queue an initial navigation (dev/testing entry
@@ -1030,11 +1307,11 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             while let Ok(request) = requests.recv().await {
                 let orchestrate_mcp::BrokerRequest { op, reply } = request;
-                let Ok(result) = this.update(cx, |state, cx| state.handle_orchestrate_op(op, cx))
+                let Ok(()) =
+                    this.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx))
                 else {
                     break;
                 };
-                let _ = reply.send(result).await;
             }
         })
         .detach();
@@ -1183,23 +1460,7 @@ impl AppState {
             })
             .or_else(|| self.background.get(parent_id).map(|s| s.meta.clone()))
             .ok_or_else(|| "unknown parent session".to_string())?;
-        let cwd = match cwd {
-            Some(path) => {
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    parent.cwd.join(path)
-                };
-                let canonical = path
-                    .canonicalize()
-                    .map_err(|_| format!("invalid cwd: {}", path.display()))?;
-                if !canonical.is_dir() {
-                    return Err(format!("invalid cwd: {}", canonical.display()));
-                }
-                canonical
-            }
-            None => parent.cwd.clone(),
-        };
+        let cwd = cwd.unwrap_or_else(|| parent.cwd.clone());
         let mut meta = build_child_meta(
             &parent,
             provider,
@@ -1210,10 +1471,14 @@ impl AppState {
             cwd,
         );
         meta.title = title;
-        self.store
-            .upsert_meta(&meta)
-            .map_err(|err| format!("failed to persist child session: {err}"))?;
-        self.sessions = self.store.load_index();
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        self.upsert_session_in_memory(meta.clone());
         let id = meta.id.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
@@ -1238,11 +1503,19 @@ impl AppState {
     pub fn handle_orchestrate_op(
         &mut self,
         op: orchestrate_mcp::OrchestrateOp,
+        reply: async_channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut Context<Self>,
-    ) -> Result<serde_json::Value, String> {
-        use orchestrate_mcp::OrchestrateOp;
+    ) {
         match op {
-            OrchestrateOp::Dispatch {
+            orchestrate_mcp::OrchestrateOp::Status {
+                parent_id,
+                thread_id,
+            } => self.handle_orchestrate_status(parent_id, thread_id, reply, cx),
+            orchestrate_mcp::OrchestrateOp::Result {
+                parent_id,
+                thread_id,
+            } => self.handle_orchestrate_result(parent_id, thread_id, reply, cx),
+            orchestrate_mcp::OrchestrateOp::Dispatch {
                 parent_id,
                 provider,
                 model,
@@ -1253,51 +1526,129 @@ impl AppState {
                 brief,
                 cwd,
             } => {
-                let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
-                    &self.settings.orchestrate,
-                    &provider,
-                    model.as_deref(),
-                    effort.as_deref(),
-                    profile.as_deref(),
-                )?;
-                if let Some(id) = profile_id.as_deref()
-                    && self.settings.resolved_profile(id).is_none()
-                {
-                    return Err(format!("unknown profile: {id}"));
-                }
-                let approval_mode = resolve_dispatch_access(access.as_deref())?;
-                let id = self.create_child_session(
-                    &parent_id,
-                    provider,
-                    Some(model),
-                    effort,
-                    profile_id,
-                    approval_mode,
-                    title,
-                    cwd.map(PathBuf::from),
-                    brief,
-                    cx,
-                )?;
-                Ok(serde_json::json!({ "thread_id": id }))
-            }
-            OrchestrateOp::Status {
-                parent_id,
-                thread_id,
-            } => {
-                let mut children: Vec<_> = self
+                let resolved = (|| {
+                    let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
+                        &self.settings.orchestrate,
+                        &provider,
+                        model.as_deref(),
+                        effort.as_deref(),
+                        profile.as_deref(),
+                    )?;
+                    if let Some(id) = profile_id.as_deref()
+                        && self.settings.resolved_profile(id).is_none()
+                    {
+                        return Err(format!("unknown profile: {id}"));
+                    }
+                    let approval_mode = resolve_dispatch_access(access.as_deref())?;
+                    Ok((provider, model, effort, profile_id, approval_mode))
+                })();
+                let (provider, model, effort, profile_id, approval_mode) = match resolved {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        let _ = reply.try_send(Err(err));
+                        return;
+                    }
+                };
+                let Some(cwd) = cwd else {
+                    let result = self
+                        .create_child_session(
+                            &parent_id,
+                            provider,
+                            Some(model),
+                            effort,
+                            profile_id,
+                            approval_mode,
+                            title,
+                            None,
+                            brief,
+                            cx,
+                        )
+                        .map(|id| serde_json::json!({ "thread_id": id }));
+                    let _ = reply.try_send(result);
+                    return;
+                };
+                let Some(parent_cwd) = self
                     .sessions
                     .iter()
-                    .filter(|meta| meta.parent_session_id.as_deref() == Some(&parent_id))
-                    .filter(|meta| thread_id.as_ref().is_none_or(|id| id == &meta.id))
-                    .map(|meta| self.child_status_json(meta))
-                    .collect();
-                if thread_id.is_some() && children.is_empty() {
-                    return Err("unknown thread or not a child of this parent".into());
-                }
-                children.sort_by_key(|value| value["updated_at"].as_u64().unwrap_or_default());
-                children.reverse();
-                Ok(serde_json::Value::Array(children))
+                    .find(|meta| meta.id == parent_id)
+                    .map(|meta| meta.cwd.clone())
+                    .or_else(|| {
+                        self.active
+                            .as_ref()
+                            .filter(|active| active.meta.id == parent_id)
+                            .map(|active| active.meta.cwd.clone())
+                    })
+                    .or_else(|| {
+                        self.background
+                            .get(&parent_id)
+                            .map(|session| session.meta.cwd.clone())
+                    })
+                else {
+                    let _ = reply.try_send(Err("unknown parent session".to_string()));
+                    return;
+                };
+                let path = PathBuf::from(cwd);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    parent_cwd.join(path)
+                };
+                cx.spawn(async move |this, cx| {
+                    let resolved_cwd = unblock(cx.background_executor(), move || {
+                        let canonical = path
+                            .canonicalize()
+                            .map_err(|_| format!("invalid cwd: {}", path.display()))?;
+                        if !canonical.is_dir() {
+                            return Err(format!("invalid cwd: {}", canonical.display()));
+                        }
+                        Ok(canonical)
+                    })
+                    .await;
+                    let result = match resolved_cwd {
+                        Ok(cwd) => this
+                            .update(cx, |state, cx| {
+                                state.create_child_session(
+                                    &parent_id,
+                                    provider,
+                                    Some(model),
+                                    effort,
+                                    profile_id,
+                                    approval_mode,
+                                    title,
+                                    Some(cwd),
+                                    brief,
+                                    cx,
+                                )
+                            })
+                            .unwrap_or_else(|_| Err("application closed".to_string()))
+                            .map(|id| serde_json::json!({ "thread_id": id })),
+                        Err(err) => Err(err),
+                    };
+                    let _ = reply.try_send(result);
+                })
+                .detach();
             }
+            op => {
+                let result = self.handle_orchestrate_sync_op(op, cx);
+                let _ = reply.try_send(result);
+            }
+        }
+    }
+
+    fn handle_orchestrate_sync_op(
+        &mut self,
+        op: orchestrate_mcp::OrchestrateOp,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        use orchestrate_mcp::OrchestrateOp;
+        match op {
+            OrchestrateOp::Dispatch { .. } => {
+                unreachable!("dispatch operations are handled asynchronously")
+            }
+            OrchestrateOp::Status {
+                parent_id: _,
+                thread_id: _,
+            } => unreachable!("status operations are handled asynchronously"),
             OrchestrateOp::Send {
                 parent_id,
                 thread_id,
@@ -1345,7 +1696,7 @@ impl AppState {
                     }
                     return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                 }
-                self.ensure_child_loaded(&thread_id)?;
+                self.ensure_child_loaded(&thread_id, cx)?;
                 let child = self.background.get_mut(&thread_id).unwrap();
                 child.push_queued(message, Vec::new());
                 let idle = matches!(child.runtime, Runtime::Idle);
@@ -1358,23 +1709,9 @@ impl AppState {
                 Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
             }
             OrchestrateOp::Result {
-                parent_id,
-                thread_id,
-            } => {
-                let meta = self.require_child(&parent_id, &thread_id)?;
-                let (state, final_message, usage) = self.child_result(meta);
-                if state == "running" {
-                    return Err("thread is still running".into());
-                }
-                let mut result = serde_json::json!({
-                    "state": state,
-                    "final_message": final_message,
-                });
-                if let Some(usage) = usage.as_ref() {
-                    result["tokens"] = token_usage_json(usage);
-                }
-                Ok(result)
-            }
+                parent_id: _,
+                thread_id: _,
+            } => unreachable!("result operations are handled asynchronously"),
             OrchestrateOp::Cancel {
                 parent_id,
                 thread_id,
@@ -1467,7 +1804,11 @@ impl AppState {
             .map_err(|err| format!("failed to respond to approval: {err}"))
     }
 
-    fn ensure_child_loaded(&mut self, thread_id: &str) -> Result<(), String> {
+    fn ensure_child_loaded(
+        &mut self,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if self.background.contains_key(thread_id) {
             return Ok(());
         }
@@ -1480,11 +1821,11 @@ impl AppState {
         if self.active_session_id() == Some(thread_id) {
             return Err("child thread is currently open in the foreground".into());
         }
-        self.load_background_session(meta);
+        self.load_background_session(meta, cx);
         Ok(())
     }
 
-    fn load_background_session(&mut self, meta: SessionMeta) {
+    fn load_background_session(&mut self, meta: SessionMeta, cx: &mut Context<Self>) {
         let thread_id = meta.id.clone();
         let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         let mut child = Self::build_draft_session(
@@ -1497,16 +1838,114 @@ impl AppState {
         );
         child.meta = meta;
         child.draft = false;
-        child.timeline = Timeline::fold_events(self.store.read_events(&thread_id));
-        child.timeline.mark_idle();
-        self.background.insert(thread_id, child);
+        self.background.insert(thread_id.clone(), child);
+        self.schedule_timeline_load(
+            thread_id,
+            TimelineLoadTarget::Background { mark_idle: true },
+            cx,
+        );
+    }
+
+    fn handle_orchestrate_status(
+        &mut self,
+        parent_id: String,
+        thread_id: Option<String>,
+        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let children: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|meta| meta.parent_session_id.as_deref() == Some(&parent_id))
+            .filter(|meta| thread_id.as_ref().is_none_or(|id| id == &meta.id))
+            .cloned()
+            .collect();
+        if thread_id.is_some() && children.is_empty() {
+            let _ = reply.try_send(Err("unknown thread or not a child of this parent".into()));
+            return;
+        }
+        let unloaded: Vec<_> = children
+            .iter()
+            .filter(|meta| self.loaded_child_timeline(&meta.id).is_none())
+            .map(|meta| meta.id.clone())
+            .collect();
+        if unloaded.is_empty() {
+            let result = self.orchestrate_status_json(&children, &HashMap::new());
+            let _ = reply.try_send(Ok(result));
+            return;
+        }
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let timelines = unblock(cx.background_executor(), move || {
+                unloaded
+                    .into_iter()
+                    .map(|id| {
+                        let timeline = Timeline::fold_events(store.read_events(&id));
+                        (id, timeline)
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .await;
+            let result = this
+                .update(cx, |state, _| {
+                    state.orchestrate_status_json(&children, &timelines)
+                })
+                .map_err(|_| "tcode orchestrator is not available".to_string());
+            let _ = reply.send(result).await;
+        })
+        .detach();
+    }
+
+    fn handle_orchestrate_result(
+        &mut self,
+        parent_id: String,
+        thread_id: String,
+        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let meta = match self.require_child(&parent_id, &thread_id) {
+            Ok(meta) => meta.clone(),
+            Err(error) => {
+                let _ = reply.try_send(Err(error));
+                return;
+            }
+        };
+        if let Some(timeline) = self.loaded_child_timeline(&thread_id) {
+            let result = self.orchestrate_result_json(&meta, timeline);
+            let _ = reply.try_send(result);
+            return;
+        }
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let read_id = thread_id.clone();
+            let timeline = unblock(cx.background_executor(), move || {
+                Timeline::fold_events(store.read_events(&read_id))
+            })
+            .await;
+            let result = this
+                .update(cx, |state, _| {
+                    let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
+                    state.orchestrate_result_json(&meta, timeline)
+                })
+                .unwrap_or_else(|_| Err("tcode orchestrator is not available".to_string()));
+            let _ = reply.send(result).await;
+        })
+        .detach();
+    }
+
+    fn loaded_child_timeline(&self, session_id: &str) -> Option<&Timeline> {
+        self.active
+            .as_ref()
+            .filter(|child| child.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))
+            .map(|child| &child.timeline)
     }
 
     fn child_result(
         &self,
         meta: &SessionMeta,
+        timeline: &Timeline,
     ) -> (&'static str, String, Option<agent::TokenUsage>) {
-        let timeline = Timeline::fold_events(self.store.read_events(&meta.id));
         let running = self
             .active
             .as_ref()
@@ -1528,11 +1967,48 @@ impl AppState {
                 None => "idle",
             }
         };
-        (state, final_assistant_message(&timeline), timeline.usage)
+        (state, final_assistant_message(timeline), timeline.usage)
     }
 
-    fn child_status_json(&self, meta: &SessionMeta) -> serde_json::Value {
-        let (state, final_message, usage) = self.child_result(meta);
+    fn orchestrate_result_json(
+        &self,
+        meta: &SessionMeta,
+        timeline: &Timeline,
+    ) -> Result<serde_json::Value, String> {
+        let (state, final_message, usage) = self.child_result(meta, timeline);
+        if state == "running" {
+            return Err("thread is still running".into());
+        }
+        let mut result = serde_json::json!({
+            "state": state,
+            "final_message": final_message,
+        });
+        if let Some(usage) = usage.as_ref() {
+            result["tokens"] = token_usage_json(usage);
+        }
+        Ok(result)
+    }
+
+    fn orchestrate_status_json(
+        &self,
+        children: &[SessionMeta],
+        disk_timelines: &HashMap<String, Timeline>,
+    ) -> serde_json::Value {
+        let mut children: Vec<_> = children
+            .iter()
+            .filter_map(|meta| {
+                self.loaded_child_timeline(&meta.id)
+                    .or_else(|| disk_timelines.get(&meta.id))
+                    .map(|timeline| self.child_status_json(meta, timeline))
+            })
+            .collect();
+        children.sort_by_key(|value| value["updated_at"].as_u64().unwrap_or_default());
+        children.reverse();
+        serde_json::Value::Array(children)
+    }
+
+    fn child_status_json(&self, meta: &SessionMeta, timeline: &Timeline) -> serde_json::Value {
+        let (state, final_message, usage) = self.child_result(meta, timeline);
         let pending_approval = self.pending_approval_for(&meta.id);
         let waiting_approval = pending_approval.as_ref().map(approval_request_summary);
         let approval_request_id = pending_approval.as_ref().map(|request| request.id.as_str());
@@ -1558,10 +2034,17 @@ impl AppState {
     pub fn refresh_model_catalogs(&mut self, cx: &mut Context<Self>) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.settings.provider(provider).binary_path;
-            let launch_env = self.launch_env(provider);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
             self.models_loading.insert(provider, true);
             let store = self.store.clone();
             cx.spawn(async move |this, cx| {
+                let profile_id = Settings::builtin_profile_id(provider).to_string();
+                let launch_env = unblock(cx.background_executor(), move || {
+                    let secrets = settings_store.profile_secrets(&profile_id);
+                    launch_env_for_profile(&settings, &profile_id, secrets)
+                })
+                .await;
                 let result = list_models(provider, binary, launch_env).await;
                 let _ = this.update(cx, |state, cx| {
                     state.models_loading.insert(provider, false);
@@ -1634,53 +2117,17 @@ impl AppState {
     /// This is the profile-aware generalization of [`Self::launch_env`]; a
     /// built-in profile id (a [`provider_key`]) reproduces the old behavior.
     pub fn launch_env_for_profile(&self, profile_id: &str) -> LaunchEnv {
-        let Some(profile) = self.settings.resolved_profile(profile_id) else {
-            return LaunchEnv::default();
-        };
-        let settings = profile.settings;
         let secrets = self.settings_store.profile_secrets(profile_id);
-        let env = settings
-            .env
-            .iter()
-            .filter(|var| !var.name.trim().is_empty())
-            .filter_map(|var| {
-                let value = if var.sensitive {
-                    // Sensitive rows keep their value only in secrets.json; a
-                    // row whose secret was never saved contributes nothing.
-                    secrets.get(&var.name).cloned()?
-                } else {
-                    var.value.clone()
-                };
-                Some((var.name.trim().to_string(), value))
-            })
-            .collect();
-        LaunchEnv {
-            env,
-            home: settings.effective_home(),
-        }
+        launch_env_for_profile(&self.settings, profile_id, secrets)
     }
 
     /// The environment a session's child process runs with: the provider card's
     /// for the native providers, and the installed agent's own rows for an ACP
     /// session (each ACP agent is configured separately, so the shared
     /// `ProviderKind::Acp` bucket is not what we want there).
+    #[cfg(test)]
     fn session_launch_env(&self, meta: &SessionMeta) -> LaunchEnv {
-        if meta.provider != ProviderKind::Acp {
-            // A native session runs against its selected profile (a third-party
-            // endpoint, say), falling back to the kind's built-in profile.
-            let id = meta
-                .profile_id
-                .clone()
-                .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
-            return self.launch_env_for_profile(&id);
-        }
-        let env = meta
-            .acp_agent_id
-            .as_deref()
-            .and_then(|id| self.settings.acp_agent(id))
-            .map(|agent| agent.env.clone())
-            .unwrap_or_default();
-        LaunchEnv { env, home: None }
+        session_launch_env(&self.settings, &self.settings_store, meta)
     }
 
     /// Whether the provider may be used for new sessions (its card's switch).
@@ -1834,15 +2281,14 @@ impl AppState {
         value: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        if let Err(err) = self.settings_store.set_profile_secret(id, name, value) {
-            self.report_error(
-                RuntimeError::PersistSettings {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_store_write(
+            StoreWrite::SetProfileSecret {
+                profile_id: id.to_string(),
+                key: name.to_string(),
+                value: value.map(str::to_string),
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -1880,20 +2326,14 @@ impl AppState {
         api_key: &str,
         cx: &mut Context<Self>,
     ) -> String {
-        let mut settings = self.settings.clone();
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
-        let id = settings.allocate_profile_id(name);
+        let id = self.settings.allocate_profile_id(name);
 
         // Each third-party Claude profile gets an isolated HOME so its auth /
         // config never collides with the official Claude login. Seed onboarding
         // so the CLI starts straight into API-key mode.
         let home = self.store.root().join("profile-homes").join(&id);
-        let _ = std::fs::create_dir_all(&home);
-        let _ = std::fs::write(
-            home.join(".claude.json"),
-            r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
-        );
 
         let mut env = vec![EnvVar {
             name: "ANTHROPIC_BASE_URL".into(),
@@ -1918,25 +2358,47 @@ impl AppState {
             .map(|m| vec![m.to_string()])
             .unwrap_or_default();
 
-        settings.profiles.insert(
-            id.clone(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    display_name: Some(name.to_string()),
-                    env,
-                    custom_models,
-                    home_path: Some(home),
-                    ..ProviderSettings::default()
-                },
+        let profile = ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings {
+                display_name: Some(name.to_string()),
+                env,
+                custom_models,
+                home_path: Some(home.clone()),
+                ..ProviderSettings::default()
             },
-        );
-        self.update_settings(settings, cx);
-        let _ =
-            self.settings_store
-                .set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(api_key.trim()));
-        cx.notify();
-        id
+        };
+        let result_id = id.clone();
+        let api_key = api_key.trim().to_string();
+        cx.spawn(async move |this, cx| {
+            unblock(cx.background_executor(), move || {
+                let _ = std::fs::create_dir_all(&home);
+                let _ = std::fs::write(
+                    home.join(".claude.json"),
+                    r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
+                );
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                if state.settings.profiles.contains_key(&id) {
+                    return;
+                }
+                let mut settings = state.settings.clone();
+                settings.profiles.insert(id.clone(), profile);
+                state.update_settings(settings, cx);
+                state.enqueue_store_write(
+                    StoreWrite::SetProfileSecret {
+                        profile_id: id,
+                        key: "ANTHROPIC_API_KEY".to_string(),
+                        value: Some(api_key),
+                    },
+                    cx,
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        result_id
     }
 
     /// Delete a user profile: remove its card, its secrets, and detach any
@@ -1950,7 +2412,7 @@ impl AppState {
         if settings.profiles.remove(id).is_none() {
             return;
         }
-        let _ = self.settings_store.clear_profile_secrets(id);
+        self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.update_settings(settings, cx);
         cx.notify();
     }
@@ -1997,8 +2459,15 @@ impl AppState {
             }
             snapshot.checking = true;
             let binary = self.resolve_profile_binary(&profile_id);
-            let launch_env = self.launch_env_for_profile(&profile_id);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
             cx.spawn(async move |this, cx| {
+                let env_profile_id = profile_id.clone();
+                let launch_env = unblock(cx.background_executor(), move || {
+                    let secrets = settings_store.profile_secrets(&env_profile_id);
+                    launch_env_for_profile(&settings, &env_profile_id, secrets)
+                })
+                .await;
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 let _ = this.update(cx, |state, cx| {
@@ -2022,18 +2491,27 @@ impl AppState {
                 continue;
             }
             status.checking = true;
-            status.install_source = binary
-                .as_deref()
-                .map(detect_install_source)
-                .unwrap_or_default();
-            let source = status.install_source;
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| default_program(provider));
             let package = npm_package(provider);
-            let env = self.launch_env(provider).pairs(provider);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
             cx.spawn(async move |this, cx| {
+                let profile_id = Settings::builtin_profile_id(provider).to_string();
+                let env = unblock(cx.background_executor(), move || {
+                    let secrets = settings_store.profile_secrets(&profile_id);
+                    launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
+                })
+                .await;
+                let source = unblock(cx.background_executor(), move || {
+                    binary
+                        .as_deref()
+                        .map(detect_install_source)
+                        .unwrap_or_default()
+                })
+                .await;
                 let installed = run_capture_env(&program, &["--version"], &env).await;
                 let latest = run_capture("npm", &["view", package, "version"]).await;
                 let _ = this.update(cx, |state, cx| {
@@ -2278,7 +2756,7 @@ impl AppState {
         // Persist so the choice survives a restart (save errors are cosmetic).
         self.settings.sidebar_collapsed = self.sidebar_collapsed;
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         cx.notify();
     }
 
@@ -2309,6 +2787,29 @@ impl AppState {
                     && state.active_session_id().map(str::to_string) == session_id
                 {
                     state.git_status = Some(status);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_session_git_branch(
+        &mut self,
+        session_id: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let branch = unblock(cx.background_executor(), move || read_git_branch(&cwd)).await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(session) = state
+                    .active
+                    .as_mut()
+                    .filter(|session| session.meta.id == session_id)
+                    .or_else(|| state.background.get_mut(&session_id))
+                {
+                    session.git_branch = branch;
                     cx.notify();
                 }
             });
@@ -2417,15 +2918,17 @@ impl AppState {
         }));
 
         cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
-                perform_action(
+            let (result, git_branch) = unblock(cx.background_executor(), move || {
+                let result = perform_action(
                     &cwd,
                     action,
                     message.as_deref(),
                     included.as_deref(),
                     feature_branch.as_deref(),
                     current_branch.as_deref(),
-                )
+                );
+                let git_branch = read_git_branch(&cwd);
+                (result, git_branch)
             })
             .await;
             let _ = this.update(cx, |state, cx| {
@@ -2442,7 +2945,7 @@ impl AppState {
                     })),
                 }
                 if let Some(active) = state.active.as_mut() {
-                    active.git_branch = read_git_branch(&active.meta.cwd);
+                    active.git_branch = git_branch;
                 }
                 state.refresh_git_status(cx);
                 cx.notify();
@@ -2517,13 +3020,16 @@ impl AppState {
         }
         self.acp_registry_loading = true;
         let data_dir = self.store.root().clone();
-        // Show the cache instantly; the fetch below refreshes it in place.
-        if self.acp_registry.is_none()
-            && let Some(cached) = cached(&data_dir)
-        {
-            self.acp_registry = Some(cached);
-        }
         cx.spawn(async move |this, cx| {
+            let cache_dir = data_dir.clone();
+            let cached_registry =
+                unblock(cx.background_executor(), move || cached(&cache_dir)).await;
+            let _ = this.update(cx, |state, cx| {
+                if state.acp_registry_loading && state.acp_registry.is_none() {
+                    state.acp_registry = cached_registry;
+                    cx.notify();
+                }
+            });
             let result = unblock(cx.background_executor(), move || load(&data_dir)).await;
             let _ = this.update(cx, |state, cx| {
                 state.acp_registry_loading = false;
@@ -2605,7 +3111,7 @@ impl AppState {
                     Ok(installed) => {
                         state.settings.acp_agents.insert(id.clone(), installed);
                         let settings = state.settings.clone();
-                        let _ = state.settings_store.save(&settings);
+                        state.enqueue_settings(&settings, cx);
                         cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallSucceeded {
                             operation,
                             name,
@@ -2628,7 +3134,7 @@ impl AppState {
     pub fn remove_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
         self.settings.acp_agents.remove(id);
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
         cx.spawn(async move |_this, cx| {
@@ -2674,7 +3180,7 @@ impl AppState {
             },
         );
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         cx.notify();
     }
 
@@ -2688,7 +3194,7 @@ impl AppState {
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
             edit(agent);
             let settings = self.settings.clone();
-            let _ = self.settings_store.save(&settings);
+            self.enqueue_settings(&settings, cx);
             cx.notify();
         }
     }
@@ -2965,13 +3471,9 @@ impl AppState {
             .copied()
     }
 
-    fn write_terminal_preferences(&self) {
+    fn write_terminal_preferences(&mut self, cx: &mut Context<Self>) {
         match serde_json::to_vec_pretty(&self.terminal_preferences) {
-            Ok(bytes) => {
-                if let Err(error) = std::fs::write(&self.terminal_preferences_path, bytes) {
-                    log::warn!("failed to persist terminal UI state: {error}");
-                }
-            }
+            Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteTerminalUi(bytes), cx),
             Err(error) => log::warn!("failed to encode terminal UI state: {error}"),
         }
     }
@@ -2995,7 +3497,7 @@ impl AppState {
 
     // -- terminal drawer ---------------------------------------------------
 
-    fn persist_terminal_preferences(&mut self) {
+    fn persist_terminal_preferences(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_ref() {
             let workspace = &active.terminal_workspace;
             let key = conversation_destination(active).preference_key();
@@ -3008,13 +3510,13 @@ impl AppState {
                 },
             );
         }
-        self.write_terminal_preferences();
+        self.write_terminal_preferences(cx);
     }
 
-    pub fn set_terminal_height(&mut self, height: f32) {
+    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.terminal_workspace.height = height;
-            self.persist_terminal_preferences();
+            self.persist_terminal_preferences(cx);
         }
     }
 
@@ -3032,90 +3534,222 @@ impl AppState {
         }
     }
 
+    fn schedule_terminal_spawn(
+        &mut self,
+        session_id: String,
+        cwd: PathBuf,
+        action: TerminalSpawnAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.next_terminal_spawn_id = self
+            .next_terminal_spawn_id
+            .checked_add(1)
+            .expect("terminal spawn id overflow");
+        let spawn_id = self.next_terminal_spawn_id;
+        self.pending_terminal_spawns
+            .entry(session_id.clone())
+            .or_default()
+            .insert(spawn_id, action);
+
+        // Capture the thread-local cwd override before the work moves to the
+        // background executor.
+        let cwd = term::Terminal::resolve_spawn_cwd(cwd);
+        cx.spawn(async move |this, cx| {
+            let result =
+                unblock(cx.background_executor(), move || term::Terminal::spawn(cwd)).await;
+            let _ = this.update(cx, |state, cx| {
+                let pending = state
+                    .pending_terminal_spawns
+                    .get_mut(&session_id)
+                    .and_then(|spawns| spawns.remove(&spawn_id));
+                if state
+                    .pending_terminal_spawns
+                    .get(&session_id)
+                    .is_some_and(HashMap::is_empty)
+                {
+                    state.pending_terminal_spawns.remove(&session_id);
+                }
+                let Some(action) = pending else {
+                    return;
+                };
+                let active_matches = state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.meta.id == session_id);
+                if !active_matches {
+                    return;
+                }
+
+                let terminal = match result {
+                    Ok(terminal) => terminal,
+                    Err(error) => {
+                        let runtime_error = match action {
+                            TerminalSpawnAction::Restart { .. } => RuntimeError::TerminalRestart {
+                                error: error.to_string(),
+                            },
+                            _ => RuntimeError::TerminalStart {
+                                error: error.to_string(),
+                            },
+                        };
+                        state.report_error(runtime_error, cx);
+                        return;
+                    }
+                };
+
+                let workspace = &mut state.active.as_mut().unwrap().terminal_workspace;
+                let mut followup_split = None;
+                let applied = match action {
+                    TerminalSpawnAction::Open { split_after } => {
+                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
+                            let first = workspace.push(terminal);
+                            workspace.open = true;
+                            followup_split = split_after.map(|direction| (first, direction));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerminalSpawnAction::Restart { terminal_id } => {
+                        if let Some(entry) = workspace
+                            .terminals
+                            .iter_mut()
+                            .find(|entry| Some(entry.id) == terminal_id)
+                        {
+                            entry.terminal = terminal;
+                            workspace.open = true;
+                            true
+                        } else if terminal_id.is_none() && workspace.terminals.is_empty() {
+                            workspace.push(terminal);
+                            workspace.open = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerminalSpawnAction::New => {
+                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
+                            workspace.push(terminal);
+                            workspace.open = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerminalSpawnAction::Split { first, direction } => {
+                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION
+                            && workspace.terminal(first).is_some()
+                            && workspace.split_for(first).is_none()
+                        {
+                            let second = workspace.push(terminal);
+                            workspace.splits.push(TerminalSplit {
+                                first,
+                                second,
+                                direction,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if applied {
+                    state.persist_terminal_preferences(cx);
+                    cx.notify();
+                }
+                if let Some((first, direction)) = followup_split {
+                    let cwd = state.active.as_ref().unwrap().meta.cwd.clone();
+                    state.schedule_terminal_spawn(
+                        session_id,
+                        cwd,
+                        TerminalSpawnAction::Split { first, direction },
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_pending_terminal_spawns(&mut self, session_id: &str) {
+        self.pending_terminal_spawns.remove(session_id);
+    }
+
     pub fn open_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
         if active.terminal_workspace.terminals.is_empty() {
-            match term::Terminal::spawn(&active.meta.cwd) {
-                Ok(terminal) => {
-                    active.terminal_workspace.push(terminal);
-                }
-                Err(error) => {
-                    self.report_error(
-                        RuntimeError::TerminalStart {
-                            error: error.to_string(),
-                        },
-                        cx,
-                    );
-                    return;
-                }
+            let already_pending = self
+                .pending_terminal_spawns
+                .get(&active.meta.id)
+                .is_some_and(|spawns| {
+                    spawns
+                        .values()
+                        .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
+                });
+            if !already_pending {
+                self.schedule_terminal_spawn(
+                    active.meta.id.clone(),
+                    active.meta.cwd.clone(),
+                    TerminalSpawnAction::Open { split_after: None },
+                    cx,
+                );
             }
+            return;
         }
+        let active = self.active.as_mut().unwrap();
         active.terminal_workspace.open = true;
-        self.persist_terminal_preferences();
+        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
     pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        let session_id = self.active.as_ref().map(|active| active.meta.id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.cancel_pending_terminal_spawns(session_id);
+        }
         if let Some(active) = self.active.as_mut() {
             active.terminal_workspace.open = false;
-            self.persist_terminal_preferences();
+            self.persist_terminal_preferences(cx);
             cx.notify();
         }
     }
 
     pub fn restart_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        let active_id = active.terminal_workspace.active_id;
-        match term::Terminal::spawn(&active.meta.cwd) {
-            Ok(terminal) => {
-                if let Some(entry) = active
-                    .terminal_workspace
-                    .terminals
-                    .iter_mut()
-                    .find(|entry| Some(entry.id) == active_id)
-                {
-                    entry.terminal = terminal;
-                } else {
-                    active.terminal_workspace.push(terminal);
-                }
-                active.terminal_workspace.open = true;
-                self.persist_terminal_preferences();
-                cx.notify();
-            }
-            Err(error) => self.report_error(
-                RuntimeError::TerminalRestart {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
+        let session_id = active.meta.id.clone();
+        let cwd = active.meta.cwd.clone();
+        let terminal_id = active.terminal_workspace.active_id;
+        if let Some(spawns) = self.pending_terminal_spawns.get_mut(&session_id) {
+            spawns.retain(|_, action| !matches!(action, TerminalSpawnAction::Restart { .. }));
         }
+        self.schedule_terminal_spawn(
+            session_id,
+            cwd,
+            TerminalSpawnAction::Restart { terminal_id },
+            cx,
+        );
     }
 
     pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        if active.terminal_workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION {
+        let pending = self
+            .pending_terminal_spawns
+            .get(&active.meta.id)
+            .map_or(0, HashMap::len);
+        if active.terminal_workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION {
             return;
         }
-        match term::Terminal::spawn(&active.meta.cwd) {
-            Ok(terminal) => {
-                active.terminal_workspace.push(terminal);
-                active.terminal_workspace.open = true;
-                self.persist_terminal_preferences();
-                cx.notify();
-            }
-            Err(error) => self.report_error(
-                RuntimeError::TerminalStart {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
-        }
+        self.schedule_terminal_spawn(
+            active.meta.id.clone(),
+            active.meta.cwd.clone(),
+            TerminalSpawnAction::New,
+            cx,
+        );
     }
 
     pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
@@ -3129,6 +3763,10 @@ impl AppState {
     }
 
     pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        let session_id = self.active.as_ref().map(|active| active.meta.id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.cancel_pending_terminal_spawns(session_id);
+        }
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -3143,41 +3781,47 @@ impl AppState {
         if workspace.terminals.is_empty() {
             workspace.open = false;
         }
-        self.persist_terminal_preferences();
+        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
     pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        let workspace = &mut active.terminal_workspace;
+        let workspace = &active.terminal_workspace;
         let Some(first) = workspace.active_id else {
             return;
         };
-        if workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION
+        let pending = self
+            .pending_terminal_spawns
+            .get(&active.meta.id)
+            .map_or(0, HashMap::len);
+        if workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION
             || workspace.split_for(first).is_some()
+            || self
+                .pending_terminal_spawns
+                .get(&active.meta.id)
+                .is_some_and(|spawns| {
+                    spawns.values().any(|action| {
+                        matches!(
+                            action,
+                            TerminalSpawnAction::Split {
+                                first: pending_first,
+                                ..
+                            } if *pending_first == first
+                        )
+                    })
+                })
         {
             return;
         }
-        match term::Terminal::spawn(&active.meta.cwd) {
-            Ok(terminal) => {
-                let second = workspace.push(terminal);
-                workspace.splits.push(TerminalSplit {
-                    first,
-                    second,
-                    direction,
-                });
-                self.persist_terminal_preferences();
-                cx.notify();
-            }
-            Err(error) => self.report_error(
-                RuntimeError::TerminalStart {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
-        }
+        self.schedule_terminal_spawn(
+            active.meta.id.clone(),
+            active.meta.cwd.clone(),
+            TerminalSpawnAction::Split { first, direction },
+            cx,
+        );
     }
 
     pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
@@ -3197,27 +3841,38 @@ impl AppState {
 
     /// Hidden visual-QA fixture: two live PTYs in a split plus a captured chip.
     pub fn open_terminal_demo(&mut self, cx: &mut Context<Self>) {
-        self.open_terminal_panel(cx);
-        self.split_terminal(TerminalSplitDirection::Horizontal, cx);
-        let Some((first, second)) = self.active.as_ref().and_then(|active| {
-            let split = active.terminal_workspace.splits.first()?;
-            Some((split.first, split.second))
-        }) else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        if let Some(active) = self.active.as_ref() {
-            if let Some(entry) = active.terminal_workspace.terminal(first) {
-                entry
-                    .terminal
-                    .write_input(b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec());
-            }
-            if let Some(entry) = active.terminal_workspace.terminal(second) {
-                entry
-                    .terminal
-                    .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
-            }
+        if active.terminal_workspace.terminals.is_empty() {
+            self.schedule_terminal_spawn(
+                active.meta.id.clone(),
+                active.meta.cwd.clone(),
+                TerminalSpawnAction::Open {
+                    split_after: Some(TerminalSplitDirection::Horizontal),
+                },
+                cx,
+            );
+        } else {
+            self.split_terminal(TerminalSplitDirection::Horizontal, cx);
         }
         cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(700)).await;
+            let Ok(Some((first, _second))) = this.update(cx, |state, _| {
+                let active = state.active.as_ref()?;
+                let split = active.terminal_workspace.splits.first()?;
+                let first = active.terminal_workspace.terminal(split.first)?;
+                let second = active.terminal_workspace.terminal(split.second)?;
+                first
+                    .terminal
+                    .write_input(b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec());
+                second
+                    .terminal
+                    .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
+                Some((split.first, split.second))
+            }) else {
+                return;
+            };
             smol::Timer::after(std::time::Duration::from_millis(700)).await;
             let _ = this.update(cx, |state, cx| {
                 let selected = state.active.as_ref().and_then(|active| {
@@ -3354,17 +4009,9 @@ impl AppState {
             return Some(existing.id.clone());
         }
         let project = Project::from_root(root);
-        if let Err(err) = self.store.upsert_project(&project) {
-            self.report_error(
-                RuntimeError::PersistProject {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return None;
-        }
         let id = project.id.clone();
-        self.projects = self.store.load_projects();
+        self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
+        self.projects.push(project);
         cx.notify();
         Some(id)
     }
@@ -3522,16 +4169,17 @@ impl AppState {
         user_files::save_attachment(self.store.root(), id, bytes, ext)
     }
 
+    /// Persist attachment bytes to a previously captured active-session target.
+    /// Callers run this blocking helper on the background executor.
+    pub fn save_attachment_to_dir(dir: &Path, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, bytes)?;
+        Ok(path)
+    }
+
     pub fn update_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
-        if let Err(err) = self.settings_store.save(&settings) {
-            self.report_error(
-                RuntimeError::PersistSettings {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
         self.settings = settings;
         // Keep the live computer-use MCP config in step with the persisted
@@ -3665,7 +4313,7 @@ impl AppState {
             .active_session_id()
             .is_some_and(|active| ids.contains(active))
         {
-            self.shutdown_active();
+            self.shutdown_active(cx);
         }
         for id in ids.iter().copied() {
             // An archived conversation must not leave an off-screen PTY running.
@@ -3773,26 +4421,38 @@ impl AppState {
         // marker. The cwd may be shared, but the fork must not own the source's
         // generated worktree or offer to delete it.
 
-        if let Err(err) = self.store.clone_events(&source.id, &fork.id) {
-            self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
-        if let Err(err) = self.store.upsert_meta(&fork) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
-        self.sessions = self.store.load_index();
-        self.select_session(&fork.id, cx);
+        let (completion, completed) = async_channel::bounded(1);
+        self.enqueue_store_write(
+            StoreWrite::CloneEvents {
+                src: source.id,
+                dst: fork.id.clone(),
+                completion,
+            },
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = completed
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("session store writer stopped".into()));
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(()) => {
+                    state.enqueue_store_write(
+                        StoreWrite::UpsertMeta {
+                            meta: Box::new(fork.clone()),
+                            initial: true,
+                        },
+                        cx,
+                    );
+                    state.upsert_session_in_memory(fork.clone());
+                    state.select_session(&fork.id, cx);
+                }
+                Err(error) => {
+                    state.report_error(RuntimeError::PersistEvent { error }, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The worktree that deleting `session_id` would orphan (i.e. it is the only
@@ -3823,42 +4483,52 @@ impl AppState {
         let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
         if self.active_session_id() == Some(session_id) {
             // shutdown_active drops the ActiveSession (and its terminal PTY).
-            self.shutdown_active();
+            self.shutdown_active(cx);
         }
         // Deleting a thread that is working in the background kills it for real.
         self.drop_background(session_id);
         self.conversation_ui
             .remove(&ConversationDestination::Thread(session_id.to_string()));
         if self.terminal_preferences.remove(session_id).is_some() {
-            self.write_terminal_preferences();
+            self.write_terminal_preferences(cx);
         }
         self.close_orchestrator_children(session_id);
-        if let Some(meta) = &meta
-            && remove_worktree
-            && let Some(worktree) = &meta.worktree
-            && let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd)
-        {
-            self.report_error(
-                RuntimeError::WorktreeRemove {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
+        let worktree_remove = meta.as_ref().and_then(|meta| {
+            (remove_worktree && meta.worktree.is_some()).then(|| {
+                let worktree = meta.worktree.as_ref().unwrap();
+                (worktree.root_project_path.clone(), meta.cwd.clone())
+            })
+        });
         self.settings.last_visited.remove(session_id);
-        if let Err(err) = self.store.remove_session(session_id) {
-            self.report_error(
-                RuntimeError::DeleteSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
-        self.sessions = self.store.load_index();
+        self.enqueue_settings(&settings, cx);
+        self.sessions.retain(|meta| meta.id != session_id);
+        if let Some((root, cwd)) = worktree_remove {
+            let deleted_id = session_id.to_string();
+            cx.spawn(async move |this, cx| {
+                let result = unblock(cx.background_executor(), move || {
+                    remove_git_worktree(&root, &cwd)
+                })
+                .await;
+                let _ = this.update(cx, |state, cx| {
+                    if let Err(err) = result
+                        && !state.sessions.iter().any(|meta| meta.id == deleted_id)
+                        && state.active_session_id() != Some(&deleted_id)
+                        && !state.background.contains_key(&deleted_id)
+                    {
+                        state.report_error(
+                            RuntimeError::WorktreeRemove {
+                                error: err.to_string(),
+                            },
+                            cx,
+                        );
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -3876,7 +4546,7 @@ impl AppState {
             .as_ref()
             .is_some_and(|active| active.meta.project_id.as_deref() == Some(project_id))
         {
-            self.shutdown_active();
+            self.shutdown_active(cx);
         }
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.conversation_ui.remove(&draft_destination);
@@ -3885,27 +4555,18 @@ impl AppState {
             .remove(&draft_destination.preference_key())
             .is_some()
         {
-            self.write_terminal_preferences();
+            self.write_terminal_preferences(cx);
         }
         for session_id in session_ids {
             self.delete_session(&session_id, false, cx);
         }
-        if let Err(err) = self.store.remove_project(project_id) {
-            self.report_error(
-                RuntimeError::DeleteProject {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
             .retain(|id| id != project_id);
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
-        self.sessions = self.store.load_index();
-        self.projects = self.store.load_projects();
+        self.enqueue_settings(&settings, cx);
+        self.projects.retain(|project| project.id != project_id);
         cx.notify();
     }
 
@@ -3986,12 +4647,12 @@ impl AppState {
     }
 
     /// Record that a thread has been visited now (clears its unread dot).
-    fn mark_visited(&mut self, session_id: &str) {
+    fn mark_visited(&mut self, session_id: &str, cx: &mut Context<Self>) {
         self.settings
             .last_visited
             .insert(session_id.to_string(), now_secs());
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
     }
 
     /// Mark a thread unread (context menu): set its last-visited just below its
@@ -4007,7 +4668,7 @@ impl AppState {
             .last_visited
             .insert(session_id.to_string(), updated.saturating_sub(1));
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         cx.notify();
     }
 
@@ -4091,6 +4752,10 @@ impl AppState {
                     &branch_for_task,
                     &base_for_task,
                 )
+                .map(|worktree_path| {
+                    let git_branch = read_git_branch(&worktree_path);
+                    (worktree_path, git_branch)
+                })
             })
             .await;
             let _ = this.update(cx, |state, cx| {
@@ -4103,7 +4768,7 @@ impl AppState {
                 };
                 active.preparing_worktree = false;
                 match result {
-                    Ok(worktree_path) => {
+                    Ok((worktree_path, git_branch)) => {
                         active.meta.cwd = worktree_path.clone();
                         active.meta.worktree = Some(WorktreeInfo {
                             root_project_path: root,
@@ -4111,7 +4776,7 @@ impl AppState {
                             branch,
                         });
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
-                        active.git_branch = read_git_branch(&worktree_path);
+                        active.git_branch = git_branch;
                         // Now that the worktree exists, run the deferred send.
                         state.send_turn(text, attachments, cx);
                     }
@@ -4160,23 +4825,23 @@ impl AppState {
             Some(id) if self.projects.iter().any(|p| p.id == id) => Some(id),
             _ => self.create_project(meta.cwd.clone(), cx),
         };
-        if let Err(err) = self.store.upsert_meta(&meta) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
-        self.sessions = self.store.load_index();
-        self.park_active();
-        let git_branch = read_git_branch(&meta.cwd);
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        self.upsert_session_in_memory(meta.clone());
+        self.park_active(cx);
+        let session_id = meta.id.clone();
+        let cwd = meta.cwd.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline: Timeline::default(),
-            git_branch,
+            git_branch: None,
             branches: Vec::new(),
             draft: false,
             pending_relay: None,
@@ -4204,6 +4869,7 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.refresh_session_git_branch(session_id, cwd, cx);
         self.ensure_started(cx);
         self.refresh_git_status(cx);
         cx.notify();
@@ -4225,11 +4891,10 @@ impl AppState {
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.project_id = Some(project_id);
         meta.acp_agent_id = acp_agent_id;
-        let git_branch = read_git_branch(&meta.cwd);
         ActiveSession {
             meta,
             timeline: Timeline::default(),
-            git_branch,
+            git_branch: None,
             branches: Vec::new(),
             draft: true,
             pending_relay: None,
@@ -4320,7 +4985,7 @@ impl AppState {
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
-        self.park_active();
+        self.park_active(cx);
         let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
             self.draft_defaults(&project_id);
         let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());
@@ -4340,6 +5005,9 @@ impl AppState {
             draft.terminal_workspace.height = preferences.height.clamp(120., 600.);
         }
         self.active = Some(draft);
+        if let Some(active) = self.active.as_ref() {
+            self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
+        }
         if !restored_ui {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
@@ -4352,9 +5020,9 @@ impl AppState {
         self.active.as_ref().is_some_and(|a| a.draft)
     }
 
-    /// Persist the active draft as a real session (no cx; caller notifies).
+    /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
-    fn commit_draft(&mut self) -> std::io::Result<()> {
+    fn commit_draft(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
         let preference_migration = self.active.as_ref().and_then(|active| {
             active.draft.then(|| {
                 (
@@ -4368,16 +5036,138 @@ impl AppState {
         {
             active.draft = false;
             let meta = active.meta.clone();
-            self.store.upsert_meta(&meta)?;
-            self.sessions = self.store.load_index();
+            self.enqueue_store_write(
+                StoreWrite::UpsertMeta {
+                    meta: Box::new(meta.clone()),
+                    initial: true,
+                },
+                cx,
+            );
+            self.upsert_session_in_memory(meta);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
         {
             self.terminal_preferences.insert(session_key, preferences);
-            self.write_terminal_preferences();
+            self.write_terminal_preferences(cx);
         }
         Ok(())
+    }
+
+    fn schedule_timeline_load(
+        &mut self,
+        session_id: String,
+        target: TimelineLoadTarget,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = {
+            let generation = self
+                .timeline_load_generations
+                .entry(session_id.clone())
+                .or_default();
+            *generation += 1;
+            *generation
+        };
+        self.spawn_timeline_load_attempt(
+            session_id,
+            target,
+            generation,
+            self.store_append_generation,
+            1,
+            cx,
+        );
+    }
+
+    fn spawn_timeline_load_attempt(
+        &mut self,
+        session_id: String,
+        target: TimelineLoadTarget,
+        generation: u64,
+        watermark: u64,
+        attempt: u8,
+        cx: &mut Context<Self>,
+    ) {
+        let intended = match target {
+            TimelineLoadTarget::Active { .. } => self
+                .active
+                .as_ref()
+                .filter(|session| session.meta.id == session_id),
+            TimelineLoadTarget::Background { .. } => self.background.get(&session_id),
+        };
+        let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
+            return;
+        };
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let read_id = session_id.clone();
+            let (timeline, git_branch) = unblock(cx.background_executor(), move || {
+                let mut timeline = Timeline::fold_events(store.read_events(&read_id));
+                let (mark_idle, load_branch) = match target {
+                    TimelineLoadTarget::Active {
+                        mark_idle,
+                        read_git_branch,
+                    } => (mark_idle, read_git_branch),
+                    TimelineLoadTarget::Background { mark_idle } => (mark_idle, false),
+                };
+                if mark_idle {
+                    timeline.mark_idle();
+                }
+                let git_branch = load_branch.then(|| read_git_branch(&cwd));
+                (timeline, git_branch)
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                let generation_matches = state
+                    .timeline_load_generations
+                    .get(&session_id)
+                    .copied()
+                    == Some(generation);
+                let target_matches = match target {
+                    TimelineLoadTarget::Active { .. } => {
+                        state.active_session_id() == Some(session_id.as_str())
+                    }
+                    TimelineLoadTarget::Background { .. } => {
+                        state.background.contains_key(&session_id)
+                    }
+                };
+                if !generation_matches || !target_matches {
+                    return;
+                }
+                if state.store_append_generation != watermark && attempt < 4 {
+                    state.spawn_timeline_load_attempt(
+                        session_id,
+                        target,
+                        generation,
+                        state.store_append_generation,
+                        attempt + 1,
+                        cx,
+                    );
+                    return;
+                }
+                if state.store_append_generation != watermark {
+                    log::warn!(
+                        "timeline load for {session_id} remained racy after {attempt} attempts; applying the last fold"
+                    );
+                }
+                match target {
+                    TimelineLoadTarget::Active { .. } => {
+                        if let Some(active) = state.active.as_mut() {
+                            active.timeline = timeline;
+                            if let Some(git_branch) = git_branch {
+                                active.git_branch = git_branch;
+                            }
+                        }
+                    }
+                    TimelineLoadTarget::Background { .. } => {
+                        if let Some(background) = state.background.get_mut(&session_id) {
+                            background.timeline = timeline;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Make a stored session active: replay its JSONL log only. The provider
@@ -4390,8 +5180,8 @@ impl AppState {
         let Some(meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() else {
             return;
         };
-        self.park_active();
-        self.mark_visited(session_id);
+        self.park_active(cx);
+        self.mark_visited(session_id, cx);
 
         // A parked session is re-adopted, not replayed cold: its process, pump
         // and queue come back as they were, and the timeline is rebuilt from the
@@ -4404,8 +5194,6 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
-            parked.timeline = Timeline::fold_events(self.store.read_events(session_id));
-            parked.git_branch = read_git_branch(&parked.meta.cwd);
             // Background events may have auto-opened or otherwise changed the
             // panel after it was parked; that live state wins over the snapshot
             // captured when the user switched away.
@@ -4420,6 +5208,14 @@ impl AppState {
             }
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
             self.active = Some(parked);
+            self.schedule_timeline_load(
+                session_id.to_string(),
+                TimelineLoadTarget::Active {
+                    mark_idle: false,
+                    read_git_branch: true,
+                },
+                cx,
+            );
             if !restored_ui {
                 self.reopen_persisted_terminals(terminal_preferences, cx);
             }
@@ -4437,24 +5233,18 @@ impl AppState {
             return;
         }
 
-        let events = self.store.read_events(&meta.id);
-        let mut timeline = Timeline::fold_events(events);
-        // The provider process is gone; stale approvals / running turns can't
-        // continue, so drop them.
-        timeline.mark_idle();
         log::info!(
-            "opened session {} ({} timeline entries, resume cursor: {})",
+            "opening session {} (resume cursor: {})",
             meta.id,
-            timeline.entries.len(),
             meta.resume_cursor.is_some()
         );
-        let git_branch = read_git_branch(&meta.cwd);
+        let session_id = meta.id.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         let mut active = ActiveSession {
             meta,
-            timeline,
-            git_branch,
+            timeline: Timeline::default(),
+            git_branch: None,
             branches: Vec::new(),
             draft: false,
             pending_relay: None,
@@ -4488,6 +5278,14 @@ impl AppState {
             active.terminal_workspace.height = preferences.height.clamp(120., 600.);
         }
         self.active = Some(active);
+        self.schedule_timeline_load(
+            session_id,
+            TimelineLoadTarget::Active {
+                mark_idle: true,
+                read_git_branch: true,
+            },
+            cx,
+        );
         if !restored_ui {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
@@ -4529,7 +5327,7 @@ impl AppState {
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
         if self.active_is_draft()
-            && let Err(err) = self.commit_draft()
+            && let Err(err) = self.commit_draft(cx)
         {
             self.report_error(
                 RuntimeError::PersistSession {
@@ -4740,23 +5538,32 @@ impl AppState {
             }
             if parked.meta.parent_session_id.is_some() {
                 let child_id = session_id.to_string();
-                let idle_turns = Timeline::fold_events(self.store.read_events(session_id))
-                    .turns
-                    .len();
+                let store = self.store.clone();
                 cx.spawn(async move |this, cx| {
+                    let first_store = store.clone();
+                    let first_id = child_id.clone();
+                    let idle_turns = unblock(cx.background_executor(), move || {
+                        Timeline::fold_events(first_store.read_events(&first_id))
+                            .turns
+                            .len()
+                    })
+                    .await;
                     cx.background_executor()
                         .timer(std::time::Duration::from_secs(30 * 60))
                         .await;
+                    let second_id = child_id.clone();
+                    let current_turns = unblock(cx.background_executor(), move || {
+                        Timeline::fold_events(store.read_events(&second_id))
+                            .turns
+                            .len()
+                    })
+                    .await;
                     let _ = this.update(cx, |state, cx| {
-                        let still_idle =
-                            state.background.get(&child_id).is_some_and(|child| {
-                                child.queue.is_empty()
-                                    && !child.turn_in_flight
-                                    && child.background_task_count == 0
-                            }) && Timeline::fold_events(state.store.read_events(&child_id))
-                                .turns
-                                .len()
-                                == idle_turns;
+                        let still_idle = state.background.get(&child_id).is_some_and(|child| {
+                            child.queue.is_empty()
+                                && !child.turn_in_flight
+                                && child.background_task_count == 0
+                        }) && current_turns == idle_turns;
                         if still_idle {
                             state.drop_background(&child_id);
                             cx.notify();
@@ -4812,21 +5619,40 @@ impl AppState {
         {
             return;
         }
-        let timeline = Timeline::fold_events(self.store.read_events(child_id));
-        let turn = timeline.turns.len();
-        if self.callback_last_turn.get(child_id).copied() == Some(turn) {
-            return;
-        }
+        let child_id = child_id.to_string();
         let parent_id = child.parent_session_id.clone().unwrap();
-        self.callback_last_turn.insert(child_id.to_string(), turn);
-        let text = assemble_callback_text(
-            child_id,
-            &child.title,
-            status,
-            &final_assistant_message(&timeline),
-            timeline.usage.as_ref(),
-        );
-        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+        let title = child.title;
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let read_id = child_id.clone();
+            let timeline = unblock(cx.background_executor(), move || {
+                Timeline::fold_events(store.read_events(&read_id))
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                let child_still_exists = state.sessions.iter().any(|meta| {
+                    meta.id == child_id
+                        && meta.parent_session_id.as_deref() == Some(parent_id.as_str())
+                });
+                if !child_still_exists {
+                    return;
+                }
+                let turn = timeline.turns.len();
+                if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
+                    return;
+                }
+                let text = assemble_callback_text(
+                    &child_id,
+                    &title,
+                    status,
+                    &final_assistant_message(&timeline),
+                    timeline.usage.as_ref(),
+                );
+                state.callback_last_turn.insert(child_id, turn);
+                state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+            });
+        })
+        .detach();
     }
 
     fn deliver_child_approval_callback(
@@ -4944,7 +5770,7 @@ impl AppState {
                 .find(|meta| meta.id == parent_id)
                 .cloned()
         {
-            self.load_background_session(parent);
+            self.load_background_session(parent, cx);
         }
         if let Some(parent) = self.background.get_mut(parent_id) {
             parent.push_or_merge_orchestrate_callback(text);
@@ -5396,23 +6222,23 @@ impl AppState {
         meta.interaction_mode = InteractionMode::Build;
         meta.project_id = project_id;
         meta.acp_agent_id = acp_agent_id;
-        if let Err(err) = self.store.upsert_meta(&meta) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
-        self.sessions = self.store.load_index();
-        self.park_active();
-        let git_branch = read_git_branch(&meta.cwd);
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        self.upsert_session_in_memory(meta.clone());
+        self.park_active(cx);
+        let session_id = meta.id.clone();
+        let cwd = meta.cwd.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         self.active = Some(ActiveSession {
             meta,
             timeline: Timeline::default(),
-            git_branch,
+            git_branch: None,
             branches: Vec::new(),
             draft: false,
             pending_relay: None,
@@ -5440,6 +6266,7 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.refresh_session_git_branch(session_id, cwd, cx);
         self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
         cx.notify();
     }
@@ -5455,22 +6282,31 @@ impl AppState {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             return;
         };
-        match user_files::save_plan_to_workspace(&cwd, &markdown) {
-            Ok(path) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
-            }
-            Err(err) => self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            ),
-        }
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = unblock(cx.background_executor(), move || {
+                user_files::save_plan_to_workspace(&cwd, &markdown)
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                match result {
+                    Ok(path) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                    }
+                    Err(err) => state.report_error(
+                        RuntimeError::PersistEvent {
+                            error: err.to_string(),
+                        },
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Save the plan markdown to the user's Downloads directory (falling back to
@@ -5483,23 +6319,32 @@ impl AppState {
     ) {
         let title = plan_title(&markdown).unwrap_or(fallback_title);
         let filename = format!("{}.md", sanitize_filename(&title));
-        let fallback_cwd = self.active.as_ref().map(|a| a.meta.cwd.as_path());
-        match user_files::save_plan_download(&filename, &markdown, fallback_cwd) {
-            Ok(path) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
-            }
-            Err(err) => self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            ),
-        }
-        cx.notify();
+        let fallback_cwd = self.active.as_ref().map(|a| a.meta.cwd.clone());
+        cx.spawn(async move |this, cx| {
+            let result = unblock(cx.background_executor(), move || {
+                user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                match result {
+                    Ok(path) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                    }
+                    Err(err) => state.report_error(
+                        RuntimeError::PersistEvent {
+                            error: err.to_string(),
+                        },
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The active session's latest structured plan steps and proposed plan (for
@@ -5678,10 +6523,13 @@ impl AppState {
             let _ = this.update(cx, |state, cx| {
                 match result {
                     Ok(()) => {
-                        if let Some(active) = state.active.as_mut()
-                            && active.meta.id == session_id
+                        if let Some(cwd) = state
+                            .active
+                            .as_ref()
+                            .filter(|active| active.meta.id == session_id)
+                            .map(|active| active.meta.cwd.clone())
                         {
-                            active.git_branch = read_git_branch(&active.meta.cwd);
+                            state.refresh_session_git_branch(session_id.clone(), cwd, cx);
                         }
                         cx.emit(AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }));
                     }
@@ -5882,7 +6730,7 @@ impl AppState {
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
-        let launch_env = self.session_launch_env(&meta);
+        let settings_store = self.settings_store.clone();
         let preview_registration = self.preview_registration_for(&meta);
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let computer_use_registration = self.computer_use_registration.clone();
@@ -5898,6 +6746,12 @@ impl AppState {
         }
 
         cx.spawn(async move |this, cx| {
+            let env_meta = meta.clone();
+            let env_settings = settings.clone();
+            let launch_env = unblock(cx.background_executor(), move || {
+                session_launch_env(&env_settings, &settings_store, &env_meta)
+            })
+            .await;
             let opts = session_options(
                 &meta,
                 &settings,
@@ -6155,12 +7009,15 @@ impl AppState {
             } else {
                 None
             };
-            if let Some((provider, acp_agent_id)) = cache_key
-                && let Err(err) =
-                    self.store
-                        .save_commands(provider, acp_agent_id.as_deref(), commands)
-            {
-                log::warn!("failed to persist {provider:?} command cache: {err}");
+            if let Some((provider, acp_agent_id)) = cache_key {
+                self.enqueue_store_write(
+                    StoreWrite::SaveCommands {
+                        provider,
+                        acp_agent_id,
+                        commands: commands.clone(),
+                    },
+                    cx,
+                );
             }
             return;
         }
@@ -6245,10 +7102,13 @@ impl AppState {
                 // The turn may have switched branches (checkout) or made the
                 // first commit; refresh the display-only branch label and the
                 // git quick-action status.
-                if let Some(active) = self.active.as_mut()
-                    && active.meta.id == session_id
+                if let Some((session_id, cwd)) = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.meta.id == session_id)
+                    .map(|active| (active.meta.id.clone(), active.meta.cwd.clone()))
                 {
-                    active.git_branch = read_git_branch(&active.meta.cwd);
+                    self.refresh_session_git_branch(session_id, cwd, cx);
                 }
                 if self.active_session_id() == Some(session_id) {
                     self.refresh_git_status(cx);
@@ -6452,15 +7312,16 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded so the on-disk
     /// log and the live timeline agree.
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
+        self.store_append_generation += 1;
         let ts = now_millis();
-        if let Err(err) = self.store.append_event(session_id, ts, event) {
-            self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
+        self.enqueue_store_write(
+            StoreWrite::AppendEvent {
+                id: session_id.to_string(),
+                ts,
+                event: Box::new(event.clone()),
+            },
+            cx,
+        );
         if let Some(active) = self.active.as_mut()
             && active.meta.id == session_id
         {
@@ -6502,13 +7363,22 @@ impl AppState {
         let session_id = fallback_meta.id.clone();
         let title_meta = title_session_meta(&self.settings, fallback_meta.cwd);
         let settings = self.settings.clone();
-        let launch_env = self.session_launch_env(&title_meta);
-        let options = session_options(&title_meta, &settings, launch_env, None, None, None);
+        let settings_store = self.settings_store.clone();
         let source = first_message.to_string();
         let attachments = attachments.to_vec();
+        let executor = cx.background_executor().clone();
 
         cx.spawn(async move |this, cx| {
-            let title = generate_ai_title(title_meta.provider, options, source, attachments).await;
+            let env_meta = title_meta.clone();
+            let env_settings = settings.clone();
+            let launch_env = unblock(cx.background_executor(), move || {
+                session_launch_env(&env_settings, &settings_store, &env_meta)
+            })
+            .await;
+            let options = session_options(&title_meta, &settings, launch_env, None, None, None);
+            let title =
+                generate_ai_title(title_meta.provider, options, source, attachments, executor)
+                    .await;
             let _ = this.update(cx, |state, cx| {
                 if let Some(title) = title {
                     state.apply_generated_title(&session_id, &fallback, &title, cx);
@@ -6560,32 +7430,26 @@ impl AppState {
             if *visited < meta.updated_at {
                 *visited = meta.updated_at;
                 let settings = self.settings.clone();
-                let _ = self.settings_store.save(&settings);
+                self.enqueue_settings(&settings, cx);
             }
         }
-        if let Err(err) = self.store.upsert_meta(meta) {
-            self.report_error(
-                RuntimeError::PersistSessionIndex {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: false,
+            },
+            cx,
+        );
         // Reflect the upsert in memory instead of reloading the whole index
         // from disk: `persist_meta` runs on every turn,
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
-        match self.sessions.iter_mut().find(|m| m.id == meta.id) {
-            Some(existing) => *existing = meta.clone(),
-            None => self.sessions.push(meta.clone()),
-        }
-        self.sessions
-            .sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+        self.upsert_session_in_memory(meta.clone());
         cx.notify();
     }
 
-    pub fn shutdown_active(&mut self) {
-        self.persist_terminal_preferences();
+    pub fn shutdown_active(&mut self, cx: &mut Context<Self>) {
+        self.persist_terminal_preferences(cx);
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             self.sessions_awaiting_approval.remove(&session_id);
             self.pending_native_rewinds.remove(&session_id);
@@ -6599,8 +7463,8 @@ impl AppState {
     }
 
     /// Shut down every provider process before the application exits.
-    pub fn shutdown_all(&mut self) {
-        self.shutdown_active();
+    pub fn shutdown_all(&mut self, cx: &mut Context<Self>) {
+        self.shutdown_active(cx);
         for (_, parked) in self.background.drain() {
             if let Runtime::Live(commands) = parked.runtime {
                 let _ = commands.try_send(SessionCommand::Shutdown);
@@ -6618,9 +7482,9 @@ impl AppState {
     /// tasks is parked in `background` (process, pump and queue intact — see the
     /// field docs); an idle one is shut down as before. Every "switch away" path
     /// goes through here; only destructive paths use `shutdown_active` directly.
-    fn park_active(&mut self) {
+    fn park_active(&mut self, cx: &mut Context<Self>) {
         self.pending_diff_focus = None;
-        self.persist_terminal_preferences();
+        self.persist_terminal_preferences(cx);
         let Some(mut active) = self.active.take() else {
             return;
         };
@@ -7111,6 +7975,58 @@ fn normalized_selections(
     out
 }
 
+fn launch_env_for_profile(
+    settings: &Settings,
+    profile_id: &str,
+    secrets: std::collections::BTreeMap<String, String>,
+) -> LaunchEnv {
+    let Some(profile) = settings.resolved_profile(profile_id) else {
+        return LaunchEnv::default();
+    };
+    let profile_settings = profile.settings;
+    let env = profile_settings
+        .env
+        .iter()
+        .filter(|var| !var.name.trim().is_empty())
+        .filter_map(|var| {
+            let value = if var.sensitive {
+                // Sensitive rows keep their value only in secrets.json; a row
+                // whose secret was never saved contributes nothing.
+                secrets.get(&var.name).cloned()?
+            } else {
+                var.value.clone()
+            };
+            Some((var.name.trim().to_string(), value))
+        })
+        .collect();
+    LaunchEnv {
+        env,
+        home: profile_settings.effective_home(),
+    }
+}
+
+fn session_launch_env(
+    settings: &Settings,
+    settings_store: &SettingsStore,
+    meta: &SessionMeta,
+) -> LaunchEnv {
+    if meta.provider != ProviderKind::Acp {
+        let profile_id = meta
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
+        let secrets = settings_store.profile_secrets(&profile_id);
+        return launch_env_for_profile(settings, &profile_id, secrets);
+    }
+    let env = meta
+        .acp_agent_id
+        .as_deref()
+        .and_then(|id| settings.acp_agent(id))
+        .map(|agent| agent.env.clone())
+        .unwrap_or_default();
+    LaunchEnv { env, home: None }
+}
+
 fn session_options(
     meta: &SessionMeta,
     settings: &Settings,
@@ -7208,12 +8124,18 @@ async fn generate_ai_title(
     mut options: SessionOptions,
     source: String,
     attachments: Vec<Attachment>,
+    executor: BackgroundExecutor,
 ) -> Option<String> {
     // Isolate even a badly behaved title request from the user's checkout. The
     // title prompt forbids tools and Supervised mode denies side effects, but a
     // scratch cwd gives us another cheap boundary.
     let scratch = std::env::temp_dir().join(format!("tcode-title-{}", uuid::Uuid::new_v4()));
-    if let Err(err) = std::fs::create_dir_all(&scratch) {
+    let scratch_for_create = scratch.clone();
+    if let Err(err) = unblock(&executor, move || {
+        std::fs::create_dir_all(&scratch_for_create)
+    })
+    .await
+    {
         log::debug!("could not create AI title scratch directory: {err}");
         return None;
     }
@@ -7227,7 +8149,7 @@ async fn generate_ai_title(
         },
     )
     .await;
-    let _ = std::fs::remove_dir_all(scratch);
+    let _ = unblock(&executor, move || std::fs::remove_dir_all(scratch)).await;
     generated
 }
 
@@ -7500,6 +8422,7 @@ mod tests {
                 Some(archived_at + 1)
             );
         });
+        cx.run_until_parked();
         let persisted = store.load_index();
         assert!(
             persisted
@@ -7834,6 +8757,8 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
+        let mut expected_full = String::new();
+        let mut expected_context = 0;
 
         state.update(cx, |state, cx| {
             // A live, idle, already-enabled orchestrator: the turn is an ordinary
@@ -7856,15 +8781,17 @@ mod tests {
             state.on_event("orchestrator", AgentEvent::TurnAccepted { delivery_id }, cx);
 
             // What the provider actually receives is the whole composed text.
-            let expected_full = compose_orchestrate_text(
+            expected_full = compose_orchestrate_text(
                 ProviderKind::Codex,
                 None,
                 false,
                 &state.settings.orchestrate,
                 "执行某某任务",
             );
-            let expected_context = expected_full.len() - "执行某某任务".len();
-
+            expected_context = expected_full.len() - "执行某某任务".len();
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             let events = state.store.read_events("orchestrator");
             let recorded = events
                 .iter()
@@ -8203,7 +9130,7 @@ mod tests {
 
             // Committing keeps the active resources but moves external caches
             // (such as PreviewPanel's WebView pool) to the real thread key.
-            state.commit_draft().unwrap();
+            state.commit_draft(cx).unwrap();
             assert_eq!(
                 state.active_conversation_ui_key().as_deref(),
                 Some(second_id.as_str())
@@ -8213,14 +9140,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn draft_send_creates_session_with_project_cwd() {
+    #[gpui::test]
+    fn draft_send_creates_session_with_project_cwd(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("tcode-draft-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(PathBuf::from("/tmp/tcode-draft-proj"));
         // Persist the project so the draft's project_id survives index migration.
         store.upsert_project(&project).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
         // A draft is set up (cwd = project root) but not yet persisted.
         let draft = AppState::build_draft_session(
             project.id.clone(),
@@ -8235,17 +9162,19 @@ mod tests {
         assert_eq!(draft.meta.project_id.as_deref(), Some(project.id.as_str()));
         assert!(matches!(draft.runtime, Runtime::Idle));
         let draft_id = draft.meta.id.clone();
-        state.active = Some(draft);
-        // Not in the index until the first send materializes it.
-        assert!(!state.sessions.iter().any(|m| m.id == draft_id));
+        state.update(cx, |state, cx| {
+            state.active = Some(draft);
+            // Not in the index until the first send materializes it.
+            assert!(!state.sessions.iter().any(|m| m.id == draft_id));
 
-        // The first send commits the draft: it becomes a real session whose
-        // cwd is the project root and shows up in the sidebar index.
-        state.commit_draft().unwrap();
-        assert!(!state.active.as_ref().unwrap().draft);
-        let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
-        assert_eq!(created.cwd, project.root);
-        assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+            // The first send commits the draft: it becomes a real session whose
+            // cwd is the project root and shows up in the sidebar index.
+            state.commit_draft(cx).unwrap();
+            assert!(!state.active.as_ref().unwrap().draft);
+            let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
+            assert_eq!(created.cwd, project.root);
+            assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+        });
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9091,7 +10020,7 @@ mod tests {
             assert!(text.contains("decide with the approve tool"));
             assert!(receiver.try_recv().is_err(), "callback was delivered twice");
 
-            let status = state.child_status_json(&child);
+            let status = state.child_status_json(&child, &Timeline::default());
             assert_eq!(
                 status["waiting_approval"],
                 serde_json::json!("command `touch blocked`")
@@ -9245,17 +10174,18 @@ mod tests {
                 }],
             );
 
-            let result = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "parent".into(),
-                        thread_id: "child".into(),
-                        request_id: None,
-                        decision: " APPROVE ".into(),
-                    },
-                    cx,
-                )
-                .unwrap();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: None,
+                    decision: " APPROVE ".into(),
+                },
+                reply,
+                cx,
+            );
+            let result = response.try_recv().unwrap().unwrap();
             assert_eq!(
                 result,
                 serde_json::json!({ "ok": true, "request_id": "approval-op" })
@@ -9268,46 +10198,49 @@ mod tests {
                 }) if request_id == "approval-op"
             ));
 
-            let unknown_request = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "parent".into(),
-                        thread_id: "child".into(),
-                        request_id: Some("missing".into()),
-                        decision: "deny".into(),
-                    },
-                    cx,
-                )
-                .unwrap_err();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some("missing".into()),
+                    decision: "deny".into(),
+                },
+                reply,
+                cx,
+            );
+            let unknown_request = response.try_recv().unwrap().unwrap_err();
             assert_eq!(unknown_request, "no pending approval with that request_id");
 
-            let bad_decision = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "parent".into(),
-                        thread_id: "child".into(),
-                        request_id: Some("approval-op".into()),
-                        decision: "later".into(),
-                    },
-                    cx,
-                )
-                .unwrap_err();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some("approval-op".into()),
+                    decision: "later".into(),
+                },
+                reply,
+                cx,
+            );
+            let bad_decision = response.try_recv().unwrap().unwrap_err();
             assert_eq!(
                 bad_decision,
                 "unknown decision: later; expected approve, approve_for_session, or deny"
             );
 
-            let non_child = state
-                .handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Approve {
-                        parent_id: "other-parent".into(),
-                        thread_id: "child".into(),
-                        request_id: Some("approval-op".into()),
-                        decision: "deny".into(),
-                    },
-                    cx,
-                )
-                .unwrap_err();
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Approve {
+                    parent_id: "other-parent".into(),
+                    thread_id: "child".into(),
+                    request_id: Some("approval-op".into()),
+                    decision: "deny".into(),
+                },
+                reply,
+                cx,
+            );
+            let non_child = response.try_recv().unwrap().unwrap_err();
             assert_eq!(non_child, "unknown thread or not a child of this parent");
         });
 
@@ -9359,6 +10292,7 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
+        let mut recorded_request_id = String::new();
 
         state.update(cx, |state, cx| {
             let mut parent = live_session(ProviderKind::Codex, commands);
@@ -9382,7 +10316,11 @@ mod tests {
             else {
                 panic!("callback did not steer")
             };
+            recorded_request_id = request_id;
             assert!(text.contains("full result"));
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             let timeline = Timeline::fold_events(state.store.read_events("parent"));
             assert!(timeline.entries.iter().any(|entry| matches!(
                 &entry.content,
@@ -9390,7 +10328,7 @@ mod tests {
                     text,
                     steering: Some(tcode_core::session::SteeringStatus::Pending),
                     ..
-                } if entry.id == request_id && text.contains("child-a completed")
+                } if entry.id == recorded_request_id && text.contains("child-a completed")
             )));
         });
 
@@ -9513,13 +10451,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn shutdown_active_notifies_live_provider() {
+    #[gpui::test]
+    fn shutdown_active_notifies_live_provider(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
-        state.active = Some(ActiveSession {
+        let active = ActiveSession {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
             git_branch: None,
@@ -9549,12 +10487,14 @@ mod tests {
             auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
+        };
+
+        state.update(cx, |state, cx| {
+            state.active = Some(active);
+            state.shutdown_active(cx);
+            assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
+            assert!(state.active.is_none());
         });
-
-        state.shutdown_active();
-
-        assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert!(state.active.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -9776,39 +10716,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn shutdown_all_notifies_active_and_parked_live_providers() {
+    #[gpui::test]
+    fn shutdown_all_notifies_active_and_parked_live_providers(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
 
         let (active_commands, active_receiver) = async_channel::unbounded();
-        state.active = Some(live_session(ProviderKind::Codex, active_commands));
-
         let (parked_commands, parked_receiver) = async_channel::unbounded();
         let parked = live_session(ProviderKind::ClaudeCode, parked_commands);
-        state.background.insert(parked.meta.id.clone(), parked);
-
         let (other_commands, other_receiver) = async_channel::unbounded();
         let other = live_session(ProviderKind::Acp, other_commands);
-        state.background.insert(other.meta.id.clone(), other);
+        state.update(cx, |state, cx| {
+            state.active = Some(live_session(ProviderKind::Codex, active_commands));
+            state.background.insert(parked.meta.id.clone(), parked);
+            state.background.insert(other.meta.id.clone(), other);
+            state.shutdown_all(cx);
 
-        state.shutdown_all();
-
-        assert!(matches!(
-            active_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(matches!(
-            parked_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(matches!(
-            other_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(state.active.is_none());
-        assert!(state.background.is_empty());
+            assert!(matches!(
+                active_receiver.try_recv(),
+                Ok(SessionCommand::Shutdown)
+            ));
+            assert!(matches!(
+                parked_receiver.try_recv(),
+                Ok(SessionCommand::Shutdown)
+            ));
+            assert!(matches!(
+                other_receiver.try_recv(),
+                Ok(SessionCommand::Shutdown)
+            ));
+            assert!(state.active.is_none());
+            assert!(state.background.is_empty());
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -10171,6 +11110,9 @@ mod tests {
                 cx,
             );
             assert!(state.active.as_ref().unwrap().queue.is_empty());
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             let delivered = state
                 .store
                 .read_events(&session_id)
@@ -10233,28 +11175,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[test]
-    fn park_active_retains_provider_with_background_tasks() {
+    #[gpui::test]
+    fn park_active_retains_provider_with_background_tasks(cx: &mut gpui::TestAppContext) {
         let data = std::env::temp_dir().join(format!(
             "tcode-background-park-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "background-owner".into();
         session.background_task_count = 1;
-        state.active = Some(session);
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.park_active(cx);
 
-        state.park_active();
-
-        assert!(state.active.is_none());
-        assert_eq!(
-            state.background["background-owner"].background_task_count,
-            1
-        );
-        assert!(actor.try_recv().is_err(), "parking killed background work");
+            assert!(state.active.is_none());
+            assert_eq!(
+                state.background["background-owner"].background_task_count,
+                1
+            );
+            assert!(actor.try_recv().is_err(), "parking killed background work");
+        });
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -10479,6 +11422,7 @@ mod tests {
         let state = cx.new(|_| AppState::new(store));
 
         state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
+        cx.run_until_parked();
 
         state.update(cx, |state, _cx| {
             let active = state.active.as_ref().unwrap();
@@ -10498,6 +11442,135 @@ mod tests {
                 std::fs::read(root.join(format!("{}.jsonl", fork.id))).unwrap(),
                 std::fs::read(root.join(format!("{}.jsonl", source.id))).unwrap()
             );
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn store_writer_appends_events_in_fifo_order(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-writer-events-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store.clone()));
+
+        state.update(cx, |state, cx| {
+            state.record_event("ordered", &persisted_assistant_event("first"), cx);
+            state.record_event("ordered", &persisted_assistant_event("second"), cx);
+        });
+        cx.run_until_parked();
+
+        let events = store.read_events("ordered");
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::AssistantMessage { text },
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn store_writer_upsert_is_visible_to_fresh_store(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-writer-upsert-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
+        meta.title = "persisted by writer".into();
+        let id = meta.id.clone();
+
+        state.update(cx, |state, cx| state.persist_meta(&meta, cx));
+        cx.run_until_parked();
+
+        let fresh = SessionStore::open_at(root.clone()).unwrap();
+        assert_eq!(
+            fresh
+                .load_index()
+                .into_iter()
+                .find(|stored| stored.id == id)
+                .unwrap()
+                .title,
+            "persisted by writer"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn store_writer_profile_secret_is_visible_to_fresh_store(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-writer-secret-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.set_profile_secret(
+                "klaude-kode",
+                "ANTHROPIC_API_KEY",
+                Some("writer-secret"),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let fresh = SettingsStore::new(root.clone());
+        assert_eq!(
+            fresh
+                .profile_secrets("klaude-kode")
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("writer-secret")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-terminal-open-{}", uuid::Uuid::new_v4()));
+        let override_cwd = root.join("override");
+        std::fs::create_dir_all(&override_cwd).unwrap();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, _| {
+            state.active = Some(AppState::build_draft_session(
+                "terminal-project".into(),
+                root.clone(),
+                ProviderKind::Codex,
+                None,
+                None,
+                Vec::new(),
+            ));
+        });
+        term::Terminal::with_spawn_cwd(override_cwd.clone(), || {
+            state.update(cx, |state, cx| state.open_terminal_panel(cx));
+        });
+        state.read_with(cx, |state, _| {
+            assert!(
+                state
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .terminal_workspace
+                    .terminals
+                    .is_empty()
+            );
+        });
+
+        cx.run_until_parked();
+
+        state.read_with(cx, |state, _| {
+            let workspace = &state.active.as_ref().unwrap().terminal_workspace;
+            assert_eq!(workspace.terminals.len(), 1);
+            assert!(workspace.open);
+            assert_eq!(workspace.terminals[0].terminal.cwd(), override_cwd);
         });
         let _ = std::fs::remove_dir_all(root);
     }
@@ -10525,6 +11598,166 @@ mod tests {
         (session, receiver)
     }
 
+    fn persisted_assistant_event(text: &str) -> AgentEvent {
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: format!("item-{text}"),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage { text: text.into() },
+        })
+    }
+
+    #[gpui::test]
+    fn cold_select_installs_immediately_then_loads_persisted_timeline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-cold-select-async-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/cold"), None);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &persisted_assistant_event("persisted cold output"),
+            )
+            .unwrap();
+        let id = meta.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&id, cx);
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, id);
+            assert!(active.timeline.entries.is_empty());
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "persisted cold output")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn parked_readopt_refolds_events_appended_while_parked(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-parked-readopt-async-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/parked"), None);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(&meta.id, 1, &persisted_assistant_event("before parking"))
+            .unwrap();
+        let id = meta.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| state.select_session(&id, cx));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            let active = state.active.as_mut().unwrap();
+            active.turn_in_flight = true;
+            active.runtime = Runtime::Starting { generation: 1 };
+            state.start_draft("other".into(), PathBuf::from("/tmp/other"), cx);
+            state
+                .store
+                .append_event(&id, 2, &persisted_assistant_event("while parked"))
+                .unwrap();
+            state.select_session(&id, cx);
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "while parked")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn stale_timeline_completion_cannot_land_on_another_session(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-stale-timeline-load-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
+        let b = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
+        store.upsert_meta(&a).unwrap();
+        store.upsert_meta(&b).unwrap();
+        store
+            .append_event(&a.id, 1, &persisted_assistant_event("only session A"))
+            .unwrap();
+        store
+            .append_event(&b.id, 1, &persisted_assistant_event("only session B"))
+            .unwrap();
+        let (id_a, id_b) = (a.id.clone(), b.id.clone());
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&id_a, cx);
+            state.select_session(&id_b, cx);
+            assert_eq!(state.active_session_id(), Some(id_b.as_str()));
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.id, id_b);
+            assert!(active.timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "only session B")
+            ));
+            assert!(!active.timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "only session A")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn timeline_load_retries_when_append_watermark_moves(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-timeline-watermark-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/watermark"), None);
+        store.upsert_meta(&meta).unwrap();
+        store
+            .append_event(&meta.id, 1, &persisted_assistant_event("before load"))
+            .unwrap();
+        let id = meta.id.clone();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.select_session(&id, cx);
+            state.record_event(&id, &persisted_assistant_event("raced append"), cx);
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, _| {
+            let timeline = &state.active.as_ref().unwrap().timeline;
+            assert!(timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "before load")
+            ));
+            assert!(timeline.entries.iter().any(
+                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "raced append")
+            ));
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The T3 Code regression this app must not inherit: send a message, hit
     /// stop, get an error, then immediately open a new thread and send — and the
     /// new thread's FIRST user message must be in its timeline (T3 loses the
@@ -10545,6 +11778,7 @@ mod tests {
         // Session A, live (fake provider: commands land on `commands_a`).
         let (session, commands_a) = fake_live_session(cwd.clone());
         let (commands_b, receiver_b) = async_channel::unbounded();
+        let mut id_b = String::new();
 
         state.update(cx, |state, cx| {
             // No real provider may spawn if a start slips through.
@@ -10613,7 +11847,7 @@ mod tests {
             state.start_draft("proj-t3".into(), cwd.clone(), cx);
             state.send_turn("second message".into(), Vec::new(), cx);
             let active = state.active.as_ref().unwrap();
-            let id_b = active.meta.id.clone();
+            id_b = active.meta.id.clone();
             assert_ne!(id_a, id_b);
             assert_eq!(active.queue.len(), 1);
 
@@ -10659,6 +11893,9 @@ mod tests {
                     .any(|e| matches!(e.content, EntryContent::Error { .. })),
                 "session A's interrupt error leaked into the new thread"
             );
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             // And it is durable: a replay of the JSONL shows the same thing.
             let replayed = Timeline::fold_events(state.store.read_events(&id_b));
             assert!(replayed.entries.iter().any(
@@ -10772,6 +12009,11 @@ mod tests {
             // Coming back re-adopts the live session: everything that happened
             // while parked is in the timeline, and the turn is still running.
             state.select_session(&id_a, cx);
+        });
+
+        cx.run_until_parked();
+
+        state.update(cx, |state, cx| {
             let active = state.active.as_ref().unwrap();
             assert_eq!(active.meta.id, id_a);
             assert!(matches!(active.runtime, Runtime::Live(_)));
@@ -10900,5 +12142,77 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn plan_workspace_save_completes_after_background_executor_runs(cx: &mut gpui::TestAppContext) {
+        let cwd = std::env::temp_dir().join(format!("tcode-plan-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data =
+            std::env::temp_dir().join(format!("tcode-plan-save-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.start_draft("plan-project".into(), cwd.clone(), cx);
+            state.save_plan_to_workspace("# Saved plan".into(), cx);
+        });
+        assert!(
+            !cwd.join("PLAN-1.md").exists(),
+            "the GPUI update must not perform the write synchronously"
+        );
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("PLAN-1.md")).unwrap(),
+            "# Saved plan"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn orchestrate_dispatch_resolves_cwd_before_reply(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-dispatch-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::open_at(root.join("data")).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        let parent_id = parent.id.clone();
+        let missing = root.join("missing");
+        let (reply, response) = async_channel::bounded(1);
+
+        state.update(cx, |state, cx| {
+            state.sessions.push(parent);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Dispatch {
+                    parent_id,
+                    provider: "codex".into(),
+                    model: Some("gpt-5.6-sol".into()),
+                    effort: None,
+                    profile: None,
+                    access: None,
+                    title: "Child".into(),
+                    brief: "Inspect the workspace".into(),
+                    cwd: Some(missing.to_string_lossy().into_owned()),
+                },
+                reply,
+                cx,
+            );
+        });
+        assert!(
+            response.try_recv().is_err(),
+            "cwd resolution must not reply from the GPUI update"
+        );
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            response.try_recv().unwrap().unwrap_err(),
+            format!("invalid cwd: {}", missing.display())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

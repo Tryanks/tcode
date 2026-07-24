@@ -332,6 +332,16 @@ struct PendingImage {
     name: String,
 }
 
+enum PendingImageSource {
+    Bytes(Vec<u8>),
+    Path(PathBuf),
+}
+
+enum AddImageError {
+    Attachment(tcode_core::attachments::AttachError),
+    Persist(std::io::Error),
+}
+
 /// Which glyph a trigger-menu row shows.
 #[derive(Clone, Copy)]
 enum MenuIcon {
@@ -518,6 +528,10 @@ pub struct Composer {
     pending_images: Vec<PendingImage>,
     /// The session id `pending_images` belongs to (reset the strip on switch).
     images_session: Option<String>,
+    /// Invalidates image jobs when the owning session changes or a turn sends.
+    image_load_generation: u64,
+    /// Reserved strip slots for image jobs that have not completed yet.
+    pending_image_loads: usize,
     /// Whether the one-shot screenshot debug seed has been applied.
     debug_applied: bool,
     _subscriptions: Vec<Subscription>,
@@ -620,6 +634,8 @@ impl Composer {
             workspace_loading: false,
             pending_images: Vec::new(),
             images_session: None,
+            image_load_generation: 0,
+            pending_image_loads: 0,
             debug_applied: false,
             _subscriptions: subscriptions,
         }
@@ -844,6 +860,8 @@ impl Composer {
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.pending_images.clear();
+        self.image_load_generation = self.image_load_generation.wrapping_add(1);
+        self.pending_image_loads = 0;
         self.app_state.update(cx, |state, cx| {
             if let Some(active) = state.active.as_mut() {
                 active.terminal_workspace.contexts.clear();
@@ -1108,11 +1126,113 @@ impl Composer {
         if id != self.images_session {
             self.images_session = id;
             self.pending_images.clear();
+            self.image_load_generation = self.image_load_generation.wrapping_add(1);
+            self.pending_image_loads = 0;
         }
     }
 
-    /// Validate `bytes` against the type/size/count limits and, if ok, persist a
-    /// copy to the session attachments dir and add it to the pending strip.
+    /// Validate, decode/transcode, and persist an image off the main thread.
+    /// Completion appends only while the same session still owns the strip.
+    fn add_image(
+        &mut self,
+        name: String,
+        mime: String,
+        source: PendingImageSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.sync_images_session(cx);
+        let initial_size = match &source {
+            PendingImageSource::Bytes(bytes) => bytes.len() as u64,
+            PendingImageSource::Path(_) => 0,
+        };
+        if let Err(err) = validate_attachment(
+            &name,
+            &mime,
+            initial_size,
+            self.pending_images.len() + self.pending_image_loads,
+        ) {
+            window.push_notification(Notification::error(attach_error_message(&err)), cx);
+            return false;
+        }
+        let session_id = self
+            .app_state
+            .read(cx)
+            .active_session_id()
+            .map(str::to_string);
+        let attachments_dir = self.app_state.read(cx).attachments_dir();
+        let current_count = self.pending_images.len() + self.pending_image_loads;
+        self.pending_image_loads += 1;
+        let generation = self.image_load_generation;
+        let result_name = name.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = tcode_runtime::blocking::unblock(cx.background_executor(), move || {
+                let bytes = match source {
+                    PendingImageSource::Bytes(bytes) => bytes,
+                    PendingImageSource::Path(path) => {
+                        let size = std::fs::metadata(&path)
+                            .map_err(AddImageError::Persist)?
+                            .len();
+                        validate_attachment(&name, &mime, size, current_count)
+                            .map_err(AddImageError::Attachment)?;
+                        std::fs::read(path).map_err(AddImageError::Persist)?
+                    }
+                };
+                validate_attachment(&name, &mime, bytes.len() as u64, current_count)
+                    .map_err(AddImageError::Attachment)?;
+                let (mime, bytes) = if is_wire_ready_image(&mime) {
+                    (mime, bytes)
+                } else {
+                    let bytes = transcode_image_to_png(&bytes).map_err(|_| {
+                        AddImageError::Attachment(
+                            tcode_core::attachments::AttachError::UnsupportedType {
+                                name: name.clone(),
+                            },
+                        )
+                    })?;
+                    ("image/png".to_string(), bytes)
+                };
+                let dir = attachments_dir.ok_or_else(|| {
+                    AddImageError::Persist(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no active session",
+                    ))
+                })?;
+                let ext = image_extension(&mime, &name);
+                AppState::save_attachment_to_dir(&dir, &bytes, &ext).map_err(AddImageError::Persist)
+            })
+            .await;
+            let _ = this.update_in(cx, |composer, window, cx| {
+                if composer.image_load_generation != generation
+                    || composer.images_session != session_id
+                    || composer.app_state.read(cx).active_session_id() != session_id.as_deref()
+                {
+                    return;
+                }
+                composer.pending_image_loads = composer.pending_image_loads.saturating_sub(1);
+                match result {
+                    Ok(path) => {
+                        composer.pending_images.push(PendingImage {
+                            path,
+                            name: result_name,
+                        });
+                        cx.notify();
+                    }
+                    Err(AddImageError::Attachment(err)) => window
+                        .push_notification(Notification::error(attach_error_message(&err)), cx),
+                    Err(AddImageError::Persist(err)) => window.push_notification(
+                        Notification::error(
+                            tcode_i18n::tr!("errors.persist_event", error = err).into_owned(),
+                        ),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+        true
+    }
+
     fn add_image_bytes(
         &mut self,
         name: String,
@@ -1120,72 +1240,46 @@ impl Composer {
         bytes: Vec<u8>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if let Err(err) =
-            validate_attachment(&name, &mime, bytes.len() as u64, self.pending_images.len())
-        {
-            window.push_notification(Notification::error(attach_error_message(&err)), cx);
-            return;
-        }
-        let (mime, bytes) = if is_wire_ready_image(&mime) {
-            (mime, bytes)
-        } else {
-            let Ok(bytes) = transcode_image_to_png(&bytes) else {
-                let err =
-                    tcode_core::attachments::AttachError::UnsupportedType { name: name.clone() };
-                window.push_notification(Notification::error(attach_error_message(&err)), cx);
-                return;
-            };
-            ("image/png".to_string(), bytes)
-        };
-        let ext = image_extension(&mime, &name);
-        match self.app_state.read(cx).save_attachment(&bytes, &ext) {
-            Ok(path) => {
-                self.pending_images.push(PendingImage { path, name });
-                cx.notify();
-            }
-            Err(err) => window.push_notification(
-                Notification::error(
-                    tcode_i18n::tr!("errors.persist_event", error = err).into_owned(),
-                ),
-                cx,
-            ),
-        }
+    ) -> bool {
+        self.add_image(name, mime, PendingImageSource::Bytes(bytes), window, cx)
     }
 
-    /// Add an image from a dropped file path (reads + re-validates it).
-    fn add_image_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Add an image from a dropped file path.
+    fn add_image_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "image".to_string());
         let mime = mime_from_path(&path);
-        match tcode_runtime::ui_facade::read_file_bytes(&path) {
-            Ok(bytes) => self.add_image_bytes(name, mime, bytes, window, cx),
-            Err(err) => window.push_notification(
-                Notification::error(
-                    tcode_i18n::tr!("errors.persist_event", error = err).into_owned(),
-                ),
-                cx,
-            ),
-        }
+        self.add_image(name, mime, PendingImageSource::Path(path), window, cx)
     }
 
     /// Pull an image off the clipboard (⌘V with image content), if present.
     fn paste_clipboard_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let image_count_before = self.pending_images.len();
+        let mut accepted_image = false;
         if let Some(item) = cx.read_from_clipboard() {
             for entry in &item.entries {
                 match entry {
                     ClipboardEntry::Image(image) => {
                         let mime = image.format().mime_type().to_string();
                         let bytes = image.bytes().to_vec();
-                        self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
+                        accepted_image |= self.add_image_bytes(
+                            "pasted-image".to_string(),
+                            mime,
+                            bytes,
+                            window,
+                            cx,
+                        );
                     }
                     ClipboardEntry::ExternalPaths(paths) => {
                         for path in paths.paths() {
                             if mime_from_path(path).starts_with("image/") {
-                                self.add_image_path(path.clone(), window, cx);
+                                accepted_image |= self.add_image_path(path.clone(), window, cx);
                             }
                         }
                     }
@@ -1193,9 +1287,7 @@ impl Composer {
                 }
             }
         }
-        if self.pending_images.len() == image_count_before
-            && let Some((mime, bytes)) = crate::pasteboard::read_pasteboard_image()
-        {
+        if !accepted_image && let Some((mime, bytes)) = crate::pasteboard::read_pasteboard_image() {
             self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
         }
     }

@@ -19,9 +19,7 @@ use gpui_component::{
 
 use crate::time::now_secs;
 use tcode_runtime::app::AppState;
-use tcode_runtime::ui_facade::{
-    ExternalImportUpdate, ExternalThread, RecentDir, SourceTool, is_directory,
-};
+use tcode_runtime::ui_facade::{ExternalImportUpdate, ExternalThread, RecentDir, SourceTool};
 
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
@@ -113,12 +111,27 @@ impl AddProjectDialog {
 
     fn open_typed_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = PathBuf::from(self.path_input.read(cx).value().trim());
-        if !path.is_absolute() || !is_directory(&path) {
+        if !path.is_absolute() {
             self.path_error = true;
             cx.notify();
             return;
         }
-        self.create_draft(path, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let is_directory = tcode_runtime::blocking::unblock(cx.background_executor(), {
+                let path = path.clone();
+                move || path.is_dir()
+            })
+            .await;
+            let _ = this.update_in(cx, |dialog, window, cx| {
+                if is_directory {
+                    dialog.create_draft(path, window, cx);
+                } else {
+                    dialog.path_error = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
