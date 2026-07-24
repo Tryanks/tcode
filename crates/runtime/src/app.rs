@@ -100,6 +100,21 @@ struct TerminalPreferences {
     count: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TerminalSpawnAction {
+    Open {
+        split_after: Option<TerminalSplitDirection>,
+    },
+    Restart {
+        terminal_id: Option<u64>,
+    },
+    New,
+    Split {
+        first: u64,
+        direction: TerminalSplitDirection,
+    },
+}
+
 enum StoreWrite {
     AppendEvent {
         id: String,
@@ -125,6 +140,12 @@ enum StoreWrite {
     },
     WriteTerminalUi(Vec<u8>),
     WriteSettings(Vec<u8>),
+    SetProfileSecret {
+        profile_id: String,
+        key: String,
+        value: Option<String>,
+    },
+    ClearProfileSecrets(String),
     Flush(async_channel::Sender<()>),
 }
 
@@ -147,6 +168,7 @@ fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
 
 fn run_store_write(
     store: &SessionStore,
+    settings_store: &SettingsStore,
     terminal_preferences_path: &Path,
     write: StoreWrite,
 ) -> Option<StoreWriteFailure> {
@@ -205,6 +227,18 @@ fn run_store_write(
                 })
         }
         StoreWrite::WriteSettings(bytes) => atomic_write(store.root().join("settings.json"), bytes)
+            .err()
+            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+        StoreWrite::SetProfileSecret {
+            profile_id,
+            key,
+            value,
+        } => settings_store
+            .set_profile_secret(&profile_id, &key, value.as_deref())
+            .err()
+            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+        StoreWrite::ClearProfileSecrets(profile_id) => settings_store
+            .clear_profile_secrets(&profile_id)
             .err()
             .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
         StoreWrite::Flush(completion) => {
@@ -890,6 +924,8 @@ pub struct AppState {
     pub models_loading: HashMap<ProviderKind, bool>,
     terminal_preferences_path: PathBuf,
     terminal_preferences: HashMap<String, TerminalPreferences>,
+    next_terminal_spawn_id: u64,
+    pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
     next_start_generation: u64,
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
@@ -1071,6 +1107,8 @@ impl AppState {
             models_loading: HashMap::new(),
             terminal_preferences_path,
             terminal_preferences,
+            next_terminal_spawn_id: 0,
+            pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
             ai_title_generation_enabled: !cfg!(test),
             debug_compose: None,
@@ -1120,14 +1158,18 @@ impl AppState {
     fn start_store_writer(&mut self, cx: &mut Context<Self>) {
         if let Some(writes) = self.store_write_receiver.take() {
             let store = self.store.clone();
+            let settings_store = self.settings_store.clone();
             let terminal_preferences_path = self.terminal_preferences_path.clone();
             let failures = self.store_write_failures.clone();
             cx.background_executor()
                 .spawn(async move {
                     while let Ok(write) = writes.recv().await {
-                        if let Some(failure) =
-                            run_store_write(&store, &terminal_preferences_path, write)
-                        {
+                        if let Some(failure) = run_store_write(
+                            &store,
+                            &settings_store,
+                            &terminal_preferences_path,
+                            write,
+                        ) {
                             let _ = failures.send(failure).await;
                         }
                     }
@@ -1992,10 +2034,17 @@ impl AppState {
     pub fn refresh_model_catalogs(&mut self, cx: &mut Context<Self>) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.settings.provider(provider).binary_path;
-            let launch_env = self.launch_env(provider);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
             self.models_loading.insert(provider, true);
             let store = self.store.clone();
             cx.spawn(async move |this, cx| {
+                let profile_id = Settings::builtin_profile_id(provider).to_string();
+                let launch_env = unblock(cx.background_executor(), move || {
+                    let secrets = settings_store.profile_secrets(&profile_id);
+                    launch_env_for_profile(&settings, &profile_id, secrets)
+                })
+                .await;
                 let result = list_models(provider, binary, launch_env).await;
                 let _ = this.update(cx, |state, cx| {
                     state.models_loading.insert(provider, false);
@@ -2068,53 +2117,17 @@ impl AppState {
     /// This is the profile-aware generalization of [`Self::launch_env`]; a
     /// built-in profile id (a [`provider_key`]) reproduces the old behavior.
     pub fn launch_env_for_profile(&self, profile_id: &str) -> LaunchEnv {
-        let Some(profile) = self.settings.resolved_profile(profile_id) else {
-            return LaunchEnv::default();
-        };
-        let settings = profile.settings;
         let secrets = self.settings_store.profile_secrets(profile_id);
-        let env = settings
-            .env
-            .iter()
-            .filter(|var| !var.name.trim().is_empty())
-            .filter_map(|var| {
-                let value = if var.sensitive {
-                    // Sensitive rows keep their value only in secrets.json; a
-                    // row whose secret was never saved contributes nothing.
-                    secrets.get(&var.name).cloned()?
-                } else {
-                    var.value.clone()
-                };
-                Some((var.name.trim().to_string(), value))
-            })
-            .collect();
-        LaunchEnv {
-            env,
-            home: settings.effective_home(),
-        }
+        launch_env_for_profile(&self.settings, profile_id, secrets)
     }
 
     /// The environment a session's child process runs with: the provider card's
     /// for the native providers, and the installed agent's own rows for an ACP
     /// session (each ACP agent is configured separately, so the shared
     /// `ProviderKind::Acp` bucket is not what we want there).
+    #[cfg(test)]
     fn session_launch_env(&self, meta: &SessionMeta) -> LaunchEnv {
-        if meta.provider != ProviderKind::Acp {
-            // A native session runs against its selected profile (a third-party
-            // endpoint, say), falling back to the kind's built-in profile.
-            let id = meta
-                .profile_id
-                .clone()
-                .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
-            return self.launch_env_for_profile(&id);
-        }
-        let env = meta
-            .acp_agent_id
-            .as_deref()
-            .and_then(|id| self.settings.acp_agent(id))
-            .map(|agent| agent.env.clone())
-            .unwrap_or_default();
-        LaunchEnv { env, home: None }
+        session_launch_env(&self.settings, &self.settings_store, meta)
     }
 
     /// Whether the provider may be used for new sessions (its card's switch).
@@ -2268,15 +2281,14 @@ impl AppState {
         value: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        if let Err(err) = self.settings_store.set_profile_secret(id, name, value) {
-            self.report_error(
-                RuntimeError::PersistSettings {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_store_write(
+            StoreWrite::SetProfileSecret {
+                profile_id: id.to_string(),
+                key: name.to_string(),
+                value: value.map(str::to_string),
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -2374,10 +2386,13 @@ impl AppState {
                 let mut settings = state.settings.clone();
                 settings.profiles.insert(id.clone(), profile);
                 state.update_settings(settings, cx);
-                let _ = state.settings_store.set_profile_secret(
-                    &id,
-                    "ANTHROPIC_API_KEY",
-                    Some(&api_key),
+                state.enqueue_store_write(
+                    StoreWrite::SetProfileSecret {
+                        profile_id: id,
+                        key: "ANTHROPIC_API_KEY".to_string(),
+                        value: Some(api_key),
+                    },
+                    cx,
                 );
                 cx.notify();
             });
@@ -2397,7 +2412,7 @@ impl AppState {
         if settings.profiles.remove(id).is_none() {
             return;
         }
-        let _ = self.settings_store.clear_profile_secrets(id);
+        self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.update_settings(settings, cx);
         cx.notify();
     }
@@ -2444,8 +2459,15 @@ impl AppState {
             }
             snapshot.checking = true;
             let binary = self.resolve_profile_binary(&profile_id);
-            let launch_env = self.launch_env_for_profile(&profile_id);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
             cx.spawn(async move |this, cx| {
+                let env_profile_id = profile_id.clone();
+                let launch_env = unblock(cx.background_executor(), move || {
+                    let secrets = settings_store.profile_secrets(&env_profile_id);
+                    launch_env_for_profile(&settings, &env_profile_id, secrets)
+                })
+                .await;
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 let _ = this.update(cx, |state, cx| {
@@ -2474,8 +2496,15 @@ impl AppState {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| default_program(provider));
             let package = npm_package(provider);
-            let env = self.launch_env(provider).pairs(provider);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
             cx.spawn(async move |this, cx| {
+                let profile_id = Settings::builtin_profile_id(provider).to_string();
+                let env = unblock(cx.background_executor(), move || {
+                    let secrets = settings_store.profile_secrets(&profile_id);
+                    launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
+                })
+                .await;
                 let source = unblock(cx.background_executor(), move || {
                     binary
                         .as_deref()
@@ -3505,32 +3534,180 @@ impl AppState {
         }
     }
 
+    fn schedule_terminal_spawn(
+        &mut self,
+        session_id: String,
+        cwd: PathBuf,
+        action: TerminalSpawnAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.next_terminal_spawn_id = self
+            .next_terminal_spawn_id
+            .checked_add(1)
+            .expect("terminal spawn id overflow");
+        let spawn_id = self.next_terminal_spawn_id;
+        self.pending_terminal_spawns
+            .entry(session_id.clone())
+            .or_default()
+            .insert(spawn_id, action);
+
+        // Capture the thread-local cwd override before the work moves to the
+        // background executor.
+        let cwd = term::Terminal::resolve_spawn_cwd(cwd);
+        cx.spawn(async move |this, cx| {
+            let result =
+                unblock(cx.background_executor(), move || term::Terminal::spawn(cwd)).await;
+            let _ = this.update(cx, |state, cx| {
+                let pending = state
+                    .pending_terminal_spawns
+                    .get_mut(&session_id)
+                    .and_then(|spawns| spawns.remove(&spawn_id));
+                if state
+                    .pending_terminal_spawns
+                    .get(&session_id)
+                    .is_some_and(HashMap::is_empty)
+                {
+                    state.pending_terminal_spawns.remove(&session_id);
+                }
+                let Some(action) = pending else {
+                    return;
+                };
+                let active_matches = state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.meta.id == session_id);
+                if !active_matches {
+                    return;
+                }
+
+                let terminal = match result {
+                    Ok(terminal) => terminal,
+                    Err(error) => {
+                        let runtime_error = match action {
+                            TerminalSpawnAction::Restart { .. } => RuntimeError::TerminalRestart {
+                                error: error.to_string(),
+                            },
+                            _ => RuntimeError::TerminalStart {
+                                error: error.to_string(),
+                            },
+                        };
+                        state.report_error(runtime_error, cx);
+                        return;
+                    }
+                };
+
+                let workspace = &mut state.active.as_mut().unwrap().terminal_workspace;
+                let mut followup_split = None;
+                let applied = match action {
+                    TerminalSpawnAction::Open { split_after } => {
+                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
+                            let first = workspace.push(terminal);
+                            workspace.open = true;
+                            followup_split = split_after.map(|direction| (first, direction));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerminalSpawnAction::Restart { terminal_id } => {
+                        if let Some(entry) = workspace
+                            .terminals
+                            .iter_mut()
+                            .find(|entry| Some(entry.id) == terminal_id)
+                        {
+                            entry.terminal = terminal;
+                            workspace.open = true;
+                            true
+                        } else if terminal_id.is_none() && workspace.terminals.is_empty() {
+                            workspace.push(terminal);
+                            workspace.open = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerminalSpawnAction::New => {
+                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
+                            workspace.push(terminal);
+                            workspace.open = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerminalSpawnAction::Split { first, direction } => {
+                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION
+                            && workspace.terminal(first).is_some()
+                            && workspace.split_for(first).is_none()
+                        {
+                            let second = workspace.push(terminal);
+                            workspace.splits.push(TerminalSplit {
+                                first,
+                                second,
+                                direction,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if applied {
+                    state.persist_terminal_preferences(cx);
+                    cx.notify();
+                }
+                if let Some((first, direction)) = followup_split {
+                    let cwd = state.active.as_ref().unwrap().meta.cwd.clone();
+                    state.schedule_terminal_spawn(
+                        session_id,
+                        cwd,
+                        TerminalSpawnAction::Split { first, direction },
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_pending_terminal_spawns(&mut self, session_id: &str) {
+        self.pending_terminal_spawns.remove(session_id);
+    }
+
     pub fn open_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
         if active.terminal_workspace.terminals.is_empty() {
-            match term::Terminal::spawn(&active.meta.cwd) {
-                Ok(terminal) => {
-                    active.terminal_workspace.push(terminal);
-                }
-                Err(error) => {
-                    self.report_error(
-                        RuntimeError::TerminalStart {
-                            error: error.to_string(),
-                        },
-                        cx,
-                    );
-                    return;
-                }
+            let already_pending = self
+                .pending_terminal_spawns
+                .get(&active.meta.id)
+                .is_some_and(|spawns| {
+                    spawns
+                        .values()
+                        .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
+                });
+            if !already_pending {
+                self.schedule_terminal_spawn(
+                    active.meta.id.clone(),
+                    active.meta.cwd.clone(),
+                    TerminalSpawnAction::Open { split_after: None },
+                    cx,
+                );
             }
+            return;
         }
+        let active = self.active.as_mut().unwrap();
         active.terminal_workspace.open = true;
         self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
     pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        let session_id = self.active.as_ref().map(|active| active.meta.id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.cancel_pending_terminal_spawns(session_id);
+        }
         if let Some(active) = self.active.as_mut() {
             active.terminal_workspace.open = false;
             self.persist_terminal_preferences(cx);
@@ -3539,56 +3716,40 @@ impl AppState {
     }
 
     pub fn restart_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        let active_id = active.terminal_workspace.active_id;
-        match term::Terminal::spawn(&active.meta.cwd) {
-            Ok(terminal) => {
-                if let Some(entry) = active
-                    .terminal_workspace
-                    .terminals
-                    .iter_mut()
-                    .find(|entry| Some(entry.id) == active_id)
-                {
-                    entry.terminal = terminal;
-                } else {
-                    active.terminal_workspace.push(terminal);
-                }
-                active.terminal_workspace.open = true;
-                self.persist_terminal_preferences(cx);
-                cx.notify();
-            }
-            Err(error) => self.report_error(
-                RuntimeError::TerminalRestart {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
+        let session_id = active.meta.id.clone();
+        let cwd = active.meta.cwd.clone();
+        let terminal_id = active.terminal_workspace.active_id;
+        if let Some(spawns) = self.pending_terminal_spawns.get_mut(&session_id) {
+            spawns.retain(|_, action| !matches!(action, TerminalSpawnAction::Restart { .. }));
         }
+        self.schedule_terminal_spawn(
+            session_id,
+            cwd,
+            TerminalSpawnAction::Restart { terminal_id },
+            cx,
+        );
     }
 
     pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        if active.terminal_workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION {
+        let pending = self
+            .pending_terminal_spawns
+            .get(&active.meta.id)
+            .map_or(0, HashMap::len);
+        if active.terminal_workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION {
             return;
         }
-        match term::Terminal::spawn(&active.meta.cwd) {
-            Ok(terminal) => {
-                active.terminal_workspace.push(terminal);
-                active.terminal_workspace.open = true;
-                self.persist_terminal_preferences(cx);
-                cx.notify();
-            }
-            Err(error) => self.report_error(
-                RuntimeError::TerminalStart {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
-        }
+        self.schedule_terminal_spawn(
+            active.meta.id.clone(),
+            active.meta.cwd.clone(),
+            TerminalSpawnAction::New,
+            cx,
+        );
     }
 
     pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
@@ -3602,6 +3763,10 @@ impl AppState {
     }
 
     pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        let session_id = self.active.as_ref().map(|active| active.meta.id.clone());
+        if let Some(session_id) = session_id.as_deref() {
+            self.cancel_pending_terminal_spawns(session_id);
+        }
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -3621,36 +3786,42 @@ impl AppState {
     }
 
     pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        let workspace = &mut active.terminal_workspace;
+        let workspace = &active.terminal_workspace;
         let Some(first) = workspace.active_id else {
             return;
         };
-        if workspace.terminals.len() >= MAX_TERMINALS_PER_SESSION
+        let pending = self
+            .pending_terminal_spawns
+            .get(&active.meta.id)
+            .map_or(0, HashMap::len);
+        if workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION
             || workspace.split_for(first).is_some()
+            || self
+                .pending_terminal_spawns
+                .get(&active.meta.id)
+                .is_some_and(|spawns| {
+                    spawns.values().any(|action| {
+                        matches!(
+                            action,
+                            TerminalSpawnAction::Split {
+                                first: pending_first,
+                                ..
+                            } if *pending_first == first
+                        )
+                    })
+                })
         {
             return;
         }
-        match term::Terminal::spawn(&active.meta.cwd) {
-            Ok(terminal) => {
-                let second = workspace.push(terminal);
-                workspace.splits.push(TerminalSplit {
-                    first,
-                    second,
-                    direction,
-                });
-                self.persist_terminal_preferences(cx);
-                cx.notify();
-            }
-            Err(error) => self.report_error(
-                RuntimeError::TerminalStart {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
-        }
+        self.schedule_terminal_spawn(
+            active.meta.id.clone(),
+            active.meta.cwd.clone(),
+            TerminalSpawnAction::Split { first, direction },
+            cx,
+        );
     }
 
     pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
@@ -3670,27 +3841,38 @@ impl AppState {
 
     /// Hidden visual-QA fixture: two live PTYs in a split plus a captured chip.
     pub fn open_terminal_demo(&mut self, cx: &mut Context<Self>) {
-        self.open_terminal_panel(cx);
-        self.split_terminal(TerminalSplitDirection::Horizontal, cx);
-        let Some((first, second)) = self.active.as_ref().and_then(|active| {
-            let split = active.terminal_workspace.splits.first()?;
-            Some((split.first, split.second))
-        }) else {
+        let Some(active) = self.active.as_ref() else {
             return;
         };
-        if let Some(active) = self.active.as_ref() {
-            if let Some(entry) = active.terminal_workspace.terminal(first) {
-                entry
-                    .terminal
-                    .write_input(b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec());
-            }
-            if let Some(entry) = active.terminal_workspace.terminal(second) {
-                entry
-                    .terminal
-                    .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
-            }
+        if active.terminal_workspace.terminals.is_empty() {
+            self.schedule_terminal_spawn(
+                active.meta.id.clone(),
+                active.meta.cwd.clone(),
+                TerminalSpawnAction::Open {
+                    split_after: Some(TerminalSplitDirection::Horizontal),
+                },
+                cx,
+            );
+        } else {
+            self.split_terminal(TerminalSplitDirection::Horizontal, cx);
         }
         cx.spawn(async move |this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(700)).await;
+            let Ok(Some((first, _second))) = this.update(cx, |state, _| {
+                let active = state.active.as_ref()?;
+                let split = active.terminal_workspace.splits.first()?;
+                let first = active.terminal_workspace.terminal(split.first)?;
+                let second = active.terminal_workspace.terminal(split.second)?;
+                first
+                    .terminal
+                    .write_input(b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec());
+                second
+                    .terminal
+                    .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
+                Some((split.first, split.second))
+            }) else {
+                return;
+            };
             smol::Timer::after(std::time::Duration::from_millis(700)).await;
             let _ = this.update(cx, |state, cx| {
                 let selected = state.active.as_ref().and_then(|active| {
@@ -6548,7 +6730,7 @@ impl AppState {
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
-        let launch_env = self.session_launch_env(&meta);
+        let settings_store = self.settings_store.clone();
         let preview_registration = self.preview_registration_for(&meta);
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let computer_use_registration = self.computer_use_registration.clone();
@@ -6564,6 +6746,12 @@ impl AppState {
         }
 
         cx.spawn(async move |this, cx| {
+            let env_meta = meta.clone();
+            let env_settings = settings.clone();
+            let launch_env = unblock(cx.background_executor(), move || {
+                session_launch_env(&env_settings, &settings_store, &env_meta)
+            })
+            .await;
             let opts = session_options(
                 &meta,
                 &settings,
@@ -7175,13 +7363,19 @@ impl AppState {
         let session_id = fallback_meta.id.clone();
         let title_meta = title_session_meta(&self.settings, fallback_meta.cwd);
         let settings = self.settings.clone();
-        let launch_env = self.session_launch_env(&title_meta);
-        let options = session_options(&title_meta, &settings, launch_env, None, None, None);
+        let settings_store = self.settings_store.clone();
         let source = first_message.to_string();
         let attachments = attachments.to_vec();
         let executor = cx.background_executor().clone();
 
         cx.spawn(async move |this, cx| {
+            let env_meta = title_meta.clone();
+            let env_settings = settings.clone();
+            let launch_env = unblock(cx.background_executor(), move || {
+                session_launch_env(&env_settings, &settings_store, &env_meta)
+            })
+            .await;
+            let options = session_options(&title_meta, &settings, launch_env, None, None, None);
             let title =
                 generate_ai_title(title_meta.provider, options, source, attachments, executor)
                     .await;
@@ -7779,6 +7973,58 @@ fn normalized_selections(
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+fn launch_env_for_profile(
+    settings: &Settings,
+    profile_id: &str,
+    secrets: std::collections::BTreeMap<String, String>,
+) -> LaunchEnv {
+    let Some(profile) = settings.resolved_profile(profile_id) else {
+        return LaunchEnv::default();
+    };
+    let profile_settings = profile.settings;
+    let env = profile_settings
+        .env
+        .iter()
+        .filter(|var| !var.name.trim().is_empty())
+        .filter_map(|var| {
+            let value = if var.sensitive {
+                // Sensitive rows keep their value only in secrets.json; a row
+                // whose secret was never saved contributes nothing.
+                secrets.get(&var.name).cloned()?
+            } else {
+                var.value.clone()
+            };
+            Some((var.name.trim().to_string(), value))
+        })
+        .collect();
+    LaunchEnv {
+        env,
+        home: profile_settings.effective_home(),
+    }
+}
+
+fn session_launch_env(
+    settings: &Settings,
+    settings_store: &SettingsStore,
+    meta: &SessionMeta,
+) -> LaunchEnv {
+    if meta.provider != ProviderKind::Acp {
+        let profile_id = meta
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
+        let secrets = settings_store.profile_secrets(&profile_id);
+        return launch_env_for_profile(settings, &profile_id, secrets);
+    }
+    let env = meta
+        .acp_agent_id
+        .as_deref()
+        .and_then(|id| settings.acp_agent(id))
+        .map(|agent| agent.env.clone())
+        .unwrap_or_default();
+    LaunchEnv { env, home: None }
 }
 
 fn session_options(
@@ -11251,6 +11497,81 @@ mod tests {
                 .title,
             "persisted by writer"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn store_writer_profile_secret_is_visible_to_fresh_store(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-writer-secret-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.set_profile_secret(
+                "klaude-kode",
+                "ANTHROPIC_API_KEY",
+                Some("writer-secret"),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let fresh = SettingsStore::new(root.clone());
+        assert_eq!(
+            fresh
+                .profile_secrets("klaude-kode")
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("writer-secret")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-terminal-open-{}", uuid::Uuid::new_v4()));
+        let override_cwd = root.join("override");
+        std::fs::create_dir_all(&override_cwd).unwrap();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, _| {
+            state.active = Some(AppState::build_draft_session(
+                "terminal-project".into(),
+                root.clone(),
+                ProviderKind::Codex,
+                None,
+                None,
+                Vec::new(),
+            ));
+        });
+        term::Terminal::with_spawn_cwd(override_cwd.clone(), || {
+            state.update(cx, |state, cx| state.open_terminal_panel(cx));
+        });
+        state.read_with(cx, |state, _| {
+            assert!(
+                state
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .terminal_workspace
+                    .terminals
+                    .is_empty()
+            );
+        });
+
+        cx.run_until_parked();
+
+        state.read_with(cx, |state, _| {
+            let workspace = &state.active.as_ref().unwrap().terminal_workspace;
+            assert_eq!(workspace.terminals.len(), 1);
+            assert!(workspace.open);
+            assert_eq!(workspace.terminals[0].terminal.cwd(), override_cwd);
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 
