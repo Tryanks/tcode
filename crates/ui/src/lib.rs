@@ -26,6 +26,7 @@ pub mod runtime_event;
 pub mod settings;
 mod settings_page;
 mod shell;
+mod shortcut;
 mod sidebar;
 mod terminal_drawer;
 pub mod time;

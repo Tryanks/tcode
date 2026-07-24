@@ -21,6 +21,7 @@ use serde::Deserialize;
 use tcode_core::project::SessionMeta;
 use tcode_runtime::app::{AppEvent, AppState, ProjectGroup, RuntimeError};
 
+use crate::shortcut::format_secondary_shortcut;
 use crate::time::now_secs;
 use crate::window_drag_area;
 
@@ -744,7 +745,7 @@ impl SessionsSidebar {
                     .border_color(cx.theme().border)
                     .text_color(cx.theme().muted_foreground)
                     .text_size(px(10.))
-                    .child("⌘K"),
+                    .child(format_secondary_shortcut("k")),
             ),
         )
     }

@@ -460,7 +460,7 @@ composer:
   send: "发送消息"
   stop: "停止当前轮次"
   wait_turn: "等待当前轮次结束"
-  queue_hint: "Enter 加入队列 · %{modifier}Enter 引导"
+  queue_hint: "Enter 加入队列 · %{shortcut} 引导"
   queued_title: "队列"
   queued_count: "%{count} 条排队中"
   steer_queued: "引导至当前轮次"
