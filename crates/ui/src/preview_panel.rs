@@ -119,6 +119,8 @@ mod native {
         active_identity: Option<(String, String)>,
         /// Discovered localhost dev-server ports (populated by the "Ports" button).
         dev_ports: Vec<u16>,
+        /// Discards a completed scan when a newer click has superseded it.
+        port_scan_generation: u64,
         /// Why the platform webview could not be created (Windows without the
         /// WebView2 runtime). Set once; the tab then explains itself instead of
         /// retrying on every frame.
@@ -154,6 +156,7 @@ mod native {
                 mirrored: None,
                 active_identity: None,
                 dev_ports: Vec::new(),
+                port_scan_generation: 0,
                 webview_error: None,
                 _subscriptions: subscriptions,
             }
@@ -378,8 +381,22 @@ mod native {
         }
 
         fn rescan_ports(&mut self, cx: &mut Context<Self>) {
-            self.dev_ports = ports::scan_listening();
-            cx.notify();
+            self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
+            let generation = self.port_scan_generation;
+            cx.spawn(async move |this, cx| {
+                let ports = tcode_runtime::blocking::unblock(
+                    cx.background_executor(),
+                    ports::scan_listening,
+                )
+                .await;
+                let _ = this.update(cx, |panel, cx| {
+                    if panel.port_scan_generation == generation {
+                        panel.dev_ports = ports;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
 
         // ---- broker bridge --------------------------------------------------

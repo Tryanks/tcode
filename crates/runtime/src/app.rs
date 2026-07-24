@@ -10,7 +10,7 @@ use agent::{
     ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions, ThreadItem,
     TurnOptions, TurnStatus, list_models, start_session,
 };
-use gpui::{Context, EventEmitter, Task};
+use gpui::{BackgroundExecutor, Context, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::blocking::unblock;
@@ -1418,23 +1418,7 @@ impl AppState {
             })
             .or_else(|| self.background.get(parent_id).map(|s| s.meta.clone()))
             .ok_or_else(|| "unknown parent session".to_string())?;
-        let cwd = match cwd {
-            Some(path) => {
-                let path = if path.is_absolute() {
-                    path
-                } else {
-                    parent.cwd.join(path)
-                };
-                let canonical = path
-                    .canonicalize()
-                    .map_err(|_| format!("invalid cwd: {}", path.display()))?;
-                if !canonical.is_dir() {
-                    return Err(format!("invalid cwd: {}", canonical.display()));
-                }
-                canonical
-            }
-            None => parent.cwd.clone(),
-        };
+        let cwd = cwd.unwrap_or_else(|| parent.cwd.clone());
         let mut meta = build_child_meta(
             &parent,
             provider,
@@ -1489,6 +1473,119 @@ impl AppState {
                 parent_id,
                 thread_id,
             } => self.handle_orchestrate_result(parent_id, thread_id, reply, cx),
+            orchestrate_mcp::OrchestrateOp::Dispatch {
+                parent_id,
+                provider,
+                model,
+                effort,
+                profile,
+                access,
+                title,
+                brief,
+                cwd,
+            } => {
+                let resolved = (|| {
+                    let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
+                        &self.settings.orchestrate,
+                        &provider,
+                        model.as_deref(),
+                        effort.as_deref(),
+                        profile.as_deref(),
+                    )?;
+                    if let Some(id) = profile_id.as_deref()
+                        && self.settings.resolved_profile(id).is_none()
+                    {
+                        return Err(format!("unknown profile: {id}"));
+                    }
+                    let approval_mode = resolve_dispatch_access(access.as_deref())?;
+                    Ok((provider, model, effort, profile_id, approval_mode))
+                })();
+                let (provider, model, effort, profile_id, approval_mode) = match resolved {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        let _ = reply.try_send(Err(err));
+                        return;
+                    }
+                };
+                let Some(cwd) = cwd else {
+                    let result = self
+                        .create_child_session(
+                            &parent_id,
+                            provider,
+                            Some(model),
+                            effort,
+                            profile_id,
+                            approval_mode,
+                            title,
+                            None,
+                            brief,
+                            cx,
+                        )
+                        .map(|id| serde_json::json!({ "thread_id": id }));
+                    let _ = reply.try_send(result);
+                    return;
+                };
+                let Some(parent_cwd) = self
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == parent_id)
+                    .map(|meta| meta.cwd.clone())
+                    .or_else(|| {
+                        self.active
+                            .as_ref()
+                            .filter(|active| active.meta.id == parent_id)
+                            .map(|active| active.meta.cwd.clone())
+                    })
+                    .or_else(|| {
+                        self.background
+                            .get(&parent_id)
+                            .map(|session| session.meta.cwd.clone())
+                    })
+                else {
+                    let _ = reply.try_send(Err("unknown parent session".to_string()));
+                    return;
+                };
+                let path = PathBuf::from(cwd);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    parent_cwd.join(path)
+                };
+                cx.spawn(async move |this, cx| {
+                    let resolved_cwd = unblock(cx.background_executor(), move || {
+                        let canonical = path
+                            .canonicalize()
+                            .map_err(|_| format!("invalid cwd: {}", path.display()))?;
+                        if !canonical.is_dir() {
+                            return Err(format!("invalid cwd: {}", canonical.display()));
+                        }
+                        Ok(canonical)
+                    })
+                    .await;
+                    let result = match resolved_cwd {
+                        Ok(cwd) => this
+                            .update(cx, |state, cx| {
+                                state.create_child_session(
+                                    &parent_id,
+                                    provider,
+                                    Some(model),
+                                    effort,
+                                    profile_id,
+                                    approval_mode,
+                                    title,
+                                    Some(cwd),
+                                    brief,
+                                    cx,
+                                )
+                            })
+                            .unwrap_or_else(|_| Err("application closed".to_string()))
+                            .map(|id| serde_json::json!({ "thread_id": id })),
+                        Err(err) => Err(err),
+                    };
+                    let _ = reply.try_send(result);
+                })
+                .detach();
+            }
             op => {
                 let result = self.handle_orchestrate_sync_op(op, cx);
                 let _ = reply.try_send(result);
@@ -1503,43 +1600,8 @@ impl AppState {
     ) -> Result<serde_json::Value, String> {
         use orchestrate_mcp::OrchestrateOp;
         match op {
-            OrchestrateOp::Dispatch {
-                parent_id,
-                provider,
-                model,
-                effort,
-                profile,
-                access,
-                title,
-                brief,
-                cwd,
-            } => {
-                let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
-                    &self.settings.orchestrate,
-                    &provider,
-                    model.as_deref(),
-                    effort.as_deref(),
-                    profile.as_deref(),
-                )?;
-                if let Some(id) = profile_id.as_deref()
-                    && self.settings.resolved_profile(id).is_none()
-                {
-                    return Err(format!("unknown profile: {id}"));
-                }
-                let approval_mode = resolve_dispatch_access(access.as_deref())?;
-                let id = self.create_child_session(
-                    &parent_id,
-                    provider,
-                    Some(model),
-                    effort,
-                    profile_id,
-                    approval_mode,
-                    title,
-                    cwd.map(PathBuf::from),
-                    brief,
-                    cx,
-                )?;
-                Ok(serde_json::json!({ "thread_id": id }))
+            OrchestrateOp::Dispatch { .. } => {
+                unreachable!("dispatch operations are handled asynchronously")
             }
             OrchestrateOp::Status {
                 parent_id: _,
@@ -2252,20 +2314,14 @@ impl AppState {
         api_key: &str,
         cx: &mut Context<Self>,
     ) -> String {
-        let mut settings = self.settings.clone();
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
-        let id = settings.allocate_profile_id(name);
+        let id = self.settings.allocate_profile_id(name);
 
         // Each third-party Claude profile gets an isolated HOME so its auth /
         // config never collides with the official Claude login. Seed onboarding
         // so the CLI starts straight into API-key mode.
         let home = self.store.root().join("profile-homes").join(&id);
-        let _ = std::fs::create_dir_all(&home);
-        let _ = std::fs::write(
-            home.join(".claude.json"),
-            r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
-        );
 
         let mut env = vec![EnvVar {
             name: "ANTHROPIC_BASE_URL".into(),
@@ -2290,25 +2346,44 @@ impl AppState {
             .map(|m| vec![m.to_string()])
             .unwrap_or_default();
 
-        settings.profiles.insert(
-            id.clone(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    display_name: Some(name.to_string()),
-                    env,
-                    custom_models,
-                    home_path: Some(home),
-                    ..ProviderSettings::default()
-                },
+        let profile = ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings {
+                display_name: Some(name.to_string()),
+                env,
+                custom_models,
+                home_path: Some(home.clone()),
+                ..ProviderSettings::default()
             },
-        );
-        self.update_settings(settings, cx);
-        let _ =
-            self.settings_store
-                .set_profile_secret(&id, "ANTHROPIC_API_KEY", Some(api_key.trim()));
-        cx.notify();
-        id
+        };
+        let result_id = id.clone();
+        let api_key = api_key.trim().to_string();
+        cx.spawn(async move |this, cx| {
+            unblock(cx.background_executor(), move || {
+                let _ = std::fs::create_dir_all(&home);
+                let _ = std::fs::write(
+                    home.join(".claude.json"),
+                    r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
+                );
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                if state.settings.profiles.contains_key(&id) {
+                    return;
+                }
+                let mut settings = state.settings.clone();
+                settings.profiles.insert(id.clone(), profile);
+                state.update_settings(settings, cx);
+                let _ = state.settings_store.set_profile_secret(
+                    &id,
+                    "ANTHROPIC_API_KEY",
+                    Some(&api_key),
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        result_id
     }
 
     /// Delete a user profile: remove its card, its secrets, and detach any
@@ -2394,11 +2469,6 @@ impl AppState {
                 continue;
             }
             status.checking = true;
-            status.install_source = binary
-                .as_deref()
-                .map(detect_install_source)
-                .unwrap_or_default();
-            let source = status.install_source;
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -2406,6 +2476,13 @@ impl AppState {
             let package = npm_package(provider);
             let env = self.launch_env(provider).pairs(provider);
             cx.spawn(async move |this, cx| {
+                let source = unblock(cx.background_executor(), move || {
+                    binary
+                        .as_deref()
+                        .map(detect_install_source)
+                        .unwrap_or_default()
+                })
+                .await;
                 let installed = run_capture_env(&program, &["--version"], &env).await;
                 let latest = run_capture("npm", &["view", package, "version"]).await;
                 let _ = this.update(cx, |state, cx| {
@@ -2914,13 +2991,16 @@ impl AppState {
         }
         self.acp_registry_loading = true;
         let data_dir = self.store.root().clone();
-        // Show the cache instantly; the fetch below refreshes it in place.
-        if self.acp_registry.is_none()
-            && let Some(cached) = cached(&data_dir)
-        {
-            self.acp_registry = Some(cached);
-        }
         cx.spawn(async move |this, cx| {
+            let cache_dir = data_dir.clone();
+            let cached_registry =
+                unblock(cx.background_executor(), move || cached(&cache_dir)).await;
+            let _ = this.update(cx, |state, cx| {
+                if state.acp_registry_loading && state.acp_registry.is_none() {
+                    state.acp_registry = cached_registry;
+                    cx.notify();
+                }
+            });
             let result = unblock(cx.background_executor(), move || load(&data_dir)).await;
             let _ = this.update(cx, |state, cx| {
                 state.acp_registry_loading = false;
@@ -3907,6 +3987,15 @@ impl AppState {
         user_files::save_attachment(self.store.root(), id, bytes, ext)
     }
 
+    /// Persist attachment bytes to a previously captured active-session target.
+    /// Callers run this blocking helper on the background executor.
+    pub fn save_attachment_to_dir(dir: &Path, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, bytes)?;
+        Ok(path)
+    }
+
     pub fn update_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
@@ -4222,24 +4311,42 @@ impl AppState {
             self.write_terminal_preferences(cx);
         }
         self.close_orchestrator_children(session_id);
-        if let Some(meta) = &meta
-            && remove_worktree
-            && let Some(worktree) = &meta.worktree
-            && let Err(err) = remove_git_worktree(&worktree.root_project_path, &meta.cwd)
-        {
-            self.report_error(
-                RuntimeError::WorktreeRemove {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
+        let worktree_remove = meta.as_ref().and_then(|meta| {
+            (remove_worktree && meta.worktree.is_some()).then(|| {
+                let worktree = meta.worktree.as_ref().unwrap();
+                (worktree.root_project_path.clone(), meta.cwd.clone())
+            })
+        });
         self.settings.last_visited.remove(session_id);
         self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         let settings = self.settings.clone();
         self.enqueue_settings(&settings, cx);
         self.sessions.retain(|meta| meta.id != session_id);
+        if let Some((root, cwd)) = worktree_remove {
+            let deleted_id = session_id.to_string();
+            cx.spawn(async move |this, cx| {
+                let result = unblock(cx.background_executor(), move || {
+                    remove_git_worktree(&root, &cwd)
+                })
+                .await;
+                let _ = this.update(cx, |state, cx| {
+                    if let Err(err) = result
+                        && !state.sessions.iter().any(|meta| meta.id == deleted_id)
+                        && state.active_session_id() != Some(&deleted_id)
+                        && !state.background.contains_key(&deleted_id)
+                    {
+                        state.report_error(
+                            RuntimeError::WorktreeRemove {
+                                error: err.to_string(),
+                            },
+                            cx,
+                        );
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -5993,22 +6100,31 @@ impl AppState {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             return;
         };
-        match user_files::save_plan_to_workspace(&cwd, &markdown) {
-            Ok(path) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
-            }
-            Err(err) => self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            ),
-        }
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = unblock(cx.background_executor(), move || {
+                user_files::save_plan_to_workspace(&cwd, &markdown)
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                match result {
+                    Ok(path) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                    }
+                    Err(err) => state.report_error(
+                        RuntimeError::PersistEvent {
+                            error: err.to_string(),
+                        },
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Save the plan markdown to the user's Downloads directory (falling back to
@@ -6021,23 +6137,32 @@ impl AppState {
     ) {
         let title = plan_title(&markdown).unwrap_or(fallback_title);
         let filename = format!("{}.md", sanitize_filename(&title));
-        let fallback_cwd = self.active.as_ref().map(|a| a.meta.cwd.as_path());
-        match user_files::save_plan_download(&filename, &markdown, fallback_cwd) {
-            Ok(path) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
-            }
-            Err(err) => self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            ),
-        }
-        cx.notify();
+        let fallback_cwd = self.active.as_ref().map(|a| a.meta.cwd.clone());
+        cx.spawn(async move |this, cx| {
+            let result = unblock(cx.background_executor(), move || {
+                user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
+            })
+            .await;
+            let _ = this.update(cx, |state, cx| {
+                match result {
+                    Ok(path) => {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                    }
+                    Err(err) => state.report_error(
+                        RuntimeError::PersistEvent {
+                            error: err.to_string(),
+                        },
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The active session's latest structured plan steps and proposed plan (for
@@ -7054,9 +7179,12 @@ impl AppState {
         let options = session_options(&title_meta, &settings, launch_env, None, None, None);
         let source = first_message.to_string();
         let attachments = attachments.to_vec();
+        let executor = cx.background_executor().clone();
 
         cx.spawn(async move |this, cx| {
-            let title = generate_ai_title(title_meta.provider, options, source, attachments).await;
+            let title =
+                generate_ai_title(title_meta.provider, options, source, attachments, executor)
+                    .await;
             let _ = this.update(cx, |state, cx| {
                 if let Some(title) = title {
                     state.apply_generated_title(&session_id, &fallback, &title, cx);
@@ -7750,12 +7878,18 @@ async fn generate_ai_title(
     mut options: SessionOptions,
     source: String,
     attachments: Vec<Attachment>,
+    executor: BackgroundExecutor,
 ) -> Option<String> {
     // Isolate even a badly behaved title request from the user's checkout. The
     // title prompt forbids tools and Supervised mode denies side effects, but a
     // scratch cwd gives us another cheap boundary.
     let scratch = std::env::temp_dir().join(format!("tcode-title-{}", uuid::Uuid::new_v4()));
-    if let Err(err) = std::fs::create_dir_all(&scratch) {
+    let scratch_for_create = scratch.clone();
+    if let Err(err) = unblock(&executor, move || {
+        std::fs::create_dir_all(&scratch_for_create)
+    })
+    .await
+    {
         log::debug!("could not create AI title scratch directory: {err}");
         return None;
     }
@@ -7769,7 +7903,7 @@ async fn generate_ai_title(
         },
     )
     .await;
-    let _ = std::fs::remove_dir_all(scratch);
+    let _ = unblock(&executor, move || std::fs::remove_dir_all(scratch)).await;
     generated
 }
 
@@ -11687,5 +11821,77 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn plan_workspace_save_completes_after_background_executor_runs(cx: &mut gpui::TestAppContext) {
+        let cwd = std::env::temp_dir().join(format!("tcode-plan-save-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data =
+            std::env::temp_dir().join(format!("tcode-plan-save-data-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            state.start_draft("plan-project".into(), cwd.clone(), cx);
+            state.save_plan_to_workspace("# Saved plan".into(), cx);
+        });
+        assert!(
+            !cwd.join("PLAN-1.md").exists(),
+            "the GPUI update must not perform the write synchronously"
+        );
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("PLAN-1.md")).unwrap(),
+            "# Saved plan"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn orchestrate_dispatch_resolves_cwd_before_reply(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-dispatch-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = SessionStore::open_at(root.join("data")).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        let parent_id = parent.id.clone();
+        let missing = root.join("missing");
+        let (reply, response) = async_channel::bounded(1);
+
+        state.update(cx, |state, cx| {
+            state.sessions.push(parent);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Dispatch {
+                    parent_id,
+                    provider: "codex".into(),
+                    model: Some("gpt-5.6-sol".into()),
+                    effort: None,
+                    profile: None,
+                    access: None,
+                    title: "Child".into(),
+                    brief: "Inspect the workspace".into(),
+                    cwd: Some(missing.to_string_lossy().into_owned()),
+                },
+                reply,
+                cx,
+            );
+        });
+        assert!(
+            response.try_recv().is_err(),
+            "cwd resolution must not reply from the GPUI update"
+        );
+
+        cx.run_until_parked();
+
+        assert_eq!(
+            response.try_recv().unwrap().unwrap_err(),
+            format!("invalid cwd: {}", missing.display())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
