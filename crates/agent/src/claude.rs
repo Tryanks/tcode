@@ -2667,8 +2667,8 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
 }
 
 /// T3's `normalizeClaudeCliEffort`: `ultrathink` → no flag (prompt prefix);
-/// `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5 / Opus 4.8 / Sonnet 5;
-/// Sonnet 4.6 `max` → `high`; otherwise passthrough.
+/// `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5 / Opus 5 / Opus 4.8 /
+/// Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise passthrough.
 fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Option<String> {
     let effort = effort?;
     if effort == "ultrathink" {
@@ -2679,6 +2679,7 @@ fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Opt
     }
     if effort == "xhigh"
         && model != Some("claude-fable-5")
+        && model != Some("claude-opus-5")
         && model != Some("claude-opus-4-8")
         && model != Some("claude-sonnet-5")
     {
@@ -2778,6 +2779,26 @@ fn built_in_models() -> Vec<ModelSpec> {
             ],
         ),
         model(
+            "claude-opus-5",
+            "Claude Opus 5",
+            vec![
+                reasoning(
+                    &[
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultracode",
+                        "ultrathink",
+                    ],
+                    "high",
+                ),
+                boolean("fastMode", "Fast Mode"),
+                context_window(),
+            ],
+        ),
+        model(
             "claude-opus-4-8",
             "Claude Opus 4.8",
             vec![
@@ -2860,6 +2881,7 @@ fn model_spec(id: &str) -> Option<ModelSpec> {
 /// Whether a version-gated model is available at the installed Claude version.
 fn model_available(id: &str, version: Option<(u32, u32, u32)>) -> bool {
     match id {
+        "claude-opus-5" => version_ge(version, (2, 1, 219)),
         "claude-fable-5" => version_ge(version, (2, 1, 169)),
         "claude-opus-4-8" => version_ge(version, (2, 1, 154)),
         "claude-opus-4-7" => version_ge(version, (2, 1, 111)),
@@ -3125,9 +3147,11 @@ mod tests {
                 .collect()
         };
         // Current version exposes everything.
+        assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
         assert!(ids(Some((2, 1, 206))).contains(&"claude-fable-5".to_string()));
-        // Below every gate: fable-5 / opus-4-8 / opus-4-7 hidden, rest visible.
+        // Below every gate: opus-5 / fable-5 / opus-4-8 / opus-4-7 hidden, rest visible.
         let old = ids(Some((2, 1, 100)));
+        assert!(!old.contains(&"claude-opus-5".to_string()));
         assert!(!old.contains(&"claude-fable-5".to_string()));
         assert!(!old.contains(&"claude-opus-4-8".to_string()));
         assert!(!old.contains(&"claude-opus-4-7".to_string()));
@@ -3136,6 +3160,8 @@ mod tests {
         // Exact boundary is inclusive.
         assert!(ids(Some((2, 1, 154))).contains(&"claude-opus-4-8".to_string()));
         assert!(!ids(Some((2, 1, 153))).contains(&"claude-opus-4-8".to_string()));
+        assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
+        assert!(!ids(Some((2, 1, 218))).contains(&"claude-opus-5".to_string()));
         // Unknown version hides gated models.
         assert!(!ids(None).contains(&"claude-fable-5".to_string()));
     }
