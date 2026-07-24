@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn wide_table_keeps_its_intrinsic_width_inside_viewport(cx: &mut TestAppContext) {
+    fn wide_table_shrinks_to_viewport_and_wraps(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
@@ -333,10 +333,68 @@ mod tests {
         let track = cx
             .debug_bounds("markdown-table-track-root-0")
             .expect("table track was painted");
+        assert_eq!(
+            track.size.width,
+            px(320.),
+            "wide table did not shrink to the markdown viewport"
+        );
         assert!(
-            track.size.width > px(320.),
-            "wide table collapsed to viewport width {:?}",
-            track.size.width
+            track.size.height > px(68.),
+            "wide table did not grow tall enough for wrapped content: {:?}",
+            track.size.height
+        );
+    }
+
+    #[gpui::test]
+    fn small_table_stretches_to_viewport_width(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) =
+            cx.add_window_view(|_, cx| TestRoot::new("| a | b |\n| --- | --- |\n| 1 | 2 |", cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let track = cx
+            .debug_bounds("markdown-table-track-root-0")
+            .expect("table track was painted");
+        assert_eq!(
+            track.size.width,
+            px(320.),
+            "small table did not stretch to the markdown viewport"
+        );
+    }
+
+    #[gpui::test]
+    fn right_aligned_column_justifies_cell_content(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TestRoot::new("| num | label |\n| ---: | --- |\n| 1 | value |", cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let cell = cx
+            .debug_bounds("markdown-table-cell-1-0")
+            .expect("right-aligned cell was painted");
+        let content = cx
+            .debug_bounds("markdown-table-cell-content-1-0")
+            .expect("cell content was painted");
+        // The stretched column is far wider than "1"; justify_end must push the
+        // content against the cell's right padding edge (px_2 = 8px).
+        assert!(
+            cell.right() - content.right() <= px(9.),
+            "content {content:?} is not right-justified inside cell {cell:?}"
+        );
+        assert!(
+            content.left() - cell.left() > px(20.),
+            "content {content:?} hugs the left edge of cell {cell:?}"
         );
     }
 
@@ -378,7 +436,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn streaming_table_growth_updates_track_width(cx: &mut TestAppContext) {
+    fn streaming_table_growth_updates_track_height(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
@@ -388,30 +446,33 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        let initial_width = cx
+        let initial_height = cx
             .debug_bounds("markdown-table-track-root-0")
             .expect("initial table track was painted")
             .size
-            .width;
+            .height;
 
         view.update(cx, |root, cx| {
             root.markdown.update(cx, |markdown, cx| {
-                markdown.push_str("-cell-that-grows-much-wider |", cx);
+                markdown.push_str(
+                    "-cell-that-grows-much-wider-and-keeps-growing-until-it-wraps |",
+                    cx,
+                );
             });
         });
         cx.run_until_parked();
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        let grown_width = cx
+        let grown_height = cx
             .debug_bounds("markdown-table-track-root-0")
             .expect("grown table track was painted")
             .size
-            .width;
+            .height;
 
         assert!(
-            grown_width > initial_width,
-            "streamed table width stayed at {initial_width:?} instead of growing: {grown_width:?}"
+            grown_height > initial_height,
+            "streamed table height stayed at {initial_height:?} instead of growing: {grown_height:?}"
         );
     }
 
