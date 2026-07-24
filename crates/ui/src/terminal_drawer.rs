@@ -1038,12 +1038,7 @@ impl TerminalDrawer {
             return div().into_any_element();
         };
 
-        let mut grid = v_flex().child(self.render_grid(
-            terminal_id,
-            &snapshot,
-            register_input,
-            cx,
-        ));
+        let mut grid = v_flex().child(self.render_grid(terminal_id, &snapshot, register_input, cx));
         if snapshot.exited {
             let status = snapshot
                 .exit_code
