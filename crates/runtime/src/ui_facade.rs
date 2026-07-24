@@ -3,12 +3,21 @@
 use std::io;
 use std::path::Path;
 
-pub use tcode_services::git::{GitDiffResult, GitDiffScope};
+pub use tcode_services::git::{GitDiffResult, GitDiffScope, GitFileText};
 pub use tcode_services::import::{ExternalThread, RecentDir, SourceTool};
 pub use tcode_services::workspace::PathEntry;
 
 pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> GitDiffResult {
-    tcode_services::git::load_git_diff(cwd, scope, base)
+    load_git_diff_opts(cwd, scope, base, false)
+}
+
+pub fn load_git_diff_opts(
+    cwd: &Path,
+    scope: GitDiffScope,
+    base: Option<&str>,
+    ignore_whitespace: bool,
+) -> GitDiffResult {
+    tcode_services::git::load_git_diff(cwd, scope, base, ignore_whitespace)
 }
 
 pub fn open_in_zed(cwd: &Path) -> io::Result<()> {

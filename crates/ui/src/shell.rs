@@ -17,7 +17,7 @@ use tcode_runtime::app::{AppEvent, AppState, RightTab, Route};
 use tcode_runtime::event::{RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
-use crate::diff_panel::DiffPanel;
+use crate::diff::DiffPanel;
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
 use crate::settings_page::SettingsPage;

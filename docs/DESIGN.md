@@ -259,16 +259,15 @@ shrink the chat — the right panel is painted over it and the timeline and comp
 are clipped mid-word. The chat column reflows; it never clips.
 
 Details: tab strip ("Diff" + "+" no-op) with expand/close cluster; toolbar
-"Turn N ⌄" selector, unified/split layout, and wrap toggle (+ no-op
-whitespace/¶ icons).
+"Turn N ⌄" selector, unified/split layout, wrap, whitespace-insensitive, and
+invisibles toggles.
 
-The body is a variable-height virtual GPUI list. Git loading, patch parsing,
-syntax highlighting, and row model construction run on background executors;
-the render path constructs only
-the visible file headers and rows. Each file header shows icon, relative path,
-operation badge, and +N/-M totals. Rows retain dual line-number gutters, mono
-content, syntax/novel-span highlighting, add/remove tints and accent bars, soft
-wrapping, split pairing, selection, and inline review comments.
+The body is a variable-height virtual GPUI list backed by a Zed-inspired
+pipeline: full old/new texts use imara-diff histogram hunks, with patch parsing
+as fallback. Word-level changed-token highlights layer over syntax runs;
+collapsed gaps expand without re-diffing, and split rows pair by content.
+Loading, highlighting, and row construction run on background executors, while
+the render path constructs only visible file headers and rows.
 
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the
