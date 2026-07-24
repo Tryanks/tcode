@@ -426,8 +426,13 @@ fn main() {
             let quit_subscription = cx.on_app_quit({
                 let app_state = app_state.clone();
                 move |cx| {
-                    app_state.update(cx, |state, _| state.shutdown_all());
-                    async {}
+                    let barrier = app_state.update(cx, |state, cx| {
+                        state.shutdown_all(cx);
+                        state.store_write_barrier(cx)
+                    });
+                    async move {
+                        let _ = barrier.recv().await;
+                    }
                 }
             });
             quit_subscription.detach();
