@@ -23,6 +23,7 @@ mod provider_model_picker;
 pub mod provider_models;
 pub mod provider_status;
 pub mod runtime_event;
+mod schedule;
 pub mod settings;
 mod settings_page;
 mod shell;

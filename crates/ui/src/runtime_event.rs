@@ -128,6 +128,15 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::SwitchedBranch { branch } => {
                     tcode_i18n::tr!("notice.switched_branch", branch = branch).into_owned()
                 }
+                RuntimeNotice::ScheduledFired { parked: false } => {
+                    tcode_i18n::tr!("notice.scheduled_sent").into_owned()
+                }
+                RuntimeNotice::ScheduledFired { parked: true } => {
+                    tcode_i18n::tr!("notice.scheduled_queued").into_owned()
+                }
+                RuntimeNotice::ScheduledDropped => {
+                    tcode_i18n::tr!("notice.scheduled_dropped").into_owned()
+                }
             };
             (RuntimeEventSeverity::Success, message)
         }

@@ -754,6 +754,40 @@ impl Composer {
         {
             return;
         }
+        if text == "/schedule" || text.starts_with("/schedule ") {
+            let parsed = crate::schedule::parse_schedule_args(
+                text["/schedule".len()..].trim(),
+                chrono::Local::now(),
+            );
+            let has_active_session = self.app_state.read(cx).active.is_some();
+            let Ok((fire_at, message, steer)) = parsed else {
+                window.push_notification(
+                    Notification::info(tcode_i18n::tr!("composer.schedule_usage")),
+                    cx,
+                );
+                return;
+            };
+            if !has_active_session {
+                window.push_notification(
+                    Notification::info(tcode_i18n::tr!("composer.schedule_usage")),
+                    cx,
+                );
+                return;
+            }
+
+            self.text_cache.clear_current();
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            self.app_state.update(cx, |state, cx| {
+                state.schedule_message(message, fire_at, steer, cx);
+            });
+            let when = crate::schedule::format_fire_time(fire_at);
+            window.push_notification(
+                Notification::info(tcode_i18n::tr!("composer.scheduled_toast", when = when)),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         if self.app_state.read(cx).active.is_none() {
             window.push_notification(
                 Notification::info(tcode_i18n::tr!("composer.no_session")),
@@ -1844,6 +1878,132 @@ impl Composer {
                 .bg(cx.theme().popover)
                 .shadow_xl()
                 .child(list)
+                .into_any_element(),
+        )
+    }
+
+    fn render_schedule_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let mut scheduled = {
+            let state = self.app_state.read(cx);
+            let active = state.active.as_ref()?;
+            state
+                .scheduled_for(&active.meta.id)
+                .map(|message| {
+                    (
+                        message.id,
+                        message.text.clone(),
+                        message.fire_at,
+                        message.steer,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if scheduled.is_empty() {
+            return None;
+        }
+        scheduled.sort_by_key(|message| message.2);
+
+        let muted = cx.theme().muted_foreground;
+        let mut strip = v_flex()
+            .w_full()
+            .gap_1()
+            .p_2()
+            .rounded(crate::material::radius_card())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(tcode_i18n::tr!(
+                        "composer.scheduled_count",
+                        count = scheduled.len()
+                    )),
+            );
+
+        for (id, text, fire_at, steer) in scheduled {
+            let mode = if steer {
+                tcode_i18n::tr!("composer.scheduled_steer_badge")
+            } else {
+                tcode_i18n::tr!("composer.scheduled_queue_badge")
+            }
+            .into_owned();
+            let mode_tooltip = mode.clone();
+            strip = strip.child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .gap_1()
+                    .items_center()
+                    .px_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().foreground)
+                            .child(truncate_queued(&text)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(crate::schedule::format_fire_time(fire_at)),
+                    )
+                    .child(
+                        div()
+                            .id(("schedule-mode", id as usize))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .px_1()
+                            .py(px(1.))
+                            .rounded_full()
+                            .bg(cx.theme().secondary)
+                            .text_size(px(10.))
+                            .text_color(muted)
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(mode_tooltip.clone())
+                                    .build(window, cx)
+                            })
+                            .child(mode),
+                    )
+                    .child(
+                        Button::new(("schedule-send-now", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ArrowUp)
+                            .tooltip(tcode_i18n::tr!("composer.send_scheduled_now"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.app_state
+                                    .update(cx, |state, cx| state.fire_scheduled_now(id, cx));
+                            })),
+                    )
+                    .child(
+                        Button::new(("schedule-cancel", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(tcode_i18n::tr!("composer.cancel_scheduled"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.app_state
+                                    .update(cx, |state, cx| state.cancel_scheduled(id, cx));
+                            })),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .id("scheduled-messages-scroll")
+                .w_full()
+                .max_h(px(180.))
+                .overflow_y_scroll()
+                .child(strip)
                 .into_any_element(),
         )
     }
@@ -3552,6 +3712,7 @@ impl Render for Composer {
                     })
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_queue_strip(cx))
+                    .children(self.render_schedule_strip(cx))
                     .child(card)
                     .children(self.render_checkout_row(cx)),
             )
