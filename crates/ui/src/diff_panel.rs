@@ -32,6 +32,11 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::diff::model::{
+    DiffColors, FileDiffInput, PairedRow, RenderedFile, RenderedRow, VisibleItem, VisibleSplitItem,
+    build_file, diff_content_widths, visible_split, visible_unified,
+};
+pub use crate::diff::parse::RowKind;
 use crate::plan_panel::PlanPanel;
 use crate::window_caption;
 use crate::{highlight, material};
@@ -41,71 +46,6 @@ use tcode_runtime::ui_facade::{
     GitDiffResult, GitDiffScope, load_git_diff, relativize_to_workspace,
 };
 
-// ---------------------------------------------------------------------------
-// Unified-diff parser
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RowKind {
-    Context,
-    Added,
-    Removed,
-}
-
-/// One rendered line of a diff: its side line numbers and content (the leading
-/// `+`/`-`/space marker already stripped).
-#[derive(Debug, Clone, PartialEq)]
-pub struct DiffRow {
-    pub kind: RowKind,
-    pub old_line: Option<u32>,
-    pub new_line: Option<u32>,
-    pub text: String,
-}
-
-/// A contiguous block of changed/context lines, preceded by the count of
-/// unmodified lines skipped since the previous hunk (0 for the first hunk when
-/// it starts at line 1).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Hunk {
-    pub gap_before: u32,
-    pub rows: Vec<DiffRow>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ParsedDiff {
-    pub hunks: Vec<Hunk>,
-    pub added: u32,
-    pub removed: u32,
-}
-
-/// Parse a `@@ -a,b +c,d @@` hunk header into (old_start, new_start). Counts
-/// are ignored (line cursors are advanced by the actual rows).
-fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
-    let rest = line.strip_prefix("@@")?;
-    // "... -a,b +c,d @@ section" -> take the "-a,b +c,d" part.
-    let body = rest.split("@@").next().unwrap_or("").trim();
-    let mut old_start = None;
-    let mut new_start = None;
-    for tok in body.split_whitespace() {
-        if let Some(v) = tok.strip_prefix('-') {
-            old_start = v.split(',').next().and_then(|n| n.parse::<u32>().ok());
-        } else if let Some(v) = tok.strip_prefix('+') {
-            new_start = v.split(',').next().and_then(|n| n.parse::<u32>().ok());
-        }
-    }
-    Some((old_start?, new_start?))
-}
-
-/// Parse a unified diff string into hunks + totals, tolerating both real
-/// unified diffs and the header-less `+`/`-` form.
-pub fn parse_unified_diff(diff: &str) -> ParsedDiff {
-    if diff.lines().any(|l| l.starts_with("@@")) {
-        parse_standard(diff)
-    } else {
-        parse_bare(diff)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DiffScope {
     Turn(usize),
@@ -113,436 +53,29 @@ enum DiffScope {
     Branch,
 }
 
-fn parse_standard(diff: &str) -> ParsedDiff {
-    let mut out = ParsedDiff::default();
-    let mut cur: Option<Hunk> = None;
-    let mut seen_hunk = false;
-    let mut old_cursor = 0u32;
-    let mut new_cursor = 0u32;
-    // Where the new-side cursor stood at the end of the previous hunk; the gap
-    // before the next hunk is `next_new_start - prev_new_end`.
-    let mut prev_new_end = 1u32;
-
-    for line in diff.lines() {
-        if let Some((old_start, new_start)) = parse_hunk_header(line) {
-            if let Some(hunk) = cur.take() {
-                prev_new_end = new_cursor;
-                out.hunks.push(hunk);
-            }
-            let gap = new_start.saturating_sub(prev_new_end);
-            old_cursor = old_start;
-            new_cursor = new_start;
-            cur = Some(Hunk {
-                gap_before: gap,
-                rows: Vec::new(),
-            });
-            seen_hunk = true;
-            continue;
-        }
-        if !seen_hunk {
-            // Skip file headers (`diff --git`, `index`, `--- a/x`, `+++ b/x`,
-            // `new file mode`, `rename ...`) that precede the first hunk.
-            continue;
-        }
-        let Some(hunk) = cur.as_mut() else { continue };
-        let mut chars = line.chars();
-        match chars.next() {
-            Some('+') => {
-                out.added += 1;
-                hunk.rows.push(DiffRow {
-                    kind: RowKind::Added,
-                    old_line: None,
-                    new_line: Some(new_cursor),
-                    text: chars.as_str().to_string(),
-                });
-                new_cursor += 1;
-            }
-            Some('-') => {
-                out.removed += 1;
-                hunk.rows.push(DiffRow {
-                    kind: RowKind::Removed,
-                    old_line: Some(old_cursor),
-                    new_line: None,
-                    text: chars.as_str().to_string(),
-                });
-                old_cursor += 1;
-            }
-            // "\ No newline at end of file" — a marker for the preceding row.
-            Some('\\') => {}
-            Some(' ') => {
-                hunk.rows.push(DiffRow {
-                    kind: RowKind::Context,
-                    old_line: Some(old_cursor),
-                    new_line: Some(new_cursor),
-                    text: chars.as_str().to_string(),
-                });
-                old_cursor += 1;
-                new_cursor += 1;
-            }
-            // A fully blank line inside a hunk is empty context.
-            None => {
-                hunk.rows.push(DiffRow {
-                    kind: RowKind::Context,
-                    old_line: Some(old_cursor),
-                    new_line: Some(new_cursor),
-                    text: String::new(),
-                });
-                old_cursor += 1;
-                new_cursor += 1;
-            }
-            // Anything else: treat the whole line as context content.
-            Some(_) => {
-                hunk.rows.push(DiffRow {
-                    kind: RowKind::Context,
-                    old_line: Some(old_cursor),
-                    new_line: Some(new_cursor),
-                    text: line.to_string(),
-                });
-                old_cursor += 1;
-                new_cursor += 1;
-            }
-        }
-    }
-    if let Some(hunk) = cur.take() {
-        out.hunks.push(hunk);
-    }
-    out
-}
-
-/// Parse a header-less `+`/`-` diff (Claude Write/Edit): a single hunk with no
-/// gap, line numbers assigned sequentially from 1 on each side.
-fn parse_bare(diff: &str) -> ParsedDiff {
-    let mut out = ParsedDiff::default();
-    let mut rows = Vec::new();
-    let mut old_cursor = 1u32;
-    let mut new_cursor = 1u32;
-    for line in diff.lines() {
-        let mut chars = line.chars();
-        match chars.next() {
-            Some('+') => {
-                out.added += 1;
-                rows.push(DiffRow {
-                    kind: RowKind::Added,
-                    old_line: None,
-                    new_line: Some(new_cursor),
-                    text: chars.as_str().to_string(),
-                });
-                new_cursor += 1;
-            }
-            Some('-') => {
-                out.removed += 1;
-                rows.push(DiffRow {
-                    kind: RowKind::Removed,
-                    old_line: Some(old_cursor),
-                    new_line: None,
-                    text: chars.as_str().to_string(),
-                });
-                old_cursor += 1;
-            }
-            _ => {
-                rows.push(DiffRow {
-                    kind: RowKind::Context,
-                    old_line: Some(old_cursor),
-                    new_line: Some(new_cursor),
-                    text: line.to_string(),
-                });
-                old_cursor += 1;
-                new_cursor += 1;
-            }
-        }
-    }
-    if !rows.is_empty() {
-        out.hunks.push(Hunk {
-            gap_before: 0,
-            rows,
-        });
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Highlighting helpers
-// ---------------------------------------------------------------------------
-
-fn language_name(path: &str) -> &'static str {
-    highlight::language_name_for_path(path)
-}
-
-/// Highlight `src` (a full reconstructed file side) once and return the token
-/// style spans in byte offsets.
-fn highlight_source(
-    src: &str,
-    lang: &str,
+fn render_file(
+    change: &FileChange,
+    cwd: &Path,
     theme: &HighlightTheme,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    highlight::highlight_source(src, lang, theme)
-}
-
-/// Slice the style spans overlapping `[start, end)` and rebase them to be
-/// relative to `start` (for a single line extracted from a full-file highlight).
-fn sub_runs(
-    all: &[(Range<usize>, HighlightStyle)],
-    start: usize,
-    end: usize,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    all.iter()
-        .filter(|(r, _)| r.start < end && r.end > start)
-        .map(|(r, style)| {
-            let s = r.start.max(start) - start;
-            let e = r.end.min(end) - start;
-            (s..e, *style)
-        })
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-// Rendered (cached) diff model
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-enum RenderedRow {
-    /// A "N unmodified lines" separator.
-    Gap(u32),
-    Code {
-        kind: RowKind,
-        old: Option<u32>,
-        new: Option<u32>,
-        text: String,
-        runs: Vec<(Range<usize>, HighlightStyle)>,
-    },
-}
-
-#[derive(Clone)]
-struct RenderedFile {
-    path: String,
-    kind: FileChangeKind,
-    added: u32,
-    removed: u32,
-    rows: Vec<RenderedRow>,
-    split_rows: Vec<PairedRenderedRow>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq)]
-pub struct SplitPair {
-    pub left: Option<DiffRow>,
-    pub right: Option<DiffRow>,
-}
-
-/// Align context on both sides and zip each adjacent remove/add block by
-/// position. Called per hunk so change blocks never pair across hunk gaps.
-#[cfg(test)]
-pub fn pair_split_rows(rows: &[DiffRow]) -> Vec<SplitPair> {
-    let mut paired = Vec::new();
-    let mut index = 0;
-    while index < rows.len() {
-        if rows[index].kind == RowKind::Context {
-            paired.push(SplitPair {
-                left: Some(rows[index].clone()),
-                right: Some(rows[index].clone()),
-            });
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < rows.len() && rows[index].kind != RowKind::Context {
-            index += 1;
-        }
-        let block = &rows[start..index];
-        let removed = block
-            .iter()
-            .filter(|row| row.kind == RowKind::Removed)
-            .cloned()
-            .collect::<Vec<_>>();
-        let added = block
-            .iter()
-            .filter(|row| row.kind == RowKind::Added)
-            .cloned()
-            .collect::<Vec<_>>();
-        for offset in 0..removed.len().max(added.len()) {
-            paired.push(SplitPair {
-                left: removed.get(offset).cloned(),
-                right: added.get(offset).cloned(),
-            });
-        }
-    }
-    paired
-}
-
-#[derive(Clone)]
-enum PairedRenderedRow {
-    Gap(u32),
-    Pair {
-        left: Option<(usize, RenderedRow)>,
-        right: Option<(usize, RenderedRow)>,
-    },
-}
-
-fn pair_rendered_rows(rows: &[RenderedRow]) -> Vec<PairedRenderedRow> {
-    let mut output = Vec::new();
-    let mut index = 0;
-    while index < rows.len() {
-        match &rows[index] {
-            RenderedRow::Gap(gap) => {
-                output.push(PairedRenderedRow::Gap(*gap));
-                index += 1;
-            }
-            RenderedRow::Code {
-                kind: RowKind::Context,
-                ..
-            } => {
-                output.push(PairedRenderedRow::Pair {
-                    left: Some((index, rows[index].clone())),
-                    right: Some((index, rows[index].clone())),
-                });
-                index += 1;
-            }
-            RenderedRow::Code { .. } => {
-                let start = index;
-                while index < rows.len()
-                    && matches!(
-                        rows[index],
-                        RenderedRow::Code {
-                            kind: RowKind::Added | RowKind::Removed,
-                            ..
-                        }
-                    )
-                {
-                    index += 1;
-                }
-                let removed = rows[start..index]
-                    .iter()
-                    .enumerate()
-                    .filter(|row| {
-                        matches!(
-                            row.1,
-                            RenderedRow::Code {
-                                kind: RowKind::Removed,
-                                ..
-                            }
-                        )
-                    })
-                    .map(|(offset, row)| (start + offset, row.clone()))
-                    .collect::<Vec<_>>();
-                let added = rows[start..index]
-                    .iter()
-                    .enumerate()
-                    .filter(|row| {
-                        matches!(
-                            row.1,
-                            RenderedRow::Code {
-                                kind: RowKind::Added,
-                                ..
-                            }
-                        )
-                    })
-                    .map(|(offset, row)| (start + offset, row.clone()))
-                    .collect::<Vec<_>>();
-                for offset in 0..removed.len().max(added.len()) {
-                    output.push(PairedRenderedRow::Pair {
-                        left: removed.get(offset).cloned(),
-                        right: added.get(offset).cloned(),
-                    });
-                }
-            }
-        }
-    }
-    output
-}
-
-/// Build a file's rendered rows: parse the diff, reconstruct each side's source
-/// for context-aware highlighting, then attach per-line style runs.
-fn render_file(change: &FileChange, cwd: &Path, theme: &HighlightTheme) -> RenderedFile {
-    let display = relativize_to_workspace(&change.path, cwd);
-    let lang = language_name(&change.path);
-    let parsed = change
-        .diff
-        .as_deref()
-        .map(parse_unified_diff)
-        .unwrap_or_default();
-
-    // Reconstruct the visible new-side and old-side sources (context appears in
-    // both) so multi-line constructs highlight correctly, tracking each row's
-    // byte range into its source.
-    let mut new_src = String::new();
-    let mut old_src = String::new();
-    enum Src {
-        New(usize, usize),
-        Old(usize, usize),
-        None,
-    }
-    let mut row_src: Vec<Src> = Vec::new();
-    enum FlatItem<'a> {
-        Gap(u32),
-        Row(&'a DiffRow),
-    }
-    let mut flat: Vec<FlatItem> = Vec::new();
-
-    for hunk in &parsed.hunks {
-        if hunk.gap_before > 0 {
-            flat.push(FlatItem::Gap(hunk.gap_before));
-            row_src.push(Src::None);
-        }
-        for row in &hunk.rows {
-            let (start, end) = match row.kind {
-                RowKind::Added | RowKind::Context => {
-                    let s = new_src.len();
-                    new_src.push_str(&row.text);
-                    let e = new_src.len();
-                    new_src.push('\n');
-                    (s, e)
-                }
-                RowKind::Removed => {
-                    let s = old_src.len();
-                    old_src.push_str(&row.text);
-                    let e = old_src.len();
-                    old_src.push('\n');
-                    (s, e)
-                }
-            };
-            row_src.push(match row.kind {
-                RowKind::Removed => Src::Old(start, end),
-                _ => Src::New(start, end),
-            });
-            flat.push(FlatItem::Row(row));
-        }
-    }
-
-    let new_styles = highlight_source(&new_src, lang, theme);
-    let old_styles = highlight_source(&old_src, lang, theme);
-
-    let mut rows = Vec::with_capacity(flat.len());
-    for (item, src) in flat.into_iter().zip(row_src) {
-        let row = match item {
-            FlatItem::Gap(gap) => {
-                rows.push(RenderedRow::Gap(gap));
-                continue;
-            }
-            FlatItem::Row(row) => row,
-        };
-        let runs = match src {
-            Src::New(s, e) => sub_runs(&new_styles, s, e),
-            Src::Old(s, e) => sub_runs(&old_styles, s, e),
-            Src::None => Vec::new(),
-        };
-        rows.push(RenderedRow::Code {
-            kind: row.kind,
-            old: row.old_line,
-            new: row.new_line,
-            text: row.text.clone(),
-            runs,
-        });
-    }
-
-    let split_rows = pair_rendered_rows(&rows);
-    RenderedFile {
-        path: display,
-        kind: change.kind,
-        added: parsed.added,
-        removed: parsed.removed,
-        rows,
-        split_rows,
-    }
+    colors: &DiffColors,
+    whitespace_style: &HighlightStyle,
+) -> RenderedFile {
+    build_file(
+        &FileDiffInput {
+            path: &change.path,
+            kind: change.kind,
+            old_text: None,
+            new_text: None,
+            patch: change.diff.as_deref(),
+            ignore_whitespace: false,
+            show_invisibles: false,
+        },
+        relativize_to_workspace(&change.path, cwd),
+        highlight::language_name_for_path(&change.path),
+        theme,
+        colors,
+        whitespace_style,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +90,8 @@ struct DiffCache {
     revision: u64,
     dark: bool,
     files: Vec<RenderedFile>,
+    unified_visible: Vec<Vec<VisibleItem>>,
+    split_visible: Vec<Vec<VisibleSplitItem>>,
     unified_items: Vec<DiffListItem>,
     split_items: Vec<DiffListItem>,
     unified_content_width: f32,
@@ -572,30 +107,42 @@ enum DiffListItem {
     SplitRow { file: usize, row: usize },
 }
 
-fn build_list_items(files: &[RenderedFile]) -> (Vec<DiffListItem>, Vec<DiffListItem>) {
-    let unified_capacity = files.len() + files.iter().map(|file| file.rows.len()).sum::<usize>();
-    let split_capacity = files.len()
-        + files
-            .iter()
-            .map(|file| file.split_rows.len())
-            .sum::<usize>();
+fn build_list_items(files: &[RenderedFile]) -> BuiltListItems {
+    let unified_visible = files.iter().map(visible_unified).collect::<Vec<_>>();
+    let split_visible = files.iter().map(visible_split).collect::<Vec<_>>();
+    let unified_capacity = files.len() + unified_visible.iter().map(Vec::len).sum::<usize>();
+    let split_capacity = files.len() + split_visible.iter().map(Vec::len).sum::<usize>();
     let mut unified = Vec::with_capacity(unified_capacity);
     let mut split = Vec::with_capacity(split_capacity);
-    for (file_index, file) in files.iter().enumerate() {
+    for (file_index, _) in files.iter().enumerate() {
         unified.push(DiffListItem::Header(file_index));
         split.push(DiffListItem::Header(file_index));
-        unified.extend((0..file.rows.len()).map(|row| DiffListItem::UnifiedRow {
-            file: file_index,
-            row,
+        unified.extend((0..unified_visible[file_index].len()).map(|row| {
+            DiffListItem::UnifiedRow {
+                file: file_index,
+                row,
+            }
         }));
         split.extend(
-            (0..file.split_rows.len()).map(|row| DiffListItem::SplitRow {
+            (0..split_visible[file_index].len()).map(|row| DiffListItem::SplitRow {
                 file: file_index,
                 row,
             }),
         );
     }
-    (unified, split)
+    BuiltListItems {
+        unified_visible,
+        split_visible,
+        unified,
+        split,
+    }
+}
+
+struct BuiltListItems {
+    unified_visible: Vec<Vec<VisibleItem>>,
+    split_visible: Vec<Vec<VisibleSplitItem>>,
+    unified: Vec<DiffListItem>,
+    split: Vec<DiffListItem>,
 }
 
 fn file_header_index(files: &[RenderedFile], items: &[DiffListItem], path: &str) -> Option<usize> {
@@ -605,72 +152,18 @@ fn file_header_index(files: &[RenderedFile], items: &[DiffListItem], path: &str)
         .position(|item| matches!(item, DiffListItem::Header(index) if *index == file_index))
 }
 
-/// Conservative monospace width used by the no-wrap virtual lists. GPUI's
-/// inferred list sizing renders and measures the viewport during both layout
-/// and prepaint; fixing the list width up front keeps rendering virtualized to
-/// prepaint while still giving the horizontal scroll container real overflow.
-fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
-    const MONO_ADVANCE: f32 = 8.;
-    const UNIFIED_CHROME: f32 = 106.; // border + two gutters + code padding
-    const SPLIT_CHROME: f32 = 117.; // two gutters + code padding + divider
-    const HEADER_CHROME: f32 = 180.;
-
-    let mut unified_columns = 0;
-    let mut split_columns = 0;
-    let mut header_columns = 0;
-    for file in files {
-        header_columns = header_columns.max(display_columns(&file.path));
-        for row in &file.rows {
-            if let RenderedRow::Code { text, .. } = row {
-                unified_columns = unified_columns.max(display_columns(text));
-            }
-        }
-        for row in &file.split_rows {
-            if let PairedRenderedRow::Pair { left, right } = row {
-                let columns = left
-                    .as_ref()
-                    .and_then(|(_, row)| rendered_row_text(row))
-                    .map(display_columns)
-                    .unwrap_or(0)
-                    + right
-                        .as_ref()
-                        .and_then(|(_, row)| rendered_row_text(row))
-                        .map(display_columns)
-                        .unwrap_or(0);
-                split_columns = split_columns.max(columns);
-            }
-        }
-    }
-
-    let header_width = header_columns as f32 * MONO_ADVANCE + HEADER_CHROME;
-    (
-        (unified_columns as f32 * MONO_ADVANCE + UNIFIED_CHROME).max(header_width),
-        (split_columns as f32 * MONO_ADVANCE + SPLIT_CHROME).max(header_width),
-    )
-}
-
-fn rendered_row_text(row: &RenderedRow) -> Option<&str> {
-    match row {
-        RenderedRow::Code { text, .. } => Some(text),
-        RenderedRow::Gap(_) => None,
-    }
-}
-
-fn display_columns(text: &str) -> usize {
-    text.chars().fold(0, |columns, ch| match ch {
-        '\t' => columns + (4 - columns % 4),
-        ch if ch.is_ascii_control() => columns,
-        ch if ch.is_ascii() => columns + 1,
-        _ => columns + 2,
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RenderKey {
     session: String,
     scope: DiffScope,
     revision: u64,
     dark: bool,
+}
+
+struct RenderAppearance {
+    theme: Arc<HighlightTheme>,
+    colors: DiffColors,
+    whitespace_style: HighlightStyle,
 }
 
 struct GitPreview {
@@ -854,7 +347,7 @@ impl DiffPanel {
         key: RenderKey,
         changes: Vec<FileChange>,
         cwd: PathBuf,
-        theme: Arc<HighlightTheme>,
+        appearance: RenderAppearance,
         cx: &mut Context<Self>,
     ) {
         if self.render_loading_key.as_ref() == Some(&key) {
@@ -863,23 +356,40 @@ impl DiffPanel {
         self.cache = None;
         self.render_loading_key = Some(key.clone());
         cx.spawn(async move |this, cx| {
-            let (files, unified_items, split_items, unified_content_width, split_content_width) =
-                tcode_runtime::blocking::unblock(cx.background_executor(), move || {
-                    let files = changes
-                        .iter()
-                        .map(|change| render_file(change, &cwd, &theme))
-                        .collect::<Vec<_>>();
-                    let (unified_items, split_items) = build_list_items(&files);
-                    let (unified_content_width, split_content_width) = diff_content_widths(&files);
-                    (
-                        files,
-                        unified_items,
-                        split_items,
-                        unified_content_width,
-                        split_content_width,
-                    )
-                })
-                .await;
+            let (
+                files,
+                unified_visible,
+                split_visible,
+                unified_items,
+                split_items,
+                unified_content_width,
+                split_content_width,
+            ) = tcode_runtime::blocking::unblock(cx.background_executor(), move || {
+                let files = changes
+                    .iter()
+                    .map(|change| {
+                        render_file(
+                            change,
+                            &cwd,
+                            &appearance.theme,
+                            &appearance.colors,
+                            &appearance.whitespace_style,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let items = build_list_items(&files);
+                let (unified_content_width, split_content_width) = diff_content_widths(&files);
+                (
+                    files,
+                    items.unified_visible,
+                    items.split_visible,
+                    items.unified,
+                    items.split,
+                    unified_content_width,
+                    split_content_width,
+                )
+            })
+            .await;
             let _ = this.update(cx, |panel, cx| {
                 if panel.render_loading_key.as_ref() == Some(&key) {
                     let unified_list =
@@ -892,6 +402,8 @@ impl DiffPanel {
                         revision: key.revision,
                         dark: key.dark,
                         files,
+                        unified_visible,
+                        split_visible,
                         unified_items,
                         split_items,
                         unified_content_width,
@@ -1010,7 +522,17 @@ impl DiffPanel {
             c.session != session || c.scope != scope || c.revision != revision || c.dark != dark
         });
         if fresh {
-            let theme = cx.theme().highlight_theme.clone();
+            let appearance = RenderAppearance {
+                theme: cx.theme().highlight_theme.clone(),
+                colors: DiffColors {
+                    added_word_bg: cx.theme().success.opacity(0.30),
+                    removed_word_bg: cx.theme().danger.opacity(0.28),
+                },
+                whitespace_style: HighlightStyle {
+                    color: Some(cx.theme().muted_foreground),
+                    ..Default::default()
+                },
+            };
             self.request_rendered_files(
                 RenderKey {
                     session,
@@ -1020,7 +542,7 @@ impl DiffPanel {
                 },
                 changes,
                 cwd,
-                theme,
+                appearance,
                 cx,
             );
             return false;
@@ -1032,7 +554,7 @@ impl DiffPanel {
             && let Some((scope, file, row_index, line, side, text)) =
                 self.cache.as_ref().and_then(|cache| {
                     cache.files.iter().find_map(|file| {
-                        file.rows
+                        file.all_rows
                             .iter()
                             .enumerate()
                             .find_map(|(index, row)| match row {
@@ -1597,7 +1119,7 @@ impl DiffPanel {
         let start = selection.row_start.min(selection.row_end);
         let end = selection.row_start.max(selection.row_end);
         let selected = file
-            .rows
+            .all_rows
             .iter()
             .enumerate()
             .filter(|(index, _)| *index >= start && *index <= end)
@@ -1752,52 +1274,59 @@ impl DiffPanel {
             DiffListItem::Header(file_index) => {
                 self.render_file_header(&cache.files[file_index], cx)
             }
-            DiffListItem::UnifiedRow { file, row } => {
-                let file = &cache.files[file];
-                let rendered = match &file.rows[row] {
-                    RenderedRow::Gap(count) => self.render_gap(*count, cx),
-                    RenderedRow::Code {
-                        kind,
-                        old,
-                        new,
-                        text,
-                        runs,
-                    } => self.render_code_row(
-                        &file.path, row, *kind, *old, *new, text, runs, self.wrap, cx,
-                    ),
+            DiffListItem::UnifiedRow {
+                file: file_index,
+                row,
+            } => {
+                let file = &cache.files[file_index];
+                let (rendered, comment_row) = match &cache.unified_visible[file_index][row] {
+                    VisibleItem::Gap { count, .. } => (self.render_gap(*count, cx), None),
+                    VisibleItem::Row(row_index) => match &file.all_rows[*row_index] {
+                        RenderedRow::Gap(gap) => (self.render_gap(gap.count, cx), None),
+                        RenderedRow::Code {
+                            kind,
+                            old,
+                            new,
+                            text,
+                            runs,
+                        } => (
+                            self.render_code_row(
+                                &file.path, *row_index, *kind, *old, *new, text, runs, self.wrap,
+                                cx,
+                            ),
+                            Some(*row_index),
+                        ),
+                    },
                 };
                 v_flex()
                     .min_w_full()
                     .child(rendered)
-                    .children(self.render_comment_ui(&file.path, row, cx))
+                    .children(
+                        comment_row
+                            .into_iter()
+                            .flat_map(|row| self.render_comment_ui(&file.path, row, cx)),
+                    )
                     .into_any_element()
             }
             DiffListItem::SplitRow { file, row } => {
-                let file = &cache.files[file];
-                let rendered = match &file.split_rows[row] {
-                    PairedRenderedRow::Gap(count) => self.render_gap(*count, cx),
-                    PairedRenderedRow::Pair { left, right } => self.render_split_row(
-                        &file.path,
-                        left.as_ref(),
-                        right.as_ref(),
-                        self.wrap,
-                        cx,
-                    ),
-                };
-                let comment_rows = match &file.split_rows[row] {
-                    PairedRenderedRow::Gap(_) => Vec::new(),
-                    PairedRenderedRow::Pair { left, right } => {
-                        let mut indices = left
-                            .iter()
-                            .map(|(index, _)| *index)
-                            .chain(right.iter().map(|(index, _)| *index))
-                            .collect::<Vec<_>>();
+                let file_index = file;
+                let file = &cache.files[file_index];
+                let (rendered, comment_rows) = match &cache.split_visible[file_index][row] {
+                    VisibleSplitItem::Gap { count, .. } => {
+                        (self.render_gap(*count, cx), Vec::new())
+                    }
+                    VisibleSplitItem::Pair(pair_index) => {
+                        let pair = file.all_split[*pair_index];
+                        let rendered = self.render_split_row(file, pair, self.wrap, cx);
+                        let mut indices =
+                            pair.left.into_iter().chain(pair.right).collect::<Vec<_>>();
                         indices.sort_unstable();
                         indices.dedup();
-                        indices
+                        let comments = indices
                             .into_iter()
                             .flat_map(|index| self.render_comment_ui(&file.path, index, cx))
-                            .collect()
+                            .collect();
+                        (rendered, comments)
                     }
                 };
                 v_flex()
@@ -2033,37 +1562,58 @@ impl DiffPanel {
 
     fn render_split_row(
         &self,
-        file: &str,
-        left: Option<&(usize, RenderedRow)>,
-        right: Option<&(usize, RenderedRow)>,
+        file: &RenderedFile,
+        pair: PairedRow,
         wrap: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cell =
-            |row: Option<&(usize, RenderedRow)>, side: ReviewSide, cx: &mut Context<Self>| {
-                let row_index = row.map(|(index, _)| *index).unwrap_or_default();
-                let Some(RenderedRow::Code {
-                    kind,
-                    old,
-                    new,
-                    text,
-                    runs,
-                }) = row.map(|(_, row)| row)
-                else {
-                    return div().flex_1().min_w_0().min_h(px(18.)).into_any_element();
-                };
-                let line = match side {
-                    ReviewSide::Old => *old,
-                    ReviewSide::New => *new,
-                };
-                self.render_split_cell(file, row_index, *kind, line, side, text, runs, wrap, cx)
+        let paired_as_context = pair.left.zip(pair.right).is_some_and(|(left, right)| {
+            matches!(
+                (&file.all_rows[left], &file.all_rows[right]),
+                (
+                    RenderedRow::Code { text: left, .. },
+                    RenderedRow::Code { text: right, .. }
+                ) if left == right
+            )
+        });
+        let cell = |row_index: Option<usize>, side: ReviewSide, cx: &mut Context<Self>| {
+            let index = row_index.unwrap_or_default();
+            let Some(RenderedRow::Code {
+                kind,
+                old,
+                new,
+                text,
+                runs,
+            }) = row_index.map(|index| &file.all_rows[index])
+            else {
+                return div().flex_1().min_w_0().min_h(px(18.)).into_any_element();
             };
+            let line = match side {
+                ReviewSide::Old => *old,
+                ReviewSide::New => *new,
+            };
+            self.render_split_cell(
+                &file.path,
+                index,
+                if paired_as_context {
+                    RowKind::Context
+                } else {
+                    *kind
+                },
+                line,
+                side,
+                text,
+                runs,
+                wrap,
+                cx,
+            )
+        };
         h_flex()
             .min_w_full()
             .items_stretch()
-            .child(cell(left, ReviewSide::Old, cx))
+            .child(cell(pair.left, ReviewSide::Old, cx))
             .child(div().w_px().bg(cx.theme().border.opacity(0.)))
-            .child(cell(right, ReviewSide::New, cx))
+            .child(cell(pair.right, ReviewSide::New, cx))
             .into_any_element()
     }
 
@@ -2257,44 +1807,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn display_columns_accounts_for_tabs_and_wide_characters() {
-        assert_eq!(display_columns("ab\tcd"), 6);
-        assert_eq!(display_columns("a界b"), 4);
-    }
-
-    #[test]
-    fn no_wrap_widths_cover_unified_and_split_rows() {
-        let rows = vec![
-            RenderedRow::Code {
-                kind: RowKind::Removed,
-                old: Some(1),
-                new: None,
-                text: "short".into(),
-                runs: Vec::new(),
-            },
-            RenderedRow::Code {
-                kind: RowKind::Added,
-                old: None,
-                new: Some(1),
-                text: "a much longer replacement".into(),
-                runs: Vec::new(),
-            },
-        ];
-        let files = vec![RenderedFile {
-            path: "src/example.rs".into(),
-            kind: FileChangeKind::Modify,
-            added: 1,
-            removed: 1,
-            split_rows: pair_rendered_rows(&rows),
-            rows,
-        }];
-
-        let (unified, split) = diff_content_widths(&files);
-        assert!(unified >= 24. * 8. + 106.);
-        assert!(split >= (5. + 24.) * 8. + 117.);
-    }
-
-    #[test]
     fn resolves_file_headers_independently_for_unified_and_split_lists() {
         let code_row = |text: &str| RenderedRow::Code {
             kind: RowKind::Added,
@@ -2311,19 +1823,30 @@ mod tests {
                 kind: FileChangeKind::Modify,
                 added: 3,
                 removed: 0,
-                split_rows: vec![PairedRenderedRow::Gap(7)],
-                rows: first_rows,
+                all_split: vec![PairedRow {
+                    left: None,
+                    right: Some(0),
+                }],
+                all_rows: first_rows,
+                collapsed: Vec::new(),
+                expandable: false,
             },
             RenderedFile {
                 path: "tests/second.rs".into(),
                 kind: FileChangeKind::Modify,
                 added: 1,
                 removed: 0,
-                split_rows: pair_rendered_rows(&second_rows),
-                rows: second_rows,
+                all_split: vec![PairedRow {
+                    left: None,
+                    right: Some(0),
+                }],
+                all_rows: second_rows,
+                collapsed: Vec::new(),
+                expandable: false,
             },
         ];
-        let (unified, split) = build_list_items(&files);
+        let items = build_list_items(&files);
+        let (unified, split) = (items.unified, items.split);
 
         assert_eq!(
             file_header_index(&files, &unified, "tests/second.rs"),
@@ -2337,136 +1860,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_bare_create_diff() {
-        // Claude Write: every line prefixed with `+`, no headers.
-        let diff = "+def f():\n+    return 1";
-        let parsed = parse_unified_diff(diff);
-        assert_eq!(parsed.added, 2);
-        assert_eq!(parsed.removed, 0);
-        assert_eq!(parsed.hunks.len(), 1);
-        let rows = &parsed.hunks[0].rows;
-        assert_eq!(rows[0].kind, RowKind::Added);
-        assert_eq!(rows[0].new_line, Some(1));
-        assert_eq!(rows[0].old_line, None);
-        assert_eq!(rows[0].text, "def f():");
-        assert_eq!(rows[1].new_line, Some(2));
-    }
-
-    #[test]
-    fn parses_bare_edit_diff() {
-        // Claude Edit: removed block then added block, no headers.
-        let diff = "-old one\n-old two\n+new one\n+new two\n+new three";
-        let parsed = parse_unified_diff(diff);
-        assert_eq!(parsed.removed, 2);
-        assert_eq!(parsed.added, 3);
-        let rows = &parsed.hunks[0].rows;
-        assert_eq!(rows[0].old_line, Some(1));
-        assert_eq!(rows[1].old_line, Some(2));
-        // Added lines number from 1 on the new side.
-        assert_eq!(rows[2].new_line, Some(1));
-        assert_eq!(rows[4].new_line, Some(3));
-    }
-
-    #[test]
-    fn parses_multi_hunk_with_gaps_create_edit_and_no_newline() {
-        // Two hunks with a gap between; a `\ No newline` marker; file headers.
-        let diff = "\
-diff --git a/util.py b/util.py
---- a/util.py
-+++ b/util.py
-@@ -1,3 +1,4 @@
- import sys
--x = 1
-+x = 2
-+y = 3
- print(x)
-@@ -20,2 +21,2 @@
- last_ctx
--tail_old
-+tail_new
-\\ No newline at end of file";
-        let parsed = parse_unified_diff(diff);
-        assert_eq!(parsed.hunks.len(), 2);
-        // First hunk starts at line 1: no leading gap.
-        assert_eq!(parsed.hunks[0].gap_before, 0);
-        // Second hunk: new side jumped from 5 (end of hunk 1) to 21 => gap 16.
-        assert_eq!(parsed.hunks[1].gap_before, 16);
-        assert_eq!(parsed.added, 3);
-        assert_eq!(parsed.removed, 2);
-
-        // Context/added/removed numbering in the first hunk.
-        let h0 = &parsed.hunks[0].rows;
-        assert_eq!(h0[0].kind, RowKind::Context);
-        assert_eq!((h0[0].old_line, h0[0].new_line), (Some(1), Some(1)));
-        assert_eq!(h0[1].kind, RowKind::Removed);
-        assert_eq!((h0[1].old_line, h0[1].new_line), (Some(2), None));
-        assert_eq!(h0[2].kind, RowKind::Added);
-        assert_eq!((h0[2].old_line, h0[2].new_line), (None, Some(2)));
-        assert_eq!(h0[3].kind, RowKind::Added);
-        assert_eq!(h0[3].new_line, Some(3));
-        assert_eq!(h0[4].kind, RowKind::Context);
-        assert_eq!((h0[4].old_line, h0[4].new_line), (Some(3), Some(4)));
-
-        // The `\ No newline` marker produced no extra row.
-        assert_eq!(parsed.hunks[1].rows.len(), 3);
-    }
-
-    #[test]
-    fn gap_before_first_hunk_when_not_at_top() {
-        let diff = "@@ -10,2 +10,3 @@\n ctx\n+added\n more";
-        let parsed = parse_unified_diff(diff);
-        // First shown new line is 10 => 9 unmodified lines above.
-        assert_eq!(parsed.hunks[0].gap_before, 9);
-    }
-
-    #[test]
-    fn hunk_header_without_counts_parses() {
-        let diff = "@@ -1 +1 @@\n-a\n+b";
-        let parsed = parse_unified_diff(diff);
-        assert_eq!(parsed.hunks.len(), 1);
-        assert_eq!(parsed.added, 1);
-        assert_eq!(parsed.removed, 1);
-    }
-
-    #[test]
-    fn sub_runs_clips_and_rebases() {
-        let all = vec![
-            (0..5, HighlightStyle::default()),
-            (8..12, HighlightStyle::default()),
-        ];
-        // Row occupies bytes 4..10 of the source.
-        let runs = sub_runs(&all, 4, 10);
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].0, 0..1); // 4..5 -> 0..1
-        assert_eq!(runs[1].0, 4..6); // 8..10 -> 4..6
-    }
-
-    #[test]
-    fn language_name_maps_extensions() {
-        assert_eq!(language_name("/x/util.py"), "python");
-        assert_eq!(language_name("/x/main.rs"), "rust");
-        assert_eq!(language_name("/x/noext"), "text");
-    }
-
-    #[test]
-    fn split_pairing_aligns_multi_hunk_change_blocks() {
-        let parsed = parse_unified_diff(
-            "@@ -1,4 +1,4 @@\n one\n-old a\n-old b\n+new a\n two\n@@ -20,2 +20,3 @@\n tail\n+extra\n",
-        );
-        assert_eq!(parsed.hunks.len(), 2);
-        let first = pair_split_rows(&parsed.hunks[0].rows);
-        assert_eq!(first.len(), 4);
-        assert_eq!(first[0].left.as_ref().unwrap().kind, RowKind::Context);
-        assert_eq!(first[1].left.as_ref().unwrap().text, "old a");
-        assert_eq!(first[1].right.as_ref().unwrap().text, "new a");
-        assert!(first[2].right.is_none());
-        let second = pair_split_rows(&parsed.hunks[1].rows);
-        assert_eq!(second.len(), 2);
-        assert!(second[1].left.is_none());
-        assert_eq!(second[1].right.as_ref().unwrap().text, "extra");
-    }
-
-    #[test]
     fn large_diff_builds_virtual_list_models_without_row_elements() {
         let rows = (1..=5_000)
             .map(|line| RenderedRow::Code {
@@ -2477,17 +1870,25 @@ diff --git a/util.py b/util.py
                 runs: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let split_rows = pair_rendered_rows(&rows);
+        let all_split = (0..rows.len())
+            .map(|row| PairedRow {
+                left: None,
+                right: Some(row),
+            })
+            .collect();
         let files = vec![RenderedFile {
             path: "src/large.rs".into(),
             kind: FileChangeKind::Modify,
             added: 5_000,
             removed: 0,
-            rows,
-            split_rows,
+            all_rows: rows,
+            all_split,
+            collapsed: Vec::new(),
+            expandable: false,
         }];
 
-        let (unified, split) = build_list_items(&files);
+        let items = build_list_items(&files);
+        let (unified, split) = (items.unified, items.split);
 
         assert_eq!(unified.len(), 5_001);
         assert_eq!(split.len(), 5_001);

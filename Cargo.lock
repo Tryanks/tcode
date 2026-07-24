@@ -4074,6 +4074,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
 
 [[package]]
+name = "imara-diff"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f01d462f766df78ab820dd06f5eb700233c51f0f4c2e846520eaf4ba6aa5c5c"
+dependencies = [
+ "hashbrown 0.15.5",
+ "memchr",
+]
+
+[[package]]
 name = "imgref"
 version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8547,6 +8557,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui-wry",
  "image",
+ "imara-diff",
  "lb-wry",
  "log",
  "objc2-app-kit 0.3.2",
