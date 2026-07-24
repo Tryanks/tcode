@@ -236,6 +236,15 @@ circular send button (primary bg when input non-empty). Below the card: folder
 icon + "Local checkout" left, branch icon + current git branch right (hidden
 outside a git repo).
 
+A finalized, unresolved proposed plan adds a "Plan Ready" header with a dismiss
+button and changes the empty primary action to Implement. In Plan mode any
+sendable draft (text, images, terminal context, or review comments) uses Refine
+and the refine placeholder; in Build mode the composer keeps its ordinary Send
+affordance, because a typed message there is an ordinary build turn.
+At compact widths the overflow Build/Plan row is interactive (it toggles like the
+full-width chip and closes the popover); the permission row stays display-only,
+since its full-width counterpart is an explicit picker.
+
 Model picker popover (~360px, radius 12): left rail = favorites star + provider
 glyphs; search input; rows = model name (✓ current) + provider subtitle,
 ⌘1…⌘9 (macOS) / Ctrl+1…Ctrl+9 (Windows/Linux) chips, favorite star; footer note
