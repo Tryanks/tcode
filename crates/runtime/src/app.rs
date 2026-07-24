@@ -1,7 +1,8 @@
 //! Application state: session registry, active session runtime, event pump.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, ChangeCompleteness, FileChange,
@@ -97,6 +98,120 @@ struct TerminalPreferences {
     open: bool,
     height: f32,
     count: usize,
+}
+
+enum StoreWrite {
+    AppendEvent {
+        id: String,
+        ts: u64,
+        event: Box<AgentEvent>,
+    },
+    UpsertMeta {
+        meta: Box<SessionMeta>,
+        initial: bool,
+    },
+    UpsertProject(Project),
+    RemoveSession(String),
+    RemoveProject(String),
+    CloneEvents {
+        src: String,
+        dst: String,
+        completion: async_channel::Sender<Result<(), String>>,
+    },
+    SaveCommands {
+        provider: ProviderKind,
+        acp_agent_id: Option<String>,
+        commands: Vec<ProviderCommand>,
+    },
+    WriteTerminalUi(Vec<u8>),
+    WriteSettings(Vec<u8>),
+    Flush(async_channel::Sender<()>),
+}
+
+enum StoreWriteFailure {
+    PersistEvent(String),
+    PersistSession(String),
+    PersistSessionIndex(String),
+    PersistProject(String),
+    DeleteSession(String),
+    DeleteProject(String),
+    PersistSettings(String),
+    Log(String),
+}
+
+fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(tmp, path)
+}
+
+fn run_store_write(
+    store: &SessionStore,
+    terminal_preferences_path: &Path,
+    write: StoreWrite,
+) -> Option<StoreWriteFailure> {
+    match write {
+        StoreWrite::AppendEvent { id, ts, event } => store
+            .append_event(&id, ts, &event)
+            .err()
+            .map(|err| StoreWriteFailure::PersistEvent(err.to_string())),
+        StoreWrite::UpsertMeta { meta, initial } => store.upsert_meta(&meta).err().map(|err| {
+            if initial {
+                StoreWriteFailure::PersistSession(err.to_string())
+            } else {
+                StoreWriteFailure::PersistSessionIndex(err.to_string())
+            }
+        }),
+        StoreWrite::UpsertProject(project) => store
+            .upsert_project(&project)
+            .err()
+            .map(|err| StoreWriteFailure::PersistProject(err.to_string())),
+        StoreWrite::RemoveSession(id) => store
+            .remove_session(&id)
+            .err()
+            .map(|err| StoreWriteFailure::DeleteSession(err.to_string())),
+        StoreWrite::RemoveProject(id) => store
+            .remove_project(&id)
+            .err()
+            .map(|err| StoreWriteFailure::DeleteProject(err.to_string())),
+        StoreWrite::CloneEvents {
+            src,
+            dst,
+            completion,
+        } => {
+            let result = store
+                .clone_events(&src, &dst)
+                .map_err(|err| err.to_string());
+            let _ = completion.try_send(result);
+            None
+        }
+        StoreWrite::SaveCommands {
+            provider,
+            acp_agent_id,
+            commands,
+        } => store
+            .save_commands(provider, acp_agent_id.as_deref(), &commands)
+            .err()
+            .map(|err| {
+                StoreWriteFailure::Log(format!(
+                    "failed to persist {provider:?} command cache: {err}"
+                ))
+            }),
+        StoreWrite::WriteTerminalUi(bytes) => {
+            atomic_write(terminal_preferences_path.to_path_buf(), bytes)
+                .err()
+                .map(|err| {
+                    StoreWriteFailure::Log(format!("failed to persist terminal UI state: {err}"))
+                })
+        }
+        StoreWrite::WriteSettings(bytes) => atomic_write(store.root().join("settings.json"), bytes)
+            .err()
+            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+        StoreWrite::Flush(completion) => {
+            let _ = completion.try_send(());
+            None
+        }
+    }
 }
 
 /// Stable destination for conversation-owned UI. A stored thread uses its
@@ -724,6 +839,10 @@ pub enum WorkspaceMode {
 pub struct AppState {
     store: SessionStore,
     settings_store: SettingsStore,
+    store_writes: async_channel::Sender<StoreWrite>,
+    store_write_receiver: Option<async_channel::Receiver<StoreWrite>>,
+    store_write_failures: async_channel::Sender<StoreWriteFailure>,
+    store_write_failure_receiver: Option<async_channel::Receiver<StoreWriteFailure>>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
     pub active: Option<ActiveSession>,
@@ -925,9 +1044,15 @@ impl AppState {
             projects.len(),
             store.root().display()
         );
+        let (store_writes, store_write_receiver) = async_channel::unbounded();
+        let (store_write_failures, store_write_failure_receiver) = async_channel::unbounded();
         Self {
             store,
             settings_store,
+            store_writes,
+            store_write_receiver: Some(store_write_receiver),
+            store_write_failures,
+            store_write_failure_receiver: Some(store_write_failure_receiver),
             sessions,
             projects,
             active: None,
@@ -990,6 +1115,98 @@ impl AppState {
             provider_snapshots: HashMap::new(),
             pending_relaunch,
         }
+    }
+
+    fn start_store_writer(&mut self, cx: &mut Context<Self>) {
+        if let Some(writes) = self.store_write_receiver.take() {
+            let store = self.store.clone();
+            let terminal_preferences_path = self.terminal_preferences_path.clone();
+            let failures = self.store_write_failures.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    while let Ok(write) = writes.recv().await {
+                        if let Some(failure) =
+                            run_store_write(&store, &terminal_preferences_path, write)
+                        {
+                            let _ = failures.send(failure).await;
+                        }
+                    }
+                })
+                .detach();
+        }
+        if let Some(failures) = self.store_write_failure_receiver.take() {
+            cx.spawn(async move |this, cx| {
+                while let Ok(failure) = failures.recv().await {
+                    let Ok(()) = this.update(cx, |state, cx| match failure {
+                        StoreWriteFailure::PersistEvent(error) => {
+                            state.report_error(RuntimeError::PersistEvent { error }, cx);
+                        }
+                        StoreWriteFailure::PersistSession(error) => {
+                            state.report_error(RuntimeError::PersistSession { error }, cx);
+                        }
+                        StoreWriteFailure::PersistSessionIndex(error) => {
+                            state.report_error(RuntimeError::PersistSessionIndex { error }, cx);
+                        }
+                        StoreWriteFailure::PersistProject(error) => {
+                            state.report_error(RuntimeError::PersistProject { error }, cx);
+                        }
+                        StoreWriteFailure::DeleteSession(error) => {
+                            state.report_error(RuntimeError::DeleteSession { error }, cx);
+                        }
+                        StoreWriteFailure::DeleteProject(error) => {
+                            state.report_error(RuntimeError::DeleteProject { error }, cx);
+                        }
+                        StoreWriteFailure::PersistSettings(error) => {
+                            state.report_error(RuntimeError::PersistSettings { error }, cx);
+                        }
+                        StoreWriteFailure::Log(message) => log::warn!("{message}"),
+                    }) else {
+                        break;
+                    };
+                }
+            })
+            .detach();
+        }
+    }
+
+    fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut Context<Self>) {
+        self.start_store_writer(cx);
+        if self.store_writes.try_send(write).is_err() {
+            log::error!("session store writer stopped before accepting a write");
+        }
+    }
+
+    fn enqueue_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
+        match serde_json::to_vec_pretty(settings) {
+            Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
+            Err(err) => self.report_error(
+                RuntimeError::PersistSettings {
+                    error: err.to_string(),
+                },
+                cx,
+            ),
+        }
+    }
+
+    fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
+        match self
+            .sessions
+            .iter_mut()
+            .find(|existing| existing.id == meta.id)
+        {
+            Some(existing) => *existing = meta,
+            None => self.sessions.push(meta),
+        }
+        self.sessions
+            .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+    }
+
+    /// Enqueue a FIFO barrier used by the application quit hook. The returned
+    /// receiver resolves only after every earlier store write has completed.
+    pub fn store_write_barrier(&mut self, cx: &mut Context<Self>) -> async_channel::Receiver<()> {
+        let (completion, barrier) = async_channel::bounded(1);
+        self.enqueue_store_write(StoreWrite::Flush(completion), cx);
+        barrier
     }
 
     /// Open the Preview tab and queue an initial navigation (dev/testing entry
@@ -1228,10 +1445,14 @@ impl AppState {
             cwd,
         );
         meta.title = title;
-        self.store
-            .upsert_meta(&meta)
-            .map_err(|err| format!("failed to persist child session: {err}"))?;
-        self.sessions = self.store.load_index();
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        self.upsert_session_in_memory(meta.clone());
         let id = meta.id.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
@@ -2429,7 +2650,7 @@ impl AppState {
         // Persist so the choice survives a restart (save errors are cosmetic).
         self.settings.sidebar_collapsed = self.sidebar_collapsed;
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         cx.notify();
     }
 
@@ -2781,7 +3002,7 @@ impl AppState {
                     Ok(installed) => {
                         state.settings.acp_agents.insert(id.clone(), installed);
                         let settings = state.settings.clone();
-                        let _ = state.settings_store.save(&settings);
+                        state.enqueue_settings(&settings, cx);
                         cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallSucceeded {
                             operation,
                             name,
@@ -2804,7 +3025,7 @@ impl AppState {
     pub fn remove_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
         self.settings.acp_agents.remove(id);
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
         cx.spawn(async move |_this, cx| {
@@ -2850,7 +3071,7 @@ impl AppState {
             },
         );
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         cx.notify();
     }
 
@@ -2864,7 +3085,7 @@ impl AppState {
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
             edit(agent);
             let settings = self.settings.clone();
-            let _ = self.settings_store.save(&settings);
+            self.enqueue_settings(&settings, cx);
             cx.notify();
         }
     }
@@ -3141,13 +3362,9 @@ impl AppState {
             .copied()
     }
 
-    fn write_terminal_preferences(&self) {
+    fn write_terminal_preferences(&mut self, cx: &mut Context<Self>) {
         match serde_json::to_vec_pretty(&self.terminal_preferences) {
-            Ok(bytes) => {
-                if let Err(error) = std::fs::write(&self.terminal_preferences_path, bytes) {
-                    log::warn!("failed to persist terminal UI state: {error}");
-                }
-            }
+            Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteTerminalUi(bytes), cx),
             Err(error) => log::warn!("failed to encode terminal UI state: {error}"),
         }
     }
@@ -3171,7 +3388,7 @@ impl AppState {
 
     // -- terminal drawer ---------------------------------------------------
 
-    fn persist_terminal_preferences(&mut self) {
+    fn persist_terminal_preferences(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_ref() {
             let workspace = &active.terminal_workspace;
             let key = conversation_destination(active).preference_key();
@@ -3184,13 +3401,13 @@ impl AppState {
                 },
             );
         }
-        self.write_terminal_preferences();
+        self.write_terminal_preferences(cx);
     }
 
-    pub fn set_terminal_height(&mut self, height: f32) {
+    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.terminal_workspace.height = height;
-            self.persist_terminal_preferences();
+            self.persist_terminal_preferences(cx);
         }
     }
 
@@ -3229,14 +3446,14 @@ impl AppState {
             }
         }
         active.terminal_workspace.open = true;
-        self.persist_terminal_preferences();
+        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
     pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.terminal_workspace.open = false;
-            self.persist_terminal_preferences();
+            self.persist_terminal_preferences(cx);
             cx.notify();
         }
     }
@@ -3259,7 +3476,7 @@ impl AppState {
                     active.terminal_workspace.push(terminal);
                 }
                 active.terminal_workspace.open = true;
-                self.persist_terminal_preferences();
+                self.persist_terminal_preferences(cx);
                 cx.notify();
             }
             Err(error) => self.report_error(
@@ -3282,7 +3499,7 @@ impl AppState {
             Ok(terminal) => {
                 active.terminal_workspace.push(terminal);
                 active.terminal_workspace.open = true;
-                self.persist_terminal_preferences();
+                self.persist_terminal_preferences(cx);
                 cx.notify();
             }
             Err(error) => self.report_error(
@@ -3319,7 +3536,7 @@ impl AppState {
         if workspace.terminals.is_empty() {
             workspace.open = false;
         }
-        self.persist_terminal_preferences();
+        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
@@ -3344,7 +3561,7 @@ impl AppState {
                     second,
                     direction,
                 });
-                self.persist_terminal_preferences();
+                self.persist_terminal_preferences(cx);
                 cx.notify();
             }
             Err(error) => self.report_error(
@@ -3530,17 +3747,9 @@ impl AppState {
             return Some(existing.id.clone());
         }
         let project = Project::from_root(root);
-        if let Err(err) = self.store.upsert_project(&project) {
-            self.report_error(
-                RuntimeError::PersistProject {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return None;
-        }
         let id = project.id.clone();
-        self.projects = self.store.load_projects();
+        self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
+        self.projects.push(project);
         cx.notify();
         Some(id)
     }
@@ -3699,15 +3908,7 @@ impl AppState {
     }
 
     pub fn update_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
-        if let Err(err) = self.settings_store.save(&settings) {
-            self.report_error(
-                RuntimeError::PersistSettings {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
         self.settings = settings;
         // Keep the live computer-use MCP config in step with the persisted
@@ -3841,7 +4042,7 @@ impl AppState {
             .active_session_id()
             .is_some_and(|active| ids.contains(active))
         {
-            self.shutdown_active();
+            self.shutdown_active(cx);
         }
         for id in ids.iter().copied() {
             // An archived conversation must not leave an off-screen PTY running.
@@ -3949,26 +4150,38 @@ impl AppState {
         // marker. The cwd may be shared, but the fork must not own the source's
         // generated worktree or offer to delete it.
 
-        if let Err(err) = self.store.clone_events(&source.id, &fork.id) {
-            self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
-        if let Err(err) = self.store.upsert_meta(&fork) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
-        self.sessions = self.store.load_index();
-        self.select_session(&fork.id, cx);
+        let (completion, completed) = async_channel::bounded(1);
+        self.enqueue_store_write(
+            StoreWrite::CloneEvents {
+                src: source.id,
+                dst: fork.id.clone(),
+                completion,
+            },
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = completed
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("session store writer stopped".into()));
+            let _ = this.update(cx, |state, cx| match result {
+                Ok(()) => {
+                    state.enqueue_store_write(
+                        StoreWrite::UpsertMeta {
+                            meta: Box::new(fork.clone()),
+                            initial: true,
+                        },
+                        cx,
+                    );
+                    state.upsert_session_in_memory(fork.clone());
+                    state.select_session(&fork.id, cx);
+                }
+                Err(error) => {
+                    state.report_error(RuntimeError::PersistEvent { error }, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The worktree that deleting `session_id` would orphan (i.e. it is the only
@@ -3999,14 +4212,14 @@ impl AppState {
         let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
         if self.active_session_id() == Some(session_id) {
             // shutdown_active drops the ActiveSession (and its terminal PTY).
-            self.shutdown_active();
+            self.shutdown_active(cx);
         }
         // Deleting a thread that is working in the background kills it for real.
         self.drop_background(session_id);
         self.conversation_ui
             .remove(&ConversationDestination::Thread(session_id.to_string()));
         if self.terminal_preferences.remove(session_id).is_some() {
-            self.write_terminal_preferences();
+            self.write_terminal_preferences(cx);
         }
         self.close_orchestrator_children(session_id);
         if let Some(meta) = &meta
@@ -4022,19 +4235,11 @@ impl AppState {
             );
         }
         self.settings.last_visited.remove(session_id);
-        if let Err(err) = self.store.remove_session(session_id) {
-            self.report_error(
-                RuntimeError::DeleteSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
-        self.sessions = self.store.load_index();
+        self.enqueue_settings(&settings, cx);
+        self.sessions.retain(|meta| meta.id != session_id);
         cx.notify();
     }
 
@@ -4052,7 +4257,7 @@ impl AppState {
             .as_ref()
             .is_some_and(|active| active.meta.project_id.as_deref() == Some(project_id))
         {
-            self.shutdown_active();
+            self.shutdown_active(cx);
         }
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.conversation_ui.remove(&draft_destination);
@@ -4061,27 +4266,18 @@ impl AppState {
             .remove(&draft_destination.preference_key())
             .is_some()
         {
-            self.write_terminal_preferences();
+            self.write_terminal_preferences(cx);
         }
         for session_id in session_ids {
             self.delete_session(&session_id, false, cx);
         }
-        if let Err(err) = self.store.remove_project(project_id) {
-            self.report_error(
-                RuntimeError::DeleteProject {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
         self.settings
             .collapsed_projects
             .retain(|id| id != project_id);
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
-        self.sessions = self.store.load_index();
-        self.projects = self.store.load_projects();
+        self.enqueue_settings(&settings, cx);
+        self.projects.retain(|project| project.id != project_id);
         cx.notify();
     }
 
@@ -4162,12 +4358,12 @@ impl AppState {
     }
 
     /// Record that a thread has been visited now (clears its unread dot).
-    fn mark_visited(&mut self, session_id: &str) {
+    fn mark_visited(&mut self, session_id: &str, cx: &mut Context<Self>) {
         self.settings
             .last_visited
             .insert(session_id.to_string(), now_secs());
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
     }
 
     /// Mark a thread unread (context menu): set its last-visited just below its
@@ -4183,7 +4379,7 @@ impl AppState {
             .last_visited
             .insert(session_id.to_string(), updated.saturating_sub(1));
         let settings = self.settings.clone();
-        let _ = self.settings_store.save(&settings);
+        self.enqueue_settings(&settings, cx);
         cx.notify();
     }
 
@@ -4340,16 +4536,15 @@ impl AppState {
             Some(id) if self.projects.iter().any(|p| p.id == id) => Some(id),
             _ => self.create_project(meta.cwd.clone(), cx),
         };
-        if let Err(err) = self.store.upsert_meta(&meta) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
-        self.sessions = self.store.load_index();
-        self.park_active();
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        self.upsert_session_in_memory(meta.clone());
+        self.park_active(cx);
         let session_id = meta.id.clone();
         let cwd = meta.cwd.clone();
         let provider_commands =
@@ -4501,7 +4696,7 @@ impl AppState {
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
-        self.park_active();
+        self.park_active(cx);
         let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
             self.draft_defaults(&project_id);
         let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());
@@ -4536,9 +4731,9 @@ impl AppState {
         self.active.as_ref().is_some_and(|a| a.draft)
     }
 
-    /// Persist the active draft as a real session (no cx; caller notifies).
+    /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
-    fn commit_draft(&mut self) -> std::io::Result<()> {
+    fn commit_draft(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
         let preference_migration = self.active.as_ref().and_then(|active| {
             active.draft.then(|| {
                 (
@@ -4552,14 +4747,20 @@ impl AppState {
         {
             active.draft = false;
             let meta = active.meta.clone();
-            self.store.upsert_meta(&meta)?;
-            self.sessions = self.store.load_index();
+            self.enqueue_store_write(
+                StoreWrite::UpsertMeta {
+                    meta: Box::new(meta.clone()),
+                    initial: true,
+                },
+                cx,
+            );
+            self.upsert_session_in_memory(meta);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
         {
             self.terminal_preferences.insert(session_key, preferences);
-            self.write_terminal_preferences();
+            self.write_terminal_preferences(cx);
         }
         Ok(())
     }
@@ -4690,8 +4891,8 @@ impl AppState {
         let Some(meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() else {
             return;
         };
-        self.park_active();
-        self.mark_visited(session_id);
+        self.park_active(cx);
+        self.mark_visited(session_id, cx);
 
         // A parked session is re-adopted, not replayed cold: its process, pump
         // and queue come back as they were, and the timeline is rebuilt from the
@@ -4837,7 +5038,7 @@ impl AppState {
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
         if self.active_is_draft()
-            && let Err(err) = self.commit_draft()
+            && let Err(err) = self.commit_draft(cx)
         {
             self.report_error(
                 RuntimeError::PersistSession {
@@ -5732,16 +5933,15 @@ impl AppState {
         meta.interaction_mode = InteractionMode::Build;
         meta.project_id = project_id;
         meta.acp_agent_id = acp_agent_id;
-        if let Err(err) = self.store.upsert_meta(&meta) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
-        self.sessions = self.store.load_index();
-        self.park_active();
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: true,
+            },
+            cx,
+        );
+        self.upsert_session_in_memory(meta.clone());
+        self.park_active(cx);
         let session_id = meta.id.clone();
         let cwd = meta.cwd.clone();
         let provider_commands =
@@ -6496,12 +6696,15 @@ impl AppState {
             } else {
                 None
             };
-            if let Some((provider, acp_agent_id)) = cache_key
-                && let Err(err) =
-                    self.store
-                        .save_commands(provider, acp_agent_id.as_deref(), commands)
-            {
-                log::warn!("failed to persist {provider:?} command cache: {err}");
+            if let Some((provider, acp_agent_id)) = cache_key {
+                self.enqueue_store_write(
+                    StoreWrite::SaveCommands {
+                        provider,
+                        acp_agent_id,
+                        commands: commands.clone(),
+                    },
+                    cx,
+                );
             }
             return;
         }
@@ -6798,14 +7001,14 @@ impl AppState {
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
         self.store_append_generation += 1;
         let ts = now_millis();
-        if let Err(err) = self.store.append_event(session_id, ts, event) {
-            self.report_error(
-                RuntimeError::PersistEvent {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
+        self.enqueue_store_write(
+            StoreWrite::AppendEvent {
+                id: session_id.to_string(),
+                ts,
+                event: Box::new(event.clone()),
+            },
+            cx,
+        );
         if let Some(active) = self.active.as_mut()
             && active.meta.id == session_id
         {
@@ -6905,32 +7108,26 @@ impl AppState {
             if *visited < meta.updated_at {
                 *visited = meta.updated_at;
                 let settings = self.settings.clone();
-                let _ = self.settings_store.save(&settings);
+                self.enqueue_settings(&settings, cx);
             }
         }
-        if let Err(err) = self.store.upsert_meta(meta) {
-            self.report_error(
-                RuntimeError::PersistSessionIndex {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-        }
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: false,
+            },
+            cx,
+        );
         // Reflect the upsert in memory instead of reloading the whole index
         // from disk: `persist_meta` runs on every turn,
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
-        match self.sessions.iter_mut().find(|m| m.id == meta.id) {
-            Some(existing) => *existing = meta.clone(),
-            None => self.sessions.push(meta.clone()),
-        }
-        self.sessions
-            .sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+        self.upsert_session_in_memory(meta.clone());
         cx.notify();
     }
 
-    pub fn shutdown_active(&mut self) {
-        self.persist_terminal_preferences();
+    pub fn shutdown_active(&mut self, cx: &mut Context<Self>) {
+        self.persist_terminal_preferences(cx);
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             self.sessions_awaiting_approval.remove(&session_id);
             self.pending_native_rewinds.remove(&session_id);
@@ -6944,8 +7141,8 @@ impl AppState {
     }
 
     /// Shut down every provider process before the application exits.
-    pub fn shutdown_all(&mut self) {
-        self.shutdown_active();
+    pub fn shutdown_all(&mut self, cx: &mut Context<Self>) {
+        self.shutdown_active(cx);
         for (_, parked) in self.background.drain() {
             if let Runtime::Live(commands) = parked.runtime {
                 let _ = commands.try_send(SessionCommand::Shutdown);
@@ -6963,9 +7160,9 @@ impl AppState {
     /// tasks is parked in `background` (process, pump and queue intact — see the
     /// field docs); an idle one is shut down as before. Every "switch away" path
     /// goes through here; only destructive paths use `shutdown_active` directly.
-    fn park_active(&mut self) {
+    fn park_active(&mut self, cx: &mut Context<Self>) {
         self.pending_diff_focus = None;
-        self.persist_terminal_preferences();
+        self.persist_terminal_preferences(cx);
         let Some(mut active) = self.active.take() else {
             return;
         };
@@ -7845,6 +8042,7 @@ mod tests {
                 Some(archived_at + 1)
             );
         });
+        cx.run_until_parked();
         let persisted = store.load_index();
         assert!(
             persisted
@@ -8179,6 +8377,8 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
+        let mut expected_full = String::new();
+        let mut expected_context = 0;
 
         state.update(cx, |state, cx| {
             // A live, idle, already-enabled orchestrator: the turn is an ordinary
@@ -8201,15 +8401,17 @@ mod tests {
             state.on_event("orchestrator", AgentEvent::TurnAccepted { delivery_id }, cx);
 
             // What the provider actually receives is the whole composed text.
-            let expected_full = compose_orchestrate_text(
+            expected_full = compose_orchestrate_text(
                 ProviderKind::Codex,
                 None,
                 false,
                 &state.settings.orchestrate,
                 "执行某某任务",
             );
-            let expected_context = expected_full.len() - "执行某某任务".len();
-
+            expected_context = expected_full.len() - "执行某某任务".len();
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             let events = state.store.read_events("orchestrator");
             let recorded = events
                 .iter()
@@ -8548,7 +8750,7 @@ mod tests {
 
             // Committing keeps the active resources but moves external caches
             // (such as PreviewPanel's WebView pool) to the real thread key.
-            state.commit_draft().unwrap();
+            state.commit_draft(cx).unwrap();
             assert_eq!(
                 state.active_conversation_ui_key().as_deref(),
                 Some(second_id.as_str())
@@ -8558,14 +8760,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn draft_send_creates_session_with_project_cwd() {
+    #[gpui::test]
+    fn draft_send_creates_session_with_project_cwd(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("tcode-draft-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(PathBuf::from("/tmp/tcode-draft-proj"));
         // Persist the project so the draft's project_id survives index migration.
         store.upsert_project(&project).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
         // A draft is set up (cwd = project root) but not yet persisted.
         let draft = AppState::build_draft_session(
             project.id.clone(),
@@ -8580,17 +8782,19 @@ mod tests {
         assert_eq!(draft.meta.project_id.as_deref(), Some(project.id.as_str()));
         assert!(matches!(draft.runtime, Runtime::Idle));
         let draft_id = draft.meta.id.clone();
-        state.active = Some(draft);
-        // Not in the index until the first send materializes it.
-        assert!(!state.sessions.iter().any(|m| m.id == draft_id));
+        state.update(cx, |state, cx| {
+            state.active = Some(draft);
+            // Not in the index until the first send materializes it.
+            assert!(!state.sessions.iter().any(|m| m.id == draft_id));
 
-        // The first send commits the draft: it becomes a real session whose
-        // cwd is the project root and shows up in the sidebar index.
-        state.commit_draft().unwrap();
-        assert!(!state.active.as_ref().unwrap().draft);
-        let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
-        assert_eq!(created.cwd, project.root);
-        assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+            // The first send commits the draft: it becomes a real session whose
+            // cwd is the project root and shows up in the sidebar index.
+            state.commit_draft(cx).unwrap();
+            assert!(!state.active.as_ref().unwrap().draft);
+            let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
+            assert_eq!(created.cwd, project.root);
+            assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
+        });
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9708,6 +9912,7 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
+        let mut recorded_request_id = String::new();
 
         state.update(cx, |state, cx| {
             let mut parent = live_session(ProviderKind::Codex, commands);
@@ -9731,7 +9936,11 @@ mod tests {
             else {
                 panic!("callback did not steer")
             };
+            recorded_request_id = request_id;
             assert!(text.contains("full result"));
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             let timeline = Timeline::fold_events(state.store.read_events("parent"));
             assert!(timeline.entries.iter().any(|entry| matches!(
                 &entry.content,
@@ -9739,7 +9948,7 @@ mod tests {
                     text,
                     steering: Some(tcode_core::session::SteeringStatus::Pending),
                     ..
-                } if entry.id == request_id && text.contains("child-a completed")
+                } if entry.id == recorded_request_id && text.contains("child-a completed")
             )));
         });
 
@@ -9862,13 +10071,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn shutdown_active_notifies_live_provider() {
+    #[gpui::test]
+    fn shutdown_active_notifies_live_provider(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
-        state.active = Some(ActiveSession {
+        let active = ActiveSession {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
             git_branch: None,
@@ -9898,12 +10107,14 @@ mod tests {
             auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
+        };
+
+        state.update(cx, |state, cx| {
+            state.active = Some(active);
+            state.shutdown_active(cx);
+            assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
+            assert!(state.active.is_none());
         });
-
-        state.shutdown_active();
-
-        assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert!(state.active.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -10125,39 +10336,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn shutdown_all_notifies_active_and_parked_live_providers() {
+    #[gpui::test]
+    fn shutdown_all_notifies_active_and_parked_live_providers(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
 
         let (active_commands, active_receiver) = async_channel::unbounded();
-        state.active = Some(live_session(ProviderKind::Codex, active_commands));
-
         let (parked_commands, parked_receiver) = async_channel::unbounded();
         let parked = live_session(ProviderKind::ClaudeCode, parked_commands);
-        state.background.insert(parked.meta.id.clone(), parked);
-
         let (other_commands, other_receiver) = async_channel::unbounded();
         let other = live_session(ProviderKind::Acp, other_commands);
-        state.background.insert(other.meta.id.clone(), other);
+        state.update(cx, |state, cx| {
+            state.active = Some(live_session(ProviderKind::Codex, active_commands));
+            state.background.insert(parked.meta.id.clone(), parked);
+            state.background.insert(other.meta.id.clone(), other);
+            state.shutdown_all(cx);
 
-        state.shutdown_all();
-
-        assert!(matches!(
-            active_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(matches!(
-            parked_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(matches!(
-            other_receiver.try_recv(),
-            Ok(SessionCommand::Shutdown)
-        ));
-        assert!(state.active.is_none());
-        assert!(state.background.is_empty());
+            assert!(matches!(
+                active_receiver.try_recv(),
+                Ok(SessionCommand::Shutdown)
+            ));
+            assert!(matches!(
+                parked_receiver.try_recv(),
+                Ok(SessionCommand::Shutdown)
+            ));
+            assert!(matches!(
+                other_receiver.try_recv(),
+                Ok(SessionCommand::Shutdown)
+            ));
+            assert!(state.active.is_none());
+            assert!(state.background.is_empty());
+        });
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -10520,6 +10730,9 @@ mod tests {
                 cx,
             );
             assert!(state.active.as_ref().unwrap().queue.is_empty());
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             let delivered = state
                 .store
                 .read_events(&session_id)
@@ -10582,28 +10795,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[test]
-    fn park_active_retains_provider_with_background_tasks() {
+    #[gpui::test]
+    fn park_active_retains_provider_with_background_tasks(cx: &mut gpui::TestAppContext) {
         let data = std::env::temp_dir().join(format!(
             "tcode-background-park-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let mut state = AppState::new(store);
+        let state = cx.new(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "background-owner".into();
         session.background_task_count = 1;
-        state.active = Some(session);
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.park_active(cx);
 
-        state.park_active();
-
-        assert!(state.active.is_none());
-        assert_eq!(
-            state.background["background-owner"].background_task_count,
-            1
-        );
-        assert!(actor.try_recv().is_err(), "parking killed background work");
+            assert!(state.active.is_none());
+            assert_eq!(
+                state.background["background-owner"].background_task_count,
+                1
+            );
+            assert!(actor.try_recv().is_err(), "parking killed background work");
+        });
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -10828,6 +11042,7 @@ mod tests {
         let state = cx.new(|_| AppState::new(store));
 
         state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
+        cx.run_until_parked();
 
         state.update(cx, |state, _cx| {
             let active = state.active.as_ref().unwrap();
@@ -10848,6 +11063,60 @@ mod tests {
                 std::fs::read(root.join(format!("{}.jsonl", source.id))).unwrap()
             );
         });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn store_writer_appends_events_in_fifo_order(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-writer-events-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store.clone()));
+
+        state.update(cx, |state, cx| {
+            state.record_event("ordered", &persisted_assistant_event("first"), cx);
+            state.record_event("ordered", &persisted_assistant_event("second"), cx);
+        });
+        cx.run_until_parked();
+
+        let events = store.read_events("ordered");
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::AssistantMessage { text },
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn store_writer_upsert_is_visible_to_fresh_store(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-writer-upsert-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
+        meta.title = "persisted by writer".into();
+        let id = meta.id.clone();
+
+        state.update(cx, |state, cx| state.persist_meta(&meta, cx));
+        cx.run_until_parked();
+
+        let fresh = SessionStore::open_at(root.clone()).unwrap();
+        assert_eq!(
+            fresh
+                .load_index()
+                .into_iter()
+                .find(|stored| stored.id == id)
+                .unwrap()
+                .title,
+            "persisted by writer"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -11054,6 +11323,7 @@ mod tests {
         // Session A, live (fake provider: commands land on `commands_a`).
         let (session, commands_a) = fake_live_session(cwd.clone());
         let (commands_b, receiver_b) = async_channel::unbounded();
+        let mut id_b = String::new();
 
         state.update(cx, |state, cx| {
             // No real provider may spawn if a start slips through.
@@ -11122,7 +11392,7 @@ mod tests {
             state.start_draft("proj-t3".into(), cwd.clone(), cx);
             state.send_turn("second message".into(), Vec::new(), cx);
             let active = state.active.as_ref().unwrap();
-            let id_b = active.meta.id.clone();
+            id_b = active.meta.id.clone();
             assert_ne!(id_a, id_b);
             assert_eq!(active.queue.len(), 1);
 
@@ -11168,6 +11438,9 @@ mod tests {
                     .any(|e| matches!(e.content, EntryContent::Error { .. })),
                 "session A's interrupt error leaked into the new thread"
             );
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
             // And it is durable: a replay of the JSONL shows the same thing.
             let replayed = Timeline::fold_events(state.store.read_events(&id_b));
             assert!(replayed.entries.iter().any(
