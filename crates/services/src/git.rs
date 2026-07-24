@@ -6,17 +6,28 @@ use agent::{FileChange, FileChangeKind};
 use tcode_core::git::{GitAction, GitStatus, parse_status};
 
 const MAX_RAW_DIFF_BYTES: usize = 200 * 1024;
+const MAX_FILE_TEXT_BYTES: u64 = 512 * 1024;
 
-fn working_tree_diff_args() -> Vec<String> {
-    vec!["diff".into(), "HEAD".into(), "--".into()]
+fn working_tree_diff_args(ignore_whitespace: bool) -> Vec<String> {
+    let mut args = vec!["diff".into(), "HEAD".into()];
+    if ignore_whitespace {
+        args.push("-w".into());
+    }
+    args.push("--".into());
+    args
 }
 
 fn merge_base_args(base: &str) -> Vec<String> {
     vec!["merge-base".into(), base.into(), "HEAD".into()]
 }
 
-fn branch_diff_args(merge_base: &str) -> Vec<String> {
-    vec!["diff".into(), format!("{merge_base}...HEAD"), "--".into()]
+fn branch_diff_args(merge_base: &str, ignore_whitespace: bool) -> Vec<String> {
+    let mut args = vec!["diff".into(), format!("{merge_base}...HEAD")];
+    if ignore_whitespace {
+        args.push("-w".into());
+    }
+    args.push("--".into());
+    args
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,13 +36,28 @@ pub enum GitDiffScope {
     Branch,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GitFileText {
+    /// Full base-side file text; None for created/untracked files or when unloadable.
+    pub old: Option<String>,
+    /// Full new-side file text; None for deleted files or when unloadable.
+    pub new: Option<String>,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct GitDiffResult {
     pub changes: Vec<FileChange>,
+    pub texts: Vec<GitFileText>,
     pub truncated: bool,
     pub error: Option<String>,
     pub branches: Vec<String>,
     pub default_base: Option<String>,
+}
+
+struct ParsedFileChange {
+    change: FileChange,
+    old_path: Option<String>,
+    new_path: Option<String>,
 }
 
 fn git_output(cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
@@ -48,7 +74,24 @@ fn append_capped(raw: &mut Vec<u8>, bytes: &[u8], truncated: &mut bool) {
     *truncated |= bytes.len() > remaining;
 }
 
-fn split_git_patch(raw: &str, cwd: &Path) -> Vec<FileChange> {
+fn patch_path(value: &str, side_prefix: Option<&str>) -> Option<String> {
+    let value = value.trim_end_matches('\t');
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value);
+    if value == "/dev/null" {
+        return None;
+    }
+    Some(
+        side_prefix
+            .and_then(|prefix| value.strip_prefix(prefix))
+            .unwrap_or(value)
+            .to_string(),
+    )
+}
+
+fn split_git_patch(raw: &str, cwd: &Path, repo_prefix: &str) -> Vec<ParsedFileChange> {
     let mut sections = Vec::new();
     let mut current = String::new();
     for line in raw.lines() {
@@ -66,25 +109,126 @@ fn split_git_patch(raw: &str, cwd: &Path) -> Vec<FileChange> {
     sections
         .into_iter()
         .filter_map(|patch| {
-            let old_null = patch.lines().any(|line| line == "--- /dev/null");
-            let new_null = patch.lines().any(|line| line == "+++ /dev/null");
-            let path = patch
+            let old_path = patch
                 .lines()
-                .find_map(|line| line.strip_prefix("+++ b/"))
-                .or_else(|| patch.lines().find_map(|line| line.strip_prefix("--- a/")))?;
-            Some(FileChange {
-                path: cwd.join(path).to_string_lossy().to_string(),
-                kind: if old_null {
-                    FileChangeKind::Create
-                } else if new_null {
-                    FileChangeKind::Delete
-                } else if patch.lines().any(|line| line.starts_with("rename to ")) {
-                    FileChangeKind::Rename
-                } else {
-                    FileChangeKind::Modify
+                .find_map(|line| {
+                    line.strip_prefix("rename from ")
+                        .and_then(|path| patch_path(path, None))
+                })
+                .or_else(|| {
+                    patch.lines().find_map(|line| {
+                        line.strip_prefix("--- ")
+                            .and_then(|path| patch_path(path, Some("a/")))
+                    })
+                });
+            let new_path = patch
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("rename to ")
+                        .and_then(|path| patch_path(path, None))
+                })
+                .or_else(|| {
+                    patch.lines().find_map(|line| {
+                        line.strip_prefix("+++ ")
+                            .and_then(|path| patch_path(path, Some("b/")))
+                    })
+                });
+            let path = new_path.as_deref().or(old_path.as_deref())?;
+            let cwd_path = path.strip_prefix(repo_prefix).unwrap_or(path);
+            Some(ParsedFileChange {
+                change: FileChange {
+                    path: cwd.join(cwd_path).to_string_lossy().to_string(),
+                    kind: if old_path.is_none() {
+                        FileChangeKind::Create
+                    } else if new_path.is_none() {
+                        FileChangeKind::Delete
+                    } else if patch.lines().any(|line| line.starts_with("rename to ")) {
+                        FileChangeKind::Rename
+                    } else {
+                        FileChangeKind::Modify
+                    },
+                    diff: Some(patch),
                 },
-                diff: Some(patch),
+                old_path,
+                new_path,
             })
+        })
+        .collect()
+}
+
+fn repo_prefix(cwd: &Path) -> String {
+    let args = vec!["rev-parse".into(), "--show-prefix".into()];
+    git_output(cwd, &args)
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|prefix| prefix.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn repo_root_path(path: &str, prefix: &str) -> String {
+    if prefix.is_empty() || path.starts_with(prefix) {
+        path.to_string()
+    } else {
+        format!("{prefix}{path}")
+    }
+}
+
+fn read_disk_text(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > MAX_FILE_TEXT_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+fn read_git_text(cwd: &Path, revision: &str, path: &str) -> Option<String> {
+    let args = vec!["show".into(), format!("{revision}:{path}")];
+    let output = git_output(cwd, &args).ok()?;
+    if !output.status.success() || output.stdout.len() as u64 > MAX_FILE_TEXT_BYTES {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn load_file_texts(
+    cwd: &Path,
+    scope: GitDiffScope,
+    base_revision: Option<&str>,
+    prefix: &str,
+    parsed: &[ParsedFileChange],
+) -> Vec<GitFileText> {
+    parsed
+        .iter()
+        .map(|parsed| {
+            let old_path = parsed
+                .old_path
+                .as_deref()
+                .map(|path| repo_root_path(path, prefix));
+            let new_path = parsed
+                .new_path
+                .as_deref()
+                .map(|path| repo_root_path(path, prefix));
+            match scope {
+                GitDiffScope::WorkingTree => GitFileText {
+                    old: old_path
+                        .as_deref()
+                        .and_then(|path| read_git_text(cwd, "HEAD", path)),
+                    new: new_path
+                        .as_deref()
+                        .and_then(|_| read_disk_text(Path::new(&parsed.change.path))),
+                },
+                GitDiffScope::Branch => GitFileText {
+                    old: base_revision.and_then(|revision| {
+                        old_path
+                            .as_deref()
+                            .and_then(|path| read_git_text(cwd, revision, path))
+                    }),
+                    new: new_path
+                        .as_deref()
+                        .and_then(|path| read_git_text(cwd, "HEAD", path)),
+                },
+            }
         })
         .collect()
 }
@@ -133,10 +277,16 @@ fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
     (branches, default)
 }
 
-pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> GitDiffResult {
+pub fn load_git_diff(
+    cwd: &Path,
+    scope: GitDiffScope,
+    base: Option<&str>,
+    ignore_whitespace: bool,
+) -> GitDiffResult {
     let (branches, default_base) = git_branches(cwd);
+    let mut base_revision = None;
     let args = match scope {
-        GitDiffScope::WorkingTree => working_tree_diff_args(),
+        GitDiffScope::WorkingTree => working_tree_diff_args(ignore_whitespace),
         GitDiffScope::Branch => {
             let base = base.or(default_base.as_deref()).unwrap_or("HEAD");
             let merge_base = match git_output(cwd, &merge_base_args(base)) {
@@ -160,7 +310,9 @@ pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> Git
                     };
                 }
             };
-            branch_diff_args(&merge_base)
+            let args = branch_diff_args(&merge_base, ignore_whitespace);
+            base_revision = Some(merge_base);
+            args
         }
     };
     let output = match git_output(cwd, &args) {
@@ -214,9 +366,13 @@ pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> Git
         }
     }
     let raw = String::from_utf8_lossy(&raw);
-    let changes = split_git_patch(&raw, cwd);
+    let prefix = repo_prefix(cwd);
+    let parsed = split_git_patch(&raw, cwd, &prefix);
+    let texts = load_file_texts(cwd, scope, base_revision.as_deref(), &prefix, &parsed);
+    let changes = parsed.into_iter().map(|parsed| parsed.change).collect();
     GitDiffResult {
         changes,
+        texts,
         truncated,
         error: None,
         branches,
@@ -581,9 +737,17 @@ mod tests {
 
     #[test]
     fn diff_command_shapes() {
-        assert_eq!(working_tree_diff_args(), ["diff", "HEAD", "--"]);
+        assert_eq!(working_tree_diff_args(false), ["diff", "HEAD", "--"]);
+        assert_eq!(working_tree_diff_args(true), ["diff", "HEAD", "-w", "--"]);
         assert_eq!(merge_base_args("main"), ["merge-base", "main", "HEAD"]);
-        assert_eq!(branch_diff_args("abc123"), ["diff", "abc123...HEAD", "--"]);
+        assert_eq!(
+            branch_diff_args("abc123", false),
+            ["diff", "abc123...HEAD", "--"]
+        );
+        assert_eq!(
+            branch_diff_args("abc123", true),
+            ["diff", "abc123...HEAD", "-w", "--"]
+        );
     }
 
     #[test]
@@ -617,18 +781,149 @@ mod tests {
         std::fs::write(root.join("tracked.txt"), "after\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "new\n").unwrap();
 
-        let working = load_git_diff(&root, GitDiffScope::WorkingTree, None);
+        let working = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
         assert!(working.error.is_none());
         assert_eq!(working.changes.len(), 2);
+        assert_eq!(working.texts.len(), working.changes.len());
         assert!(working.changes.iter().any(|change| {
             change.path.ends_with("untracked.txt") && change.kind == FileChangeKind::Create
         }));
+        let tracked_index = working
+            .changes
+            .iter()
+            .position(|change| change.path.ends_with("tracked.txt"))
+            .unwrap();
+        assert_eq!(
+            working.texts[tracked_index].old.as_deref(),
+            Some("before\n")
+        );
+        assert_eq!(working.texts[tracked_index].new.as_deref(), Some("after\n"));
+        let untracked_index = working
+            .changes
+            .iter()
+            .position(|change| change.path.ends_with("untracked.txt"))
+            .unwrap();
+        assert!(working.texts[untracked_index].old.is_none());
+        assert_eq!(working.texts[untracked_index].new.as_deref(), Some("new\n"));
         git(&["add", "."]);
         git(&["commit", "-m", "feature changes"]);
-        let branch = load_git_diff(&root, GitDiffScope::Branch, Some(&base));
+        let branch = load_git_diff(&root, GitDiffScope::Branch, Some(&base), false);
         assert!(branch.error.is_none());
         assert_eq!(branch.changes.len(), 2);
+        assert_eq!(branch.texts.len(), branch.changes.len());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diff_texts_handle_created_and_deleted_files() {
+        let (temp, root) = scratch_repo("tcode-diff-file-text-test");
+        std::fs::remove_file(root.join("tracked.txt")).unwrap();
+        std::fs::write(root.join("created.txt"), "created\n").unwrap();
+
+        let result = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
+
+        assert!(result.error.is_none());
+        assert_eq!(result.texts.len(), result.changes.len());
+        let deleted_index = result
+            .changes
+            .iter()
+            .position(|change| change.path.ends_with("tracked.txt"))
+            .unwrap();
+        assert_eq!(result.changes[deleted_index].kind, FileChangeKind::Delete);
+        assert_eq!(
+            result.texts[deleted_index].old.as_deref(),
+            Some("initial\n")
+        );
+        assert!(result.texts[deleted_index].new.is_none());
+        let created_index = result
+            .changes
+            .iter()
+            .position(|change| change.path.ends_with("created.txt"))
+            .unwrap();
+        assert_eq!(result.changes[created_index].kind, FileChangeKind::Create);
+        assert!(result.texts[created_index].old.is_none());
+        assert_eq!(
+            result.texts[created_index].new.as_deref(),
+            Some("created\n")
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn whitespace_only_changes_can_be_ignored() {
+        let (temp, root) = scratch_repo("tcode-diff-whitespace-test");
+        std::fs::write(root.join("tracked.txt"), "  initial  \n").unwrap();
+
+        let normal = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
+        let ignored = load_git_diff(&root, GitDiffScope::WorkingTree, None, true);
+
+        assert_eq!(normal.changes.len(), 1);
+        assert_eq!(normal.texts.len(), normal.changes.len());
+        assert!(ignored.changes.is_empty());
+        assert_eq!(ignored.texts.len(), ignored.changes.len());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn diff_texts_support_paths_with_spaces() {
+        let (temp, root) = scratch_repo("tcode-diff-spaced-path-test");
+        std::fs::write(root.join("new file.txt"), "new\n").unwrap();
+
+        let result = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
+
+        let index = result
+            .changes
+            .iter()
+            .position(|change| change.path.ends_with("new file.txt"))
+            .unwrap();
+        assert!(result.texts[index].old.is_none());
+        assert_eq!(result.texts[index].new.as_deref(), Some("new\n"));
+        assert_eq!(result.texts.len(), result.changes.len());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn rename_uses_the_old_path_for_base_text() {
+        let (temp, root) = scratch_repo("tcode-diff-rename-test");
+        run(&root, &["mv", "tracked.txt", "renamed.txt"]);
+
+        let result = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
+
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].kind, FileChangeKind::Rename);
+        assert!(result.changes[0].path.ends_with("renamed.txt"));
+        assert_eq!(result.texts[0].old.as_deref(), Some("initial\n"));
+        assert_eq!(result.texts[0].new.as_deref(), Some("initial\n"));
+        assert_eq!(result.texts.len(), result.changes.len());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn diff_texts_map_subdirectory_cwd_paths_to_repo_root() {
+        let (temp, root) = scratch_repo("tcode-diff-subdirectory-test");
+        let subdirectory = root.join("subdirectory");
+        std::fs::create_dir(&subdirectory).unwrap();
+        std::fs::write(subdirectory.join("nested.txt"), "before\n").unwrap();
+        run(&root, &["add", "subdirectory/nested.txt"]);
+        run(&root, &["commit", "-m", "add nested file"]);
+        std::fs::write(subdirectory.join("nested.txt"), "after\n").unwrap();
+
+        let result = load_git_diff(&subdirectory, GitDiffScope::WorkingTree, None, false);
+
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(
+            Path::new(&result.changes[0].path),
+            subdirectory.join("nested.txt")
+        );
+        assert_eq!(result.texts[0].old.as_deref(), Some("before\n"));
+        assert_eq!(result.texts[0].new.as_deref(), Some("after\n"));
+        assert_eq!(result.texts.len(), result.changes.len());
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
