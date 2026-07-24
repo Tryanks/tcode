@@ -588,6 +588,7 @@ plan:
   expand: "Expand plan"
   collapse: "Collapse plan"
   ready: "Plan Ready"
+  dismiss: "Dismiss plan"
   refine_placeholder: "Add feedback to refine the plan, or leave this blank to implement it"
   refine: "Refine"
   implement: "Implement"

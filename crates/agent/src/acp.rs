@@ -11,6 +11,7 @@
 //! that cross the thread boundary — exactly like `claude.rs` / `codex.rs`.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -32,10 +33,10 @@ use serde_json::{Value, json};
 use crate::{
     AcpAgent, AcpLaunch, AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode,
     ApprovalOption, ApprovalOptionKind, ApprovalRequest, Attachment, DeltaKind, FileChange,
-    FileChangeKind, ItemContent, ItemStatus, McpRegistration, OptionDescriptor, OptionSelection,
-    PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus,
+    FileChangeKind, InteractionMode, ItemContent, ItemStatus, McpRegistration, OptionDescriptor,
+    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
+    ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
+    TokenUsage, TurnStatus,
 };
 
 /// Option-descriptor ids. The composer renders an ACP agent's own
@@ -817,30 +818,39 @@ async fn handshake(
             }
         };
 
-    if opts.approval_mode == ApprovalMode::ReadOnly
-        && let Some(plan_mode) = modes.as_ref().and_then(acp_plan_mode)
+    let wants_plan = opts.approval_mode == ApprovalMode::ReadOnly
+        || opts.interaction_mode == InteractionMode::Plan;
+    let target_mode = modes.as_ref().and_then(|modes| {
+        if wants_plan {
+            acp_plan_mode(modes)
+        } else if acp_plan_mode(modes).as_ref() == Some(&modes.current_mode_id) {
+            first_non_plan_mode(modes)
+        } else {
+            None
+        }
+    });
+    if let Some(target_mode) = target_mode
         && modes
             .as_ref()
-            .is_some_and(|modes| modes.current_mode_id != plan_mode)
+            .is_some_and(|modes| modes.current_mode_id != target_mode)
     {
         match connection
             .send_request(acp::SetSessionModeRequest::new(
                 session_id.clone(),
-                plan_mode.clone(),
+                target_mode.clone(),
             ))
             .block_task()
             .await
         {
-            Ok(_) => modes.as_mut().unwrap().current_mode_id = plan_mode,
+            Ok(_) => modes.as_mut().unwrap().current_mode_id = target_mode,
             Err(err) => {
                 // ACP has no provider-independent permission policy. If an
-                // advertised plan mode cannot be selected, retain the agent's
-                // current mode, which is the same least-privilege fallback used
-                // for Supervised sessions.
+                // advertised mode cannot be selected, retain the agent's
+                // current mode and let the pushed option correct the chip.
                 let _ = events
                     .send(AgentEvent::Warning {
                         message: format!(
-                            "{} could not enter its read-only plan mode: {}",
+                            "{} could not enter the requested interaction mode: {}",
                             agent.name,
                             describe(&err)
                         ),
@@ -848,15 +858,27 @@ async fn handshake(
                     .await;
             }
         }
+    } else if wants_plan
+        && modes
+            .as_ref()
+            .is_none_or(|modes| acp_plan_mode(modes).is_none())
+    {
+        let _ = events
+            .send(AgentEvent::Warning {
+                message: format!(
+                    "{} does not advertise a Plan mode; the mode switch was not applied.",
+                    agent.name
+                ),
+            })
+            .await;
     }
 
     let model = config_options.as_deref().and_then(current_model);
     {
         let mut state = state.lock().unwrap();
         state.session_id = Some(session_id.clone());
-        state
-            .options
-            .ingest(modes.as_ref(), config_options.as_deref());
+        state.ingest_modes(modes.as_ref());
+        state.options.ingest(None, config_options.as_deref());
     }
 
     Ok(Session {
@@ -871,6 +893,15 @@ fn acp_plan_mode(modes: &acp::SessionModeState) -> Option<acp::SessionModeId> {
         .available_modes
         .iter()
         .find(|mode| mode.id.0.eq_ignore_ascii_case("plan"))
+        .map(|mode| mode.id.clone())
+}
+
+fn first_non_plan_mode(modes: &acp::SessionModeState) -> Option<acp::SessionModeId> {
+    let plan = acp_plan_mode(modes);
+    modes
+        .available_modes
+        .iter()
+        .find(|mode| Some(&mode.id) != plan.as_ref())
         .map(|mode| mode.id.clone())
 }
 
@@ -1192,7 +1223,13 @@ async fn handle_command(
                         if let Some(options) = config_options.as_deref() {
                             state.options.ingest(None, Some(options));
                         }
-                        state.options.select(&id, value);
+                        if origin == OptionOrigin::Mode {
+                            if let Some(mode) = value.as_str() {
+                                state.select_mode(acp::SessionModeId::new(mode));
+                            }
+                        } else {
+                            state.options.select(&id, value);
+                        }
                     }
                     emit_provider_options(state, events).await;
                 }
@@ -1218,9 +1255,17 @@ async fn handle_command(
                 })
                 .await;
         }
-        SessionCommand::SetInteractionMode(_) => {
-            // Build/Plan is a session *mode* in ACP; the traits picker drives it
-            // through `SetOption` (`acp:mode`).
+        SessionCommand::SetInteractionMode(mode) => {
+            apply_interaction_mode(mode, state, events, |mode_id| async move {
+                connection
+                    .send_request(acp::SetSessionModeRequest::new(
+                        session.session_id.clone(),
+                        mode_id,
+                    ))
+                    .block_task()
+                    .await
+            })
+            .await;
         }
         SessionCommand::Rewind {
             checkpoint_id,
@@ -1275,6 +1320,56 @@ async fn set_option(
                 .block_task()
                 .await?;
             Ok(Some(response.config_options))
+        }
+    }
+}
+
+async fn apply_interaction_mode<F, Fut>(
+    mode: InteractionMode,
+    state: &Arc<Mutex<State>>,
+    events: &Sender<AgentEvent>,
+    set_mode: F,
+) where
+    F: FnOnce(acp::SessionModeId) -> Fut,
+    Fut: Future<Output = Result<acp::SetSessionModeResponse, acp::Error>>,
+{
+    let target = {
+        let state = state.lock().unwrap();
+        match mode {
+            InteractionMode::Plan => state.modes.as_ref().and_then(acp_plan_mode),
+            InteractionMode::Build => state.build_mode(),
+        }
+    };
+    let Some(target) = target else {
+        let mode_name = match mode {
+            InteractionMode::Plan => "Plan",
+            InteractionMode::Build => "Build",
+        };
+        let _ = events
+            .send(AgentEvent::Warning {
+                message: format!(
+                    "This agent does not advertise a {mode_name} mode; the mode switch was not applied."
+                ),
+            })
+            .await;
+        // Republish the actual selection so the runtime rolls back its
+        // optimistic Build/Plan toggle instead of leaving a lying chip.
+        emit_provider_options_even_if_empty(state, events).await;
+        return;
+    };
+
+    match set_mode(target.clone()).await {
+        Ok(_) => {
+            state.lock().unwrap().select_mode(target);
+            emit_provider_options(state, events).await;
+        }
+        Err(err) => {
+            let _ = events
+                .send(AgentEvent::Warning {
+                    message: format!("could not switch this agent's mode: {}", describe(&err)),
+                })
+                .await;
+            emit_provider_options_even_if_empty(state, events).await;
         }
     }
 }
@@ -1410,6 +1505,22 @@ async fn emit_provider_options(state: &Arc<Mutex<State>>, events: &Sender<AgentE
     if descriptors.is_empty() {
         return;
     }
+    let _ = events
+        .send(AgentEvent::ProviderOptions {
+            descriptors,
+            selections,
+        })
+        .await;
+}
+
+async fn emit_provider_options_even_if_empty(
+    state: &Arc<Mutex<State>>,
+    events: &Sender<AgentEvent>,
+) {
+    let (descriptors, selections) = {
+        let state = state.lock().unwrap();
+        (state.options.descriptors(), state.options.selections())
+    };
     let _ = events
         .send(AgentEvent::ProviderOptions {
             descriptors,
@@ -1620,6 +1731,8 @@ pub(crate) struct State {
     terminals: HashMap<String, Arc<Terminal>>,
     usage: Option<TokenUsage>,
     options: OptionRegistry,
+    modes: Option<acp::SessionModeState>,
+    previous_non_plan_mode: Option<acp::SessionModeId>,
 }
 
 impl State {
@@ -1639,7 +1752,44 @@ impl State {
             terminals: HashMap::new(),
             usage: None,
             options: OptionRegistry::default(),
+            modes: None,
+            previous_non_plan_mode: None,
         }
+    }
+
+    fn ingest_modes(&mut self, modes: Option<&acp::SessionModeState>) {
+        let Some(modes) = modes else {
+            return;
+        };
+        self.modes = Some(modes.clone());
+        self.select_mode(modes.current_mode_id.clone());
+        self.options.ingest(Some(modes), None);
+    }
+
+    fn select_mode(&mut self, mode: acp::SessionModeId) {
+        let is_plan = self
+            .modes
+            .as_ref()
+            .and_then(acp_plan_mode)
+            .is_some_and(|plan| plan == mode);
+        if !is_plan {
+            self.previous_non_plan_mode = Some(mode.clone());
+        }
+        if let Some(modes) = self.modes.as_mut() {
+            modes.current_mode_id = mode.clone();
+        }
+        self.options
+            .select(MODE_OPTION_ID, Value::String(mode.0.to_string()));
+    }
+
+    fn build_mode(&self) -> Option<acp::SessionModeId> {
+        let modes = self.modes.as_ref()?;
+        // ACP exposes no distinct default mode. Remember the last non-plan
+        // selection from before Plan; if the session began in Plan, fall back
+        // to the first advertised non-plan mode (the agent's ordering).
+        self.previous_non_plan_mode
+            .clone()
+            .or_else(|| first_non_plan_mode(modes))
     }
 
     /// Close the open text block, emitting its final `ItemCompleted`.
@@ -1794,10 +1944,7 @@ impl State {
                 }]
             }
             acp::SessionUpdate::CurrentModeUpdate(update) => {
-                self.options.select(
-                    MODE_OPTION_ID,
-                    Value::String(update.current_mode_id.0.to_string()),
-                );
+                self.select_mode(update.current_mode_id.clone());
                 vec![AgentEvent::ProviderOptions {
                     descriptors: self.options.descriptors(),
                     selections: self.options.selections(),
@@ -2537,6 +2684,102 @@ mod tests {
 
     fn update(json: Value) -> acp::SessionUpdate {
         serde_json::from_value(json).expect("valid session/update payload")
+    }
+
+    fn modes(current: &str, available: &[&str]) -> acp::SessionModeState {
+        serde_json::from_value(json!({
+            "currentModeId": current,
+            "availableModes": available
+                .iter()
+                .map(|id| json!({ "id": id, "name": id }))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn set_interaction_mode_plan_issues_the_advertised_mode_request() {
+        smol::block_on(async {
+            let state = Arc::new(Mutex::new(state()));
+            state
+                .lock()
+                .unwrap()
+                .ingest_modes(Some(&modes("build", &["build", "plan"])));
+            let (events, _) = async_channel::unbounded();
+            let requested = Arc::new(Mutex::new(Vec::new()));
+
+            apply_interaction_mode(InteractionMode::Plan, &state, &events, {
+                let requested = requested.clone();
+                move |mode| async move {
+                    requested.lock().unwrap().push(mode.0.to_string());
+                    Ok(acp::SetSessionModeResponse::new())
+                }
+            })
+            .await;
+
+            assert_eq!(*requested.lock().unwrap(), vec!["plan"]);
+        });
+    }
+
+    #[test]
+    fn set_interaction_mode_build_restores_the_previous_non_plan_mode() {
+        smol::block_on(async {
+            let state = Arc::new(Mutex::new(state()));
+            state
+                .lock()
+                .unwrap()
+                .ingest_modes(Some(&modes("review", &["review", "build", "plan"])));
+            let (events, _) = async_channel::unbounded();
+            let requested = Arc::new(Mutex::new(Vec::new()));
+
+            apply_interaction_mode(InteractionMode::Plan, &state, &events, {
+                let requested = requested.clone();
+                move |mode| async move {
+                    requested.lock().unwrap().push(mode.0.to_string());
+                    Ok(acp::SetSessionModeResponse::new())
+                }
+            })
+            .await;
+            apply_interaction_mode(InteractionMode::Build, &state, &events, {
+                let requested = requested.clone();
+                move |mode| async move {
+                    requested.lock().unwrap().push(mode.0.to_string());
+                    Ok(acp::SetSessionModeResponse::new())
+                }
+            })
+            .await;
+
+            assert_eq!(*requested.lock().unwrap(), vec!["plan", "review"]);
+        });
+    }
+
+    #[test]
+    fn set_interaction_mode_plan_without_advertised_plan_warns() {
+        smol::block_on(async {
+            let state = Arc::new(Mutex::new(state()));
+            state
+                .lock()
+                .unwrap()
+                .ingest_modes(Some(&modes("build", &["build", "review"])));
+            let (events, received) = async_channel::unbounded();
+            let requested = Arc::new(Mutex::new(Vec::new()));
+
+            apply_interaction_mode(InteractionMode::Plan, &state, &events, {
+                let requested = requested.clone();
+                move |mode| async move {
+                    requested.lock().unwrap().push(mode.0.to_string());
+                    Ok(acp::SetSessionModeResponse::new())
+                }
+            })
+            .await;
+
+            assert!(requested.lock().unwrap().is_empty());
+            assert!(matches!(
+                received.recv().await.unwrap(),
+                AgentEvent::Warning { message }
+                    if message.contains("does not advertise a Plan mode")
+            ));
+        });
     }
 
     #[test]
