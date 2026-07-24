@@ -56,9 +56,10 @@ or deny. Permission modes run from "ask about everything" to "don't ask".
 
 **Queue and steer.** The composer stays live while a turn runs.
 <kbd>Enter</kbd> queues your message and sends it when the turn finishes;
-<kbd>⌘</kbd><kbd>Enter</kbd> steers — injecting it into the turn in flight so the
-agent changes course at its next step. Queued messages show above the composer
-and can be promoted to a steer with one click.
+<kbd>⌘</kbd><kbd>Enter</kbd> on macOS or <kbd>Ctrl</kbd><kbd>Enter</kbd> on
+Windows/Linux steers — injecting it into the turn in flight so the agent changes
+course at its next step. Queued messages show above the composer and can be
+promoted to a steer with one click.
 
 **A terminal, a browser, and a plan.** Per-thread terminal drawer (select output,
 send it as context), an embedded preview browser the agent can drive over MCP,

@@ -110,7 +110,8 @@ in both states.
 1. App row: "tcode" bold 14px, channel pill ("DEV"). No collapse button — the
    toggle lives in the chat header, since a collapsed sidebar has no width to
    host it.
-2. Search row: magnifier + "Search" muted + ⌘K kbd chip → opens the palette.
+2. Search row: magnifier + "Search" muted + ⌘K (macOS) / Ctrl+K
+   (Windows/Linux) kbd chip → opens the palette.
 3. "PROJECTS" header: 11px uppercase muted + sort (no-op) + add-project button
    (native directory picker).
 4. Project groups: rotating chevron + folder icon + 13px medium name; hover
@@ -236,9 +237,10 @@ icon + "Local checkout" left, branch icon + current git branch right (hidden
 outside a git repo).
 
 Model picker popover (~360px, radius 12): left rail = favorites star + provider
-glyphs; search input; rows = model name (✓ current) + provider subtitle, ⌘1…⌘9
-chips, favorite star; footer note when a live session will restart (via resume)
-on model change. Picking a different provider on a thread with at least one
+glyphs; search input; rows = model name (✓ current) + provider subtitle,
+⌘1…⌘9 (macOS) / Ctrl+1…Ctrl+9 (Windows/Linux) chips, favorite star; footer note
+when a live session will restart (via resume) on model change. Picking a
+different provider on a thread with at least one
 completed turn defers the switch until send. Send opens a “Conversation relay”
 confirmation; confirming starts that provider fresh and sends a canonical
 timeline transcript (project, original provider/model, turn messages, compact
@@ -309,7 +311,7 @@ That provider/model picker is one shared component also used by the General
 page's thread-title setting, so catalog resolution and provider switching stay
 identical across both settings surfaces.
 
-### Command palette (⌘K)
+### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 Centered top-anchored modal over a dim backdrop: search input; grouped results
 — Actions (new thread per project, open settings, toggle theme, toggle diff
 panel) and Threads (fuzzy over titles); footer key hints (↑↓ Navigate · Enter
