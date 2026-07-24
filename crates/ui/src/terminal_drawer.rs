@@ -39,9 +39,7 @@ const TERMINAL_FONT_FAMILY: &str = "Menlo";
 const TERMINAL_FONT_FAMILY: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const TERMINAL_FONT_FAMILY: &str = "Lilex";
-const PANE_PADDING_X: f32 = 8.;
-const PANE_PADDING_Y: f32 = 5.;
-const PANE_BORDER: f32 = 1.;
+const PANE_PADDING: f32 = 8.;
 const SELECTION_DRAG_THRESHOLD: f32 = 2.;
 
 #[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -1073,29 +1071,11 @@ impl TerminalDrawer {
             .size_full()
             .min_h_0()
             .overflow_hidden()
-            .px(px(PANE_PADDING_X))
-            .py(px(PANE_PADDING_Y))
-            .border_1()
-            .rounded(material::radius_card())
-            .border_color(
-                if self
-                    .app_state
-                    .read(cx)
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| active.terminal_workspace.active_id == Some(terminal_id))
-                {
-                    cx.theme().ring.opacity(0.72)
-                } else {
-                    cx.theme().border
-                },
-            )
+            .p(px(PANE_PADDING))
             .when(link_hovered, |this| this.cursor_pointer())
             .on_prepaint(move |bounds, _window, cx| {
-                let content_width =
-                    f32::from(bounds.size.width) - 2. * (PANE_BORDER + PANE_PADDING_X);
-                let content_height =
-                    f32::from(bounds.size.height) - 2. * (PANE_BORDER + PANE_PADDING_Y);
+                let content_width = f32::from(bounds.size.width) - 2. * PANE_PADDING;
+                let content_height = f32::from(bounds.size.height) - 2. * PANE_PADDING;
                 let cols = (content_width / cell_width).floor().max(2.) as usize;
                 let rows = (content_height / cell_height).floor().max(2.) as usize;
                 if let Some(entry) = app_state
@@ -1167,8 +1147,8 @@ impl TerminalDrawer {
                 this.child(
                     Button::new(("terminal-add-context", terminal_id))
                         .absolute()
-                        .right(px(PANE_BORDER + PANE_PADDING_X))
-                        .top(px(PANE_BORDER + PANE_PADDING_Y))
+                        .right(px(PANE_PADDING))
+                        .top(px(PANE_PADDING))
                         .small()
                         .label(tcode_i18n::tr!("terminal.add_context"))
                         .tooltip(format!(
