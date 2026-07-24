@@ -287,6 +287,27 @@ fn shell_label(shell: &str) -> String {
         .to_string()
 }
 
+#[cfg(target_os = "macos")]
+fn with_pty_creation<T>(create: impl FnOnce() -> T) -> T {
+    // Concurrent macOS openpty(3) calls can return an invalid negative errno.
+    // Serialize only PTY creation process-wide; the terminal lifetime remains unlocked.
+    static PTY_CREATION_LOCK: Mutex<()> = Mutex::new(());
+
+    // This mutex protects no Rust data invariant, so poisoning does not make
+    // subsequent PTY creation unsafe; retain the guard and continue.
+    let guard = PTY_CREATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let result = create();
+    drop(guard);
+    result
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_pty_creation<T>(create: impl FnOnce() -> T) -> T {
+    create()
+}
+
 impl Terminal {
     /// Spawn the platform's default interactive shell in `cwd`.
     pub fn spawn(cwd: impl AsRef<Path>) -> io::Result<Self> {
@@ -321,7 +342,7 @@ impl Terminal {
             #[cfg(windows)]
             escape_args: false,
         };
-        let pty = tty::new(&options, size.window_size(), 0)?;
+        let pty = with_pty_creation(|| tty::new(&options, size.window_size(), 0))?;
         #[cfg(unix)]
         let pty_info = {
             use std::os::fd::AsRawFd as _;
@@ -923,6 +944,62 @@ fn convert_color(color: AlacrittyColor) -> Color {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pty_creation_is_serialized() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        const THREADS: usize = 16;
+
+        let start = Arc::new(Barrier::new(THREADS + 1));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut threads = Vec::with_capacity(THREADS);
+
+        for _ in 0..THREADS {
+            let start = start.clone();
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let release = release.clone();
+            let entered_tx = entered_tx.clone();
+            threads.push(thread::spawn(move || {
+                start.wait();
+                with_pty_creation(|| {
+                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now_active, Ordering::SeqCst);
+                    entered_tx.send(()).unwrap();
+                    while !release.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }));
+        }
+        drop(entered_tx);
+
+        start.wait();
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a thread should enter the PTY creation helper");
+        let second_entry = entered_rx.recv_timeout(Duration::from_millis(250));
+        release.store(true, Ordering::SeqCst);
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "unexpected concurrent helper entry: {second_entry:?}"
+        );
+    }
 
     /// The shell defaults are platform-specific: `$SHELL -l` on Unix, `%COMSPEC%`
     /// (no `-l`; the flag does not exist there) on Windows.
