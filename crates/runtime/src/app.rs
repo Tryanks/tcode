@@ -7301,9 +7301,9 @@ impl AppState {
         }
     }
 
-    /// Append to JSONL + fold into the active timeline (if it's this session).
-    /// The same wall-clock timestamp is persisted and folded so the on-disk
-    /// log and the live timeline agree.
+    /// Append to JSONL + fold into the matching active or background timeline.
+    /// The same wall-clock timestamp is persisted and folded exactly once so
+    /// the on-disk log and the loaded timeline agree.
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
         self.store_append_generation += 1;
         let ts = now_millis();
@@ -7319,6 +7319,8 @@ impl AppState {
             && active.meta.id == session_id
         {
             active.timeline.apply_at(Some(ts), event);
+        } else if let Some(background) = self.background.get_mut(session_id) {
+            background.timeline.apply_at(Some(ts), event);
         }
     }
 
@@ -10335,6 +10337,68 @@ mod tests {
         ]);
 
         assert_eq!(final_assistant_message(&timeline), "Complete answer.");
+    }
+
+    #[gpui::test]
+    fn resident_background_child_result_uses_completed_live_timeline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-orchestrate-resident-result-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let report = format!("Complete child report:\n{}", "full detail ".repeat(80));
+
+        state.update(cx, |state, cx| {
+            let mut parent =
+                SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
+            parent.id = "parent".into();
+
+            let (commands, _receiver) = async_channel::unbounded();
+            let mut child = live_session(ProviderKind::Codex, commands);
+            child.meta.id = "child".into();
+            child.meta.parent_session_id = Some(parent.id.clone());
+            child.turn_in_flight = true;
+
+            state.sessions.push(parent);
+            state.sessions.push(child.meta.clone());
+            state.background.insert(child.meta.id.clone(), child);
+
+            state.on_event("child", persisted_assistant_event(&report), cx);
+            state.on_event(
+                "child",
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+
+            let child = state.background.get("child").unwrap();
+            assert!(
+                child.idle_since.is_some(),
+                "completed child must remain resident in background"
+            );
+            assert!(!child.turn_in_flight);
+
+            let (reply, response) = async_channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Result {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                },
+                reply,
+                cx,
+            );
+            let result = response.try_recv().unwrap().unwrap();
+            assert_eq!(result["state"], "completed");
+            assert_eq!(result["final_message"], report);
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
