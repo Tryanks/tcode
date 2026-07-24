@@ -5413,13 +5413,66 @@ impl AppState {
             cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledFired {
                 parked: false,
             }));
-        } else if let Some(parked) = self.background.get_mut(&message.session_id) {
-            parked.push_queued(message.text, Vec::new());
+        } else {
+            if !self.background.contains_key(&message.session_id)
+                && let Some(meta) = self
+                    .sessions
+                    .iter()
+                    .find(|meta| meta.id == message.session_id)
+                    .cloned()
+            {
+                self.load_background_session(meta, cx);
+            }
+            if !self.background.contains_key(&message.session_id) {
+                cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledDropped));
+                return;
+            }
+
+            let can_steer = message.steer
+                && self
+                    .background
+                    .get(&message.session_id)
+                    .is_some_and(|parked| parked.turn_in_flight && parked.supports_steering());
+            if can_steer {
+                let request_id =
+                    self.record_steer_request(&message.session_id, &message.text, &[], cx);
+                let steered = self
+                    .background
+                    .get_mut(&message.session_id)
+                    .is_some_and(|parked| {
+                        parked
+                            .steer_now(request_id, message.text.clone(), Vec::new())
+                            .is_ok()
+                    });
+                if steered {
+                    cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledFired {
+                        parked: true,
+                    }));
+                    return;
+                }
+                log::warn!(
+                    "failed to steer scheduled message into parked session {}; queueing instead",
+                    message.session_id
+                );
+            }
+
+            let (can_dispatch, idle_runtime) = {
+                let parked = self.background.get_mut(&message.session_id).unwrap();
+                parked.push_queued(message.text, Vec::new());
+                (
+                    !parked.turn_in_flight && matches!(parked.runtime, Runtime::Live(_)),
+                    matches!(parked.runtime, Runtime::Idle),
+                )
+            };
+            if can_dispatch {
+                self.on_background_turn_completed(&message.session_id, cx);
+            }
+            if idle_runtime {
+                self.ensure_session_started(&message.session_id, cx);
+            }
             cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledFired {
                 parked: true,
             }));
-        } else {
-            cx.emit(AppEvent::Notice(RuntimeNotice::ScheduledDropped));
         }
     }
 
@@ -10846,17 +10899,20 @@ mod tests {
     }
 
     #[gpui::test]
-    fn scheduled_due_message_queues_on_parked_bound_session(cx: &mut gpui::TestAppContext) {
+    fn scheduled_due_message_dispatches_on_live_parked_bound_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let root =
             std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
 
         state.update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
             active.meta.id = "active".into();
             state.active = Some(active);
-            let mut parked = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            let mut parked = live_session(ProviderKind::Codex, commands);
             parked.meta.id = "parked".into();
             state.background.insert(parked.meta.id.clone(), parked);
             state
@@ -10869,6 +10925,113 @@ mod tests {
             let parked = state.background.get("parked").unwrap();
             assert_eq!(parked.queue.len(), 1);
             assert_eq!(parked.queue[0].text, "background later");
+            assert!(parked.delivery_in_flight.is_some());
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::SendTurn { text, .. }) if text == "background later"
+            ));
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_due_message_starts_idle_parked_bound_session(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            let mut parked = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            parked.meta.id = "parked".into();
+            parked.runtime = Runtime::Idle;
+            state.background.insert(parked.meta.id.clone(), parked);
+            state
+                .scheduled
+                .push(scheduled_message(0, "parked", "start in background", false));
+
+            state.fire_due_scheduled(cx);
+
+            let parked = state.background.get("parked").unwrap();
+            assert_eq!(parked.queue.len(), 1);
+            assert_eq!(parked.queue[0].text, "start in background");
+            assert!(matches!(parked.runtime, Runtime::Starting { .. }));
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_due_steer_delivers_to_live_parked_bound_session(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            let mut parked = live_session(ProviderKind::Codex, commands);
+            parked.meta.id = "parked".into();
+            parked.turn_in_flight = true;
+            state.background.insert(parked.meta.id.clone(), parked);
+            state
+                .scheduled
+                .push(scheduled_message(0, "parked", "steer in background", true));
+
+            state.fire_due_scheduled(cx);
+
+            let parked = state.background.get("parked").unwrap();
+            assert!(parked.queue.is_empty());
+            assert!(parked.turn_in_flight);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::Steer { text, .. }) if text == "steer in background"
+            ));
+            assert!(state.scheduled.is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn scheduled_due_message_loads_unloaded_bound_session_into_background(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-scheduled-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+            let mut unloaded =
+                SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
+            unloaded.id = "unloaded".into();
+            state.sessions.push(unloaded);
+            state.scheduled.push(scheduled_message(
+                0,
+                "unloaded",
+                "load in background",
+                false,
+            ));
+
+            state.fire_due_scheduled(cx);
+
+            let parked = state.background.get("unloaded").unwrap();
+            assert_eq!(parked.queue.len(), 1);
+            assert_eq!(parked.queue[0].text, "load in background");
+            assert!(matches!(parked.runtime, Runtime::Starting { .. }));
             assert!(state.scheduled.is_empty());
         });
 

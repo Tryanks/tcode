@@ -669,7 +669,7 @@ notice:
   updating_provider: "Updating %{provider}…"
   update_done: "%{provider} updated"
   scheduled_sent: "Scheduled message sent"
-  scheduled_queued: "Scheduled message queued in its original conversation (sends when you switch back)"
+  scheduled_queued: "Scheduled message sent in its original conversation (runs in the background)"
   scheduled_dropped: "Scheduled message dropped — its conversation no longer exists"
 attach:
   unsupported_type: "Unsupported file type for '%{name}'. Please attach image files only."

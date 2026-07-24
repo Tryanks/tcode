@@ -663,7 +663,7 @@ notice:
   updating_provider: "正在更新 %{provider}…"
   update_done: "%{provider} 已更新"
   scheduled_sent: "定时消息已发送"
-  scheduled_queued: "定时消息已存入原会话队列（切回该会话后自动发送）"
+  scheduled_queued: "定时消息已在原对话发送（后台自动进行）"
   scheduled_dropped: "定时消息所属会话已关闭，消息已丢弃"
 attach:
   unsupported_type: "'%{name}' 的文件类型不受支持。请仅附加图片文件。"
