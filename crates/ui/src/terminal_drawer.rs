@@ -735,7 +735,10 @@ impl TerminalDrawer {
                 });
             },
         )
-        .w_full()
+        // The pane is rarely an exact multiple of the cell metrics; it centers
+        // this canvas, so the sub-cell remainder is split evenly on both axes
+        // instead of accumulating at the right/bottom edge.
+        .w(px(cols as f32 * cell_width))
         .h(px(rows as f32 * cell_height))
         .into_any_element()
     }
@@ -1035,7 +1038,7 @@ impl TerminalDrawer {
             return div().into_any_element();
         };
 
-        let mut grid = v_flex().min_w_full().child(self.render_grid(
+        let mut grid = v_flex().child(self.render_grid(
             terminal_id,
             &snapshot,
             register_input,
@@ -1072,6 +1075,8 @@ impl TerminalDrawer {
             .min_h_0()
             .overflow_hidden()
             .p(px(PANE_PADDING))
+            .items_center()
+            .justify_center()
             .when(link_hovered, |this| this.cursor_pointer())
             .on_prepaint(move |bounds, _window, cx| {
                 let content_width = f32::from(bounds.size.width) - 2. * PANE_PADDING;
