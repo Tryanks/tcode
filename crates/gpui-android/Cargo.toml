@@ -6,5 +6,12 @@ edition = "2024"
 [lib]
 crate-type = ["lib"]
 
-[dependencies]
+[target.'cfg(target_os = "android")'.dependencies]
+anyhow = "1"
+futures = "0.3"
+gpui = { git = "https://github.com/zed-industries/zed", default-features = false }
+gpui_wgpu = { git = "https://github.com/zed-industries/zed" }
 log = "0.4"
+ndk = "0.9"
+raw-window-handle = { version = "0.6", features = ["std"] }
+uuid = "1"

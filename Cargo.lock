@@ -3203,7 +3203,14 @@ dependencies = [
 name = "gpui-android"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "futures",
+ "gpui",
+ "gpui_wgpu",
  "log",
+ "ndk",
+ "raw-window-handle",
+ "uuid",
 ]
 
 [[package]]
