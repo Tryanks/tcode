@@ -40,16 +40,22 @@ Cross-Origin-Opener-Policy: same-origin
 Production hosting must send the same headers. Without them the dispatcher
 cannot start its worker threads.
 
-Serve with the same environment and `trunk serve --release --locked`, then
-supply the host endpoint in the page URL:
+Serve with the same environment and `trunk serve --release --locked`, then open
+the page. It shows a connect screen: enter the host address and the short-lived
+pairing code the desktop host prints at startup. Pairing trades the code for a
+durable token, which is kept in `localStorage`, so a reload reconnects without
+retyping anything; **Sign out** clears it and returns to the connect screen.
+
+`?url=` is honoured as a convenience — it only prefills the address field, which
+is not a secret:
 
 ```text
 http://127.0.0.1:8080/?url=ws%3A%2F%2F127.0.0.1%3APORT%2Fsync
 ```
 
-Enter the short-lived pairing code displayed by the desktop host. Pairing is
-the only credential bootstrap path; the resulting token is retained by the
-client and is never placed in browser URL history.
+There is deliberately no `?token=`. Pairing is the only credential bootstrap
+path, and a durable token has no business in the address bar, in browser
+history, or in a referrer header — which is the whole reason pairing exists.
 
 ## Upstream contribution candidate
 

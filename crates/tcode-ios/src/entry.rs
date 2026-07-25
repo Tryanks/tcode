@@ -8,11 +8,14 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, c_char, c_void};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use client_app::native_transport::NativeTransportFactory;
-use client_app::{ClientApp, ClientConnection, ClientIdentity, TransportFactory};
+use client_app::{
+    ClientApp, ClientConnection, ClientIdentity, ConnectionStore, FileStore, TransportFactory,
+};
 use gpui::{App, AppContext as _, AppLifecyclePhase, ApplicationHandle, TouchPhase, WindowOptions};
 use gpui_ios::{IosDisplayMetrics, IosEventSink, IosLayer, IosPlatform, IosSurface};
 
@@ -57,26 +60,37 @@ fn lifecycle_phase(value: i32) -> Result<AppLifecyclePhase> {
     }
 }
 
+/// The app container's Documents directory.
+///
+/// On iOS the process `HOME` is the app sandbox, so `$HOME/Documents` is the
+/// per-app store the OS isolates — where a durable token belongs. Falls back to
+/// the temp dir only if `HOME` is somehow unset, which keeps the app running
+/// rather than refusing to start over persistence.
+fn documents_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Documents")
+}
+
 /// Where this client attaches, and what it calls itself.
 ///
-/// Read from the environment for now. A phone cannot be handed a token the way
-/// a query string hands one to a browser, so real pairing — a code the host
-/// shows and the phone scans — is the next piece of work; until then this keeps
-/// the app runnable without inventing a UX that would have to be thrown away.
-fn client_connection() -> ClientConnection {
+/// The token comes from pairing on the connect screen and is kept in `store`;
+/// the code is typed once. `TCODE_SYNC_URL` survives only as a convenience that
+/// prefills the host address — never a secret, exactly like the browser's
+/// `?url=`.
+fn client_connection(store: Arc<dyn ConnectionStore>) -> ClientConnection {
     ClientConnection {
-        url: std::env::var("TCODE_SYNC_URL")
-            .ok()
-            .filter(|v| !v.is_empty()),
-        token: std::env::var("TCODE_SYNC_TOKEN")
-            .ok()
-            .filter(|v| !v.is_empty()),
         identity: ClientIdentity {
             client_id: format!("tcode-ios-{}", std::process::id()),
             display_name: "tcode iOS".into(),
             platform: "ios".into(),
             app_version: env!("CARGO_PKG_VERSION").into(),
         },
+        url: std::env::var("TCODE_SYNC_URL")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        store,
     }
 }
 
@@ -115,11 +129,15 @@ fn start(
     // One runtime for the process; the client reconnects through this factory.
     let transport: Arc<dyn TransportFactory> =
         Arc::new(NativeTransportFactory::new().context("starting the client's network runtime")?);
+    // The paired token lands in the app's Documents dir, which the connect
+    // screen fills by pairing — the phone equivalent of the browser's
+    // localStorage.
+    let store: Arc<dyn ConnectionStore> = Arc::new(FileStore::new(documents_dir()));
 
     let handle = gpui::Application::with_platform(std::rc::Rc::new(platform)).run_embedded(
         move |cx: &mut App| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                let connection = client_connection();
+                let connection = client_connection(store.clone());
                 cx.new(|cx| ClientApp::new(connection, transport.clone(), window, cx))
             })
             .expect("the iOS GPUI window must open");
