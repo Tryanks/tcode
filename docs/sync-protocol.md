@@ -107,15 +107,27 @@ is impossible without the client noticing.
 
 **Client → host is at-least-once, made idempotent by the existing
 `delivery_id`.** `SessionCommand::SendTurn` already carries one, and
-`AgentEvent::TurnAccepted` already echoes it back — a mechanism that predates
-this protocol and exists because the local UI has the same question after a
-provider restart. A client that reconnects mid-turn compares the `delivery_id`s
-it sent against the `TurnAccepted` events it can now see, and resends only what
-is genuinely missing. No new dedup layer.
+`AgentEvent::TurnAccepted` echoes it back — a mechanism that predates this
+protocol and exists because the local UI has the same question after a provider
+restart. A client that reconnects mid-turn compares the `delivery_id`s it sent
+against the `TurnAccepted` events it can now see, and resends only what is
+genuinely missing. No new dedup layer.
 
-Commands without a natural idempotency token (`Interrupt`, `RespondApproval`)
-are either harmless to repeat or scoped by a `request_id` the host can match
-against state it already holds.
+For that to work the acknowledgement has to be **durable**, and originally it
+was not: the runtime consumed `TurnAccepted` as control-plane state and returned
+before persisting it, so it never entered the log the host streams from and no
+remote client could ever observe one. Found by running the real app rather than
+by any test — 770 of them passed over the broken design.
+
+The fix is to persist it, not to invent an out-of-band acknowledgement frame.
+The question this answers is asked *after a disconnect*, so an ack that lives
+only on the connection is lost at exactly the moment it is needed; one in the
+log is visible on reconnect with no extra machinery and survives the host
+restarting too. `Timeline` already folds `TurnAccepted` to nothing, so the extra
+line costs a log entry and changes no rendering.
+
+Commands without a natural idempotency token are either harmless to repeat or
+scoped by a `request_id` the host matches against state it already holds.
 
 ## 7. Deliberately not in v1
 
