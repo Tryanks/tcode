@@ -1,3 +1,0 @@
-cargo:icons-dir=/Users/tryanks/.cargo/git/checkouts/gpui-component-95ce574d8a0da8b8/0315556/crates/assets/assets/icons
-cargo:rerun-if-changed=assets/icons
-cargo:rerun-if-changed=build.rs
