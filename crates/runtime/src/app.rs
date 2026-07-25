@@ -7031,6 +7031,9 @@ impl AppState {
         }
 
         if let AgentEvent::TurnAccepted { delivery_id } = &event {
+            // This control-plane acknowledgement must also be durable: sync
+            // clients use it after reconnecting to decide which turns to resend.
+            self.record_event(session_id, &event, cx);
             self.on_turn_accepted(session_id, *delivery_id, cx);
             return;
         }
@@ -11397,6 +11400,45 @@ mod tests {
         assert!(active.is_starting_generation(2));
         active.runtime = Runtime::Live(async_channel::unbounded().0);
         assert!(!active.is_starting_generation(2));
+    }
+
+    #[gpui::test]
+    fn turn_acceptance_is_persisted_and_flushes_the_queued_message(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-turn-accepted-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store.clone()));
+        let (commands, receiver) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::Codex, commands);
+        session.meta.id = "accepted".into();
+
+        let mut delivery_id = 0;
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.send_turn("persist this acceptance".into(), Vec::new(), cx);
+            delivery_id = match receiver.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected SendTurn, got {other:?}"),
+            };
+
+            state.on_event("accepted", AgentEvent::TurnAccepted { delivery_id }, cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert!(active.queue.is_empty());
+            assert_eq!(active.delivery_in_flight, None);
+            assert!(active.turn_in_flight);
+        });
+        cx.run_until_parked();
+
+        assert!(store.read_events("accepted").iter().any(|stored| {
+            matches!(
+                stored.event,
+                AgentEvent::TurnAccepted {
+                    delivery_id: stored_id
+                } if stored_id == delivery_id
+            )
+        }));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
