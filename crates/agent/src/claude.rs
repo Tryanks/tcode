@@ -2213,6 +2213,7 @@ impl Mapper {
                     .unwrap_or("")
                     .to_string(),
                 cwd: input.get("cwd").and_then(Value::as_str).map(str::to_string),
+                workspace_cwd: None,
                 reason,
             },
             ClaudeRequestType::FileChange => ApprovalKind::FileChange {
@@ -2489,6 +2490,7 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
             let content = input.get("content").and_then(Value::as_str).unwrap_or("");
             vec![FileChange {
                 path,
+                workspace_path: None,
                 kind: FileChangeKind::Create,
                 diff: (!content.is_empty()).then(|| {
                     content
@@ -2521,12 +2523,14 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
             }
             vec![FileChange {
                 path,
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: (!diff.is_empty()).then(|| diff.trim_end().to_string()),
             }]
         }
         _ => vec![FileChange {
             path,
+            workspace_path: None,
             kind: FileChangeKind::Modify,
             diff: None,
         }],
@@ -3461,11 +3465,13 @@ mod tests {
                 media_type: "image/png".into(),
                 data_base64: "AAAA".into(),
                 source_path: None,
+                workspace_path: None,
             },
             Attachment {
                 media_type: "image/jpeg".into(),
                 data_base64: "BBBB".into(),
                 source_path: None,
+                workspace_path: None,
             },
         ];
         let msg = user_message("what color is this?", &attachments);
