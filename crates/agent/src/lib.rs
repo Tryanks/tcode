@@ -6,12 +6,21 @@
 //! types; nothing provider-shaped leaks past this crate except [`ResumeCursor`],
 //! which is intentionally opaque.
 
+// Provider adapters are local-only because they spawn and supervise child processes.
+#[cfg(feature = "local")]
 pub mod acp;
+#[cfg(feature = "local")]
 pub mod claude;
+#[cfg(feature = "local")]
 pub mod codex;
+#[cfg(feature = "local")]
 pub mod opencode;
+#[cfg(feature = "local")]
 pub mod pi;
+#[cfg(feature = "local")]
 mod process;
+// Subagent tailing is local-only because it reads provider transcript files.
+#[cfg(feature = "local")]
 mod subagent_tail;
 
 use std::path::PathBuf;
@@ -289,6 +298,8 @@ pub struct SelectOption {
 /// working-directory change makes PATH resolution unreliable (it fails outright
 /// when PATH holds unexpanded entries such as `~/.dotnet/tools`). Resolving the
 /// binary ourselves against the parent's PATH keeps the lookup deterministic.
+// Binary resolution is local-only because it probes PATH and the filesystem before spawning.
+#[cfg(feature = "local")]
 pub(crate) fn resolve_binary(
     binary_path: Option<&std::path::Path>,
     default_name: &str,
@@ -323,6 +334,8 @@ pub(crate) fn resolve_binary(
 ///
 /// Shared with the app crate (`crate::process`), which routes every bare-name
 /// spawn (npm, pnpm, bun, git, …) through it on Windows.
+// PATH lookup is local-only because it inspects host environment and filesystem state.
+#[cfg(feature = "local")]
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     find_in_dirs(
@@ -335,6 +348,7 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
 
 /// The executable extensions to try for a bare name: `PATHEXT` on Windows
 /// (falling back to its documented default), and nothing anywhere else.
+#[cfg(feature = "local")]
 fn path_extensions() -> Vec<String> {
     if !cfg!(windows) {
         return Vec::new();
@@ -355,6 +369,7 @@ fn path_extensions() -> Vec<String> {
 /// extensionless name tried last (so a Unix-style extensionless binary dropped
 /// on a Windows PATH still resolves). With an empty `pathext` (every non-Windows
 /// target) this is just `[name]`.
+#[cfg(feature = "local")]
 fn candidate_names(name: &str, pathext: &[String]) -> Vec<String> {
     if std::path::Path::new(name).extension().is_some() {
         return vec![name.to_string()];
@@ -367,6 +382,7 @@ fn candidate_names(name: &str, pathext: &[String]) -> Vec<String> {
 /// The PATH walk itself, parameterized on the directories, the extension list
 /// and the "is this executable" predicate so both platform branches are testable
 /// from any host (see `resolve_binary_tests`).
+#[cfg(feature = "local")]
 fn find_in_dirs(
     dirs: impl IntoIterator<Item = PathBuf>,
     name: &str,
@@ -390,7 +406,7 @@ fn find_in_dirs(
     None
 }
 
-#[cfg(unix)]
+#[cfg(all(feature = "local", unix))]
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path)
@@ -400,7 +416,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Windows has no exec bit: a regular file whose name matched a `PATHEXT`
 /// candidate *is* the executable.
-#[cfg(not(unix))]
+#[cfg(all(feature = "local", not(unix)))]
 fn is_executable(path: &std::path::Path) -> bool {
     path.is_file()
 }
@@ -490,6 +506,8 @@ pub struct TurnOptions {
 /// List the provider's models (spawn, query, teardown). `launch_env` carries the
 /// provider's configured environment/home so the catalog reflects the same CLI
 /// (and account) a session would actually run against.
+// Model discovery is local-only because it launches or queries provider processes.
+#[cfg(feature = "local")]
 pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
@@ -624,6 +642,8 @@ pub enum SessionCommand {
 
 /// A live provider session: send commands in, read canonical events out.
 /// Dropping both channels (or sending `Shutdown`) tears the child process down.
+// Session handles are local-only because their channels are owned by provider actors.
+#[cfg(feature = "local")]
 pub struct SessionHandle {
     pub provider: ProviderKind,
     pub commands: async_channel::Sender<SessionCommand>,
@@ -631,6 +651,8 @@ pub struct SessionHandle {
 }
 
 /// Start a new (or resumed) session with the given provider.
+// Session startup is local-only because every adapter launches a child process.
+#[cfg(feature = "local")]
 pub async fn start_session(
     provider: ProviderKind,
     opts: SessionOptions,
@@ -1242,7 +1264,7 @@ mod launch_env_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod resolve_binary_tests {
     use super::*;
 
@@ -1420,7 +1442,7 @@ mod resolve_binary_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local"))]
 mod pathext_logic_tests {
     use super::*;
     use std::path::PathBuf;
