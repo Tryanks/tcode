@@ -403,6 +403,36 @@ client 能实时看到 host 上跑的会话并成功发送一个 turn、批准�
 > 按 50/50 拆分——这是全表**最不可靠的一个数字**，且它成立的前提正是期 2 第 3 项
 > 的拆分重构。
 
+**实测修正（2026-07-25）。** 上面那个"最不可靠的数字"现在有实测了。按模块统计
+对 `AppState` 的引用密度：
+
+| 模块 | 行数 | `app_state` 引用 | 密度（次/千行） |
+| --- | ---: | ---: | ---: |
+| `markdown/*`、`diff/model`、`diff/parse` | 10,145 | **0** | 已可移植 |
+| `chat.rs` | 5,162 | 42 | 8.1 |
+| `diff/view.rs` | 2,153 | 27 | 12.5 |
+| `composer.rs` | 5,140 | 93 | 18.1 |
+| `settings_page.rs` | 1,792 | 46 | 25.7 |
+| `sidebar.rs` | 1,710 | 67 | 39.2 |
+
+而深层渲染函数**本来就是数据驱动的**：
+
+```rust
+// crates/ui/src/chat.rs:821
+fn render_turn(&self, index: usize, turn: &TurnMeta, cwd: &Path,
+               entries: &[Arc<TimelineEntry>], ...) -> AnyElement
+```
+
+取的是 `tcode-core` 的 `TurnMeta` / `TimelineEntry`，不是 `AppState`。
+
+**所以 §6 风险台账里"`chat.rs`/`composer.rs` 拆不开"那一条应当降级。** 审计报告
+描述的"渲染与布局交织在同一批 `render_*` 函数里"在 `chat.rs` 上不成立：8 次
+引用/千行不是交织，是顶层的一道薄接缝——`ChatView` 持 `Entity<AppState>` 取数据、
+触发动作，往下传的全是领域数据。40% 的复用估计**偏保守**。
+
+耦合真正重的是导航与设置外壳（`sidebar` 39.2、`settings_page` 25.7），而那两块
+按 §5 期 5 的 IA 决策本来就要重写。
+
 **Gate 5**：手机上完成一次真实工作流：收到批准推送 → 打开 → 读 diff → 批准 →
 发下一个 turn。
 
