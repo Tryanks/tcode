@@ -34,9 +34,7 @@ const ADVANCE_BUFFER: usize = 256;
 pub struct SyncServer {
     /// WebSocket endpoint, e.g. `ws://127.0.0.1:53213/sync`.
     pub url: String,
-    /// The credential clients must present. Regenerated every launch: a token
-    /// that outlives the process would have to be stored somewhere, and nothing
-    /// yet needs it to survive a restart.
+    /// The credential clients must present, supplied by the embedding app.
     pub token: String,
     /// Commands from remote clients, for the app to apply. Single consumer.
     pub commands: async_channel::Receiver<CommandRequest>,
@@ -72,13 +70,11 @@ struct ServerState {
 /// Loopback only for now: exposing this to a LAN is a decision about
 /// trust boundaries and pairing UX, not about transport, and it should be made
 /// deliberately rather than inherited from a default.
-pub fn start(store: SessionStore, host: HostInfo) -> std::io::Result<SyncServer> {
+pub fn start(store: SessionStore, host: HostInfo, token: String) -> std::io::Result<SyncServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let url = format!("ws://127.0.0.1:{port}/sync");
-    let token = uuid::Uuid::new_v4().to_string();
-
     // Bounded: an unbounded queue would let a wedged app absorb commands
     // forever while every client believes they were delivered.
     let (command_tx, command_rx) = async_channel::bounded(256);
@@ -239,9 +235,10 @@ mod tests {
     }
 
     #[test]
-    fn start_binds_a_loopback_port_and_issues_a_token() {
+    fn start_binds_a_loopback_port_and_uses_the_supplied_token() {
         let store = temp_store();
-        let server = start(store.clone(), host_info()).expect("server starts");
+        let server =
+            start(store.clone(), host_info(), "stable-token".into()).expect("server starts");
 
         assert!(
             server.url.starts_with("ws://127.0.0.1:"),
@@ -249,17 +246,16 @@ mod tests {
             server.url
         );
         assert!(server.url.ends_with("/sync"));
-        assert_eq!(server.token.len(), 36, "expected a uuid token");
+        assert_eq!(server.token, "stable-token");
         let _ = std::fs::remove_dir_all(store.root());
     }
 
-    /// Two launches must not share a credential.
     #[test]
-    fn each_server_issues_its_own_token() {
+    fn separate_servers_can_share_a_persisted_token() {
         let store = temp_store();
-        let a = start(store.clone(), host_info()).expect("first");
-        let b = start(store.clone(), host_info()).expect("second");
-        assert_ne!(a.token, b.token);
+        let a = start(store.clone(), host_info(), "stable-token".into()).expect("first");
+        let b = start(store.clone(), host_info(), "stable-token".into()).expect("second");
+        assert_eq!(a.token, b.token);
         assert_ne!(a.url, b.url);
         let _ = std::fs::remove_dir_all(store.root());
     }
@@ -269,7 +265,7 @@ mod tests {
     #[test]
     fn notifying_with_no_subscribers_is_harmless() {
         let store = temp_store();
-        let server = start(store.clone(), host_info()).expect("server starts");
+        let server = start(store.clone(), host_info(), "test-token".into()).expect("server starts");
         server.notify_advanced("s1");
         server.notify_advanced("s1");
         let _ = std::fs::remove_dir_all(store.root());

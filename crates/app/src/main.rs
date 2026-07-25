@@ -15,7 +15,7 @@ use gpui::{
 };
 use sync_protocol::HostInfo;
 use tcode_runtime::app::AppState;
-use tcode_services::{shell_env, store::SessionStore};
+use tcode_services::{settings::SettingsStore, shell_env, store::SessionStore};
 use tcode_ui::{AppShell, Quit, TogglePalette};
 use tcode_ui::{assets, settings};
 
@@ -361,7 +361,10 @@ fn main() {
                 platform: std::env::consts::OS.into(),
                 app_version: env!("CARGO_PKG_VERSION").into(),
             };
-            match sync_host::start(store.clone(), host_info) {
+            let sync_server = SettingsStore::new(store.root().clone())
+                .load_or_create_sync_token()
+                .and_then(|token| sync_host::start(store.clone(), host_info, token));
+            match sync_server {
                 Ok(server) => {
                     log::info!("sync host listening at {}", server.url);
                     app_state.update(cx, |state, cx| {
