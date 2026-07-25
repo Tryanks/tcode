@@ -1,0 +1,17 @@
+[package]
+name = "gpui-ios"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+log = "0.4"
+
+# iOS-only. Like gpui-android, this crate exports nothing on a host build so
+# ordinary desktop workspace builds are unaffected by an in-progress backend.
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_wgpu = { git = "https://github.com/zed-industries/zed" }
+anyhow = "1"
+raw-window-handle = "0.6"
+uuid = { version = "1", features = ["v4"] }

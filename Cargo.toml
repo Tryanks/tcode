@@ -10,6 +10,7 @@ members = [
     "crates/orchestrate-mcp",
     "crates/computer-use-mcp",
     "crates/gpui-android",
+    "crates/gpui-ios",
     "crates/sync-client",
     "crates/sync-host",
     "crates/sync-protocol",
