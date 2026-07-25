@@ -25,10 +25,10 @@ use gpui_component::{
     v_flex,
 };
 
-use tcode_core::git::GitAction;
+use tcode_core::git::{GitAction, MenuItem, QuickAction};
 use tcode_core::session::{
-    EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming,
-    parse_orchestrate_callback,
+    EntryContent, OrchestrateCallback, SteeringStatus, Timeline, TimelineEntry, TurnMeta,
+    TurnTiming, parse_orchestrate_callback,
 };
 use tcode_runtime::app::{AppState, RightTab};
 
@@ -638,8 +638,109 @@ impl MdState {
     }
 }
 
+/// Owned data needed to draw the chat surface without borrowing desktop runtime state.
+///
+/// Remote clients can construct this from their synced [`Timeline`]. The desktop
+/// adapter below also captures its surrounding chrome state so the existing
+/// `ChatView` keeps rendering exactly the same controls.
+#[derive(Clone, Default)]
+pub struct ChatReadModel {
+    pub active: Option<ChatSessionReadModel>,
+    pub sidebar_collapsed: bool,
+    pub diff_showing: bool,
+    pub plan_showing: bool,
+    pub preview_showing: bool,
+    pub terminal_open: bool,
+    pub git_quick_action: Option<QuickAction>,
+    pub git_menu_items: Vec<MenuItem>,
+    chat_hosts_caption: bool,
+}
+
+impl ChatReadModel {
+    /// Wrap one synced session with neutral client-chrome defaults.
+    pub fn new(active: ChatSessionReadModel) -> Self {
+        Self {
+            active: Some(active),
+            ..Self::default()
+        }
+    }
+}
+
+/// Domain snapshot for the active chat session.
+#[derive(Clone)]
+pub struct ChatSessionReadModel {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub is_draft: bool,
+    pub provider: agent::ProviderKind,
+    pub timeline: Timeline,
+    /// Live-only delivery state used to disable native rewind while work is queued.
+    pub turn_in_flight: bool,
+    pub has_queued_messages: bool,
+    pub native_rewind_pending: bool,
+    /// Desktop-only drawer preference; remote clients can retain the default.
+    pub terminal_height: f32,
+}
+
+impl ChatSessionReadModel {
+    /// Construct the portable timeline read path from sync-owned domain data.
+    pub fn new(
+        session_id: impl Into<String>,
+        title: impl Into<String>,
+        cwd: PathBuf,
+        provider: agent::ProviderKind,
+        timeline: Timeline,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            title: title.into(),
+            cwd,
+            is_draft: false,
+            provider,
+            timeline,
+            turn_in_flight: false,
+            has_queued_messages: false,
+            native_rewind_pending: false,
+            terminal_height: 240.,
+        }
+    }
+}
+
+impl From<&AppState> for ChatReadModel {
+    fn from(state: &AppState) -> Self {
+        let active = state.active.as_ref().map(|active| ChatSessionReadModel {
+            session_id: active.meta.id.clone(),
+            title: active.meta.title.clone(),
+            cwd: active.meta.cwd.clone(),
+            is_draft: active.draft,
+            provider: active.meta.provider,
+            timeline: active.timeline.clone(),
+            turn_in_flight: active.is_turn_running(),
+            has_queued_messages: !active.queued().is_empty(),
+            native_rewind_pending: state.native_rewind_pending(),
+            terminal_height: active.terminal_workspace.height,
+        });
+        Self {
+            active,
+            sidebar_collapsed: state.sidebar_collapsed,
+            diff_showing: state.diff_panel_open() && state.right_tab() == RightTab::Diff,
+            plan_showing: state.plan_panel_showing(),
+            preview_showing: state.preview_panel_showing(),
+            terminal_open: state.terminal_panel_open(),
+            git_quick_action: state.git_quick_action(),
+            git_menu_items: state.git_menu_items(),
+            chat_hosts_caption: window_caption::hosts_caption(
+                window_caption::CaptionSurface::Chat,
+                state,
+            ),
+        }
+    }
+}
+
 pub struct ChatView {
     app_state: Entity<AppState>,
+    read_model: Arc<ChatReadModel>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
@@ -675,7 +776,7 @@ impl ChatView {
                 cx.notify();
             }),
             cx.observe(&app_state, |this, _, cx| {
-                this.sync_markdown_states(cx);
+                this.refresh_read_model(cx);
                 cx.notify();
             }),
         ];
@@ -683,6 +784,7 @@ impl ChatView {
 
         let mut this = Self {
             app_state,
+            read_model: Arc::default(),
             composer,
             terminal_drawer,
             list_state,
@@ -696,19 +798,28 @@ impl ChatView {
             commit_dialog: None,
             _subscriptions: subscriptions,
         };
-        this.sync_markdown_states(cx);
+        this.refresh_read_model(cx);
         this
+    }
+
+    /// Refresh the desktop adapter. Timeline rendering below consumes only this snapshot.
+    fn refresh_read_model(&mut self, cx: &mut Context<Self>) {
+        self.read_model = Arc::new(ChatReadModel::from(self.app_state.read(cx)));
+        self.sync_markdown_states(cx);
     }
 
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
         let (session_key, texts, running, turn_items) = {
-            let state = self.app_state.read(cx);
-            let session_key = state.active_session_id().map(str::to_string);
+            let session_key = self
+                .read_model
+                .active
+                .as_ref()
+                .map(|active| active.session_id.clone());
             let mut texts: Vec<(String, String)> = Vec::new();
             let mut running = false;
             let mut turn_items = Vec::new();
-            if let Some(active) = &state.active {
+            if let Some(active) = &self.read_model.active {
                 let timeline = &active.timeline;
                 running = timeline.turn_running;
                 turn_items = index_turns(
@@ -822,6 +933,7 @@ impl ChatView {
         &self,
         index: usize,
         turn: &TurnMeta,
+        session: &ChatSessionReadModel,
         cwd: &Path,
         entries: &[Arc<TimelineEntry>],
         pinned: (Option<&str>, Option<&str>),
@@ -871,6 +983,7 @@ impl ChatView {
                         index,
                         segment_id,
                         turn,
+                        &session.timeline,
                         cwd,
                         activities,
                         &turn_counts,
@@ -903,6 +1016,7 @@ impl ChatView {
                             index,
                             &entry.id,
                             text,
+                            session,
                             cwd,
                             *context_len,
                             attachments,
@@ -944,6 +1058,7 @@ impl ChatView {
                 index,
                 &segment_id,
                 turn,
+                &session.timeline,
                 cwd,
                 &[],
                 &turn_counts,
@@ -953,15 +1068,13 @@ impl ChatView {
         }
 
         // Proposed-plan card (the captured plan for this turn).
-        if let Some((item_id, markdown)) = {
-            let state = self.app_state.read(cx);
-            state
-                .active
-                .as_ref()
-                .and_then(|a| a.timeline.proposed_plan.as_ref())
-                .filter(|plan| plan.turn == index)
-                .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
-        } {
+        if let Some((item_id, markdown)) = session
+            .timeline
+            .proposed_plan
+            .as_ref()
+            .filter(|plan| plan.turn == index)
+            .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
+        {
             column =
                 column.child(self.render_proposed_plan_card(index, &item_id, &markdown, cwd, cx));
         }
@@ -972,15 +1085,10 @@ impl ChatView {
         // silently. Replay marks turns idle (mark_idle), so finished turns from
         // stored sessions still render the card.
         if !turn.running {
-            let (changes, completeness) = {
-                let state = self.app_state.read(cx);
-                (
-                    state.turn_file_changes(index).unwrap_or_default(),
-                    state
-                        .turn_change_completeness(index)
-                        .unwrap_or(ChangeCompleteness::Partial),
-                )
-            };
+            let (changes, completeness) = turn.changes.as_ref().map_or_else(
+                || (Vec::new(), ChangeCompleteness::Partial),
+                |changes| (changes.changes.clone(), changes.completeness),
+            );
             if !changes.is_empty() {
                 column =
                     column.child(self.render_changed_files(index, cwd, &changes, completeness, cx));
@@ -1011,6 +1119,7 @@ impl ChatView {
                 index,
                 &entry.id,
                 text,
+                session,
                 cwd,
                 *context_len,
                 attachments,
@@ -1062,25 +1171,19 @@ impl ChatView {
     fn render_native_rewind_button(
         &self,
         turn: usize,
-        cx: &mut Context<Self>,
+        session: &ChatSessionReadModel,
     ) -> Option<AnyElement> {
-        let (available, disabled) = {
-            let state = self.app_state.read(cx);
-            let active = state.active.as_ref()?;
-            (
-                active.meta.provider == agent::ProviderKind::ClaudeCode
-                    && active
-                        .timeline
-                        .turns
-                        .get(turn)
-                        .and_then(|turn| turn.provider_checkpoint_id.as_ref())
-                        .is_some(),
-                active.is_turn_running()
-                    || active.timeline.turn_running
-                    || !active.queued().is_empty()
-                    || state.native_rewind_pending(),
-            )
-        };
+        let available = session.provider == agent::ProviderKind::ClaudeCode
+            && session
+                .timeline
+                .turns
+                .get(turn)
+                .and_then(|turn| turn.provider_checkpoint_id.as_ref())
+                .is_some();
+        let disabled = session.turn_in_flight
+            || session.timeline.turn_running
+            || session.has_queued_messages
+            || session.native_rewind_pending;
         if !available {
             return None;
         }
@@ -1168,12 +1271,12 @@ impl ChatView {
     /// the timeline; it is revealed for `pinned` (the last user message) so the
     /// action is reachable without hovering.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn render_user(
         &self,
         turn: usize,
         entry_id: &str,
         text: &str,
+        session: &ChatSessionReadModel,
         cwd: &Path,
         context_len: Option<usize>,
         attachments: &[String],
@@ -1211,7 +1314,7 @@ impl ChatView {
             ));
         }
         if steering.is_none()
-            && let Some(rewind) = self.render_native_rewind_button(turn, cx)
+            && let Some(rewind) = self.render_native_rewind_button(turn, session)
         {
             actions = actions.child(rewind);
         }
@@ -1641,6 +1744,7 @@ impl ChatView {
         index: usize,
         segment_id: &str,
         turn: &TurnMeta,
+        timeline: &Timeline,
         cwd: &Path,
         activities: &[&TimelineEntry],
         turn_counts: &WorkLogCounts,
@@ -1706,7 +1810,7 @@ impl ChatView {
                         section = section.child(self.render_file_edit_row(&row, cx));
                     }
                 } else {
-                    section = section.child(self.render_activity_row(entry, false, cx));
+                    section = section.child(self.render_activity_row(entry, timeline, false, cx));
                 }
             }
 
@@ -1810,11 +1914,12 @@ impl ChatView {
     fn render_activity_row(
         &self,
         entry: &TimelineEntry,
+        timeline: &Timeline,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if matches!(&entry.content, EntryContent::Subagent { .. }) {
-            return self.render_subagent_row(entry, cx);
+            return self.render_subagent_row(entry, timeline, cx);
         }
         let muted = cx.theme().muted_foreground;
         let (icon, summary): (IconName, AnyElement) = match &entry.content {
@@ -1920,7 +2025,12 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn render_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_subagent_row(
+        &self,
+        entry: &TimelineEntry,
+        timeline: &Timeline,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let EntryContent::Subagent {
             agent_type,
             description,
@@ -1933,19 +2043,8 @@ impl ChatView {
         let key = format!("subagent-{}", entry.id);
         let expanded = self.expanded.contains(&key);
         let parent_id = entry.id.clone();
-        let (children, truncated) = {
-            let state = self.app_state.read(cx);
-            state
-                .active
-                .as_ref()
-                .map(|active| {
-                    (
-                        active.timeline.children(&parent_id).to_vec(),
-                        active.timeline.children_truncated(&parent_id),
-                    )
-                })
-                .unwrap_or_default()
-        };
+        let children = timeline.children(&parent_id).to_vec();
+        let truncated = timeline.children_truncated(&parent_id);
         let muted = cx.theme().muted_foreground;
         let finished = !matches!(status, ItemStatus::InProgress);
         let turn = entry.turn;
@@ -2018,14 +2117,19 @@ impl ChatView {
                 );
             }
             for child in &children {
-                nested = nested.child(self.render_subagent_child(child, cx));
+                nested = nested.child(self.render_subagent_child(child, timeline, cx));
             }
             block = block.child(nested);
         }
         block.into_any_element()
     }
 
-    fn render_subagent_child(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_subagent_child(
+        &self,
+        entry: &TimelineEntry,
+        timeline: &Timeline,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         match &entry.content {
             EntryContent::User { text, .. } => h_flex()
@@ -2061,7 +2165,7 @@ impl ChatView {
                 .text_color(muted)
                 .child(tcode_i18n::tr!("chat.changed_files", count = changes.len()))
                 .into_any_element(),
-            _ => self.render_activity_row(entry, true, cx),
+            _ => self.render_activity_row(entry, timeline, true, cx),
         }
     }
 
@@ -2407,6 +2511,7 @@ impl ChatView {
 
     fn render_header(
         &self,
+        read_model: &ChatReadModel,
         title: Option<String>,
         is_draft: bool,
         cwd: Option<PathBuf>,
@@ -2418,16 +2523,13 @@ impl ChatView {
         // the row's leading content (the sidebar toggle) is inset past them —
         // but only when the platform actually draws them: they are hidden in
         // fullscreen, and other platforms never had them.
-        let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        let collapsed = read_model.sidebar_collapsed;
         let clears_traffic_lights =
             cfg!(target_os = "macos") && collapsed && !window.is_fullscreen();
         // Windows: with no right panel open this header is the window's
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
-        let hosts_caption = window_caption::hosts_caption(
-            window_caption::CaptionSurface::Chat,
-            self.app_state.read(cx),
-        );
+        let hosts_caption = read_model.chat_hosts_caption;
         let base = h_flex()
             .flex_shrink_0()
             .h(px(52.))
@@ -2500,18 +2602,15 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        let diff_showing = {
-            let state = self.app_state.read(cx);
-            state.diff_panel_open() && state.right_tab() == RightTab::Diff
-        };
-        let plan_showing = self.app_state.read(cx).plan_panel_showing();
-        let preview_showing = self.app_state.read(cx).preview_panel_showing();
-        let terminal_open = self.app_state.read(cx).terminal_panel_open();
+        let diff_showing = read_model.diff_showing;
+        let plan_showing = read_model.plan_showing;
+        let preview_showing = read_model.preview_showing;
+        let terminal_open = read_model.terminal_open;
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
             .child(window_caption::drag_region(title_el))
             .when(show_actions, |this| {
-                this.children(self.render_git_button(cx))
+                this.children(self.render_git_button(read_model, cx))
                     .children(cwd.clone().map(|cwd| self.render_open_button(cwd, cx)))
                     .child(
                         h_flex()
@@ -2582,10 +2681,14 @@ impl ChatView {
     /// action follows the background git status (Commit / Commit & push / Push /
     /// Pull / Publish branch / Initialize Git, or a disabled status hint); the
     /// chevron lists the applicable subset. Ported from T3's `GitActionsControl`.
-    fn render_git_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let quick = self.app_state.read(cx).git_quick_action()?;
+    fn render_git_button(
+        &self,
+        read_model: &ChatReadModel,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let quick = read_model.git_quick_action.clone()?;
         let border = cx.theme().border;
-        let items = self.app_state.read(cx).git_menu_items();
+        let items = read_model.git_menu_items.clone();
 
         // Main action segment.
         let label: SharedString = tcode_i18n::tr!(git_action_label_key(quick.label))
@@ -2940,35 +3043,24 @@ impl Render for ChatView {
             self.open_commit_dialog(GitAction::Commit, window, cx);
         }
 
-        let active = {
-            let state = self.app_state.read(cx);
-            state.active.as_ref().map(|active| {
-                (
-                    active.meta.title.clone(),
-                    active.meta.cwd.clone(),
-                    active.draft,
-                )
-            })
-        };
+        let read_model = self.read_model.clone();
 
         let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
 
-        let Some((title, cwd, is_draft)) = active else {
+        let Some(active) = read_model.active.as_ref() else {
             return root
-                .child(self.render_header(None, false, None, window, cx))
+                .child(self.render_header(&read_model, None, false, None, window, cx))
                 .child(self.render_empty_state(cx));
         };
 
+        let cwd = active.cwd.clone();
+        let is_draft = active.is_draft;
+        let title = active.title.clone();
         let title = if is_draft { None } else { Some(title) };
-        let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
-        let terminal_open = self.app_state.read(cx).terminal_panel_open();
-        let terminal_height = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .map(|a| a.terminal_workspace.height)
-            .unwrap_or(240.);
+        let header =
+            self.render_header(&read_model, title, is_draft, Some(cwd.clone()), window, cx);
+        let terminal_open = read_model.terminal_open;
+        let terminal_height = active.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
         // content column. The column fills the available width up to
@@ -2978,13 +3070,7 @@ impl Render for ChatView {
         // The newest user / assistant message: their action rows stay visible
         // (hover is not the only way to reach Copy / native rewind).
         let (last_user_id, last_assistant_id) = {
-            let state = self.app_state.read(cx);
-            let entries = &state
-                .active
-                .as_ref()
-                .expect("active session")
-                .timeline
-                .entries;
+            let entries = &active.timeline.entries;
             (
                 entries
                     .iter()
@@ -3001,6 +3087,7 @@ impl Render for ChatView {
 
         let item_count = self.turn_items.len();
         let item_cwd = cwd.clone();
+        let item_read_model = read_model.clone();
         let timeline = list(
             self.list_state.clone(),
             cx.processor(move |this, index: usize, window, cx| {
@@ -3008,24 +3095,21 @@ impl Render for ChatView {
                     return div().into_any_element();
                 };
                 // Clone only the handful of entries in this visible/overdrawn
-                // turn. The full history remains in AppState and is never
-                // cloned by the render path.
-                let Some((turn, entries)) = this.app_state.read(cx).active.as_ref().map(|active| {
-                    (
-                        active
-                            .timeline
-                            .turns
-                            .get(index)
-                            .cloned()
-                            .unwrap_or_default(),
-                        active.timeline.entries[item.entry_range.clone()].to_vec(),
-                    )
-                }) else {
+                // turn. The full read snapshot remains shared by the render path.
+                let Some(active) = item_read_model.active.as_ref() else {
                     return div().into_any_element();
                 };
+                let turn = active
+                    .timeline
+                    .turns
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                let entries = active.timeline.entries[item.entry_range.clone()].to_vec();
                 let rendered = this.render_turn(
                     index,
                     &turn,
+                    active,
                     &item_cwd,
                     &entries,
                     (last_user_id.as_deref(), last_assistant_id.as_deref()),

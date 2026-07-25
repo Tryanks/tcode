@@ -34,5 +34,6 @@ pub(crate) mod toast;
 mod window_caption;
 mod workspace_walk;
 
+pub use chat::{ChatReadModel, ChatSessionReadModel, ChatView};
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, TogglePalette};
