@@ -25,6 +25,8 @@ use developer_instructions::{default_mode_instructions, plan_mode_instructions};
 /// Fallback model slug for `collaborationMode.settings.model` when the session
 /// has no resolved model yet (mirrors T3's `DEFAULT_MODEL`).
 const DEFAULT_MODEL: &str = "gpt-5-codex";
+const ELICITATION_URL_ACK_LABEL: &str = "I've opened the link";
+const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
 
 /// Map a canonical [`ApprovalMode`] onto Codex's `approvalPolicy` × `sandbox`
 /// pair for `thread/start` (and `thread/resume`).
@@ -365,6 +367,29 @@ enum PendingRequest {
     Steer(String),
 }
 
+struct PendingElicitation {
+    rpc_id: Value,
+    fields: Vec<ElicitField>,
+}
+
+struct ElicitField {
+    key: String,
+    kind: ElicitFieldKind,
+    /// Display label → wire value for titled enums.
+    values: HashMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+enum ElicitFieldKind {
+    Text,
+    Number,
+    Integer,
+    Boolean,
+    Enum,
+    MultiEnum,
+    UrlAck,
+}
+
 struct Actor {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -385,6 +410,9 @@ struct Actor {
     /// Pending `item/tool/requestUserInput` requests: canonical request_id → the
     /// server-to-client JSON-RPC id we must reply to.
     user_inputs: HashMap<String, Value>,
+    /// Pending `mcpServer/elicitation/request`s: canonical request_id → the
+    /// JSON-RPC id and field typing needed to rebuild a typed response.
+    elicitations: HashMap<String, PendingElicitation>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
     usage_by_turn: HashMap<String, TokenUsage>,
@@ -449,6 +477,7 @@ async fn run_actor(
         pending_requests: HashMap::new(),
         approvals: HashMap::new(),
         user_inputs: HashMap::new(),
+        elicitations: HashMap::new(),
         items: HashMap::new(),
         subagents: HashMap::new(),
         usage_by_turn: HashMap::new(),
@@ -1178,24 +1207,33 @@ impl Actor {
                 request_id,
                 answers,
             } => {
-                let Some(json_rpc_id) = self.user_inputs.remove(&request_id) else {
+                if let Some(json_rpc_id) = self.user_inputs.remove(&request_id) {
+                    // Native result shape: `{answers: {<qid>: {answers: [<strings>]}}}`
+                    // — a single string is wrapped into a 1-element array (S2 §3.2).
+                    let mut wire_answers = serde_json::Map::new();
+                    for (qid, value) in &answers {
+                        wire_answers
+                            .insert(qid.clone(), json!({ "answers": answer_strings(value) }));
+                    }
+                    send_json(
+                        &mut self.stdin,
+                        &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else if let Some(pending) = self.elicitations.remove(&request_id) {
+                    let result = elicitation_result(&pending.fields, &answers);
+                    send_json(
+                        &mut self.stdin,
+                        &json!({ "id": pending.rpc_id, "result": result }),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
                     self.emit(AgentEvent::Warning {
                         message: format!("unknown Codex user-input request id: {request_id}"),
                     })
                     .await;
                     return Ok(());
-                };
-                // Native result shape: `{answers: {<qid>: {answers: [<strings>]}}}`
-                // — a single string is wrapped into a 1-element array (S2 §3.2).
-                let mut wire_answers = serde_json::Map::new();
-                for (qid, value) in &answers {
-                    wire_answers.insert(qid.clone(), json!({ "answers": answer_strings(value) }));
                 }
-                send_json(
-                    &mut self.stdin,
-                    &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
-                )
-                .map_err(|e| e.to_string())?;
                 self.emit(AgentEvent::UserInputResolved {
                     request_id,
                     answers,
@@ -1357,6 +1395,11 @@ impl Actor {
             return;
         }
 
+        if method == "mcpServer/elicitation/request" {
+            self.handle_elicitation_request(key, id, params).await;
+            return;
+        }
+
         let kind = match method {
             "item/commandExecution/requestApproval" | "execCommandApproval" => {
                 ApprovalKind::ExecCommand {
@@ -1406,6 +1449,56 @@ impl Actor {
             // Native approvals use the fixed four decisions.
             options: Vec::new(),
         }))
+        .await;
+    }
+
+    async fn handle_elicitation_request(
+        &mut self,
+        request_id: String,
+        rpc_id: Value,
+        params: &Value,
+    ) {
+        let server_name = params
+            .get("serverName")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("MCP");
+        let mode = params
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+
+        let parsed = match mode {
+            "form" => parse_elicitation_form(params, server_name),
+            "url" => Some(parse_elicitation_url(params, server_name)),
+            _ => None,
+        };
+
+        let Some((questions, fields)) = parsed.filter(|(questions, _)| !questions.is_empty())
+        else {
+            let _ = send_json(
+                &mut self.stdin,
+                &json!({ "id": rpc_id, "result": { "action": "decline" } }),
+            );
+            let message = if mode == "form" {
+                format!(
+                    "codex: MCP server {server_name} sent an elicitation with no supported fields; declined"
+                )
+            } else {
+                format!(
+                    "codex: MCP server {server_name} sent an unsupported \"{mode}\" elicitation; declined"
+                )
+            };
+            self.emit(AgentEvent::Warning { message }).await;
+            return;
+        };
+
+        self.elicitations
+            .insert(request_id.clone(), PendingElicitation { rpc_id, fields });
+        self.emit(AgentEvent::UserInputRequested {
+            request_id,
+            questions,
+        })
         .await;
     }
 
@@ -1710,14 +1803,26 @@ impl Actor {
         self.emit(event).await;
     }
 
-    /// Settle every outstanding `requestUserInput` on teardown: reply with an
-    /// empty `{answers: {}}` result and emit an empty resolution (S2 §4.2).
+    /// Settle every outstanding native user-input request and MCP elicitation
+    /// on teardown, replying with the protocol's empty/cancel outcome.
     async fn settle_pending_user_inputs_on_shutdown(&mut self) {
         let pending: Vec<(String, Value)> = self.user_inputs.drain().collect();
         for (request_id, rpc_id) in pending {
             let _ = send_json(
                 &mut self.stdin,
                 &json!({ "id": rpc_id, "result": { "answers": {} } }),
+            );
+            self.emit(AgentEvent::UserInputResolved {
+                request_id,
+                answers: serde_json::Map::new(),
+            })
+            .await;
+        }
+        let elicitations: Vec<(String, PendingElicitation)> = self.elicitations.drain().collect();
+        for (request_id, pending) in elicitations {
+            let _ = send_json(
+                &mut self.stdin,
+                &json!({ "id": pending.rpc_id, "result": { "action": "cancel" } }),
             );
             self.emit(AgentEvent::UserInputResolved {
                 request_id,
@@ -1783,6 +1888,237 @@ fn answer_strings(value: &Value) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn non_empty_string(value: &Value) -> Option<String> {
+    answer_strings(value)
+        .into_iter()
+        .find(|answer| !answer.is_empty())
+}
+
+fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, Value>) -> Value {
+    if fields.len() == 1 && matches!(fields[0].kind, ElicitFieldKind::UrlAck) {
+        let action = answers
+            .get(&fields[0].key)
+            .and_then(non_empty_string)
+            .filter(|answer| answer != ELICITATION_URL_CANCEL_LABEL)
+            .map_or("cancel", |_| "accept");
+        return json!({ "action": action });
+    }
+
+    let mut content = serde_json::Map::new();
+    for field in fields {
+        let Some(answer) = answers.get(&field.key) else {
+            continue;
+        };
+        let value = match field.kind {
+            ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
+            ElicitFieldKind::Enum => non_empty_string(answer).and_then(|answer| {
+                if field.values.is_empty() {
+                    Some(Value::String(answer))
+                } else {
+                    field.values.get(&answer).cloned().map(Value::String)
+                }
+            }),
+            ElicitFieldKind::Number => non_empty_string(answer)
+                .and_then(|answer| answer.parse::<f64>().ok())
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number),
+            ElicitFieldKind::Integer => non_empty_string(answer)
+                .and_then(|answer| answer.parse::<i64>().ok())
+                .map(|number| json!(number)),
+            ElicitFieldKind::Boolean => non_empty_string(answer).and_then(|answer| {
+                match answer.to_ascii_lowercase().as_str() {
+                    "yes" | "true" => Some(Value::Bool(true)),
+                    "no" | "false" => Some(Value::Bool(false)),
+                    _ => None,
+                }
+            }),
+            ElicitFieldKind::MultiEnum => {
+                let values = answer_strings(answer)
+                    .into_iter()
+                    .filter(|answer| !answer.is_empty())
+                    .filter_map(|answer| {
+                        if field.values.is_empty() {
+                            Some(Value::String(answer))
+                        } else {
+                            field.values.get(&answer).cloned().map(Value::String)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (!values.is_empty()).then_some(Value::Array(values))
+            }
+            ElicitFieldKind::UrlAck => None,
+        };
+        if let Some(value) = value {
+            content.insert(field.key.clone(), value);
+        }
+    }
+
+    if content.is_empty() {
+        json!({ "action": "decline" })
+    } else {
+        json!({ "action": "accept", "content": content })
+    }
+}
+
+fn elicit_option(label: &str) -> UserInputOption {
+    UserInputOption {
+        label: label.to_owned(),
+        description: String::new(),
+    }
+}
+
+fn schema_text<'a>(schema: &'a Value, key: &str) -> Option<&'a str> {
+    schema
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+fn titled_enum(entries: Option<&Vec<Value>>) -> (Vec<UserInputOption>, HashMap<String, String>) {
+    let mut options = Vec::new();
+    let mut values = HashMap::new();
+    for entry in entries.into_iter().flatten() {
+        let Some(wire_value) = entry.get("const").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(label) = schema_text(entry, "title") else {
+            continue;
+        };
+        options.push(elicit_option(label));
+        values.insert(label.to_owned(), wire_value.to_owned());
+    }
+    (options, values)
+}
+
+fn parse_elicitation_form(
+    params: &Value,
+    server_name: &str,
+) -> Option<(Vec<UserInputQuestion>, Vec<ElicitField>)> {
+    let properties = params
+        .pointer("/requestedSchema/properties")
+        .and_then(Value::as_object)?;
+    let message = schema_text(params, "message");
+    let mut questions = Vec::new();
+    let mut fields = Vec::new();
+
+    // `serde_json::Map` preserves the server's declaration order because this
+    // workspace transitively enables `preserve_order`. Questions are presented
+    // sequentially, so that declaration order is the intended answering order.
+    // If the feature goes away, this degrades to alphabetical order and the
+    // declaration-order tests below will catch it.
+    for (key, schema) in properties {
+        let schema_type = schema.get("type").and_then(Value::as_str);
+        let (kind, options, multi_select, values) = match schema_type {
+            Some("boolean") => (
+                ElicitFieldKind::Boolean,
+                vec![elicit_option("Yes"), elicit_option("No")],
+                false,
+                HashMap::new(),
+            ),
+            Some("string") if schema.get("oneOf").is_some() => {
+                let (options, values) = titled_enum(schema.get("oneOf").and_then(Value::as_array));
+                (ElicitFieldKind::Enum, options, false, values)
+            }
+            Some("string") if schema.get("enum").is_some() => {
+                let wire_values = strings(schema.get("enum"));
+                let names = strings(schema.get("enumNames"));
+                if names.len() == wire_values.len() {
+                    let mut values = HashMap::new();
+                    let options = names
+                        .into_iter()
+                        .zip(wire_values)
+                        .filter_map(|(label, wire_value)| {
+                            if label.is_empty() {
+                                None
+                            } else {
+                                values.insert(label.to_owned(), wire_value.to_owned());
+                                Some(elicit_option(label))
+                            }
+                        })
+                        .collect();
+                    (ElicitFieldKind::Enum, options, false, values)
+                } else {
+                    let options = wire_values
+                        .into_iter()
+                        .filter(|label| !label.is_empty())
+                        .map(elicit_option)
+                        .collect();
+                    (ElicitFieldKind::Enum, options, false, HashMap::new())
+                }
+            }
+            Some("string") => (ElicitFieldKind::Text, Vec::new(), false, HashMap::new()),
+            Some("number") => (ElicitFieldKind::Number, Vec::new(), false, HashMap::new()),
+            Some("integer") => (ElicitFieldKind::Integer, Vec::new(), false, HashMap::new()),
+            Some("array") if schema.pointer("/items/anyOf").is_some() => {
+                let (options, values) =
+                    titled_enum(schema.pointer("/items/anyOf").and_then(Value::as_array));
+                (ElicitFieldKind::MultiEnum, options, true, values)
+            }
+            Some("array") if schema.pointer("/items/enum").is_some() => {
+                let options = strings(schema.pointer("/items/enum"))
+                    .into_iter()
+                    .filter(|label| !label.is_empty())
+                    .map(elicit_option)
+                    .collect();
+                (ElicitFieldKind::MultiEnum, options, true, HashMap::new())
+            }
+            _ => {
+                log::debug!("codex: dropping unsupported elicitation field {key}");
+                continue;
+            }
+        };
+        let title = schema_text(schema, "title").unwrap_or(key);
+        let question = schema_text(schema, "description")
+            .or(message)
+            .unwrap_or(key);
+        questions.push(UserInputQuestion {
+            id: key.clone(),
+            header: format!("{server_name}: {title}"),
+            question: question.to_owned(),
+            options,
+            multi_select,
+        });
+        fields.push(ElicitField {
+            key: key.clone(),
+            kind,
+            values,
+        });
+    }
+    Some((questions, fields))
+}
+
+fn parse_elicitation_url(
+    params: &Value,
+    server_name: &str,
+) -> (Vec<UserInputQuestion>, Vec<ElicitField>) {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // The agent crate has no window handle, so keep the URL visible and
+    // selectable in the question panel instead of attempting to open it.
+    let question = UserInputQuestion {
+        id: "url".into(),
+        header: format!("{server_name}: open link"),
+        question: format!("{message}\n\n{url}"),
+        options: vec![
+            elicit_option(ELICITATION_URL_ACK_LABEL),
+            elicit_option(ELICITATION_URL_CANCEL_LABEL),
+        ],
+        multi_select: false,
+    };
+    let field = ElicitField {
+        key: "url".into(),
+        kind: ElicitFieldKind::UrlAck,
+        values: HashMap::new(),
+    };
+    (vec![question], vec![field])
 }
 
 /// Map an `item/tool/requestUserInput` params object into canonical
@@ -2124,6 +2460,7 @@ mod tests {
                 pending_requests: HashMap::new(),
                 approvals: HashMap::new(),
                 user_inputs: HashMap::new(),
+                elicitations: HashMap::new(),
                 items: HashMap::new(),
                 subagents: HashMap::new(),
                 usage_by_turn: HashMap::new(),
@@ -2834,6 +3171,431 @@ mod tests {
                 response["result"]["answers"]["free"]["answers"],
                 json!(["a", "b"])
             );
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn elicitation_form_maps_fields_and_accepts_typed_content() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(
+                    &json!({
+                        "id": 81,
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "serverName": "calendar",
+                            "threadId": "thread-1",
+                            "mode": "form",
+                            "message": "Fill this in",
+                            "requestedSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "title": "Name"},
+                                    "age": {"type": "integer", "description": "Your age?"},
+                                    "active": {"type": "boolean"},
+                                    "choice": {
+                                        "type": "string",
+                                        "oneOf": [
+                                            {"const": "wire-a", "title": "Choice A"},
+                                            {"const": "wire-b", "title": "Choice B"}
+                                        ]
+                                    },
+                                    "tags": {
+                                        "type": "array",
+                                        "items": {
+                                            "anyOf": [
+                                                {"const": "red-wire", "title": "Red"},
+                                                {"const": "blue-wire", "title": "Blue"}
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+
+            let AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+            } = events.recv().await.unwrap()
+            else {
+                panic!("expected UserInputRequested")
+            };
+            assert_eq!(request_id, "81");
+            assert_eq!(
+                questions
+                    .iter()
+                    .map(|question| question.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["name", "age", "active", "choice", "tags"]
+            );
+            assert_eq!(questions[0].header, "calendar: Name");
+            assert_eq!(questions[0].question, "Fill this in");
+            assert!(questions[0].options.is_empty());
+            assert!(!questions[0].multi_select);
+            assert_eq!(questions[1].header, "calendar: age");
+            assert_eq!(questions[1].question, "Your age?");
+            assert!(questions[1].options.is_empty());
+            assert!(!questions[1].multi_select);
+            assert_eq!(questions[2].header, "calendar: active");
+            assert_eq!(questions[2].question, "Fill this in");
+            assert_eq!(
+                questions[2]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Yes", "No"]
+            );
+            assert!(!questions[2].multi_select);
+            assert_eq!(questions[3].header, "calendar: choice");
+            assert_eq!(questions[3].question, "Fill this in");
+            assert_eq!(
+                questions[3]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Choice A", "Choice B"]
+            );
+            assert!(!questions[3].multi_select);
+            assert_eq!(questions[4].header, "calendar: tags");
+            assert_eq!(questions[4].question, "Fill this in");
+            assert_eq!(
+                questions[4]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Red", "Blue"]
+            );
+            assert!(questions[4].multi_select);
+
+            let mut answers = serde_json::Map::new();
+            answers.insert("name".into(), json!("Ada"));
+            answers.insert("age".into(), json!("42"));
+            answers.insert("active".into(), json!("Yes"));
+            answers.insert("choice".into(), json!("Choice B"));
+            answers.insert("tags".into(), json!(["Red", "Blue"]));
+            actor
+                .handle_command(SessionCommand::RespondUserInput {
+                    request_id: "81".into(),
+                    answers,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, .. } if request_id == "81"
+            ));
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(
+                response,
+                json!({
+                    "id": 81,
+                    "result": {
+                        "action": "accept",
+                        "content": {
+                            "active": true,
+                            "age": 42,
+                            "choice": "wire-b",
+                            "name": "Ada",
+                            "tags": ["red-wire", "blue-wire"]
+                        }
+                    }
+                })
+            );
+            assert!(response.get("error").is_none());
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn elicitation_form_maps_enum_names_and_bare_enum() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(
+                    &json!({
+                        "id": "enum-request",
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "serverName": "choices",
+                            "threadId": "thread-1",
+                            "mode": "form",
+                            "message": "Choose",
+                            "requestedSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "named": {
+                                        "type": "string",
+                                        "enum": ["wire-1", "wire-2"],
+                                        "enumNames": ["First", "Second"]
+                                    },
+                                    "bare": {"type": "string", "enum": ["x", "y"]}
+                                }
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+
+            let AgentEvent::UserInputRequested { questions, .. } = events.recv().await.unwrap()
+            else {
+                panic!("expected UserInputRequested")
+            };
+            assert_eq!(
+                questions
+                    .iter()
+                    .map(|question| question.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["named", "bare"]
+            );
+            assert_eq!(
+                questions[0]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["First", "Second"]
+            );
+            assert_eq!(
+                questions[1]
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["x", "y"]
+            );
+
+            let mut answers = serde_json::Map::new();
+            answers.insert("bare".into(), json!("y"));
+            answers.insert("named".into(), json!("Second"));
+            actor
+                .handle_command(SessionCommand::RespondUserInput {
+                    request_id: "enum-request".into(),
+                    answers,
+                })
+                .await
+                .unwrap();
+            let _ = events.recv().await.unwrap();
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(
+                response,
+                json!({
+                    "id": "enum-request",
+                    "result": {
+                        "action": "accept",
+                        "content": {"bare": "y", "named": "wire-2"}
+                    }
+                })
+            );
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn elicitation_form_empty_answers_declines() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(
+                    &json!({
+                        "id": 82,
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "serverName": "numbers",
+                            "threadId": "thread-1",
+                            "mode": "form",
+                            "message": "Number?",
+                            "requestedSchema": {
+                                "type": "object",
+                                "properties": {"count": {"type": "number"}}
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+            let _ = events.recv().await.unwrap();
+
+            let mut answers = serde_json::Map::new();
+            answers.insert("count".into(), json!("not-a-number"));
+            actor
+                .handle_command(SessionCommand::RespondUserInput {
+                    request_id: "82".into(),
+                    answers,
+                })
+                .await
+                .unwrap();
+            let _ = events.recv().await.unwrap();
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response, json!({"id": 82, "result": {"action": "decline"}}));
+            assert!(response["result"].get("content").is_none());
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn elicitation_url_cancels_or_accepts_without_content() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (id, answer, action) in [
+                (83, "Cancel", "cancel"),
+                (84, "I've opened the link", "accept"),
+            ] {
+                actor
+                    .handle_line(
+                        &json!({
+                            "id": id,
+                            "method": "mcpServer/elicitation/request",
+                            "params": {
+                                "serverName": "oauth",
+                                "threadId": "thread-1",
+                                "mode": "url",
+                                "elicitationId": format!("elicit-{id}"),
+                                "message": "Authorize access",
+                                "url": "https://example.test/authorize"
+                            }
+                        })
+                        .to_string(),
+                    )
+                    .await;
+                let AgentEvent::UserInputRequested { questions, .. } = events.recv().await.unwrap()
+                else {
+                    panic!("expected UserInputRequested")
+                };
+                assert!(
+                    questions[0]
+                        .question
+                        .contains("https://example.test/authorize")
+                );
+                assert_eq!(questions[0].header, "oauth: open link");
+                assert_eq!(questions[0].id, "url");
+
+                let mut answers = serde_json::Map::new();
+                answers.insert("url".into(), json!(answer));
+                actor
+                    .handle_command(SessionCommand::RespondUserInput {
+                        request_id: id.to_string(),
+                        answers,
+                    })
+                    .await
+                    .unwrap();
+                let _ = events.recv().await.unwrap();
+                let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed response")
+                };
+                let response: Value = serde_json::from_str(&response).unwrap();
+                assert_eq!(response["result"]["action"], action);
+                assert!(response["result"].get("content").is_none());
+            }
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn openai_form_elicitation_declines_with_result_and_warning() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(
+                    &json!({
+                        "id": 85,
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "serverName": "opaque",
+                            "threadId": "thread-1",
+                            "mode": "openai/form",
+                            "message": "Unsupported",
+                            "requestedSchema": {"anything": true}
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::Warning { ref message }
+                    if message.contains("opaque") && message.contains("openai/form")
+            ));
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["result"]["action"], "decline");
+            assert!(response.get("result").is_some());
+            assert!(response.get("error").is_none());
+            assert!(!response.to_string().contains("-32601"));
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn shutdown_cancels_pending_elicitation() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_line(
+                    &json!({
+                        "id": 86,
+                        "method": "mcpServer/elicitation/request",
+                        "params": {
+                            "serverName": "pending",
+                            "threadId": "thread-1",
+                            "mode": "form",
+                            "message": "Wait",
+                            "requestedSchema": {
+                                "type": "object",
+                                "properties": {"value": {"type": "string"}}
+                            }
+                        }
+                    })
+                    .to_string(),
+                )
+                .await;
+            let _ = events.recv().await.unwrap();
+            actor.settle_pending_user_inputs_on_shutdown().await;
+
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::UserInputResolved { ref request_id, ref answers }
+                    if request_id == "86" && answers.is_empty()
+            ));
+            let ChildOutput::Line(response) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed response")
+            };
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response, json!({"id": 86, "result": {"action": "cancel"}}));
+            assert!(actor.elicitations.is_empty());
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
