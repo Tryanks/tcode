@@ -338,6 +338,26 @@ client 能实时看到 host 上跑的会话并成功发送一个 turn、批准�
 4. 软键盘 + `WindowInsets`；IME 桥接 `PlatformInputHandler`。
 5. `tcode-android` cdylib + Gradle。
 
+**期 3a 实测进展（2026-07-25）。** `crates/gpui-android` 已落地 2083 行，
+`cargo check -p gpui-android --target aarch64-linux-android` **0 错误**——
+且这次编译顺带证明了 **`gpui` 与 `gpui_wgpu` 本身能为 Android 目标通过类型检查**，
+这是 §2.2 那个"Android 只缺平台胶水、不缺渲染器"判断的第一份硬证据。
+`Platform` 覆盖 56/59，`PlatformWindow` 覆盖 49/81，零 `todo!()`。
+
+**两条侦察修正：**
+
+1. **`cargo check` 确实需要 Android C 工具链**（本文档此前假设不需要）。
+   `gpui → stacksafe → psm` 在依赖检查阶段就要汇编 AArch64。已装 NDK
+   29.0.14206865，API 26，env 变量记在 `crates/gpui-android/README.md`。
+2. GPUI 可复用的优先队列模块被 cfg 门控到 Windows/Linux/wasm/test，
+   **Android 拿不到**，所以 dispatcher 自带了一份。这是上游贡献的候选项。
+
+**距离 Gate 3a 还差什么（子线程的诚实评估，未软化）：** 明天把它放上真机，
+第一个失败发生在**渲染之前**——没有 Activity/SurfaceView、没有 JNI 实现、
+没有原生入口、没有 cdylib/APK 打包。接上之后，第一个未验证的后端失败点是
+`WgpuRenderer::new`（raw handle 有效性、Vulkan 适配器选择、surface 能力）。
+`draw` 本身已接通到 present。
+
 **Gate 3a（渲染证明）**：Android 设备上开出窗口并渲染一帧。
 最小可行后端所需的非桩方法：执行器、text system、`run`、display 发现、
 `open_window`、raw handle、bounds/scale、input handler 存储、
