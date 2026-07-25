@@ -8322,9 +8322,14 @@ name = "sync-client"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "futures-util",
  "log",
+ "serde_json",
  "sync-protocol",
  "tcode-core",
+ "tcode-services",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
 ]
 
 [[package]]

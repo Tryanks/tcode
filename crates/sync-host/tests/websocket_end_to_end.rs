@@ -55,6 +55,10 @@ fn event(n: u64) -> AgentEvent {
     AgentEvent::TurnAccepted { delivery_id: n }
 }
 
+fn start_server(store: SessionStore) -> SyncServer {
+    start(store, host_info(), "correct-horse".into()).expect("server starts")
+}
+
 /// A session with `len` events already logged.
 fn seed(store: &SessionStore, len: u64) -> String {
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/work/alpha"), None);
@@ -114,7 +118,7 @@ fn seqs(frame: &HostFrame) -> Vec<u64> {
 async fn a_client_handshakes_backfills_and_receives_a_live_event() {
     let store = temp_store();
     let session_id = seed(&store, 3);
-    let server = start(store.clone(), host_info()).expect("server starts");
+    let server = start_server(store.clone());
 
     let mut socket = connect(&server).await;
 
@@ -180,7 +184,7 @@ async fn a_client_handshakes_backfills_and_receives_a_live_event() {
 async fn reconnecting_with_a_cursor_replays_only_the_gap() {
     let store = temp_store();
     let session_id = seed(&store, 5);
-    let server = start(store.clone(), host_info()).expect("server starts");
+    let server = start_server(store.clone());
 
     let mut socket = connect(&server).await;
     send(&mut socket, hello(&server.token)).await;
@@ -209,7 +213,7 @@ async fn reconnecting_with_a_cursor_replays_only_the_gap() {
 async fn a_wrong_token_is_refused_and_the_socket_closes() {
     let store = temp_store();
     seed(&store, 1);
-    let server = start(store.clone(), host_info()).expect("server starts");
+    let server = start_server(store.clone());
 
     let mut socket = connect(&server).await;
     send(&mut socket, hello("not-the-token")).await;
@@ -238,7 +242,7 @@ async fn a_wrong_token_is_refused_and_the_socket_closes() {
 async fn subscribing_without_a_handshake_is_refused() {
     let store = temp_store();
     let session_id = seed(&store, 3);
-    let server = start(store.clone(), host_info()).expect("server starts");
+    let server = start_server(store.clone());
 
     let mut socket = connect(&server).await;
     send(
@@ -266,7 +270,7 @@ async fn subscribing_without_a_handshake_is_refused() {
 async fn a_command_reaches_the_apps_channel() {
     let store = temp_store();
     let session_id = seed(&store, 1);
-    let server = start(store.clone(), host_info()).expect("server starts");
+    let server = start_server(store.clone());
 
     let mut socket = connect(&server).await;
     send(&mut socket, hello(&server.token)).await;

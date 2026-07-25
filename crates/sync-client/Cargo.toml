@@ -10,3 +10,10 @@ sync-protocol = { path = "../sync-protocol" }
 agent = { path = "../agent", default-features = false }
 tcode-core = { path = "../core" }
 log = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-util = "0.3"
+serde_json = "1"
+tcode-services = { path = "../services" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-tungstenite = "0.28"
