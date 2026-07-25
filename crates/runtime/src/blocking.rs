@@ -67,6 +67,7 @@ mod tests {
             "computer-use-mcp",
             "core",
             "gpui-android",
+            "gpui-ios",
             "i18n",
             "orchestrate-mcp",
             "preview-mcp",
