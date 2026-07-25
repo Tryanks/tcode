@@ -805,7 +805,6 @@ impl SessionsSidebar {
         &self,
         group: &ProjectGroup,
         active_id: Option<&str>,
-        turn_running: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let project_id = group.project.id.clone();
@@ -955,8 +954,7 @@ impl SessionsSidebar {
                 let is_active = active_id == Some(meta.id.as_str());
                 // "Working" covers parked sessions too — a thread that keeps
                 // running in the background keeps its green dot.
-                let working = (is_active && turn_running)
-                    || (!is_active && self.app_state.read(cx).turn_running_for(&meta.id));
+                let working = self.app_state.read(cx).turn_running_for(&meta.id);
                 container = container.child(self.render_thread(meta, is_active, working, cx));
             }
             if let Some(toggle_label) = thread_list_toggle_label(total, expanded) {
@@ -1399,15 +1397,10 @@ fn proceed_delete(
 
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (groups, active_id, turn_running) = {
+        let (groups, active_id) = {
             let state = self.app_state.read(cx);
             let active_id = state.active_session_id().map(str::to_string);
-            let turn_running = state
-                .active
-                .as_ref()
-                .map(|a| a.timeline.turn_running)
-                .unwrap_or(false);
-            (state.grouped_sessions(), active_id, turn_running)
+            (state.grouped_sessions(), active_id)
         };
 
         let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
@@ -1423,12 +1416,8 @@ impl Render for SessionsSidebar {
             );
         } else {
             for group in &groups {
-                list_content = list_content.child(self.render_group(
-                    group,
-                    active_id.as_deref(),
-                    turn_running,
-                    cx,
-                ));
+                list_content =
+                    list_content.child(self.render_group(group, active_id.as_deref(), cx));
             }
         }
 
