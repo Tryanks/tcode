@@ -23,6 +23,10 @@ mod native {
     >;
 
     enum Command {
+        /// Trade a pairing code for the durable token.
+        Pair {
+            code: String,
+        },
         List,
         Watch {
             session_id: String,
@@ -50,9 +54,17 @@ mod native {
 
     pub async fn run() -> Result<(), Box<dyn Error>> {
         let args = parse_args()?;
-        let token = match args.token {
-            Some(token) => token,
-            None => default_token()?,
+        // Pairing is the one command that runs without a token — that is what it
+        // exists to obtain — so it must not fall back to reading the host's
+        // secrets file, which a phone could never do either.
+        let pairing_code = match &args.command {
+            Command::Pair { code } => Some(code.clone()),
+            _ => None,
+        };
+        let token = match (args.token, &pairing_code) {
+            (Some(token), _) => token,
+            (None, Some(_)) => String::new(),
+            (None, None) => default_token()?,
         };
         let (mut socket, _) = tokio_tungstenite::connect_async(&args.url).await?;
         let mut client = Client::new(ClientConfig {
@@ -64,10 +76,30 @@ mod native {
             },
             token,
         });
+        if let Some(code) = pairing_code {
+            send_frame(&mut socket, client.pair(code)).await?;
+            let token = loop {
+                let frame = recv_frame(&mut socket).await?;
+                match &frame {
+                    HostFrame::Paired { token, .. } => break token.clone(),
+                    HostFrame::Refused { reason } => {
+                        return Err(format!("pairing refused: {reason:?}").into());
+                    }
+                    _ => {
+                        client.handle(frame);
+                    }
+                }
+            };
+            println!("paired; token: {token}");
+            return Ok(());
+        }
+
         send_frame(&mut socket, client.connect()).await?;
         handshake(&mut socket, &mut client).await?;
 
         match args.command {
+            // Handled before the handshake; unreachable here.
+            Command::Pair { .. } => Ok(()),
             Command::List => list(&mut socket, &mut client).await,
             Command::Watch { session_id } => watch(&mut socket, &mut client, session_id).await,
             Command::Send { session_id, text } => {
@@ -104,6 +136,7 @@ mod native {
 
         let url = url.ok_or("missing required --url")?;
         let command = match positional.as_slice() {
+            [command, code] if command == "pair" => Command::Pair { code: code.clone() },
             [command] if command == "list" => Command::List,
             [command, session_id] if command == "watch" => Command::Watch {
                 session_id: session_id.clone(),

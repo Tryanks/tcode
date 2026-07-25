@@ -375,6 +375,23 @@ fn main() {
             match sync_server {
                 Ok(server) => {
                     log::info!("sync host listening at {}", server.url);
+                    // A pairing code, not the token: a phone cannot be handed a
+                    // credential the way a query string hands one to a browser,
+                    // and the code is what a person can read off this screen and
+                    // type into another. Single-use and short-lived, so logging
+                    // it is not the exposure logging the token would be.
+                    let code = server.pairing.issue(std::time::Instant::now(), || {
+                        // A v4 UUID's bytes, because they come from the system
+                        // CSPRNG. The clock is not an acceptable substitute: an
+                        // earlier attempt read it once per character and every
+                        // code came out `AAAAAA`.
+                        let bytes = *uuid::Uuid::new_v4().as_bytes();
+                        std::array::from_fn(|index| bytes[index])
+                    });
+                    log::info!(
+                        "pair a device within {}s with code {code}",
+                        sync_host::pairing::CODE_LIFETIME.as_secs()
+                    );
                     app_state.update(cx, |state, cx| {
                         state.attach_sync_host(server);
                         state.pump_sync_commands(cx);

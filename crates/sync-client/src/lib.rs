@@ -101,6 +101,8 @@ pub struct Client {
     rejections: Vec<RejectedCommand>,
     ended_sessions: Vec<EndedSession>,
     pongs: Vec<u64>,
+    /// Token obtained by pairing, for the shell to persist.
+    paired_token: Option<String>,
 }
 
 impl Client {
@@ -115,6 +117,7 @@ impl Client {
             rejections: Vec::new(),
             ended_sessions: Vec::new(),
             pongs: Vec::new(),
+            paired_token: None,
         }
     }
 
@@ -180,6 +183,29 @@ impl Client {
 
     pub fn pongs(&self) -> &[u64] {
         &self.pongs
+    }
+
+    /// Offer a pairing code in exchange for the durable token.
+    ///
+    /// Used instead of `connect` when the client has no token yet. The reply is
+    /// a `Paired` frame carrying one; the client then handshakes normally,
+    /// which is why this does not change the connection's state.
+    pub fn pair(&self, code: impl Into<String>) -> ClientFrame {
+        ClientFrame::Pair {
+            min_version: sync_protocol::PROTOCOL_MIN_VERSION,
+            max_version: sync_protocol::PROTOCOL_MAX_VERSION,
+            code: code.into(),
+            client: self.config.client.clone(),
+        }
+    }
+
+    /// The token a completed pairing produced, if one has arrived.
+    ///
+    /// A shell reads this to persist the token so the code is never needed
+    /// again — which is the entire point of pairing rather than passing a code
+    /// on every connection.
+    pub fn paired_token(&self) -> Option<&str> {
+        self.paired_token.as_deref()
     }
 
     pub fn request_sessions(&self) -> ClientFrame {
@@ -315,6 +341,13 @@ impl Client {
                 }
                 self.ended_sessions
                     .push(EndedSession { session_id, reason });
+                Vec::new()
+            }
+            HostFrame::Paired { token, .. } => {
+                // Retained, not applied: the connection is still
+                // unauthenticated, and the shell decides whether to persist the
+                // token before handshaking with it.
+                self.paired_token = Some(token);
                 Vec::new()
             }
             HostFrame::Pong { nonce } => {
