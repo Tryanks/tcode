@@ -8298,6 +8298,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync-protocol"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

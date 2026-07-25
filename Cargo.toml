@@ -9,6 +9,7 @@ members = [
     "crates/preview-mcp",
     "crates/orchestrate-mcp",
     "crates/computer-use-mcp",
+    "crates/sync-protocol",
     "crates/ui",
     "crates/app",
 ]

@@ -136,6 +136,7 @@ mod tests {
             "preview-mcp",
             "runtime",
             "services",
+            "sync-protocol",
             "term",
             "ui",
         ]
