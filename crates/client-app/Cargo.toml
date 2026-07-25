@@ -1,0 +1,23 @@
+[package]
+name = "client-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Everything here must build for wasm, Android and iOS: this is the client UI
+# all three shells mount. The only platform-specific piece is the transport,
+# which each shell supplies through the `Transport` trait.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+sync-client = { path = "../sync-client" }
+sync-protocol = { path = "../sync-protocol" }
+tcode-ui = { path = "../ui", default-features = false, features = ["portable"] }
+log = "0.4"
+
+# Native shells only. The browser brings its own WebSocket, and pulling tokio
+# into a wasm build would not compile.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
+tokio-tungstenite = "0.28"

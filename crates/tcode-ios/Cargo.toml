@@ -1,0 +1,20 @@
+[package]
+name = "tcode-ios"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+# `staticlib` is what Xcode links into the app binary; `rlib` keeps the crate
+# usable from the host workspace so `cargo test` still sees it.
+crate-type = ["staticlib", "rlib"]
+
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-ios = { path = "../gpui-ios" }
+anyhow = "1"
+client-app = { path = "../client-app" }
+log = "0.4"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSThread", "NSDictionary", "NSArray", "NSData", "NSValue", "NSObject"] }
+objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIPasteboard", "UIResponder", "UITraitCollection", "UIView", "UIScreen"] }

@@ -4,8 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agent = { path = "../agent" }
+# Types only: core holds domain data and pure reducers, none of which needs a
+# provider process. Keeping `local` off is what lets it — and the sync client
+# that folds timelines from it — build for wasm.
+agent = { path = "../agent", default-features = false }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+# `uuid::new_v4` needs a randomness source, and on wasm that is the browser's
+# crypto API rather than the OS. Scoped to wasm so native builds keep their
+# current dependency set unchanged.
+[target.'cfg(target_family = "wasm")'.dependencies]
+uuid = { version = "1", features = ["v4", "serde", "js"] }

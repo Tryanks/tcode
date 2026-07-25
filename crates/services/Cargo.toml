@@ -3,21 +3,39 @@ name = "tcode-services"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["desktop"]
+desktop = [
+    "agent/local",
+    "dep:bzip2",
+    "dep:chrono",
+    "dep:dirs",
+    "dep:flate2",
+    "dep:log",
+    "dep:sha2",
+    "dep:smol",
+    "dep:tar",
+    "dep:thiserror",
+    "dep:ureq",
+    "dep:uuid",
+    "dep:zip",
+]
+
 [dependencies]
-agent = { path = "../agent" }
+agent = { path = "../agent", default-features = false, optional = true }
 tcode-core = { path = "../core" }
 base64 = "0.22"
-bzip2 = "0.6"
-chrono = "0.4"
-dirs = "6"
-flate2 = "1"
-log = "0.4"
+bzip2 = { version = "0.6", optional = true }
+chrono = { version = "0.4", optional = true }
+dirs = { version = "6", optional = true }
+flate2 = { version = "1", optional = true }
+log = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
-smol = "2"
-tar = "0.4"
-thiserror = "2"
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
-uuid = { version = "1", features = ["v4"] }
-zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2", "bzip2"] }
+sha2 = { version = "0.11", optional = true }
+smol = { version = "2", optional = true }
+tar = { version = "0.4", optional = true }
+thiserror = { version = "2", optional = true }
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2", "bzip2"], optional = true }

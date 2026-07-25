@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent::{
@@ -178,13 +179,19 @@ fn run_store_write(
     store: &SessionStore,
     settings_store: &SettingsStore,
     terminal_preferences_path: &Path,
+    sync_server: Option<&sync_host::SyncServer>,
     write: StoreWrite,
 ) -> Option<StoreWriteFailure> {
     match write {
-        StoreWrite::AppendEvent { id, ts, event } => store
-            .append_event(&id, ts, &event)
-            .err()
-            .map(|err| StoreWriteFailure::PersistEvent(err.to_string())),
+        StoreWrite::AppendEvent { id, ts, event } => match store.append_event(&id, ts, &event) {
+            Ok(_) => {
+                if let Some(server) = sync_server {
+                    server.notify_advanced(&id);
+                }
+                None
+            }
+            Err(err) => Some(StoreWriteFailure::PersistEvent(err.to_string())),
+        },
         StoreWrite::UpsertMeta { meta, initial } => store.upsert_meta(&meta).err().map(|err| {
             if initial {
                 StoreWriteFailure::PersistSession(err.to_string())
@@ -729,11 +736,16 @@ impl ActiveSession {
         &mut self,
         request_id: String,
         text: String,
-        attachments: Vec<Attachment>,
+        mut attachments: Vec<Attachment>,
     ) -> Result<(), ()> {
         let Runtime::Live(commands) = &self.runtime else {
             return Err(());
         };
+        if let Some(workspace_id) = self.meta.project_id.as_deref() {
+            for attachment in &mut attachments {
+                attachment.add_workspace_path(workspace_id, &self.meta.cwd);
+            }
+        }
         commands
             .try_send(SessionCommand::Steer {
                 request_id,
@@ -745,8 +757,13 @@ impl ActiveSession {
 
     /// Append a message to the queue, consuming the armed Ultrathink flag (it is
     /// per-send, so it belongs to this message, not to whatever is sent later).
-    fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
+    fn push_queued(&mut self, text: String, mut attachments: Vec<Attachment>) -> u64 {
         self.idle_since = None;
+        if let Some(workspace_id) = self.meta.project_id.as_deref() {
+            for attachment in &mut attachments {
+                attachment.add_workspace_path(workspace_id, &self.meta.cwd);
+            }
+        }
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let options = self.turn_options();
@@ -1003,6 +1020,9 @@ pub struct AppState {
     orchestrate_registrations: HashMap<String, agent::McpRegistration>,
     /// Requests from the orchestrate MCP runtime, pumped on the gpui thread.
     pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
+    sync_server: Option<Arc<sync_host::SyncServer>>,
+    sync_commands: Option<async_channel::Receiver<sync_host::CommandRequest>>,
+    sync_live: Option<sync_host::LiveSessions>,
     /// Process-wide computer-use MCP registration, supplied only to sessions
     /// while the global computer-use setting is enabled.
     computer_use_registration: Option<agent::McpRegistration>,
@@ -1158,6 +1178,9 @@ impl AppState {
             orchestrate_tokens: None,
             orchestrate_registrations: HashMap::new(),
             orchestrate_requests: None,
+            sync_server: None,
+            sync_commands: None,
+            sync_live: None,
             computer_use_registration: None,
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
@@ -1190,6 +1213,7 @@ impl AppState {
             let settings_store = self.settings_store.clone();
             let terminal_preferences_path = self.terminal_preferences_path.clone();
             let failures = self.store_write_failures.clone();
+            let sync_server = self.sync_server.clone();
             cx.background_executor()
                 .spawn(async move {
                     while let Ok(write) = writes.recv().await {
@@ -1197,6 +1221,7 @@ impl AppState {
                             &store,
                             &settings_store,
                             &terminal_preferences_path,
+                            sync_server.as_deref(),
                             write,
                         ) {
                             let _ = failures.send(failure).await;
@@ -1317,6 +1342,12 @@ impl AppState {
         self.orchestrate_requests = Some(server.requests);
     }
 
+    pub fn attach_sync_host(&mut self, server: sync_host::SyncServer) {
+        self.sync_commands = Some(server.commands.clone());
+        self.sync_live = Some(server.live.clone());
+        self.sync_server = Some(Arc::new(server));
+    }
+
     pub fn attach_computer_use_mcp(&mut self, url: String, token: String) {
         self.computer_use_registration = Some(agent::McpRegistration {
             name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
@@ -1344,6 +1375,72 @@ impl AppState {
             }
         })
         .detach();
+    }
+
+    /// Pump remote commands through the same provider channels as local UI actions.
+    pub fn pump_sync_commands(&mut self, cx: &mut Context<Self>) {
+        let Some(commands) = self.sync_commands.take() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            while let Ok(request) = commands.recv().await {
+                let Ok(()) = this.update(cx, |state, _| state.apply_sync_command(request)) else {
+                    break;
+                };
+            }
+        })
+        .detach();
+    }
+
+    fn apply_sync_command(&mut self, request: sync_host::CommandRequest) {
+        let sync_host::CommandRequest {
+            session_id,
+            command,
+        } = request;
+        let commands = self
+            .active
+            .as_ref()
+            .filter(|session| session.meta.id == session_id)
+            .or_else(|| self.background.get(&session_id))
+            .and_then(|session| match &session.runtime {
+                Runtime::Live(commands) => Some(commands.clone()),
+                Runtime::Idle | Runtime::Starting { .. } => None,
+            });
+        let Some(commands) = commands else {
+            log::warn!("dropping sync command for session {session_id}: no live provider");
+            return;
+        };
+        if let Err(err) = commands.try_send(command) {
+            log::warn!("dropping sync command for session {session_id}: {err}");
+        }
+    }
+
+    fn publish_sync_liveness(&self, session_id: &str) {
+        let Some(live) = &self.sync_live else {
+            return;
+        };
+        let working = self
+            .active
+            .as_ref()
+            .filter(|session| session.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))
+            .is_some_and(|session| session.turn_in_flight);
+        live.set(
+            session_id,
+            sync_host::LiveFlags {
+                working,
+                awaiting_approval: self
+                    .sessions_awaiting_approval
+                    .get(session_id)
+                    .is_some_and(|requests| !requests.is_empty()),
+            },
+        );
+    }
+
+    fn clear_sync_liveness(&self, session_id: &str) {
+        if let Some(live) = &self.sync_live {
+            live.clear(session_id);
+        }
     }
 
     /// Persistently opt a session into native orchestration. Callers restart a
@@ -6874,6 +6971,7 @@ impl AppState {
                                 parked.background_task_count = 0;
                             }
                             state.pending_native_rewinds.remove(&session_id);
+                            state.clear_sync_liveness(&session_id);
                             let error_event = AgentEvent::ProviderStartFailed {
                                 error: err.to_string(),
                             };
@@ -6924,6 +7022,9 @@ impl AppState {
         }
 
         if let AgentEvent::TurnAccepted { delivery_id } = &event {
+            // This control-plane acknowledgement must also be durable: sync
+            // clients use it after reconnecting to decide which turns to resend.
+            self.record_event(session_id, &event, cx);
             self.on_turn_accepted(session_id, *delivery_id, cx);
             return;
         }
@@ -6955,6 +7056,7 @@ impl AppState {
         if let AgentEvent::SessionClosed { reason } = &event {
             self.pending_native_rewinds.remove(session_id);
             self.sessions_awaiting_approval.remove(session_id);
+            self.clear_sync_liveness(session_id);
             self.close_orchestrator_children(session_id);
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
@@ -7279,6 +7381,17 @@ impl AppState {
             self.on_background_turn_completed(session_id, cx);
         }
 
+        if matches!(
+            &event,
+            AgentEvent::SessionStarted { .. }
+                | AgentEvent::TurnStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::ApprovalRequested(_)
+                | AgentEvent::ApprovalResolved { .. }
+        ) {
+            self.publish_sync_liveness(session_id);
+        }
+
         // Smoke-mode automation.
         if let Some(smoke) = self.smoke {
             match &event {
@@ -7362,6 +7475,27 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
+        let workspace = self
+            .active
+            .as_ref()
+            .filter(|active| active.meta.id == session_id)
+            .map(|active| &active.meta)
+            .or_else(|| {
+                self.background
+                    .get(session_id)
+                    .map(|background| &background.meta)
+            })
+            .or_else(|| self.sessions.iter().find(|meta| meta.id == session_id))
+            .and_then(|meta| {
+                meta.project_id
+                    .as_ref()
+                    .map(|project_id| (project_id.clone(), meta.cwd.clone()))
+            });
+        let mut event = event.clone();
+        if let Some((workspace_id, workspace_root)) = workspace {
+            event.add_workspace_paths(&workspace_id, &workspace_root);
+        }
+
         self.store_append_generation += 1;
         let ts = now_millis();
         self.enqueue_store_write(
@@ -7375,9 +7509,9 @@ impl AppState {
         if let Some(active) = self.active.as_mut()
             && active.meta.id == session_id
         {
-            active.timeline.apply_at(Some(ts), event);
+            active.timeline.apply_at(Some(ts), &event);
         } else if let Some(background) = self.background.get_mut(session_id) {
-            background.timeline.apply_at(Some(ts), event);
+            background.timeline.apply_at(Some(ts), &event);
         }
     }
 
@@ -7506,6 +7640,7 @@ impl AppState {
             self.sessions_awaiting_approval.remove(&session_id);
             self.pending_native_rewinds.remove(&session_id);
             self.native_rewind_prefills.remove(&session_id);
+            self.clear_sync_liveness(&session_id);
         }
         if let Some(active) = self.active.take()
             && let Runtime::Live(commands) = active.runtime
@@ -7631,6 +7766,7 @@ impl AppState {
         self.sessions_awaiting_approval.remove(session_id);
         self.pending_native_rewinds.remove(session_id);
         self.native_rewind_prefills.remove(session_id);
+        self.clear_sync_liveness(session_id);
         if let Some(parked) = self.background.remove(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {
@@ -10117,6 +10253,7 @@ mod tests {
                 kind: agent::ApprovalKind::ExecCommand {
                     command: "touch blocked".into(),
                     cwd: Some("/tmp/project".into()),
+                    workspace_cwd: None,
                     reason: None,
                 },
                 options: Vec::new(),
@@ -10179,6 +10316,7 @@ mod tests {
                     kind: agent::ApprovalKind::ExecCommand {
                         command: "touch allowed".into(),
                         cwd: None,
+                        workspace_cwd: None,
                         reason: None,
                     },
                     options: Vec::new(),
@@ -10237,6 +10375,7 @@ mod tests {
                     kind: agent::ApprovalKind::ExecCommand {
                         command: "touch blocked".into(),
                         cwd: None,
+                        workspace_cwd: None,
                         reason: None,
                     },
                     options: Vec::new(),
@@ -10281,6 +10420,7 @@ mod tests {
                     kind: agent::ApprovalKind::ExecCommand {
                         command: "cargo test".into(),
                         cwd: None,
+                        workspace_cwd: None,
                         reason: None,
                     },
                     options: Vec::new(),
@@ -11184,6 +11324,7 @@ mod tests {
             media_type: "image/png".into(),
             data_base64: "AAAA".into(),
             source_path: Some("/tmp/a.png".into()),
+            workspace_path: None,
         };
         active.push_queued(String::new(), vec![attachment.clone()]);
 
@@ -11276,6 +11417,45 @@ mod tests {
         assert!(active.is_starting_generation(2));
         active.runtime = Runtime::Live(async_channel::unbounded().0);
         assert!(!active.is_starting_generation(2));
+    }
+
+    #[gpui::test]
+    fn turn_acceptance_is_persisted_and_flushes_the_queued_message(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-turn-accepted-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store.clone()));
+        let (commands, receiver) = async_channel::unbounded();
+        let mut session = live_session(ProviderKind::Codex, commands);
+        session.meta.id = "accepted".into();
+
+        let mut delivery_id = 0;
+        state.update(cx, |state, cx| {
+            state.active = Some(session);
+            state.send_turn("persist this acceptance".into(), Vec::new(), cx);
+            delivery_id = match receiver.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected SendTurn, got {other:?}"),
+            };
+
+            state.on_event("accepted", AgentEvent::TurnAccepted { delivery_id }, cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert!(active.queue.is_empty());
+            assert_eq!(active.delivery_in_flight, None);
+            assert!(active.turn_in_flight);
+        });
+        cx.run_until_parked();
+
+        assert!(store.read_events("accepted").iter().any(|stored| {
+            matches!(
+                stored.event,
+                AgentEvent::TurnAccepted {
+                    delivery_id: stored_id
+                } if stored_id == delivery_id
+            )
+        }));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -11905,6 +12085,47 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["first", "second"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn sync_command_reaches_the_intended_live_session(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-sync-command-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (remote_commands, requests) = async_channel::unbounded();
+        let (active_commands, active_receiver) = async_channel::unbounded();
+        let (target_commands, target_receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, active_commands);
+            active.meta.id = "active".into();
+            state.active = Some(active);
+
+            let mut target = live_session(ProviderKind::ClaudeCode, target_commands);
+            target.meta.id = "target".into();
+            state.background.insert(target.meta.id.clone(), target);
+
+            state.sync_commands = Some(requests);
+            state.pump_sync_commands(cx);
+        });
+        remote_commands
+            .try_send(sync_host::CommandRequest {
+                session_id: "target".into(),
+                command: SessionCommand::Interrupt,
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(matches!(
+            target_receiver.try_recv(),
+            Ok(SessionCommand::Interrupt)
+        ));
+        assert!(
+            active_receiver.try_recv().is_err(),
+            "the command reached the wrong session"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

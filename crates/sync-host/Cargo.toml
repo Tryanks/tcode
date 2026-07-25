@@ -1,0 +1,28 @@
+[package]
+name = "sync-host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sync-protocol = { path = "../sync-protocol" }
+# Types only: this crate must not depend on GPUI or on the provider adapters.
+# Phase 1.5 of docs/multiplatform-plan.md reuses it verbatim for a headless
+# `tcode-server` by swapping the binary's `main`, which only works if nothing
+# here reaches for a UI or a child process.
+agent = { path = "../agent", default-features = false }
+tcode-core = { path = "../core" }
+tcode-services = { path = "../services" }
+async-channel = "2"
+log = "0.4"
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio-tungstenite = "0.28"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+futures-util = "0.3"
+agent = { path = "../agent", default-features = false }
+uuid = { version = "1", features = ["v4"] }

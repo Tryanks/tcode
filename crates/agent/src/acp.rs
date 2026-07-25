@@ -2138,6 +2138,7 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
             acp::ToolCallContent::Diff(diff) => {
                 let path = diff.path.to_string_lossy().into_owned();
                 Some(FileChange {
+                    workspace_path: None,
                     kind: match (tool.kind, diff.old_text.as_deref()) {
                         (acp::ToolKind::Delete, _) => FileChangeKind::Delete,
                         (acp::ToolKind::Move, _) => FileChangeKind::Rename,
@@ -2162,6 +2163,7 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
             .iter()
             .map(|location| FileChange {
                 path: location.path.to_string_lossy().into_owned(),
+                workspace_path: None,
                 kind: match tool.kind {
                     acp::ToolKind::Delete => FileChangeKind::Delete,
                     _ => FileChangeKind::Rename,
@@ -2281,6 +2283,7 @@ pub(crate) fn approval_request(
                 ..Default::default()
             }),
             cwd: None,
+            workspace_cwd: None,
             reason: None,
         },
         acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move => {
@@ -3516,6 +3519,7 @@ mod tests {
                 media_type: "image/png".into(),
                 data_base64: "AAAA".into(),
                 source_path: None,
+                workspace_path: None,
             }],
         );
         let value = serde_json::to_value(&blocks).unwrap();
