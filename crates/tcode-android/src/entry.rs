@@ -7,13 +7,16 @@
 //! serialized against each other.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow};
 use std::rc::Rc;
 
 use client_app::native_transport::NativeTransportFactory;
-use client_app::{ClientApp, ClientConnection, ClientIdentity, TransportFactory};
+use client_app::{
+    ClientApp, ClientConnection, ClientIdentity, ConnectionStore, FileStore, TransportFactory,
+};
 use gpui::{App, AppContext as _, AppLifecyclePhase, ApplicationHandle, TouchPhase, WindowOptions};
 use gpui_android::{
     AndroidDisplayMetrics, AndroidEventSink, AndroidNativeWindow, AndroidPlatform, AndroidSurface,
@@ -114,12 +117,16 @@ fn start(
     // One runtime for the process; the client reconnects through this factory.
     let transport: Arc<dyn TransportFactory> =
         Arc::new(NativeTransportFactory::new().context("starting the client's network runtime")?);
+    // The paired token lands in app-private storage, which the connect screen
+    // fills by pairing — the phone equivalent of the browser's localStorage.
+    let files_dir = app_files_dir(env, activity).context("locating app-private storage")?;
+    let store: Arc<dyn ConnectionStore> = Arc::new(FileStore::new(files_dir));
 
     // The initial surface must stay valid across launch, per the contract.
     let application =
         gpui::Application::with_platform(Rc::new(platform)).run_embedded(move |cx: &mut App| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                let connection = client_connection();
+                let connection = client_connection(store.clone());
                 cx.new(|cx| ClientApp::new(connection, transport.clone(), window, cx))
             })
             .expect("the Android GPUI window must open");
@@ -140,26 +147,47 @@ fn start(
 ///
 /// A panic crossing the JNI boundary aborts the process with no useful Java
 /// stack, so every entry point funnels through here.
+/// The app-private files directory, queried from the Activity.
+///
+/// Android exposes no environment variable for this; `getFilesDir()` is the
+/// source, and it names storage the OS isolates per app — which is where a
+/// durable token belongs.
+fn app_files_dir(env: &mut JNIEnv<'_>, activity: &JObject<'_>) -> Result<PathBuf> {
+    let dir = env
+        .call_method(activity, "getFilesDir", "()Ljava/io/File;", &[])
+        .context("calling getFilesDir()")?
+        .l()
+        .context("getFilesDir must return a File")?;
+    let path = env
+        .call_method(&dir, "getAbsolutePath", "()Ljava/lang/String;", &[])
+        .context("calling getAbsolutePath()")?
+        .l()
+        .context("getAbsolutePath must return a String")?;
+    let path: String = env
+        .get_string(&path.into())
+        .context("decoding the files-dir path")?
+        .into();
+    Ok(PathBuf::from(path))
+}
+
 /// Where this client attaches, and what it calls itself.
 ///
-/// Read from the environment for now. A phone cannot be handed a token the way
-/// a query string hands one to a browser, so real pairing — a code the host
-/// shows and the phone scans — is the next piece of work; until then this keeps
-/// the app runnable without inventing a UX that would have to be thrown away.
-fn client_connection() -> ClientConnection {
+/// The token comes from pairing on the connect screen and is kept in `store`;
+/// the code is typed once. `TCODE_SYNC_URL` survives only as a convenience that
+/// prefills the host address — never a secret, exactly like the browser's
+/// `?url=`.
+fn client_connection(store: Arc<dyn ConnectionStore>) -> ClientConnection {
     ClientConnection {
-        url: std::env::var("TCODE_SYNC_URL")
-            .ok()
-            .filter(|v| !v.is_empty()),
-        token: std::env::var("TCODE_SYNC_TOKEN")
-            .ok()
-            .filter(|v| !v.is_empty()),
         identity: ClientIdentity {
             client_id: format!("tcode-android-{}", std::process::id()),
             display_name: "tcode android".into(),
             platform: "android".into(),
             app_version: env!("CARGO_PKG_VERSION").into(),
         },
+        url: std::env::var("TCODE_SYNC_URL")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        store,
     }
 }
 

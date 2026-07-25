@@ -4,10 +4,11 @@
 //! browser cannot share — a `web-sys` WebSocket, the page's query string, and
 //! the wasm-bindgen entry point.
 
-use std::{borrow::Cow, cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, sync::Arc};
 
 use client_app::{
-    ClientApp, ClientConnection, ClientIdentity, Inbox, Transport, TransportEvent, TransportFactory,
+    ClientApp, ClientConnection, ClientIdentity, ConnectionStore, Inbox, StoredConnection,
+    Transport, TransportEvent, TransportFactory,
 };
 use gpui::{App, AppContext as _, ApplicationHandle, WindowOptions};
 use gpui_component::Root;
@@ -46,11 +47,19 @@ impl TransportFactory for WebTransportFactory {
     }
 }
 
-fn connect(
-    url: &str,
-    hello: &str,
-    incoming: Rc<RefCell<VecDeque<TransportEvent>>>,
-) -> Result<WebSocket, JsValue> {
+/// Push one event onto the shared inbox.
+///
+/// The inbox is an `Arc<Mutex<_>>` because native transports push from a socket
+/// thread; the browser is single-threaded so the lock is never contended, but
+/// the type is shared with those platforms and so is used the same way here.
+fn push(inbox: &Inbox, event: TransportEvent) {
+    inbox
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push_back(event);
+}
+
+fn connect(url: &str, hello: &str, incoming: Inbox) -> Result<WebSocket, JsValue> {
     let socket = WebSocket::new(url)?;
 
     let on_open = Closure::<dyn FnMut(Event)>::new({
@@ -59,9 +68,9 @@ fn connect(
         let incoming = incoming.clone();
         move |_| {
             if socket.send_with_str(&hello).is_err() {
-                incoming.borrow_mut().push_back(TransportEvent::Error);
+                push(&incoming, TransportEvent::Error);
             } else {
-                incoming.borrow_mut().push_back(TransportEvent::Open);
+                push(&incoming, TransportEvent::Open);
             }
         }
     });
@@ -72,7 +81,7 @@ fn connect(
         let incoming = incoming.clone();
         move |event: MessageEvent| {
             if let Some(text) = event.data().as_string() {
-                incoming.borrow_mut().push_back(TransportEvent::Text(text));
+                push(&incoming, TransportEvent::Text(text));
             }
         }
     });
@@ -81,15 +90,13 @@ fn connect(
 
     let on_error = Closure::<dyn FnMut(Event)>::new({
         let incoming = incoming.clone();
-        move |_| incoming.borrow_mut().push_back(TransportEvent::Error)
+        move |_| push(&incoming, TransportEvent::Error)
     });
     socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     on_error.forget();
 
     let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |event: CloseEvent| {
-        incoming
-            .borrow_mut()
-            .push_back(TransportEvent::Closed(event.reason()));
+        push(&incoming, TransportEvent::Closed(event.reason()));
     });
     socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
     on_close.forget();
@@ -97,13 +104,58 @@ fn connect(
     Ok(socket)
 }
 
+/// Persists the paired connection in the browser's `localStorage`.
+///
+/// Stateless: each call re-reads `window.localStorage`, so the handle is
+/// trivially `Send + Sync` for the shared client's bounds even though `Storage`
+/// is neither. The token is the secret this exists to keep out of the address
+/// bar; the URL rides along only so a reload need not re-type it.
+struct LocalStorageStore;
+
+const URL_KEY: &str = "tcode.host_url";
+const TOKEN_KEY: &str = "tcode.sync_token";
+
+impl LocalStorageStore {
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok().flatten()
+    }
+}
+
+impl ConnectionStore for LocalStorageStore {
+    fn load(&self) -> Option<StoredConnection> {
+        let storage = Self::storage()?;
+        // No token means no pairing; the URL alone is just a prefill and is not
+        // worth restoring a session for.
+        let token = storage.get_item(TOKEN_KEY).ok().flatten()?;
+        let url = storage.get_item(URL_KEY).ok().flatten().unwrap_or_default();
+        Some(StoredConnection { url, token })
+    }
+
+    fn save(&self, connection: &StoredConnection) {
+        let Some(storage) = Self::storage() else {
+            return;
+        };
+        // Best-effort: storage can be disabled or full. Failing to persist is
+        // not worth interrupting a working session — the user simply pairs
+        // again next load.
+        let _ = storage.set_item(URL_KEY, &connection.url);
+        let _ = storage.set_item(TOKEN_KEY, &connection.token);
+    }
+
+    fn clear(&self) {
+        let Some(storage) = Self::storage() else {
+            return;
+        };
+        let _ = storage.remove_item(URL_KEY);
+        let _ = storage.remove_item(TOKEN_KEY);
+    }
+}
+
 fn page_config() -> Result<ClientConnection, JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is unavailable"))?;
     let search = window.location().search()?;
     let params = UrlSearchParams::new_with_str(&search)?;
     Ok(ClientConnection {
-        url: params.get("url").filter(|value| !value.is_empty()),
-        token: params.get("token").filter(|value| !value.is_empty()),
         identity: ClientIdentity {
             // Per page load, not per installation: a browser has no stable
             // handle to offer, and claiming one would let a host think two tabs
@@ -113,19 +165,12 @@ fn page_config() -> Result<ClientConnection, JsValue> {
             platform: "web".into(),
             app_version: env!("CARGO_PKG_VERSION").into(),
         },
-    })
-}
-
-/// Delivery ids only need to be unique within this page's lifetime, since the
-/// host correlates them per session and the client forgets them once accepted.
-fn next_delivery_id() -> u64 {
-    thread_local! {
-        static NEXT: RefCell<u64> = RefCell::new(js_sys::Date::now() as u64);
-    }
-    NEXT.with(|next| {
-        let mut next = next.borrow_mut();
-        *next = next.wrapping_add(1);
-        *next
+        // `?url=` prefills the address only — a URL is not a secret. The token
+        // is never read from the page: it is earned by pairing and kept in
+        // localStorage, deliberately never `?token=`, which would leave a
+        // durable credential in the address bar, in history, and in referrers.
+        url: params.get("url").filter(|value| !value.is_empty()),
+        store: Arc::new(LocalStorageStore),
     })
 }
 

@@ -2,9 +2,13 @@
 //!
 //! Web, Android and iOS mount this same view. They differ only in how bytes
 //! reach a host — a browser `WebSocket`, or a native one — which is what
-//! [`TransportFactory`] abstracts. Everything above that seam is identical, so
-//! a fix to the session list or the approval panel lands on all three at once.
+//! [`TransportFactory`] abstracts, and in where a token is kept between loads,
+//! which is what [`ConnectionStore`] abstracts. Everything above those two
+//! seams is identical, so a fix to pairing, the session list, or the approval
+//! panel lands on all three at once.
 //!
+//! A device joins a host once, by typing a short pairing code the host shows on
+//! startup; the token that buys is stored and the code is never needed again.
 //! Portable by construction: `sync-client` folds the protocol, `tcode-ui`'s
 //! `portable` feature supplies the timeline rendering, and nothing here touches
 //! a filesystem or a process — which is the whole reason a phone can run it.
@@ -18,13 +22,13 @@ use std::{
 
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
 };
 use sync_client::{Client, ClientConfig};
 use sync_protocol::{
@@ -32,6 +36,13 @@ use sync_protocol::{
     SessionSummary,
 };
 use tcode_ui::{ChatReadModel, ChatSessionReadModel, ChatView};
+
+pub mod pairing;
+pub mod storage;
+
+#[cfg(not(target_family = "wasm"))]
+pub use storage::FileStore;
+pub use storage::{ConnectionStore, MemoryStore, StoredConnection};
 
 // Native shells (Android, iOS) share one WebSocket implementation; the browser
 // supplies its own, since it has no sockets of this kind.
@@ -199,12 +210,23 @@ pub trait TransportFactory: Send + Sync {
 /// between one shared client and two.
 pub type Inbox = Arc<Mutex<VecDeque<TransportEvent>>>;
 
-/// What a shell reports about itself, and how to reach the host.
+/// What a shell reports about itself.
 pub struct ClientIdentity {
     pub client_id: String,
     pub display_name: String,
     pub platform: String,
     pub app_version: String,
+}
+
+impl ClientIdentity {
+    fn info(&self) -> ClientInfo {
+        ClientInfo {
+            client_id: self.client_id.clone(),
+            display_name: self.display_name.clone(),
+            platform: self.platform.clone(),
+            app_version: self.app_version.clone(),
+        }
+    }
 }
 
 /// True when nothing is waiting. Split out so the poison handling lives in one
@@ -227,17 +249,48 @@ pub enum TransportEvent {
     Closed(String),
 }
 
+/// What a shell supplies to start the client.
 pub struct ClientConnection {
-    pub url: Option<String>,
-    pub token: Option<String>,
     pub identity: ClientIdentity,
+    /// Optional prefill for the host-address field. A URL is not a secret, so a
+    /// shell may pass one taken from its page URL; the token is never taken
+    /// that way.
+    pub url: Option<String>,
+    /// Where the token earned by pairing is kept between loads.
+    pub store: Arc<dyn ConnectionStore>,
+}
+
+/// Which screen the client is on.
+///
+/// A device with no stored token starts on `Connect`; one that has paired goes
+/// straight to `Session`. There is no third state — a running session is the
+/// only thing worth showing once a token exists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Collecting a host address and a pairing code. `pairing` is true from the
+    /// moment Connect is pressed until a `Paired` or a refusal comes back, so
+    /// the button can disable itself while a code is in flight.
+    Connect {
+        pairing: bool,
+    },
+    Session,
 }
 
 pub struct ClientApp {
+    identity: ClientIdentity,
+    store: Arc<dyn ConnectionStore>,
     client: Client,
     transport: Arc<dyn TransportFactory>,
     socket: Option<Box<dyn Transport>>,
     incoming: Inbox,
+    phase: Phase,
+    // Connect screen.
+    url_input: Entity<InputState>,
+    code_input: Entity<InputState>,
+    /// In-progress or refusal text on the connect screen. Held apart from
+    /// `status` so returning to pairing does not inherit a session's last line.
+    connect_status: SharedString,
+    // Session screen.
     sessions: Vec<SessionSummary>,
     selected: Option<String>,
     chat: Entity<ChatView>,
@@ -255,6 +308,7 @@ pub struct ClientApp {
     /// be applied, and staying silent would leave a turn rendered that never ran.
     rejections_seen: usize,
     command_ui: CommandUiState,
+    _subscriptions: Vec<Subscription>,
     _poll: gpui::Task<()>,
     _reconnect: Option<gpui::Task<()>>,
 }
@@ -266,37 +320,85 @@ impl ClientApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let ClientConnection {
+            identity,
+            url: url_prefill,
+            store,
+        } = config;
         let incoming: Inbox = Arc::new(Mutex::new(VecDeque::new()));
-        let client_id = config.identity.client_id.clone();
-        let mut client = Client::new(ClientConfig {
-            client: ClientInfo {
-                client_id,
-                display_name: config.identity.display_name.clone(),
-                platform: config.identity.platform.clone(),
-                app_version: config.identity.app_version.clone(),
-            },
-            token: config.token.clone().unwrap_or_default(),
-        });
-        let hello = client
-            .connect()
-            .encode()
-            .expect("the fixed hello frame must encode");
-        let retained_hello = hello.clone();
         let chat = cx.new(|cx| ChatView::from_read_model(ChatReadModel::default(), window, cx));
         let composer =
             cx.new(|cx| InputState::new(window, cx).placeholder("Send a message to this session…"));
+        let url_input = cx.new(|cx| InputState::new(window, cx).placeholder("ws://host:port/sync"));
+        let code_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("6-character code from the host"));
 
-        let retained_url = config.url.clone();
-        let (socket, status) = match (config.url, config.token) {
-            (Some(url), Some(_)) => match transport.connect(&url, &hello, incoming.clone()) {
-                Ok(socket) => (Some(socket), "Connecting…".into()),
-                Err(error) => (None, format!("WebSocket error: {error:?}").into()),
-            },
-            _ => (
-                None,
-                "Add ?url=ws%3A%2F%2FHOST%3APORT%2Fsync&token=TOKEN to this page URL.".into(),
+        let subscriptions = vec![
+            // Upper-case the code as it is typed. A code is read off one screen
+            // and typed into another; failing that on caps reads as "pairing is
+            // broken" rather than as a typo. `set_value` suppresses its own
+            // Change event, so this does not recurse.
+            cx.subscribe_in(
+                &code_input,
+                window,
+                |this, input, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let raw = input.read(cx).value().to_string();
+                        let upper = raw.to_ascii_uppercase();
+                        if upper != raw {
+                            input.update(cx, |state, cx| state.set_value(upper, window, cx));
+                        }
+                    }
+                    InputEvent::PressEnter { .. } => this.start_pairing(cx),
+                    _ => {}
+                },
             ),
-        };
+            cx.subscribe_in(&url_input, window, |this, _input, event, _window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.start_pairing(cx);
+                }
+            }),
+        ];
+
+        let stored = storage::usable_connection(store.load());
+        if let Some(prefill) = stored
+            .as_ref()
+            .map(|connection| connection.url.clone())
+            .or(url_prefill)
+        {
+            url_input.update(cx, |state, cx| state.set_value(prefill, window, cx));
+        }
+
+        // A stored token skips the connect screen entirely and opens the
+        // session; its absence leaves the client on Connect awaiting a code.
+        let mut client = Client::new(ClientConfig {
+            client: identity.info(),
+            token: String::new(),
+        });
+        let mut phase = Phase::Connect { pairing: false };
+        let mut retained_hello = String::new();
+        let mut socket = None;
+        let mut retained_url = None;
+        let mut status = SharedString::default();
+        if let Some(connection) = stored {
+            client = Client::new(ClientConfig {
+                client: identity.info(),
+                token: connection.token,
+            });
+            retained_hello = client
+                .connect()
+                .encode()
+                .expect("the fixed hello frame must encode");
+            retained_url = Some(connection.url.clone());
+            phase = Phase::Session;
+            status = "Connecting…".into();
+            match transport.connect(&connection.url, &retained_hello, incoming.clone()) {
+                Ok(open) => socket = Some(open),
+                Err(error) => {
+                    status = format!("Could not reach {}: {error}", connection.url).into()
+                }
+            }
+        }
 
         let poll = cx.spawn({
             let incoming = incoming.clone();
@@ -317,10 +419,16 @@ impl ClientApp {
         });
 
         Self {
+            identity,
+            store,
             client,
             transport,
             socket,
             incoming,
+            phase,
+            url_input,
+            code_input,
+            connect_status: SharedString::default(),
             sessions: Vec::new(),
             selected: None,
             chat,
@@ -331,31 +439,168 @@ impl ClientApp {
             reconnect_attempts: 0,
             rejections_seen: 0,
             command_ui: CommandUiState::default(),
+            _subscriptions: subscriptions,
             _poll: poll,
             _reconnect: None,
         }
+    }
+
+    /// Trade the typed code for a token: open a connection whose first frame is
+    /// `Pair` rather than `Hello`.
+    fn start_pairing(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.phase, Phase::Connect { pairing: true }) {
+            return;
+        }
+        let url = self.url_input.read(cx).value().trim().to_string();
+        let code = pairing::normalize_code(&self.code_input.read(cx).value());
+        if url.is_empty() {
+            self.connect_status = "Enter the host address.".into();
+            cx.notify();
+            return;
+        }
+        if !pairing::is_complete_code(&code) {
+            self.connect_status =
+                format!("A pairing code is {} characters.", pairing::CODE_LEN).into();
+            cx.notify();
+            return;
+        }
+
+        // A pairing client carries no token — the code stands in for one — so it
+        // must not fall back to any stored secret. The `Pair` frame is the
+        // connection's first, before any `Hello`.
+        self.client = Client::new(ClientConfig {
+            client: self.identity.info(),
+            token: String::new(),
+        });
+        let pair = self
+            .client
+            .pair(code)
+            .encode()
+            .expect("the pair frame must encode");
+        self.url = Some(url.clone());
+        self.socket = None;
+        lock_inbox(&self.incoming).clear();
+        self.phase = Phase::Connect { pairing: true };
+        self.connect_status = "Pairing…".into();
+        match self.transport.connect(&url, &pair, self.incoming.clone()) {
+            Ok(socket) => self.socket = Some(socket),
+            Err(error) => {
+                self.connect_status = format!("Could not reach {url}: {error}").into();
+                self.phase = Phase::Connect { pairing: false };
+            }
+        }
+        cx.notify();
+    }
+
+    /// A code was accepted: persist the token so the code is never needed again,
+    /// then open the session with an ordinary `Hello`.
+    fn complete_pairing(&mut self, token: String, cx: &mut Context<Self>) {
+        let url = self.url.clone().unwrap_or_default();
+        self.store.save(&StoredConnection {
+            url: url.clone(),
+            token: token.clone(),
+        });
+        self.open_session(url, token, cx);
+    }
+
+    /// Open (or reopen) the session connection with a token in hand.
+    ///
+    /// Shared by first pairing and by a stored-token start: both recreate the
+    /// client with the token, cache the `Hello` for reconnects, and connect.
+    fn open_session(&mut self, url: String, token: String, cx: &mut Context<Self>) {
+        self.client = Client::new(ClientConfig {
+            client: self.identity.info(),
+            token,
+        });
+        self.hello = self
+            .client
+            .connect()
+            .encode()
+            .expect("the fixed hello frame must encode");
+        self.url = Some(url.clone());
+        self.phase = Phase::Session;
+        self.reconnect_attempts = 0;
+        self.rejections_seen = 0;
+        self.sessions.clear();
+        self.selected = None;
+        self.command_ui = CommandUiState::default();
+        // Drop the pairing socket and discard anything it left queued before the
+        // session socket opens, so a pairing-socket close cannot be mistaken for
+        // a session drop.
+        self.socket = None;
+        lock_inbox(&self.incoming).clear();
+        self.status = "Connecting…".into();
+        match self
+            .transport
+            .connect(&url, &self.hello, self.incoming.clone())
+        {
+            Ok(socket) => self.socket = Some(socket),
+            Err(error) => self.status = format!("Could not reach {url}: {error}").into(),
+        }
+        cx.notify();
+    }
+
+    /// Forget the stored token and return to the connect screen.
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        self.store.clear();
+        self.socket = None;
+        self._reconnect = None;
+        lock_inbox(&self.incoming).clear();
+        self.client = Client::new(ClientConfig {
+            client: self.identity.info(),
+            token: String::new(),
+        });
+        self.sessions.clear();
+        self.selected = None;
+        self.command_ui = CommandUiState::default();
+        self.phase = Phase::Connect { pairing: false };
+        self.status = SharedString::default();
+        // The address field keeps its value: signing out is not a reason to
+        // make the user retype where the host is.
+        self.connect_status = "Signed out.".into();
+        cx.notify();
     }
 
     fn drain_transport(&mut self, cx: &mut Context<Self>) {
         let events: Vec<_> = lock_inbox(&self.incoming).drain(..).collect();
         for event in events {
             match event {
-                TransportEvent::Open => {
-                    self.status = "Authenticating…".into();
-                    self.reconnect_attempts = 0;
-                }
+                TransportEvent::Open => match self.phase {
+                    Phase::Session => {
+                        self.status = "Authenticating…".into();
+                        self.reconnect_attempts = 0;
+                    }
+                    Phase::Connect { .. } => self.connect_status = "Pairing…".into(),
+                },
                 TransportEvent::Text(text) => self.handle_text(&text, cx),
-                TransportEvent::Error => {
-                    self.status = "WebSocket transport error".into();
-                }
-                TransportEvent::Closed(reason) => {
-                    self.status = if reason.is_empty() {
-                        "Disconnected — reconnecting…".into()
-                    } else {
-                        format!("Disconnected: {reason} — reconnecting…").into()
-                    };
-                    self.schedule_reconnect(cx);
-                }
+                TransportEvent::Error => match self.phase {
+                    Phase::Session => self.status = "WebSocket transport error".into(),
+                    Phase::Connect { pairing } if pairing => {
+                        self.connect_status =
+                            "Could not reach the host — check the address.".into();
+                        self.phase = Phase::Connect { pairing: false };
+                        self.socket = None;
+                    }
+                    Phase::Connect { .. } => {}
+                },
+                TransportEvent::Closed(reason) => match self.phase {
+                    Phase::Session => {
+                        self.status = if reason.is_empty() {
+                            "Disconnected — reconnecting…".into()
+                        } else {
+                            format!("Disconnected: {reason} — reconnecting…").into()
+                        };
+                        self.schedule_reconnect(cx);
+                    }
+                    Phase::Connect { pairing } if pairing => {
+                        self.connect_status =
+                            "The host closed the connection before pairing — check the address."
+                                .into();
+                        self.phase = Phase::Connect { pairing: false };
+                        self.socket = None;
+                    }
+                    Phase::Connect { .. } => {}
+                },
             }
         }
         cx.notify();
@@ -365,10 +610,31 @@ impl ClientApp {
         let frame = match HostFrame::decode(text) {
             Ok(frame) => frame,
             Err(error) => {
-                self.status = format!("Protocol decode error: {error}").into();
+                let message: SharedString = format!("Protocol decode error: {error}").into();
+                match self.phase {
+                    Phase::Session => self.status = message,
+                    Phase::Connect { .. } => self.connect_status = message,
+                }
                 return;
             }
         };
+
+        // Before a token exists the shared `Client` cannot fold these frames —
+        // its connection is not yet in a handshake — so pairing is handled here,
+        // exactly as `sync-probe`'s `pair` command does.
+        if matches!(self.phase, Phase::Connect { .. }) {
+            match frame {
+                HostFrame::Paired { token, .. } => self.complete_pairing(token, cx),
+                HostFrame::Refused { reason } => {
+                    self.connect_status = pairing::refusal_message(&reason).into();
+                    self.phase = Phase::Connect { pairing: false };
+                    self.socket = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let was_ready = self.client.is_ready();
         let is_session_list = matches!(frame, HostFrame::SessionList { .. });
         let affects_selected = matches!(
@@ -412,8 +678,17 @@ impl ClientApp {
                 .unwrap_or_else(|| "host".into());
             self.status = format!("Connected to {host}").into();
             self.send(self.client.request_sessions());
-        } else if let Some(reason) = self.client.refusal_reason() {
-            self.status = format!("Connection refused: {reason:?}").into();
+        } else if let Some(reason) = self.client.refusal_reason().cloned() {
+            // A stored token the host no longer honours cannot be salvaged by
+            // reconnecting, so clear it and send the user back to pairing rather
+            // than into a loop. Other refusals land there too — the connect
+            // screen is where a fresh code is entered.
+            self.store.clear();
+            self.socket = None;
+            self._reconnect = None;
+            self.phase = Phase::Connect { pairing: false };
+            self.connect_status = pairing::refusal_message(&reason).into();
+            return;
         }
 
         if is_session_list {
@@ -624,6 +899,72 @@ impl ClientApp {
 
 impl Render for ClientApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.phase {
+            Phase::Connect { pairing } => self.render_connect(pairing, cx).into_any_element(),
+            Phase::Session => self.render_session(window, cx).into_any_element(),
+        }
+    }
+}
+
+impl ClientApp {
+    /// The connect screen: a host address, a pairing code, and one action.
+    fn render_connect(&self, pairing: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let field = |label: &str, input: &Entity<InputState>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(SharedString::from(label.to_string())),
+                )
+                .child(Input::new(input))
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .w(px(320.))
+                    .child(div().text_xl().font_semibold().child("Connect to a host"))
+                    .child(div().text_sm().text_color(muted).child(
+                        "On the host computer, tcode shows a short pairing code when it starts. \
+                         Enter the host's address and that code to pair this device once.",
+                    ))
+                    .child(field("Host address", &self.url_input))
+                    .child(field("Pairing code", &self.code_input))
+                    .child(
+                        Button::new("connect")
+                            .primary()
+                            .label(if pairing { "Pairing…" } else { "Connect" })
+                            .disabled(pairing)
+                            .on_click(cx.listener(|this, _, _, cx| this.start_pairing(cx))),
+                    )
+                    .when(!self.connect_status.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(self.connect_status.clone()),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_session(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         // One breakpoint, not a scale factor. Below it a phone cannot show two
         // panes at once — a 280px sidebar eats 72% of a 390pt screen — so the
         // shell switches from side-by-side to one-at-a-time rather than
@@ -696,7 +1037,21 @@ impl Render for ClientApp {
             .when(narrow, |column| column.size_full())
             .p_3()
             .gap_3()
-            .child(div().text_lg().font_semibold().child("tcode"))
+            .child(
+                // The host name and the one control that leaves it: sign-out
+                // clears the stored token and returns to pairing.
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_lg().font_semibold().child("tcode"))
+                    .child(
+                        Button::new("sign-out")
+                            .ghost()
+                            .label("Sign out")
+                            .on_click(cx.listener(|this, _, _, cx| this.sign_out(cx))),
+                    ),
+            )
             .child(
                 div()
                     .text_xs()
@@ -754,10 +1109,9 @@ impl Render for ClientApp {
                     conversation.into_any_element(),
                 ]
             })
+            .into_any_element()
     }
-}
 
-impl ClientApp {
     fn render_local_turns(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(session_id) = self.selected.as_deref() else {
             return Vec::new();
