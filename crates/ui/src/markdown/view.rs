@@ -206,9 +206,9 @@ impl Element for MarkdownView {
                             ),
                         LinkTarget::Local(path) => {
                             let path = path.to_string_lossy().into_owned();
-                            let relative_path = markdown.base_dir().map(|base_dir| {
-                                tcode_runtime::ui_facade::relativize_to_workspace(&path, base_dir)
-                            });
+                            let relative_path = markdown
+                                .base_dir()
+                                .map(|base_dir| relativize_to_workspace(&path, base_dir));
                             menu.menu(
                                 tcode_i18n::tr!("chat.open").into_owned(),
                                 Box::new(OpenPath(path.clone())),
@@ -289,6 +289,7 @@ impl Element for MarkdownView {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
     if tcode_runtime::ui_facade::open_in_zed(path).is_err() {
         window.push_notification(
@@ -296,6 +297,21 @@ fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
             cx,
         );
     }
+}
+
+// Local-path launching is host-owned; portable builds keep link rendering and
+// copying but cannot dispatch a desktop editor process.
+#[cfg(not(feature = "desktop"))]
+fn open_in_zed(_path: &Path, _window: &mut Window, _cx: &mut App) {}
+
+fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let path_buf = Path::new(path);
+    path_buf
+        .strip_prefix(cwd)
+        .or_else(|_| path_buf.strip_prefix(&canonical_cwd))
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 #[cfg(test)]

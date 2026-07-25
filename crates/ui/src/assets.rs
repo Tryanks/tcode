@@ -2,6 +2,11 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 use gpui_component_assets::Assets as ComponentAssets;
+#[cfg(target_family = "wasm")]
+use std::sync::LazyLock;
+
+#[cfg(target_family = "wasm")]
+static COMPONENT_ASSETS: LazyLock<ComponentAssets> = LazyLock::new(ComponentAssets::default);
 
 pub const DM_SANS: &[u8] = include_bytes!("../../../assets/fonts/DMSans[wght].ttf");
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -86,11 +91,17 @@ impl AssetSource for Assets {
         if let Some((_, bytes)) = EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
-        ComponentAssets.load(path)
+        #[cfg(not(target_family = "wasm"))]
+        return ComponentAssets.load(path);
+        #[cfg(target_family = "wasm")]
+        COMPONENT_ASSETS.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        #[cfg(not(target_family = "wasm"))]
         let mut paths = ComponentAssets.list(path)?;
+        #[cfg(target_family = "wasm")]
+        let mut paths = COMPONENT_ASSETS.list(path)?;
         if DM_SANS_PATH.starts_with(path) {
             paths.push(DM_SANS_PATH.into());
         }
