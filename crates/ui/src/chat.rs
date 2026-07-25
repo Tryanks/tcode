@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use agent::{ChangeCompleteness, FileChange, ItemStatus, RewindMode};
+#[cfg(feature = "desktop")]
+use agent::RewindMode;
+use agent::{ChangeCompleteness, FileChange, ItemStatus};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, FollowMode,
     Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState, ObjectFit,
@@ -25,20 +27,29 @@ use gpui_component::{
     v_flex,
 };
 
-use tcode_core::git::{GitAction, MenuItem, QuickAction};
+#[cfg(feature = "desktop")]
+use tcode_core::git::GitAction;
+use tcode_core::git::{MenuItem, QuickAction};
 use tcode_core::session::{
     EntryContent, OrchestrateCallback, SteeringStatus, Timeline, TimelineEntry, TurnMeta,
     TurnTiming, parse_orchestrate_callback,
 };
+#[cfg(feature = "desktop")]
 use tcode_runtime::app::{AppState, RightTab};
 
+#[cfg(feature = "desktop")]
 use crate::commit_dialog::CommitDialog;
+#[cfg(feature = "desktop")]
 use crate::composer::{Composer, ComposerEvent};
+#[cfg(feature = "desktop")]
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::markdown::{MarkdownState, MarkdownView};
+#[cfg(feature = "desktop")]
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_millis;
+#[cfg(feature = "desktop")]
 use crate::window_caption;
+#[cfg(feature = "desktop")]
 use crate::window_drag_area;
 
 /// Content-column max width (T3 centers the timeline at ~760px). Shared with
@@ -707,6 +718,7 @@ impl ChatSessionReadModel {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl From<&AppState> for ChatReadModel {
     fn from(state: &AppState) -> Self {
         let active = state.active.as_ref().map(|active| ChatSessionReadModel {
@@ -739,9 +751,12 @@ impl From<&AppState> for ChatReadModel {
 }
 
 pub struct ChatView {
+    #[cfg(feature = "desktop")]
     app_state: Entity<AppState>,
     read_model: Arc<ChatReadModel>,
+    #[cfg(feature = "desktop")]
     composer: Entity<Composer>,
+    #[cfg(feature = "desktop")]
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
@@ -756,11 +771,13 @@ pub struct ChatView {
     copied: Option<String>,
     _copied_task: Option<Task<()>>,
     /// The live commit dialog entity while it is open (kept alive across frames).
+    #[cfg(feature = "desktop")]
     commit_dialog: Option<Entity<CommitDialog>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ChatView {
+    #[cfg(feature = "desktop")]
     pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| Composer::new(app_state.clone(), window, cx));
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
@@ -802,7 +819,42 @@ impl ChatView {
         this
     }
 
+    /// Construct the timeline-only surface from state already owned by a remote client.
+    #[cfg(feature = "portable")]
+    pub fn from_read_model(
+        read_model: ChatReadModel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
+        list_state.set_follow_mode(FollowMode::Tail);
+        let mut this = Self {
+            read_model: Arc::new(read_model),
+            list_state,
+            turn_items: Vec::new(),
+            md_states: HashMap::new(),
+            expanded: HashSet::new(),
+            session_key: None,
+            _tick: None,
+            copied: None,
+            _copied_task: None,
+            _subscriptions: Vec::new(),
+        };
+        this.sync_markdown_states(cx);
+        this
+    }
+
+    /// Replace the remote snapshot without coupling the view to its sync store.
+    #[cfg(feature = "portable")]
+    pub fn set_read_model(&mut self, read_model: ChatReadModel, cx: &mut Context<Self>) {
+        self.read_model = Arc::new(read_model);
+        self.sync_markdown_states(cx);
+        cx.notify();
+    }
+
     /// Refresh the desktop adapter. Timeline rendering below consumes only this snapshot.
+    #[cfg(feature = "desktop")]
     fn refresh_read_model(&mut self, cx: &mut Context<Self>) {
         self.read_model = Arc::new(ChatReadModel::from(self.app_state.read(cx)));
         self.sync_markdown_states(cx);
@@ -898,7 +950,10 @@ impl ChatView {
         if running && self._tick.is_none() {
             self._tick = Some(cx.spawn(async move |this, cx| {
                 loop {
+                    #[cfg(feature = "desktop")]
                     smol::Timer::after(Duration::from_secs(1)).await;
+                    #[cfg(not(feature = "desktop"))]
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -1168,6 +1223,7 @@ impl ChatView {
             .into_any_element()
     }
 
+    #[cfg(feature = "desktop")]
     fn render_native_rewind_button(
         &self,
         turn: usize,
@@ -1264,6 +1320,16 @@ impl ChatView {
                 })
                 .into_any_element(),
         )
+    }
+
+    // Native rewind mutates host-owned checkpoints, so remote clients omit it.
+    #[cfg(not(feature = "desktop"))]
+    fn render_native_rewind_button(
+        &self,
+        _turn: usize,
+        _session: &ChatSessionReadModel,
+    ) -> Option<AnyElement> {
+        None
     }
 
     /// A user message: the right-aligned bubble plus its action row. The
@@ -2187,7 +2253,7 @@ impl ChatView {
             .map(|c| diff_stats(c.diff.as_deref()))
             .fold((0, 0), |(a, d), (ca, cd)| (a + ca, d + cd));
 
-        let header = h_flex()
+        let mut header = h_flex()
             .w_full()
             .px_1()
             .py_1()
@@ -2230,18 +2296,22 @@ impl ChatView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_expanded(index, &card_key, cx);
                     })),
-            )
-            .child(
+            );
+        // Opening the native diff panel mutates AppState. Portable clients get
+        // the complete changed-files summary but no inert host-only control.
+        #[cfg(feature = "desktop")]
+        {
+            header = header.child(
                 Button::new(("view-diff", index))
                     .outline()
                     .xsmall()
                     .label(tcode_i18n::tr!("chat.view_diff"))
                     .tooltip(tcode_i18n::tr!("chat.view_diff_tooltip"))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.open_diff_for_turn(index, cx));
+                        this.open_diff_for_turn(index, cx);
                     })),
             );
+        }
 
         let mut content = v_flex().w_full().child(header);
 
@@ -2276,42 +2346,45 @@ impl ChatView {
                     );
                 }
                 for file in files {
+                    #[cfg(feature = "desktop")]
                     let path = file.path.clone();
+                    #[cfg(feature = "desktop")]
                     let row_label = format!("{}: {}", tcode_i18n::tr!("chat.view_diff"), file.path);
+                    #[cfg(feature = "desktop")]
+                    let row = crate::material::accessible_clickable(
+                        h_flex(),
+                        SharedString::from(format!("changed-file-{index}-{}", file.path)),
+                        Role::Button,
+                        row_label,
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_diff_for_file(index, path.clone(), cx);
+                    }));
+                    #[cfg(not(feature = "desktop"))]
+                    let row = h_flex();
                     body = body.child(
-                        crate::material::accessible_clickable(
-                            h_flex(),
-                            SharedString::from(format!("changed-file-{index}-{}", file.path)),
-                            Role::Button,
-                            row_label,
-                            cx,
-                        )
-                        .w_full()
-                        .pl(px(if dir.is_empty() { 8. } else { 28. }))
-                        .pr_2()
-                        .py_1()
-                        .gap_1p5()
-                        .items_center()
-                        .text_size(px(13.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().list_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.app_state.update(cx, |state, cx| {
-                                state.open_diff_for_file(index, path.clone(), cx)
-                            });
-                        }))
-                        .child(Icon::new(IconName::File).xsmall().text_color(muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(file.name),
-                        )
-                        .child(diff_counts(file.added, file.deleted, cx)),
+                        row.w_full()
+                            .pl(px(if dir.is_empty() { 8. } else { 28. }))
+                            .pr_2()
+                            .py_1()
+                            .gap_1p5()
+                            .items_center()
+                            .text_size(px(13.))
+                            .rounded(px(6.))
+                            .hover(|s| s.bg(cx.theme().list_hover))
+                            .when(cfg!(feature = "desktop"), |row| row.cursor_pointer())
+                            .child(Icon::new(IconName::File).xsmall().text_color(muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(file.name),
+                            )
+                            .child(diff_counts(file.added, file.deleted, cx)),
                     );
                 }
             }
@@ -2356,9 +2429,56 @@ impl ChatView {
         };
 
         let md_copy = markdown.to_string();
+        #[cfg(feature = "desktop")]
         let md_download = markdown.to_string();
+        #[cfg(feature = "desktop")]
         let md_save = markdown.to_string();
         let copied = self.copied.as_deref() == Some("plan");
+
+        let mut plan_actions = h_flex().w_full().gap_1().flex_wrap().child(
+            Button::new(("plan-copy", turn))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Copy)
+                .label(if copied {
+                    tcode_i18n::tr!("plan.copied")
+                } else {
+                    tcode_i18n::tr!("plan.copy")
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let md = md_copy.clone();
+                    this.copy_plan(md, cx);
+                })),
+        );
+        // Download and workspace save are filesystem operations owned by the
+        // desktop host; the portable card intentionally exposes Copy only.
+        #[cfg(feature = "desktop")]
+        {
+            plan_actions = plan_actions
+                .child(
+                    Button::new(("plan-download", turn))
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::empty().path("icons/download.svg"))
+                        .label(tcode_i18n::tr!("plan.download"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let md = md_download.clone();
+                            let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
+                            this.download_plan(md, fallback, cx);
+                        })),
+                )
+                .child(
+                    Button::new(("plan-save", turn))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::HardDrive)
+                        .label(tcode_i18n::tr!("plan.save_workspace"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let md = md_save.clone();
+                            this.save_plan_to_workspace(md, cx);
+                        })),
+                );
+        }
 
         let content = v_flex()
             .flex_1()
@@ -2409,53 +2529,7 @@ impl ChatView {
                     }),
             )
             .child(body)
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .flex_wrap()
-                    .child(
-                        Button::new(("plan-copy", turn))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Copy)
-                            .label(if copied {
-                                tcode_i18n::tr!("plan.copied")
-                            } else {
-                                tcode_i18n::tr!("plan.copy")
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let md = md_copy.clone();
-                                this.app_state.update(cx, |s, cx| s.copy_plan(md, cx));
-                                this.mark_copied("plan".into(), cx);
-                            })),
-                    )
-                    .child(
-                        Button::new(("plan-download", turn))
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::empty().path("icons/download.svg"))
-                            .label(tcode_i18n::tr!("plan.download"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let md = md_download.clone();
-                                let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
-                                this.app_state
-                                    .update(cx, |s, cx| s.download_plan(md, fallback, cx));
-                            })),
-                    )
-                    .child(
-                        Button::new(("plan-save", turn))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::HardDrive)
-                            .label(tcode_i18n::tr!("plan.save_workspace"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let md = md_save.clone();
-                                this.app_state
-                                    .update(cx, |s, cx| s.save_plan_to_workspace(md, cx));
-                            })),
-                    ),
-            );
+            .child(plan_actions);
 
         h_flex()
             .w_full()
@@ -2481,7 +2555,10 @@ impl ChatView {
     fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
         self.copied = Some(key.clone());
         self._copied_task = Some(cx.spawn(async move |this, cx| {
+            #[cfg(feature = "desktop")]
             smol::Timer::after(Duration::from_secs(2)).await;
+            #[cfg(not(feature = "desktop"))]
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.copied.as_deref() == Some(key.as_str()) {
                     this.copied = None;
@@ -2490,6 +2567,39 @@ impl ChatView {
             });
         }));
         cx.notify();
+    }
+
+    #[cfg(feature = "desktop")]
+    fn open_diff_for_turn(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.app_state
+            .update(cx, |state, cx| state.open_diff_for_turn(index, cx));
+    }
+
+    #[cfg(feature = "desktop")]
+    fn open_diff_for_file(&mut self, index: usize, path: String, cx: &mut Context<Self>) {
+        self.app_state
+            .update(cx, |state, cx| state.open_diff_for_file(index, path, cx));
+    }
+
+    fn copy_plan(&mut self, markdown: String, cx: &mut Context<Self>) {
+        #[cfg(feature = "desktop")]
+        self.app_state
+            .update(cx, |state, cx| state.copy_plan(markdown, cx));
+        #[cfg(not(feature = "desktop"))]
+        cx.write_to_clipboard(copy_payload(&markdown));
+        self.mark_copied("plan".into(), cx);
+    }
+
+    #[cfg(feature = "desktop")]
+    fn download_plan(&mut self, markdown: String, fallback: String, cx: &mut Context<Self>) {
+        self.app_state
+            .update(cx, |state, cx| state.download_plan(markdown, fallback, cx));
+    }
+
+    #[cfg(feature = "desktop")]
+    fn save_plan_to_workspace(&mut self, markdown: String, cx: &mut Context<Self>) {
+        self.app_state
+            .update(cx, |state, cx| state.save_plan_to_workspace(markdown, cx));
     }
 
     /// The finished turn's bottom row: the local completion clock, followed by
@@ -2509,6 +2619,7 @@ impl ChatView {
 
     // -- top-level surfaces -------------------------------------------------
 
+    #[cfg(feature = "desktop")]
     fn render_header(
         &self,
         read_model: &ChatReadModel,
@@ -2681,6 +2792,7 @@ impl ChatView {
     /// action follows the background git status (Commit / Commit & push / Push /
     /// Pull / Publish branch / Initialize Git, or a disabled status hint); the
     /// chevron lists the applicable subset. Ported from T3's `GitActionsControl`.
+    #[cfg(feature = "desktop")]
     fn render_git_button(
         &self,
         read_model: &ChatReadModel,
@@ -2820,6 +2932,7 @@ impl ChatView {
 
     /// Dispatch a git quick-action: commit-style actions open the commit dialog;
     /// everything else runs in the background with a progress toast.
+    #[cfg(feature = "desktop")]
     fn trigger_git_action(
         &mut self,
         action: GitAction,
@@ -2836,6 +2949,7 @@ impl ChatView {
     }
 
     /// Open the commit dialog for `action` (Commit or Commit & push).
+    #[cfg(feature = "desktop")]
     fn open_commit_dialog(
         &mut self,
         action: GitAction,
@@ -2860,6 +2974,7 @@ impl ChatView {
     /// The bordered "Open" split-button: main click opens the session cwd in
     /// Zed; the chevron opens a menu (Zed / Finder / Copy path). Matches T3's
     /// header control.
+    #[cfg(feature = "desktop")]
     fn render_open_button(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
         let border = cx.theme().border;
         let main_cwd = cwd.clone();
@@ -2983,6 +3098,7 @@ impl ChatView {
             .into_any_element()
     }
 
+    #[cfg(feature = "desktop")]
     fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .flex_1()
@@ -3027,6 +3143,7 @@ impl ChatView {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Screenshot-only: `--debug-git-dialog` opens the commit dialog once the
@@ -3177,6 +3294,76 @@ impl Render for ChatView {
     }
 }
 
+#[cfg(all(feature = "portable", not(feature = "desktop")))]
+impl Render for ChatView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let read_model = self.read_model.clone();
+        let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
+        let Some(active) = read_model.active.as_ref() else {
+            return root.into_any_element();
+        };
+        let cwd = active.cwd.clone();
+        let (last_user_id, last_assistant_id) = {
+            let entries = &active.timeline.entries;
+            (
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| matches!(entry.content, EntryContent::User { .. }))
+                    .map(|entry| entry.id.clone()),
+                entries
+                    .iter()
+                    .rev()
+                    .find(|entry| matches!(entry.content, EntryContent::Assistant { .. }))
+                    .map(|entry| entry.id.clone()),
+            )
+        };
+        let item_count = self.turn_items.len();
+        let item_cwd = cwd;
+        let item_read_model = read_model;
+        let timeline = list(
+            self.list_state.clone(),
+            cx.processor(move |this, index: usize, window, cx| {
+                let Some(item) = this.turn_items.get(index) else {
+                    return div().into_any_element();
+                };
+                let Some(active) = item_read_model.active.as_ref() else {
+                    return div().into_any_element();
+                };
+                let turn = active
+                    .timeline
+                    .turns
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                let entries = active.timeline.entries[item.entry_range.clone()].to_vec();
+                let rendered = this.render_turn(
+                    index,
+                    &turn,
+                    active,
+                    &item_cwd,
+                    &entries,
+                    (last_user_id.as_deref(), last_assistant_id.as_deref()),
+                    window,
+                    cx,
+                );
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .px(px(CONTENT_MIN_PADDING))
+                    .when(index + 1 < item_count, |item| item.pb(px(TURN_GAP)))
+                    .child(div().w_full().max_w(px(CONTENT_MAX_WIDTH)).child(rendered))
+                    .into_any_element()
+            }),
+        )
+        .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+        .flex_1()
+        .min_h_0()
+        .py_6();
+        root.child(timeline).into_any_element()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -3219,6 +3406,7 @@ fn chevron(open: bool) -> IconName {
 
 /// Launch `zed <cwd>` detached; surface a notification if the CLI is missing.
 /// The leading icon for a git quick-action.
+#[cfg(feature = "desktop")]
 fn git_action_icon(action: GitAction) -> Icon {
     match action {
         GitAction::Push => Icon::new(IconName::ArrowUp),
@@ -3229,6 +3417,7 @@ fn git_action_icon(action: GitAction) -> Icon {
 
 /// The commit dialog's footer action row (Cancel / Commit[& push]). Built inside
 /// the `open_dialog` builder so the buttons can close the dialog on click.
+#[cfg(feature = "desktop")]
 fn render_commit_footer(
     dialog: &Entity<CommitDialog>,
     _window: &mut Window,
@@ -3264,6 +3453,7 @@ fn render_commit_footer(
         .into_any_element()
 }
 
+#[cfg(feature = "desktop")]
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     if tcode_runtime::ui_facade::open_in_zed(cwd).is_err() {
         window.push_notification(
@@ -3275,6 +3465,7 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 
 /// Reveal `cwd` in the platform's file manager (Finder / Explorer / the XDG
 /// file manager). gpui does the platform dispatch, so no shell-out is needed.
+#[cfg(feature = "desktop")]
 fn reveal_in_file_manager(cwd: &Path, cx: &mut App) {
     cx.reveal_path(cwd);
 }
@@ -3477,7 +3668,7 @@ fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEditRow> {
     changes
         .iter()
         .map(|change| LiveEditRow {
-            path: tcode_runtime::ui_facade::relativize_to_workspace(&change.path, cwd),
+            path: relativize_to_workspace(&change.path, cwd),
             counts: live_edit_counts(change.diff.as_deref()),
         })
         .collect()
@@ -3521,7 +3712,7 @@ fn work_log_row_entries<'a>(
 fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>)> {
     let mut groups: Vec<(String, Vec<FileRow>)> = Vec::new();
     for change in changes {
-        let display = tcode_runtime::ui_facade::relativize_to_workspace(&change.path, cwd);
+        let display = relativize_to_workspace(&change.path, cwd);
         let (dir, name) = match display.rsplit_once('/') {
             Some((dir, name)) => (dir.to_string(), name.to_string()),
             None => (String::new(), display.clone()),
@@ -3540,6 +3731,16 @@ fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>
         }
     }
     groups
+}
+
+fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let path_buf = Path::new(path);
+    path_buf
+        .strip_prefix(cwd)
+        .or_else(|_| path_buf.strip_prefix(&canonical_cwd))
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 fn diff_counts(added: u32, deleted: u32, cx: &Context<ChatView>) -> AnyElement {
