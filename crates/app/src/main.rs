@@ -2,6 +2,9 @@
 // Debug builds keep the console so `RUST_LOG` output stays visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Lockfile guard only; nothing here is reachable from the binary.
+#[cfg(test)]
+mod gpui_pin;
 mod smoke;
 
 use std::{borrow::Cow, time::Duration};
