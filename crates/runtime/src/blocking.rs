@@ -66,6 +66,7 @@ mod tests {
             "app",
             "computer-use-mcp",
             "core",
+            "gpui-android",
             "i18n",
             "orchestrate-mcp",
             "preview-mcp",
@@ -74,6 +75,7 @@ mod tests {
             "sync-client",
             "sync-host",
             "sync-protocol",
+            "tcode-server",
             "term",
             "ui",
         ]

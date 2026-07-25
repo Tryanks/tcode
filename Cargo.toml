@@ -9,9 +9,11 @@ members = [
     "crates/preview-mcp",
     "crates/orchestrate-mcp",
     "crates/computer-use-mcp",
+    "crates/gpui-android",
     "crates/sync-client",
     "crates/sync-host",
     "crates/sync-protocol",
+    "crates/tcode-server",
     "crates/ui",
     "crates/app",
 ]

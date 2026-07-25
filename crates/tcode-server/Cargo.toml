@@ -1,0 +1,15 @@
+[package]
+name = "tcode-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "tcode-server"
+path = "src/main.rs"
+
+[dependencies]
+sync-host = { path = "../sync-host" }
+sync-protocol = { path = "../sync-protocol" }
+tcode-services = { path = "../services" }
+log = "0.4"
+env_logger = "0.11"
