@@ -339,6 +339,16 @@ impl WebApp {
         cx.notify();
     }
 
+    /// Return to the session list on a narrow layout.
+    ///
+    /// The subscription is left in place: the host keeps streaming, so coming
+    /// back is instant and no backfill is re-fetched. Only the selection —
+    /// which is presentation state — is cleared.
+    fn deselect(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        cx.notify();
+    }
+
     fn refresh_chat(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.selected.as_deref() else {
             return;
@@ -371,7 +381,18 @@ impl WebApp {
 }
 
 impl Render for WebApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // One breakpoint, not a scale factor. Below it a phone cannot show two
+        // panes at once — a 280px sidebar eats 72% of a 390pt screen — so the
+        // shell switches from side-by-side to one-at-a-time rather than
+        // shrinking both into uselessness.
+        //
+        // 640 logical pixels is where a sidebar plus a readable chat column
+        // stops fitting, not a device class: a narrow desktop window gets the
+        // same treatment, which is the honest generalisation and also makes the
+        // layout testable without a phone.
+        let narrow = window.viewport_size().width < px(640.0);
+        let showing_chat = self.selected.is_some();
         let sidebar =
             self.sessions
                 .iter()
@@ -419,42 +440,77 @@ impl Render for WebApp {
                     )
                 });
 
+        let session_list = div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .when(!narrow, |column| {
+                column
+                    .w(px(280.))
+                    .flex_shrink_0()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+            })
+            .when(narrow, |column| column.size_full())
+            .p_3()
+            .gap_3()
+            .child(div().text_lg().font_semibold().child("tcode"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.status.clone()),
+            )
+            .child(sidebar);
+
+        let conversation = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            // On a phone the only way back to the list is an explicit control:
+            // there is no second pane to click, and hiding it behind a gesture
+            // would make the app's one navigation action undiscoverable.
+            .when(narrow, |column| {
+                column.child(
+                    div()
+                        .flex()
+                        .p_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Button::new("back-to-sessions")
+                                .ghost()
+                                .label("‹ Sessions")
+                                .on_click(cx.listener(|this, _, _, cx| this.deselect(cx))),
+                        ),
+                )
+            })
+            .child(div().flex_1().min_h_0().child(self.chat.clone()))
+            .children(self.render_approvals(cx))
+            .child(self.render_composer(cx));
+
         div()
             .flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w(px(280.))
-                    .h_full()
-                    .flex_shrink_0()
-                    .border_r_1()
-                    .border_color(cx.theme().border)
-                    .p_3()
-                    .gap_3()
-                    .child(div().text_lg().font_semibold().child("tcode"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.status.clone()),
-                    )
-                    .child(sidebar),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(div().flex_1().min_h_0().child(self.chat.clone()))
-                    .children(self.render_approvals(cx))
-                    .child(self.render_composer(cx)),
-            )
+            // Narrow shows exactly one pane, chosen by whether a session is
+            // open; wide shows both. Collected first because each pane can only
+            // be placed once.
+            .children(if narrow {
+                if showing_chat {
+                    vec![conversation.into_any_element()]
+                } else {
+                    vec![session_list.into_any_element()]
+                }
+            } else {
+                vec![
+                    session_list.into_any_element(),
+                    conversation.into_any_element(),
+                ]
+            })
     }
 }
 
