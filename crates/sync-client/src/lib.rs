@@ -47,6 +47,7 @@ pub enum ProtocolViolation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedCommand {
     pub session_id: String,
+    pub command: Option<sync_protocol::RejectedCommand>,
     pub reason: CommandRejection,
 }
 
@@ -331,8 +332,21 @@ impl Client {
                 events,
                 caught_up,
             } => self.apply_events(session_id, events, caught_up),
-            HostFrame::CommandRejected { session_id, reason } => {
-                self.rejections.push(RejectedCommand { session_id, reason });
+            HostFrame::CommandRejected {
+                session_id,
+                command,
+                reason,
+            } => {
+                if let Some(sync_protocol::RejectedCommand::Turn { delivery_id }) = &command
+                    && let Some(turns) = self.pending_turns.get_mut(&session_id)
+                {
+                    turns.remove(delivery_id);
+                }
+                self.rejections.push(RejectedCommand {
+                    session_id,
+                    command,
+                    reason,
+                });
                 Vec::new()
             }
             HostFrame::SessionEnded { session_id, reason } => {
@@ -767,6 +781,9 @@ mod tests {
 
         client.handle(HostFrame::CommandRejected {
             session_id: "s1".into(),
+            command: Some(sync_protocol::RejectedCommand::Approval {
+                request_id: "approval-1".into(),
+            }),
             reason: CommandRejection::SessionNotLive,
         });
         client.handle(HostFrame::SessionEnded {
@@ -779,6 +796,9 @@ mod tests {
             client.command_rejections(),
             [RejectedCommand {
                 session_id: "s1".into(),
+                command: Some(sync_protocol::RejectedCommand::Approval {
+                    request_id: "approval-1".into(),
+                }),
                 reason: CommandRejection::SessionNotLive,
             }]
         );
@@ -790,5 +810,26 @@ mod tests {
             }]
         );
         assert_eq!(client.pongs(), [99]);
+    }
+
+    #[test]
+    fn correlated_turn_rejection_removes_only_that_pending_turn() {
+        let mut client = Client::new(config());
+        connect(&mut client);
+        client.command("s1", turn(41));
+        client.command("s1", turn(42));
+
+        client.handle(HostFrame::CommandRejected {
+            session_id: "s1".into(),
+            command: Some(sync_protocol::RejectedCommand::Turn { delivery_id: 41 }),
+            reason: CommandRejection::SessionNotLive,
+        });
+
+        assert_eq!(
+            client
+                .unacknowledged_turns("s1")
+                .collect::<Vec<&SessionCommand>>(),
+            vec![&turn(42)]
+        );
     }
 }

@@ -27,8 +27,8 @@ pub use store_source::{CommandRequest, CommandSink, LiveFlags, LiveSessions, Sto
 use std::collections::HashMap;
 
 use sync_protocol::{
-    ClientFrame, ClientInfo, CommandRejection, HostFrame, HostInfo, RefuseReason, SeqEvent,
-    SessionCommand, SessionSummary, negotiate_version,
+    ClientFrame, ClientInfo, CommandRejection, HostFrame, HostInfo, RefuseReason, RejectedCommand,
+    SeqEvent, SessionCommand, SessionSummary, negotiate_version,
 };
 
 /// How many events one `Events` frame carries while replaying backlog.
@@ -261,10 +261,17 @@ impl<S: SessionSource> Connection<S> {
             ClientFrame::Command {
                 session_id,
                 command,
-            } => match self.source.send_command(&session_id, command) {
-                Ok(()) => Vec::new(),
-                Err(reason) => vec![HostFrame::CommandRejected { session_id, reason }],
-            },
+            } => {
+                let rejected_command = rejected_command(&command);
+                match self.source.send_command(&session_id, command) {
+                    Ok(()) => Vec::new(),
+                    Err(reason) => vec![HostFrame::CommandRejected {
+                        session_id,
+                        command: rejected_command,
+                        reason,
+                    }],
+                }
+            }
         }
     }
 
@@ -272,6 +279,7 @@ impl<S: SessionSource> Connection<S> {
         if !self.source.session_exists(&session_id) {
             return vec![HostFrame::CommandRejected {
                 session_id,
+                command: None,
                 reason: CommandRejection::UnknownSession,
             }];
         }
@@ -329,6 +337,18 @@ impl<S: SessionSource> Connection<S> {
     fn refuse(&mut self, reason: RefuseReason) -> Vec<HostFrame> {
         self.state = State::Refused;
         vec![HostFrame::Refused { reason }]
+    }
+}
+
+fn rejected_command(command: &SessionCommand) -> Option<RejectedCommand> {
+    match command {
+        SessionCommand::SendTurn { delivery_id, .. } => Some(RejectedCommand::Turn {
+            delivery_id: *delivery_id,
+        }),
+        SessionCommand::RespondApproval { request_id, .. } => Some(RejectedCommand::Approval {
+            request_id: request_id.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -798,11 +818,59 @@ mod tests {
             command: SessionCommand::Interrupt,
         });
         match frames.as_slice() {
-            [HostFrame::CommandRejected { session_id, reason }] => {
+            [
+                HostFrame::CommandRejected {
+                    session_id,
+                    command,
+                    reason,
+                },
+            ] => {
                 assert_eq!(session_id, "s1");
+                assert_eq!(*command, None);
                 assert_eq!(*reason, CommandRejection::SessionNotLive);
             }
             other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejected_identifiable_commands_echo_their_identity() {
+        let commands = [
+            (
+                SessionCommand::SendTurn {
+                    delivery_id: 42,
+                    text: "continue".into(),
+                    options: None,
+                    attachments: Vec::new(),
+                },
+                RejectedCommand::Turn { delivery_id: 42 },
+            ),
+            (
+                SessionCommand::RespondApproval {
+                    request_id: "approval-1".into(),
+                    decision: sync_protocol::ApprovalDecision::ApproveForSession,
+                },
+                RejectedCommand::Approval {
+                    request_id: "approval-1".into(),
+                },
+            ),
+        ];
+
+        for (sent, expected) in commands {
+            let mut source = FakeSource::with_log("s1", 0);
+            source.reject = Some(CommandRejection::SessionNotLive);
+            let mut connection = connected(source);
+            let frames = connection.handle(ClientFrame::Command {
+                session_id: "s1".into(),
+                command: sent,
+            });
+
+            match frames.as_slice() {
+                [HostFrame::CommandRejected { command, .. }] => {
+                    assert_eq!(command.as_ref(), Some(&expected));
+                }
+                other => panic!("expected a rejection, got {other:?}"),
+            }
         }
     }
 
