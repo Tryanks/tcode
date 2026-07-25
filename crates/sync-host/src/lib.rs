@@ -19,7 +19,7 @@
 pub mod server;
 pub mod store_source;
 
-pub use server::{SyncServer, start};
+pub use server::{SyncServer, WakeSource, start, start_on};
 pub use store_source::{CommandRequest, CommandSink, LiveFlags, LiveSessions, StoreSource};
 
 use std::collections::HashMap;

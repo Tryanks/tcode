@@ -1,20 +1,11 @@
 //! Headless, read-only tcode sync host.
 
-use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use axum::Router;
-use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
-use axum::routing::any;
-use futures_util::{SinkExt as _, StreamExt as _};
-use sync_host::{CommandRequest, Connection, HostConfig, LiveSessions, StoreSource};
-use sync_protocol::{ClientFrame, HostFrame, HostInfo, SessionCommand};
+use sync_host::{CommandRequest, WakeSource};
+use sync_protocol::{HostInfo, SessionCommand};
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::SessionStore;
 
@@ -87,29 +78,6 @@ fn parse_bind(value: &str) -> Result<SocketAddr, String> {
         .map_err(|_| format!("invalid bind address {value:?}; expected IP[:PORT]"))
 }
 
-#[derive(Clone)]
-struct ServerState {
-    store: SessionStore,
-    host: HostInfo,
-    token: String,
-    live: LiveSessions,
-    commands: async_channel::Sender<CommandRequest>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-fn event_log_stamp(root: &Path, session_id: &str) -> Option<FileStamp> {
-    let metadata = std::fs::metadata(root.join(format!("{session_id}.jsonl"))).ok()?;
-    Some(FileStamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
-}
-
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -151,33 +119,25 @@ async fn run(options: Options) -> io::Result<()> {
         app_version: env!("CARGO_PKG_VERSION").into(),
     };
 
-    let listener = tokio::net::TcpListener::bind(options.bind).await?;
-    let local_addr = listener.local_addr()?;
-    let url = format!("ws://{local_addr}/sync");
-    let (command_tx, command_rx) = async_channel::bounded(256);
-    let live = LiveSessions::new();
-    let state = Arc::new(ServerState {
+    let data_dir = store.root().clone();
+    let server = sync_host::start_on(
         store,
         host,
         token,
-        live,
-        commands: command_tx,
-    });
+        options.bind,
+        WakeSource::Polling {
+            interval: LIVE_POLL_INTERVAL,
+        },
+    )?;
 
-    log::info!("tcode-server: serving at {url}");
-    log::info!(
-        "tcode-server: data directory {}",
-        state.store.root().display()
-    );
+    log::info!("tcode-server: serving at {}", server.url);
+    log::info!("tcode-server: data directory {}", data_dir.display());
     log::warn!("tcode-server: read-only host; serves history and live events but cannot run turns");
 
-    let command_drain = tokio::spawn(drain_commands(command_rx));
-    let app = Router::new().route("/sync", any(upgrade)).with_state(state);
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let command_drain = tokio::spawn(drain_commands(server.commands.clone()));
+    shutdown_signal().await;
     command_drain.abort();
-    result
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -210,104 +170,6 @@ fn command_kind(command: &SessionCommand) -> &'static str {
         SessionCommand::Rewind { .. } => "rewind",
         SessionCommand::Shutdown => "shutdown",
     }
-}
-
-async fn upgrade(upgrade: WebSocketUpgrade, State(state): State<Arc<ServerState>>) -> Response {
-    upgrade.on_upgrade(move |socket| serve_connection(socket, state))
-}
-
-async fn serve_connection(socket: WebSocket, state: Arc<ServerState>) {
-    let (mut sink, mut stream) = socket.split();
-    let mut connection = Connection::new(
-        StoreSource::new(
-            state.store.clone(),
-            state.live.clone(),
-            state.commands.clone(),
-        ),
-        HostConfig {
-            host: state.host.clone(),
-            token: state.token.clone(),
-        },
-    );
-    let mut stamps = HashMap::<String, Option<FileStamp>>::new();
-    let mut poll = tokio::time::interval(LIVE_POLL_INTERVAL);
-
-    loop {
-        let outgoing = tokio::select! {
-            incoming = stream.next() => {
-                match incoming {
-                    Some(Ok(Message::Text(text))) => match ClientFrame::decode(&text) {
-                        Ok(frame) => connection.handle(frame),
-                        Err(err) => {
-                            log::warn!("tcode-server: dropping undecodable frame: {err}");
-                            break;
-                        }
-                    },
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => Vec::new(),
-                    Some(Err(err)) => {
-                        log::debug!("tcode-server: connection closed: {err}");
-                        break;
-                    }
-                }
-            }
-            _ = poll.tick() => {
-                drain_changed_sessions(&mut connection, state.store.root(), &mut stamps)
-            }
-        };
-
-        for frame in outgoing {
-            if send_frame(&mut sink, frame).await.is_err() {
-                return;
-            }
-        }
-
-        stamps.retain(|session_id, _| {
-            connection
-                .subscribed_sessions()
-                .any(|subscribed| subscribed == session_id)
-        });
-        for session_id in connection.subscribed_sessions() {
-            stamps
-                .entry(session_id.to_owned())
-                .or_insert_with(|| event_log_stamp(state.store.root(), session_id));
-        }
-
-        if connection.is_refused() {
-            let _ = sink.send(Message::Close(None)).await;
-            return;
-        }
-    }
-}
-
-fn drain_changed_sessions(
-    connection: &mut Connection<StoreSource>,
-    root: &Path,
-    stamps: &mut HashMap<String, Option<FileStamp>>,
-) -> Vec<HostFrame> {
-    let session_ids = connection
-        .subscribed_sessions()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut outgoing = Vec::new();
-    for session_id in session_ids {
-        let current = event_log_stamp(root, &session_id);
-        match stamps.insert(session_id.clone(), current) {
-            Some(previous) if previous != current => outgoing.extend(connection.drain(&session_id)),
-            _ => {}
-        }
-    }
-    outgoing
-}
-
-async fn send_frame(
-    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    frame: HostFrame,
-) -> Result<(), ()> {
-    let text = frame.encode().map_err(|err| {
-        log::error!("tcode-server: failed to encode a host frame: {err}");
-    })?;
-    sink.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
 #[cfg(test)]
