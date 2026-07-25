@@ -16,6 +16,10 @@
 //! by swapping the binary's `main`, which only works if nothing here reaches
 //! for a UI.
 
+pub mod store_source;
+
+pub use store_source::{CommandRequest, CommandSink, LiveFlags, LiveSessions, StoreSource};
+
 use std::collections::HashMap;
 
 use sync_protocol::{
@@ -363,7 +367,7 @@ mod tests {
             model: None,
             project: None,
             updated_at: 0,
-            latest_seq: 0,
+            latest_seq: None,
             working: false,
             awaiting_approval: false,
         }
