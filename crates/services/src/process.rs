@@ -141,6 +141,7 @@ mod tests {
             "sync-host",
             "sync-protocol",
             "tcode-server",
+            "tcode-web",
             "term",
             "ui",
         ]

@@ -14,6 +14,7 @@ members = [
     "crates/sync-host",
     "crates/sync-protocol",
     "crates/tcode-server",
+    "crates/tcode-web",
     "crates/ui",
     "crates/app",
 ]

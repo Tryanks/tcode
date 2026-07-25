@@ -8675,6 +8675,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcode-web"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
+ "gpui_platform",
+ "js-sys",
+ "sync-client",
+ "sync-protocol",
+ "tcode-ui",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
