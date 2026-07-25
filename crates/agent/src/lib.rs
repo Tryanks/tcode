@@ -1076,7 +1076,19 @@ impl WorkspacePath {
         path: &str,
     ) -> Option<Self> {
         let path = std::path::Path::new(path);
-        let relative = if path.is_absolute() {
+        // Not `is_absolute()`: on Windows that is false for a path beginning
+        // `/`, which has a root but no drive letter. Such a path would then take
+        // the relative branch and be emitted verbatim — claiming an absolute
+        // path is workspace-relative, which is exactly the misleading output
+        // this function refuses to produce for `..`. A drive prefix without a
+        // root (`C:file`) is not workspace-relative either, so both count.
+        let rooted = path.components().next().is_some_and(|first| {
+            matches!(
+                first,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            )
+        });
+        let relative = if rooted {
             path.strip_prefix(workspace_root).ok()?
         } else {
             path
@@ -1778,6 +1790,26 @@ mod turn_diff_tests {
         let legacy = r#"{"media_type":"image/png","data_base64":"AAAA","source_path":"/work/tcode/assets/diagram.png"}"#;
         let decoded: Attachment = serde_json::from_str(legacy).unwrap();
         assert_eq!(decoded.workspace_path, None);
+    }
+
+    /// A path outside the workspace must produce nothing rather than a portable
+    /// path that lies about where it points.
+    ///
+    /// This caught a real Windows-only defect: the branch was chosen with
+    /// `is_absolute()`, which is false there for a rooted path carrying no drive
+    /// letter, so `/elsewhere/secret.txt` took the relative branch and came back
+    /// as a "workspace-relative" path to a file in neither the workspace nor any
+    /// relative location.
+    #[test]
+    fn a_path_outside_the_workspace_has_no_portable_form() {
+        assert_eq!(
+            WorkspacePath::from_host_path(
+                "project-stable-id",
+                std::path::Path::new("/work/tcode"),
+                "/elsewhere/secret.txt",
+            ),
+            None
+        );
     }
 }
 
