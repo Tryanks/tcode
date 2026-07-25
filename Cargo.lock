@@ -8594,11 +8594,15 @@ dependencies = [
 name = "tcode-server"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "axum",
  "env_logger",
+ "futures-util",
  "log",
  "sync-host",
  "sync-protocol",
  "tcode-services",
+ "tokio",
 ]
 
 [[package]]
