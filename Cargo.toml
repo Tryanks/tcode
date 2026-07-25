@@ -21,6 +21,17 @@ members = [
     "crates/ui",
     "crates/app",
 ]
+# client-app is deliberately not a member. It is the *client* half of the app —
+# the UI a phone or browser mounts — and it depends on tcode-ui's `portable`
+# feature, which is the mutually exclusive opposite of `desktop`. Cargo unifies
+# features across a workspace build, so listing it here would build tcode-ui
+# with both at once and neither constructor would be satisfiable.
+#
+# The three shells depend on it by path, inside target tables, so it is built
+# for wasm/Android/iOS and never for the host. Check it directly:
+#   cargo check -p client-app --target wasm32-unknown-unknown
+exclude = ["crates/client-app"]
+
 resolver = "3"
 default-members = ["crates/app"]
 

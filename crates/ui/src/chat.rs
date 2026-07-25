@@ -819,8 +819,13 @@ impl ChatView {
         this
     }
 
-    /// Construct the timeline-only surface from state already owned by a remote client.
-    #[cfg(feature = "portable")]
+    /// Construct the timeline-only surface from state already owned by a remote
+    /// client.
+    ///
+    /// Gated on `not(desktop)` as well: with the desktop feature on, `ChatView`
+    /// carries an `AppState` and a composer that a remote client has no way to
+    /// supply. The two modes are alternatives, not layers.
+    #[cfg(all(feature = "portable", not(feature = "desktop")))]
     pub fn from_read_model(
         read_model: ChatReadModel,
         window: &mut Window,
@@ -846,7 +851,7 @@ impl ChatView {
     }
 
     /// Replace the remote snapshot without coupling the view to its sync store.
-    #[cfg(feature = "portable")]
+    #[cfg(all(feature = "portable", not(feature = "desktop")))]
     pub fn set_read_model(&mut self, read_model: ChatReadModel, cx: &mut Context<Self>) {
         self.read_model = Arc::new(read_model);
         self.sync_markdown_states(cx);
