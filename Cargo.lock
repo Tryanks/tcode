@@ -8302,8 +8302,12 @@ name = "sync-host"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "async-channel",
  "log",
+ "serde_json",
  "sync-protocol",
+ "tcode-core",
+ "tcode-services",
 ]
 
 [[package]]

@@ -94,9 +94,14 @@ pub struct SessionSummary {
     pub project: Option<String>,
     /// Unix milliseconds of the most recent activity, for sorting.
     pub updated_at: u64,
-    /// Highest `seq` the host currently holds, so a client can show unread
-    /// counts and size a backfill before subscribing.
-    pub latest_seq: u64,
+    /// Highest `seq` the host currently holds, when it happens to know.
+    ///
+    /// Best-effort and therefore optional: answering it for every session
+    /// would mean scanning every log on every list, and a host can hold
+    /// thousands. `None` means "not computed", not "empty" — a client uses it
+    /// to size a backfill or badge unread counts, and simply omits the badge
+    /// when it is absent.
+    pub latest_seq: Option<u64>,
     /// True while a turn is in flight.
     pub working: bool,
     /// True when the session is waiting on a human — the state a phone exists
@@ -310,7 +315,7 @@ mod tests {
                     model: Some("gpt-5".into()),
                     project: Some("tcode".into()),
                     updated_at: 1_700_000_000_000,
-                    latest_seq: 128,
+                    latest_seq: Some(128),
                     working: true,
                     awaiting_approval: false,
                 }],

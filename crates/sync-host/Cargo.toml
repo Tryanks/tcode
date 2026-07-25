@@ -10,4 +10,10 @@ sync-protocol = { path = "../sync-protocol" }
 # `tcode-server` by swapping the binary's `main`, which only works if nothing
 # here reaches for a UI or a child process.
 agent = { path = "../agent", default-features = false }
+tcode-core = { path = "../core" }
+tcode-services = { path = "../services" }
+async-channel = "2"
 log = "0.4"
+
+[dev-dependencies]
+serde_json = "1"
