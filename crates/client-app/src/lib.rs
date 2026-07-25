@@ -28,7 +28,8 @@ use gpui_component::{
 };
 use sync_client::{Client, ClientConfig};
 use sync_protocol::{
-    ApprovalDecision, ClientFrame, ClientInfo, HostFrame, SessionCommand, SessionSummary,
+    AgentEvent, ApprovalDecision, ClientFrame, ClientInfo, HostFrame, SessionCommand,
+    SessionSummary,
 };
 use tcode_ui::{ChatReadModel, ChatSessionReadModel, ChatView};
 
@@ -45,6 +46,126 @@ fn next_delivery_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn turn_command(delivery_id: u64, text: String) -> SessionCommand {
+    SessionCommand::SendTurn {
+        delivery_id,
+        text,
+        options: None,
+        attachments: Vec::new(),
+    }
+}
+
+fn approval_command(request_id: String, decision: ApprovalDecision) -> SessionCommand {
+    SessionCommand::RespondApproval {
+        request_id,
+        decision,
+    }
+}
+
+fn provider_approval_decision(option_id: String) -> ApprovalDecision {
+    ApprovalDecision::Option(option_id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalTurnStatus {
+    AwaitingAcceptance,
+    Rejected(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalTurn {
+    session_id: String,
+    delivery_id: u64,
+    text: String,
+    status: LocalTurnStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandAttemptKind {
+    Turn(u64),
+    Approval(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandAttempt {
+    session_id: String,
+    kind: CommandAttemptKind,
+}
+
+#[derive(Default)]
+struct CommandUiState {
+    attempts: VecDeque<CommandAttempt>,
+    turns: Vec<LocalTurn>,
+}
+
+impl CommandUiState {
+    fn sent_turn(&mut self, session_id: String, delivery_id: u64, text: String) {
+        self.attempts.push_back(CommandAttempt {
+            session_id: session_id.clone(),
+            kind: CommandAttemptKind::Turn(delivery_id),
+        });
+        self.turns.push(LocalTurn {
+            session_id,
+            delivery_id,
+            text,
+            status: LocalTurnStatus::AwaitingAcceptance,
+        });
+    }
+
+    fn sent_approval(&mut self, session_id: String, request_id: String) {
+        self.attempts.push_back(CommandAttempt {
+            session_id,
+            kind: CommandAttemptKind::Approval(request_id),
+        });
+    }
+
+    fn accepted_turn(&mut self, delivery_id: u64) {
+        self.attempts.retain(
+            |attempt| !matches!(attempt.kind, CommandAttemptKind::Turn(id) if id == delivery_id),
+        );
+        // The host records the canonical user-message event before acknowledging
+        // delivery, so keeping the optimistic copy would render the turn twice.
+        self.turns.retain(|turn| turn.delivery_id != delivery_id);
+    }
+
+    fn resolved_approvals<'a>(
+        &mut self,
+        session_id: &str,
+        pending_request_ids: impl Iterator<Item = &'a str>,
+    ) {
+        let pending: Vec<&str> = pending_request_ids.collect();
+        self.attempts.retain(|attempt| {
+            attempt.session_id != session_id
+                || !matches!(
+                    &attempt.kind,
+                    CommandAttemptKind::Approval(request_id)
+                        if !pending.contains(&request_id.as_str())
+                )
+        });
+    }
+
+    fn rejected(&mut self, session_id: &str, reason: String) {
+        let Some(index) = self
+            .attempts
+            .iter()
+            .position(|attempt| attempt.session_id == session_id)
+        else {
+            return;
+        };
+        let Some(attempt) = self.attempts.remove(index) else {
+            return;
+        };
+        if let CommandAttemptKind::Turn(delivery_id) = attempt.kind
+            && let Some(turn) = self
+                .turns
+                .iter_mut()
+                .find(|turn| turn.delivery_id == delivery_id)
+        {
+            turn.status = LocalTurnStatus::Rejected(reason);
+        }
+    }
 }
 
 /// A live connection to a host, owned by the shell.
@@ -133,6 +254,7 @@ pub struct ClientApp {
     /// one can be surfaced. The host only sends these when a command could not
     /// be applied, and staying silent would leave a turn rendered that never ran.
     rejections_seen: usize,
+    command_ui: CommandUiState,
     _poll: gpui::Task<()>,
     _reconnect: Option<gpui::Task<()>>,
 }
@@ -208,6 +330,7 @@ impl ClientApp {
             hello: retained_hello,
             reconnect_attempts: 0,
             rejections_seen: 0,
+            command_ui: CommandUiState::default(),
             _poll: poll,
             _reconnect: None,
         }
@@ -254,8 +377,32 @@ impl ClientApp {
                 if self.selected.as_deref() == Some(session_id)
         );
 
+        let accepted_delivery_ids: Vec<u64> = match &frame {
+            HostFrame::Events { events, .. } => events
+                .iter()
+                .filter_map(|event| match event.event {
+                    AgentEvent::TurnAccepted { delivery_id } => Some(delivery_id),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let rejected = match &frame {
+            HostFrame::CommandRejected { session_id, reason } => {
+                Some((session_id.clone(), format!("{reason:?}")))
+            }
+            _ => None,
+        };
+
         let outgoing = self.client.handle(frame);
         self.send_all(outgoing);
+        for delivery_id in accepted_delivery_ids {
+            self.command_ui.accepted_turn(delivery_id);
+            self.status = "Turn accepted by host".into();
+        }
+        if let Some((session_id, reason)) = rejected {
+            self.command_ui.rejected(&session_id, reason);
+        }
 
         if !was_ready && self.client.is_ready() {
             let host = self
@@ -282,6 +429,18 @@ impl ClientApp {
         }
         if affects_selected {
             self.refresh_chat(cx);
+            if let Some(session_id) = self.selected.as_deref()
+                && let Some(state) = self.client.session(session_id)
+            {
+                self.command_ui.resolved_approvals(
+                    session_id,
+                    state
+                        .timeline()
+                        .pending_approvals
+                        .iter()
+                        .map(|request| request.id.as_str()),
+                );
+            }
         }
 
         // A rejected command is the one failure the timeline cannot show: the
@@ -301,9 +460,9 @@ impl ClientApp {
         }
     }
 
-    fn send(&mut self, frame: ClientFrame) {
+    fn send(&mut self, frame: ClientFrame) -> bool {
         let Some(socket) = &self.socket else {
-            return;
+            return false;
         };
         let result = frame
             .encode()
@@ -311,6 +470,9 @@ impl ClientApp {
             .and_then(|text| socket.send(&text));
         if let Err(error) = result {
             self.status = format!("WebSocket send error: {error}").into();
+            false
+        } else {
+            true
         }
     }
 
@@ -368,10 +530,9 @@ impl ClientApp {
 
     /// Send whatever is in the composer as a turn.
     ///
-    /// `Client::command` allocates and retains the `delivery_id`; the turn is
-    /// not accepted until `AgentEvent::TurnAccepted` echoes it back, which is
-    /// what the status line reports. That mechanism predates this client and is
-    /// reused rather than duplicated.
+    /// `Client::command` retains the allocated `delivery_id`; the turn is not
+    /// accepted until `AgentEvent::TurnAccepted` echoes it back, which is what
+    /// the status line reports.
     fn send_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session_id) = self.selected.clone() else {
             return;
@@ -384,19 +545,19 @@ impl ClientApp {
         // millisecond, and a repeated delivery id would make two turns
         // indistinguishable to the acknowledgement tracking.
         let delivery_id = next_delivery_id();
-        let frame = self.client.command(
-            session_id.clone(),
-            SessionCommand::SendTurn {
-                delivery_id,
-                text,
-                options: None,
-                attachments: Vec::new(),
-            },
-        );
-        self.send(frame);
+        let command = turn_command(delivery_id, text.clone());
+        let frame = self.client.command(session_id.clone(), command);
+        self.command_ui
+            .sent_turn(session_id.clone(), delivery_id, text);
+        let sent = self.send(frame);
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
-        self.status = "Turn sent — awaiting acceptance…".into();
+        if sent {
+            self.status = "Turn sent — awaiting acceptance…".into();
+        } else {
+            self.command_ui
+                .rejected(&session_id, "transport could not send the command".into());
+        }
         cx.notify();
     }
 
@@ -409,14 +570,14 @@ impl ClientApp {
         let Some(session_id) = self.selected.clone() else {
             return;
         };
-        let frame = self.client.command(
-            session_id,
-            SessionCommand::RespondApproval {
-                request_id,
-                decision,
-            },
-        );
-        self.send(frame);
+        let command = approval_command(request_id.clone(), decision);
+        let frame = self.client.command(session_id.clone(), command);
+        self.command_ui
+            .sent_approval(session_id.clone(), request_id);
+        if !self.send(frame) {
+            self.command_ui
+                .rejected(&session_id, "transport could not send the command".into());
+        }
         cx.notify();
     }
 
@@ -569,6 +730,7 @@ impl Render for ClientApp {
                 )
             })
             .child(div().flex_1().min_h_0().child(self.chat.clone()))
+            .children(self.render_local_turns(cx))
             .children(self.render_approvals(cx))
             .child(self.render_composer(cx));
 
@@ -596,6 +758,47 @@ impl Render for ClientApp {
 }
 
 impl ClientApp {
+    fn render_local_turns(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(session_id) = self.selected.as_deref() else {
+            return Vec::new();
+        };
+        self.command_ui
+            .turns
+            .iter()
+            .filter(|turn| turn.session_id == session_id)
+            .map(|turn| {
+                let (label, color) = match &turn.status {
+                    LocalTurnStatus::AwaitingAcceptance => (
+                        "Sending — awaiting host acceptance".to_owned(),
+                        cx.theme().warning,
+                    ),
+                    LocalTurnStatus::Rejected(reason) => (
+                        format!("Not sent — host rejected the command: {reason}"),
+                        cx.theme().danger,
+                    ),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        div()
+                            .max_w(px(680.))
+                            .rounded_lg()
+                            .px_3()
+                            .py_2()
+                            .bg(cx.theme().accent.opacity(0.16))
+                            .child(turn.text.clone()),
+                    )
+                    .child(div().text_xs().text_color(color).child(label))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     /// Pending approvals, rendered above the composer rather than inline in the
     /// timeline.
     ///
@@ -616,8 +819,8 @@ impl ClientApp {
             .iter()
             .map(|request| {
                 let id = request.id.clone();
-                let approve = id.clone();
-                let deny = id.clone();
+                let request_id = request.id.clone();
+                let options = request.options.clone();
                 div()
                     .flex()
                     .flex_col()
@@ -635,38 +838,57 @@ impl ClientApp {
                             .text_color(cx.theme().muted_foreground)
                             .child(SharedString::from(format!("{:?}", request.kind))),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new(SharedString::from(format!("approve-{id}")))
-                                    .primary()
-                                    .label("Approve")
+                    .child(if options.is_empty() {
+                        self.render_fixed_approval_choices(id, cx)
+                    } else {
+                        options
+                            .into_iter()
+                            .fold(div().flex().gap_2(), |row, option| {
+                                let request_id = request_id.clone();
+                                let option_id = option.id.clone();
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "approval-option-{}",
+                                        option.id
+                                    )))
+                                    .label(option.label)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.respond_approval(
-                                            approve.clone(),
-                                            ApprovalDecision::Approve,
+                                            request_id.clone(),
+                                            provider_approval_decision(option_id.clone()),
                                             cx,
                                         );
                                     })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("deny-{id}")))
-                                    .danger()
-                                    .label("Deny")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.respond_approval(
-                                            deny.clone(),
-                                            ApprovalDecision::Deny,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                    )
+                                )
+                            })
+                    })
                     .into_any_element()
             })
             .collect()
+    }
+
+    fn render_fixed_approval_choices(
+        &self,
+        request_id: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        [
+            ("Cancel turn", ApprovalDecision::Cancel),
+            ("Deny", ApprovalDecision::Deny),
+            ("Always allow", ApprovalDecision::ApproveForSession),
+            ("Approve", ApprovalDecision::Approve),
+        ]
+        .into_iter()
+        .fold(div().flex().gap_2(), |row, (label, decision)| {
+            let request_id = request_id.clone();
+            row.child(
+                Button::new(SharedString::from(format!("approval-{label}-{request_id}")))
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.respond_approval(request_id.clone(), decision.clone(), cx);
+                    })),
+            )
+        })
     }
 
     fn render_composer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -686,5 +908,74 @@ impl ClientApp {
                     .on_click(cx.listener(|this, _, window, cx| this.send_turn(window, cx))),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructs_text_turn_command() {
+        assert!(matches!(
+            turn_command(42, "ship it".into()),
+            SessionCommand::SendTurn {
+                delivery_id: 42,
+                text,
+                options: None,
+                attachments,
+            } if text == "ship it" && attachments.is_empty()
+        ));
+    }
+
+    #[test]
+    fn maps_provider_choice_to_opaque_option_id() {
+        assert_eq!(
+            provider_approval_decision("allow-worktree".into()),
+            ApprovalDecision::Option("allow-worktree".into())
+        );
+    }
+
+    #[test]
+    fn constructs_approval_response_command() {
+        assert_eq!(
+            approval_command("request-7".into(), ApprovalDecision::ApproveForSession),
+            SessionCommand::RespondApproval {
+                request_id: "request-7".into(),
+                decision: ApprovalDecision::ApproveForSession,
+            }
+        );
+    }
+
+    #[test]
+    fn rejection_marks_the_matching_optimistic_turn() {
+        let mut state = CommandUiState::default();
+        state.sent_turn("s1".into(), 7, "run tests".into());
+        state.rejected("s1", "session ended".into());
+
+        assert_eq!(
+            state.turns[0].status,
+            LocalTurnStatus::Rejected("session ended".into())
+        );
+    }
+
+    #[test]
+    fn acceptance_replaces_the_optimistic_turn_with_canonical_timeline() {
+        let mut state = CommandUiState::default();
+        state.sent_turn("s1".into(), 7, "run tests".into());
+        state.accepted_turn(7);
+
+        assert!(state.turns.is_empty());
+        assert!(state.attempts.is_empty());
+    }
+
+    #[test]
+    fn approval_rejection_does_not_mark_a_turn_rejected() {
+        let mut state = CommandUiState::default();
+        state.sent_approval("s1".into(), "approval-1".into());
+        state.sent_turn("s1".into(), 8, "continue".into());
+        state.rejected("s1", "approval expired".into());
+
+        assert_eq!(state.turns[0].status, LocalTurnStatus::AwaitingAcceptance);
     }
 }

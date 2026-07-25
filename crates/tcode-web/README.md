@@ -1,6 +1,7 @@
 # tcode web
 
-This is the read-only browser shell for the tcode sync protocol. It uses
+This is the browser shell for the full tcode sync client: it can follow a
+session, send turns, and answer approval requests. It uses
 `gpui_platform::application()`, which selects GPUI's multithreaded WebPlatform
 for wasm.
 
@@ -40,15 +41,15 @@ Production hosting must send the same headers. Without them the dispatcher
 cannot start its worker threads.
 
 Serve with the same environment and `trunk serve --release --locked`, then
-supply the host endpoint and token in the page URL:
+supply the host endpoint in the page URL:
 
 ```text
-http://127.0.0.1:8080/?url=ws%3A%2F%2F127.0.0.1%3APORT%2Fsync&token=TOKEN
+http://127.0.0.1:8080/?url=ws%3A%2F%2F127.0.0.1%3APORT%2Fsync
 ```
 
-The token remains in the browser URL/history in this minimal proof. A useful
-client should replace this bootstrap mechanism with pairing and credential
-storage before deployment.
+Enter the short-lived pairing code displayed by the desktop host. Pairing is
+the only credential bootstrap path; the resulting token is retained by the
+client and is never placed in browser URL history.
 
 ## Upstream contribution candidate
 
