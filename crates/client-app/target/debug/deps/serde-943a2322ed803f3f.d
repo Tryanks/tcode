@@ -1,0 +1,14 @@
+/Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/deps/serde-943a2322ed803f3f.d: /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/build/serde-ac5f74fe8a0c19eb/out/private.rs
+
+/Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/deps/libserde-943a2322ed803f3f.rlib: /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/build/serde-ac5f74fe8a0c19eb/out/private.rs
+
+/Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/deps/libserde-943a2322ed803f3f.rmeta: /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/build/serde-ac5f74fe8a0c19eb/out/private.rs
+
+/Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/tryanks/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/build/serde-ac5f74fe8a0c19eb/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/tryanks/RustroverProjects/tcode/crates/client-app/target/debug/build/serde-ac5f74fe8a0c19eb/out

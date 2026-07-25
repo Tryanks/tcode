@@ -1,0 +1,3 @@
+cargo::rerun-if-changed=build.rs
+cargo::rerun-if-env-changed=ZTRACING
+cargo::rerun-if-env-changed=ZTRACING_WITH_MEMORY

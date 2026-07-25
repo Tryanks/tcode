@@ -1324,6 +1324,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "client-app"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "gpui",
+ "gpui-component",
+ "log",
+ "sync-client",
+ "sync-protocol",
+ "tcode-ui",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8632,6 +8647,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "client-app",
  "gpui",
  "gpui-android",
  "jni",
@@ -8664,6 +8680,7 @@ name = "tcode-ios"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "client-app",
  "gpui",
  "gpui-ios",
  "log",
@@ -8774,6 +8791,7 @@ dependencies = [
 name = "tcode-web"
 version = "0.1.0"
 dependencies = [
+ "client-app",
  "gpui",
  "gpui-component",
  "gpui-component-assets",

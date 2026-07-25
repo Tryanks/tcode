@@ -12,10 +12,9 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow};
 use std::rc::Rc;
 
-use gpui::{
-    App, AppContext as _, AppLifecyclePhase, ApplicationHandle, Context, IntoElement,
-    ParentElement as _, Render, Styled as _, TouchPhase, Window, WindowOptions, div, rgb,
-};
+use client_app::native_transport::NativeTransportFactory;
+use client_app::{ClientApp, ClientConnection, ClientIdentity, TransportFactory};
+use gpui::{App, AppContext as _, AppLifecyclePhase, ApplicationHandle, TouchPhase, WindowOptions};
 use gpui_android::{
     AndroidDisplayMetrics, AndroidEventSink, AndroidNativeWindow, AndroidPlatform, AndroidSurface,
 };
@@ -48,25 +47,6 @@ struct AndroidRuntime {
     /// Keeps GPUI alive. `run_embedded` returns once callbacks are installed,
     /// because Android — not GPUI — owns the main loop.
     _application: ApplicationHandle,
-}
-
-/// The smallest thing that proves the whole stack drew: a solid quad.
-///
-/// Deliberately not tcode's UI. This milestone is "the Android linker resolved
-/// every symbol and wgpu produced a frame"; rendering the real app would mean a
-/// failure could come from anywhere in 37k lines of UI instead.
-struct FirstFrame;
-
-impl Render for FirstFrame {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .bg(rgb(0x1d4ed8))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(div().text_color(rgb(0xffffff)).child("tcode on Android"))
-    }
 }
 
 /// Convert a Java `Surface` into the retained native window the backend needs.
@@ -131,12 +111,18 @@ fn start(
     let platform = AndroidPlatform::new(host.clone(), surface)
         .context("constructing the Android GPUI platform")?;
     let sink = platform.event_sink();
+    // One runtime for the process; the client reconnects through this factory.
+    let transport: Arc<dyn TransportFactory> =
+        Arc::new(NativeTransportFactory::new().context("starting the client's network runtime")?);
 
     // The initial surface must stay valid across launch, per the contract.
     let application =
-        gpui::Application::with_platform(Rc::new(platform)).run_embedded(|cx: &mut App| {
-            cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| FirstFrame))
-                .expect("the Android GPUI window must open");
+        gpui::Application::with_platform(Rc::new(platform)).run_embedded(move |cx: &mut App| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let connection = client_connection();
+                cx.new(|cx| ClientApp::new(connection, transport.clone(), window, cx))
+            })
+            .expect("the Android GPUI window must open");
             cx.activate(true);
         });
 
@@ -154,6 +140,29 @@ fn start(
 ///
 /// A panic crossing the JNI boundary aborts the process with no useful Java
 /// stack, so every entry point funnels through here.
+/// Where this client attaches, and what it calls itself.
+///
+/// Read from the environment for now. A phone cannot be handed a token the way
+/// a query string hands one to a browser, so real pairing — a code the host
+/// shows and the phone scans — is the next piece of work; until then this keeps
+/// the app runnable without inventing a UX that would have to be thrown away.
+fn client_connection() -> ClientConnection {
+    ClientConnection {
+        url: std::env::var("TCODE_SYNC_URL")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        token: std::env::var("TCODE_SYNC_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        identity: ClientIdentity {
+            client_id: format!("tcode-android-{}", std::process::id()),
+            display_name: "tcode android".into(),
+            platform: "android".into(),
+            app_version: env!("CARGO_PKG_VERSION").into(),
+        },
+    }
+}
+
 fn with_runtime(name: &'static str, body: impl FnOnce(&mut AndroidRuntime) -> Result<()>) {
     RUNTIME.with(|slot| {
         let mut slot = slot.borrow_mut();

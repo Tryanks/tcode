@@ -11,10 +11,9 @@ use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use gpui::{
-    App, AppContext as _, AppLifecyclePhase, ApplicationHandle, Context, IntoElement,
-    ParentElement as _, Render, Styled as _, TouchPhase, Window, WindowOptions, div, rgb,
-};
+use client_app::native_transport::NativeTransportFactory;
+use client_app::{ClientApp, ClientConnection, ClientIdentity, TransportFactory};
+use gpui::{App, AppContext as _, AppLifecyclePhase, ApplicationHandle, TouchPhase, WindowOptions};
 use gpui_ios::{IosDisplayMetrics, IosEventSink, IosLayer, IosPlatform, IosSurface};
 
 use crate::bridge::{HostCallbacks, UiKitHost};
@@ -30,24 +29,6 @@ struct IosRuntime {
     /// Keeps GPUI alive: `run_embedded` returns once callbacks are installed,
     /// because UIKit — not GPUI — owns the run loop.
     _application: ApplicationHandle,
-}
-
-/// The smallest thing that proves the stack drew.
-///
-/// Deliberately not tcode's UI: this milestone is "Metal produced a frame", and
-/// rendering the real app would let a failure come from anywhere in 37k lines.
-struct FirstFrame;
-
-impl Render for FirstFrame {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .bg(rgb(0x1d4ed8))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(div().text_color(rgb(0xffffff)).child("tcode on iOS"))
-    }
 }
 
 /// Java's phases have integer constants; UIKit's do too, and both are translated
@@ -73,6 +54,29 @@ fn lifecycle_phase(value: i32) -> Result<AppLifecyclePhase> {
         other => Err(anyhow::anyhow!(
             "unknown lifecycle phase {other} from UIKit"
         )),
+    }
+}
+
+/// Where this client attaches, and what it calls itself.
+///
+/// Read from the environment for now. A phone cannot be handed a token the way
+/// a query string hands one to a browser, so real pairing — a code the host
+/// shows and the phone scans — is the next piece of work; until then this keeps
+/// the app runnable without inventing a UX that would have to be thrown away.
+fn client_connection() -> ClientConnection {
+    ClientConnection {
+        url: std::env::var("TCODE_SYNC_URL")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        token: std::env::var("TCODE_SYNC_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        identity: ClientIdentity {
+            client_id: format!("tcode-ios-{}", std::process::id()),
+            display_name: "tcode iOS".into(),
+            platform: "ios".into(),
+            app_version: env!("CARGO_PKG_VERSION").into(),
+        },
     }
 }
 
@@ -108,11 +112,17 @@ fn start(
     let platform =
         IosPlatform::new(host.clone(), surface).context("constructing the iOS GPUI platform")?;
     let sink = platform.event_sink();
+    // One runtime for the process; the client reconnects through this factory.
+    let transport: Arc<dyn TransportFactory> =
+        Arc::new(NativeTransportFactory::new().context("starting the client's network runtime")?);
 
     let handle = gpui::Application::with_platform(std::rc::Rc::new(platform)).run_embedded(
-        |cx: &mut App| {
-            cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| FirstFrame))
-                .expect("the iOS GPUI window must open");
+        move |cx: &mut App| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let connection = client_connection();
+                cx.new(|cx| ClientApp::new(connection, transport.clone(), window, cx))
+            })
+            .expect("the iOS GPUI window must open");
             cx.activate(true);
         },
     );

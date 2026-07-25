@@ -161,11 +161,23 @@ crates/
   gpui-android/   Platform 实现 · NDK/NativeActivity · JNI
   gpui-ios/       Platform 实现 · UIKit · Metal
 
+  # ── 新增：三端共用的客户端 UI ──
+  client-app/     ClientApp + Transport trait，全平台
+
   # ── 新增：app 外壳 ──
   tcode-android/  cdylib + Gradle 工程
   tcode-ios/      staticlib + Xcode 工程
   tcode-web/      cdylib + Trunk
 ```
+
+**`client-app` 刻意不是工作区成员。** 它依赖 `tcode-ui` 的 `portable` feature，
+而那与 `desktop` 是**互斥模式**而非可叠加的层：开了 `desktop` 的 `ChatView` 持有
+`AppState` 和 composer，远程客户端无从提供。Cargo 会在工作区构建内统一 feature，
+所以把它列为成员会让 `tcode-ui` 同时开启两者，两个构造函数都无法满足。
+
+三个 shell 各自在 **target 表内**按路径依赖它，因此它只为 wasm/Android/iOS 构建，
+从不为宿主构建。单独检查：`cargo check -p client-app --target wasm32-unknown-unknown`。
+两个工作区清单守卫为它加了显式豁免——一个刻意的非成员应当被写明，而不是靠沉默。
 
 把 `gpui-android`/`gpui-ios` 和 `tcode-android`/`tcode-ios` 分开，是为了让后端
 能独立于 tcode 演进、独立于 tcode 被上游接纳。合在一起会永久绑死。
