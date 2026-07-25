@@ -9,8 +9,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use anyhow::{Context as _, Result, anyhow};
-use gpui::{Bounds, Pixels, WindowAppearance};
+use anyhow::{Context as _, Result, anyhow, bail};
+use gpui::{Bounds, Pixels, Size, WindowAppearance, point, px, size};
 use gpui_wgpu::wgpu;
 use gpui_wgpu::{GpuContext, WgpuContext};
 use raw_window_handle::{
@@ -18,48 +18,51 @@ use raw_window_handle::{
     UiKitWindowHandle, WindowHandle,
 };
 
-/// Physical size and scale of the layer GPUI draws into.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Physical size and scale of the `CAMetalLayer` GPUI draws into.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IosDisplayMetrics {
-    width_px: u32,
-    height_px: u32,
-    scale_factor: f32,
+    /// Width of the current surface in physical pixels.
+    pub width_px: u32,
+    /// Height of the current surface in physical pixels.
+    pub height_px: u32,
+    /// Number of physical pixels per GPUI logical pixel.
+    pub scale_factor: f32,
 }
 
 impl IosDisplayMetrics {
-    /// Validated metrics.
-    ///
-    /// Rejected rather than clamped: a zero dimension or a non-positive scale
-    /// means UIKit handed us a layer that is not ready, and configuring a
-    /// surface against it produces a driver error much further from the cause.
+    /// Creates validated display metrics.
     pub fn new(width_px: u32, height_px: u32, scale_factor: f32) -> Result<Self> {
-        if width_px == 0 || height_px == 0 {
-            return Err(anyhow!(
-                "a drawable layer cannot be {width_px}x{height_px} pixels"
-            ));
-        }
-        if !scale_factor.is_finite() || scale_factor <= 0.0 {
-            return Err(anyhow!(
-                "contentScaleFactor must be positive, got {scale_factor}"
-            ));
-        }
-        Ok(Self {
+        let metrics = Self {
             width_px,
             height_px,
             scale_factor,
-        })
+        };
+        metrics.validate()?;
+        Ok(metrics)
     }
 
-    pub fn width_px(&self) -> u32 {
-        self.width_px
+    pub(crate) fn validate(self) -> Result<()> {
+        if self.width_px == 0 || self.height_px == 0 {
+            bail!("iOS drawable dimensions must be non-zero");
+        }
+        if self.width_px > i32::MAX as u32 || self.height_px > i32::MAX as u32 {
+            bail!("iOS drawable dimensions exceed GPUI's device-pixel range");
+        }
+        if !self.scale_factor.is_finite() || self.scale_factor <= 0.0 {
+            bail!("iOS contentScaleFactor must be finite and positive");
+        }
+        Ok(())
     }
 
-    pub fn height_px(&self) -> u32 {
-        self.height_px
+    pub(crate) fn logical_size(self) -> Size<Pixels> {
+        size(
+            px(self.width_px as f32 / self.scale_factor),
+            px(self.height_px as f32 / self.scale_factor),
+        )
     }
 
-    pub fn scale_factor(&self) -> f32 {
-        self.scale_factor
+    pub(crate) fn logical_bounds(self) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(0.0)), self.logical_size())
     }
 }
 
@@ -116,21 +119,23 @@ impl HasDisplayHandle for IosLayer {
 /// One drawable generation: a layer plus the metrics it was measured at.
 #[derive(Debug, Clone, Copy)]
 pub struct IosSurface {
-    layer: IosLayer,
-    metrics: IosDisplayMetrics,
+    /// The view whose layer is a `CAMetalLayer`.
+    pub window: IosLayer,
+    /// Size and scale this generation was measured at.
+    pub metrics: IosDisplayMetrics,
 }
 
 impl IosSurface {
-    pub fn new(layer: IosLayer, metrics: IosDisplayMetrics) -> Self {
-        Self { layer, metrics }
+    pub fn new(layer: IosLayer, metrics: IosDisplayMetrics) -> Result<Self> {
+        metrics.validate()?;
+        Ok(Self {
+            window: layer,
+            metrics,
+        })
     }
 
     pub fn layer(&self) -> IosLayer {
-        self.layer
-    }
-
-    pub fn metrics(&self) -> IosDisplayMetrics {
-        self.metrics
+        self.window
     }
 }
 
@@ -189,6 +194,13 @@ pub trait IosHost: Send + Sync {
     /// one vsync, and each extra tick would queue a redundant frame.
     fn request_frame(&self);
 
+    /// Ask the shell to suspend the app.
+    ///
+    /// iOS apps do not exit on demand — `exit(0)` is grounds for App Store
+    /// rejection and looks like a crash to the user — so this is advisory and a
+    /// shell may reasonably do nothing.
+    fn finish_activity(&self);
+
     /// Open a URL through `UIApplication`.
     fn open_url(&self, url: &str) -> Result<()>;
 
@@ -218,4 +230,19 @@ pub trait IosHost: Send + Sync {
 
     /// Current `UITraitCollection.userInterfaceStyle`.
     fn window_appearance(&self) -> WindowAppearance;
+
+    /// Current thermal pressure.
+    ///
+    /// iOS reports this through `ProcessInfo.thermalState`, which is a
+    /// notification rather than a poll, so a shell caches the last value.
+    fn thermal_state(&self) -> gpui::ThermalState;
+
+    /// GPUI's focused text-input state changed.
+    fn text_input_state_changed(&self, change: gpui::TextInputStateChange);
+
+    /// Enable or disable the shell's back gesture, if it has one.
+    ///
+    /// iOS has no system back button; this exists so the shared window code can
+    /// be identical on both backends, and a shell may ignore it.
+    fn set_back_enabled(&self, enabled: bool);
 }

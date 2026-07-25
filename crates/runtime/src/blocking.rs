@@ -77,6 +77,7 @@ mod tests {
             "sync-host",
             "sync-protocol",
             "tcode-android",
+            "tcode-ios",
             "tcode-server",
             "tcode-web",
             "term",
