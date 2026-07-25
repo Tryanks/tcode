@@ -363,7 +363,15 @@ fn main() {
             };
             let sync_server = SettingsStore::new(store.root().clone())
                 .load_or_create_sync_token()
-                .and_then(|token| sync_host::start(store.clone(), host_info, token));
+                .and_then(|token| {
+                    sync_host::start_on(
+                        store.clone(),
+                        host_info,
+                        token,
+                        std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                        sync_host::WakeSource::Broadcast,
+                    )
+                });
             match sync_server {
                 Ok(server) => {
                     log::info!("sync host listening at {}", server.url);
