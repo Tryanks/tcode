@@ -16,17 +16,19 @@
 //! by swapping the binary's `main`, which only works if nothing here reaches
 //! for a UI.
 
+pub mod pairing;
 pub mod server;
 pub mod store_source;
 
+pub use pairing::Pairing;
 pub use server::{SyncServer, WakeSource, start, start_on};
 pub use store_source::{CommandRequest, CommandSink, LiveFlags, LiveSessions, StoreSource};
 
 use std::collections::HashMap;
 
 use sync_protocol::{
-    ClientFrame, CommandRejection, HostFrame, HostInfo, RefuseReason, SeqEvent, SessionCommand,
-    SessionSummary, negotiate_version,
+    ClientFrame, ClientInfo, CommandRejection, HostFrame, HostInfo, RefuseReason, SeqEvent,
+    SessionCommand, SessionSummary, negotiate_version,
 };
 
 /// How many events one `Events` frame carries while replaying backlog.
@@ -64,6 +66,11 @@ pub trait SessionSource {
 /// Host identity and the credential clients must present.
 pub struct HostConfig {
     pub host: HostInfo,
+    /// Outstanding pairing code, if the host offers pairing.
+    ///
+    /// `None` means a client must already hold the token — which is right for a
+    /// headless server nobody is standing in front of to read a code off.
+    pub pairing: Option<crate::pairing::Pairing>,
     /// Compared in full. Pairing — how a client comes to hold this — is host UX
     /// and deliberately outside the protocol for now.
     pub token: String,
@@ -139,6 +146,15 @@ impl<S: SessionSource> Connection<S> {
     }
 
     fn handle_unauthenticated(&mut self, frame: ClientFrame) -> Vec<HostFrame> {
+        if let ClientFrame::Pair {
+            min_version,
+            max_version,
+            code,
+            client,
+        } = frame
+        {
+            return self.handle_pairing(min_version, max_version, &code, client);
+        }
         let ClientFrame::Hello {
             min_version,
             max_version,
@@ -179,12 +195,57 @@ impl<S: SessionSource> Connection<S> {
         }]
     }
 
+    /// Trade a pairing code for the durable token.
+    ///
+    /// Deliberately does *not* authenticate the connection: the client sends a
+    /// normal `Hello` afterwards. Pairing then has exactly one job, and a
+    /// `Paired` frame is worth no more than the token inside it.
+    fn handle_pairing(
+        &mut self,
+        min_version: u32,
+        max_version: u32,
+        code: &str,
+        client: ClientInfo,
+    ) -> Vec<HostFrame> {
+        let Some(version) = negotiate_version(min_version, max_version) else {
+            return self.refuse(RefuseReason::UnsupportedVersion {
+                host_min: sync_protocol::PROTOCOL_MIN_VERSION,
+                host_max: sync_protocol::PROTOCOL_MAX_VERSION,
+            });
+        };
+        let Some(pairing) = &self.config.pairing else {
+            // A host that offers no pairing says so as a rejection rather than
+            // as a distinct error: whether pairing is disabled or the code was
+            // wrong is not something an unauthenticated peer needs to learn.
+            return self.refuse(RefuseReason::PairingRejected);
+        };
+        if !pairing.redeem(code, std::time::Instant::now()) {
+            return self.refuse(RefuseReason::PairingRejected);
+        }
+        log::info!(
+            "sync client paired: {} ({})",
+            client.display_name,
+            client.platform
+        );
+        // The connection stays unauthenticated; the client reconnects, or sends
+        // Hello on this one, with the token it just received.
+        vec![HostFrame::Paired {
+            version,
+            token: self.config.token.clone(),
+        }]
+    }
+
     fn handle_ready(&mut self, frame: ClientFrame) -> Vec<HostFrame> {
         match frame {
             // A second handshake is a confused client, not an attack. Refusing
             // is still right: silently ignoring it would leave the two sides
             // disagreeing about the negotiated version.
-            ClientFrame::Hello { .. } => self.refuse(RefuseReason::Unauthorized),
+            // Both are "you already did this": a second handshake, or pairing
+            // on a connection that is already authenticated. Silently ignoring
+            // either would leave the two sides disagreeing about state.
+            ClientFrame::Hello { .. } | ClientFrame::Pair { .. } => {
+                self.refuse(RefuseReason::Unauthorized)
+            }
             ClientFrame::Ping { nonce } => vec![HostFrame::Pong { nonce }],
             ClientFrame::ListSessions => vec![HostFrame::SessionList {
                 sessions: self.source.list_sessions(),
@@ -386,6 +447,8 @@ mod tests {
                 app_version: "0.1.0".into(),
             },
             token: TOKEN.into(),
+            // Most tests exercise token auth; pairing gets its own fixtures.
+            pairing: None,
         }
     }
 
@@ -772,6 +835,101 @@ mod tests {
             }
             other => panic!("expected a session list, got {other:?}"),
         }
+    }
+
+    fn pair(code: &str) -> ClientFrame {
+        ClientFrame::Pair {
+            min_version: sync_protocol::PROTOCOL_MIN_VERSION,
+            max_version: sync_protocol::PROTOCOL_MAX_VERSION,
+            code: code.into(),
+            client: ClientInfo {
+                client_id: "client-1".into(),
+                display_name: "Pixel".into(),
+                platform: "android".into(),
+                app_version: "0.1.0".into(),
+            },
+        }
+    }
+
+    fn paired_config(pairing: crate::pairing::Pairing) -> HostConfig {
+        HostConfig {
+            pairing: Some(pairing),
+            ..config()
+        }
+    }
+
+    /// The point of pairing: a client with no token can obtain one.
+    #[test]
+    fn a_valid_code_yields_the_token() {
+        let pairing = crate::pairing::Pairing::new();
+        let code = pairing.issue(std::time::Instant::now(), || [1, 2, 3, 4, 5, 6]);
+        let mut connection = Connection::new(FakeSource::with_log("s1", 0), paired_config(pairing));
+
+        match connection.handle(pair(&code)).as_slice() {
+            [HostFrame::Paired { token, .. }] => assert_eq!(token, TOKEN),
+            other => panic!("expected a paired frame, got {other:?}"),
+        }
+    }
+
+    /// Pairing must not authenticate the connection. Keeping the two steps
+    /// apart means a `Paired` frame is worth no more than the token in it, and
+    /// the client still proves possession by sending `Hello`.
+    #[test]
+    fn pairing_does_not_authenticate_the_connection() {
+        let pairing = crate::pairing::Pairing::new();
+        let code = pairing.issue(std::time::Instant::now(), || [1, 2, 3, 4, 5, 6]);
+        let mut connection = Connection::new(FakeSource::with_log("s1", 0), paired_config(pairing));
+
+        connection.handle(pair(&code));
+        assert!(!connection.is_ready(), "pairing is not a handshake");
+
+        // The token it just received is what actually authenticates.
+        assert!(matches!(
+            connection.handle(hello(TOKEN)).as_slice(),
+            [HostFrame::Welcome { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_wrong_code_is_rejected_and_the_connection_is_done() {
+        let pairing = crate::pairing::Pairing::new();
+        pairing.issue(std::time::Instant::now(), || [1, 2, 3, 4, 5, 6]);
+        let mut connection = Connection::new(FakeSource::with_log("s1", 0), paired_config(pairing));
+
+        assert!(matches!(
+            connection.handle(pair("ZZZZZZ")).as_slice(),
+            [HostFrame::Refused {
+                reason: RefuseReason::PairingRejected
+            }]
+        ));
+        assert!(connection.is_refused());
+    }
+
+    /// A host with pairing disabled — a headless server nobody is standing in
+    /// front of — must answer the same way as a wrong code. Whether pairing is
+    /// off or the guess was bad is not something an unauthenticated peer needs.
+    #[test]
+    fn a_host_without_pairing_rejects_identically() {
+        let mut connection = Connection::new(FakeSource::with_log("s1", 0), config());
+        assert!(matches!(
+            connection.handle(pair("ACDEFG")).as_slice(),
+            [HostFrame::Refused {
+                reason: RefuseReason::PairingRejected
+            }]
+        ));
+    }
+
+    #[test]
+    fn pairing_after_a_handshake_is_refused() {
+        let pairing = crate::pairing::Pairing::new();
+        let code = pairing.issue(std::time::Instant::now(), || [1, 2, 3, 4, 5, 6]);
+        let mut connection = Connection::new(FakeSource::with_log("s1", 0), paired_config(pairing));
+        connection.handle(hello(TOKEN));
+
+        assert!(matches!(
+            connection.handle(pair(&code)).as_slice(),
+            [HostFrame::Refused { .. }]
+        ));
     }
 
     #[test]

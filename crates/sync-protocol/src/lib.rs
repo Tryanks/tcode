@@ -123,6 +123,12 @@ pub enum RefuseReason {
     Unauthorized,
     /// The host is shutting down or already serving its connection limit.
     Unavailable { detail: String },
+    /// The pairing code was wrong, already used, or has expired.
+    ///
+    /// Deliberately one reason for all three: distinguishing them would let an
+    /// attacker learn that a guessed code was *once* valid, which is most of
+    /// what they need to know.
+    PairingRejected,
 }
 
 /// Why the host could not apply a command.
@@ -158,6 +164,18 @@ pub enum SessionEndReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ClientFrame {
+    /// Exchange a short-lived pairing code for a durable token.
+    ///
+    /// The one frame a client may send before `Hello`, because it is how a
+    /// client that has no token gets one. A phone cannot be handed a
+    /// credential the way a query string hands one to a browser, and asking
+    /// someone to type a UUID off another screen is not a pairing flow.
+    Pair {
+        min_version: u32,
+        max_version: u32,
+        code: String,
+        client: ClientInfo,
+    },
     /// Must be the first frame; a host rejects anything else before it.
     Hello {
         min_version: u32,
@@ -200,6 +218,17 @@ pub enum HostFrame {
     },
     Refused {
         reason: RefuseReason,
+    },
+    /// A pairing code was accepted. The token is durable: a client stores it and
+    /// never needs the code again.
+    ///
+    /// The connection is *not* authenticated by this — the client still sends
+    /// `Hello` with the new token. Keeping the two steps separate means pairing
+    /// has exactly one job, and a stolen `Paired` frame is worth no more than
+    /// the token it carries.
+    Paired {
+        version: u32,
+        token: String,
     },
     SessionList {
         sessions: Vec<SessionSummary>,
@@ -270,6 +299,12 @@ mod tests {
                 client: client_info(),
                 token: "secret".into(),
             },
+            ClientFrame::Pair {
+                min_version: PROTOCOL_MIN_VERSION,
+                max_version: PROTOCOL_MAX_VERSION,
+                code: "K7M2QX".into(),
+                client: client_info(),
+            },
             ClientFrame::ListSessions,
             ClientFrame::Subscribe {
                 session_id: "s1".into(),
@@ -309,6 +344,13 @@ mod tests {
             },
             HostFrame::Refused {
                 reason: RefuseReason::Unauthorized,
+            },
+            HostFrame::Refused {
+                reason: RefuseReason::PairingRejected,
+            },
+            HostFrame::Paired {
+                version: PROTOCOL_MAX_VERSION,
+                token: "durable-token".into(),
             },
             HostFrame::SessionList {
                 sessions: vec![SessionSummary {

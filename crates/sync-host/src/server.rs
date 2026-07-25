@@ -48,6 +48,8 @@ pub enum WakeSource {
 
 /// A running sync server.
 pub struct SyncServer {
+    /// Issues the short codes a phone trades for the token.
+    pub pairing: crate::pairing::Pairing,
     /// WebSocket endpoint, e.g. `ws://127.0.0.1:53213/sync`.
     pub url: String,
     /// The credential clients must present, supplied by the embedding app.
@@ -78,6 +80,7 @@ struct ServerState {
     store: SessionStore,
     host: HostInfo,
     token: String,
+    pairing: Option<crate::pairing::Pairing>,
     live: LiveSessions,
     commands: async_channel::Sender<CommandRequest>,
     wake: WakeFactory,
@@ -148,6 +151,7 @@ pub fn start_on(
     // forever while every client believes they were delivered.
     let (command_tx, command_rx) = async_channel::bounded(256);
     let live = LiveSessions::new();
+    let pairing = crate::pairing::Pairing::new();
     let (wake, advance) = match wake_source {
         WakeSource::Broadcast => {
             let (advance, _) = tokio::sync::broadcast::channel(ADVANCE_BUFFER);
@@ -166,6 +170,7 @@ pub fn start_on(
         store,
         host,
         token: token.clone(),
+        pairing: Some(pairing.clone()),
         live: live.clone(),
         commands: command_tx,
         wake,
@@ -205,6 +210,7 @@ pub fn start_on(
     Ok(SyncServer {
         url,
         token,
+        pairing,
         commands: command_rx,
         live,
         advance,
@@ -227,6 +233,7 @@ async fn serve_connection(socket: WebSocket, state: Arc<ServerState>) {
         HostConfig {
             host: state.host.clone(),
             token: state.token.clone(),
+            pairing: state.pairing.clone(),
         },
     );
 
