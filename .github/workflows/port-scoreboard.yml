@@ -24,7 +24,7 @@ concurrency:
 jobs:
   scoreboard:
     name: ${{ matrix.target }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +36,10 @@ jobs:
             extra_flags: "-Zbuild-std=std,panic_abort"
           - target: aarch64-linux-android
             extra_flags: ""
+          - target: aarch64-apple-ios
+            extra_flags: ""
+            # iOS needs Apple's toolchain, so this row runs on macOS.
+            runner: macos-15
     env:
       CARGO_TERM_COLOR: never
       RUSTC_BOOTSTRAP: "1"
@@ -51,6 +55,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -62,6 +67,14 @@ jobs:
           # is absent on purpose: it is desktop-only forever (PTY + login shell
           # + tcgetpgrp), so counting its errors would only add noise.
           crates="tcode-i18n sync-protocol sync-client tcode-core agent tcode-services tcode-runtime tcode-ui"
+
+          # The platform backends only exist for one target each, and are added
+          # to their own row. gpui-android additionally needs an NDK this job
+          # does not install — psm assembles AArch64 during dependency checking
+          # — so it is deliberately absent rather than counted as broken.
+          case "${{ matrix.target }}" in
+            aarch64-apple-ios) crates="$crates gpui-ios tcode-ios" ;;
+          esac
 
           {
             echo "## ${{ matrix.target }}"
