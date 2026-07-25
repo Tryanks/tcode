@@ -307,6 +307,37 @@ client 能实时看到 host 上跑的会话并成功发送一个 turn、批准�
 **Gate 2**：浏览器里打开一个 host 上的活跃会话，能读、能发 turn、能批准。
 桌面布局，不做响应式。
 
+**读的那一半已达成（2026-07-25，目视确认）。** 浏览器加载 `tcode-web`，
+经 WebSocket 连上真实 host，渲染出真实会话的时间线：用户消息气泡、
+助手回复、Copy 按钮、回合计时页脚（`Total 5s · AI thinking & response 5s`），
+与桌面端一致。
+
+关键在于**那是桌面端的同一个 `ChatView`**，编译成 wasm 后由同步来的 `Timeline`
+驱动——浏览器侧没有 `AppState`、没有 runtime、没有任何进程。这正是 §5 期 2
+第 3 项那个"拆分重构"要买的东西，现在兑现了。
+
+产物体积（多线程 atomics 构建，即今天真能发布的那个配置）：
+
+| | 体积 |
+| --- | ---: |
+| 裸 wasm | 15.6 MB |
+| `wasm-opt -Oz` | 14.3 MB |
+| gzip -9 | 6.0 MB |
+| **brotli -q11** | **4.1 MB** |
+
+`wasm-opt` 只砍 8% 裸体积、brotli 后不变——它去掉的冗余 brotli 本来就压掉了。
+**4.1 MB 是终值**，远在"10MB 以内可接受嵌入"的门槛内，且这是悲观值
+（单线程构建会更小，但见下）。
+
+**一个上游 bug 决定了配置。** `gpui_web` 的单线程配置在本文 pin 的 rev 上
+编不过：`shared_memory_supported` 定义在 `#[cfg(feature = "multithreaded")]`
+下（`dispatcher.rs:130`）却被无条件调用（`:82`）。已在独立 crate 复现。
+根因是上游 CI 只跑 atomics 那条路径——又一条 §2.1「spike 而非生产级」的证据。
+按 §7 不 fork：记为上游贡献候选，本地走多线程。
+
+代价是一条真实部署约束：atomics 需要 SharedArrayBuffer，
+**页面必须以 COOP/COEP 跨源隔离方式提供**。
+
 **实测的起点（2026-07-25）。** `cargo check --target wasm32-unknown-unknown` 错误数：
 
 | crate | 起始 | 现在 |
