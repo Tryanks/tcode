@@ -3200,6 +3200,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-android"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "gpui-component"
 version = "0.5.2"
 source = "git+https://github.com/longbridge/gpui-component?rev=031555662e99a1b5a549990b47f246d475b8288a#031555662e99a1b5a549990b47f246d475b8288a"
@@ -8581,6 +8588,17 @@ dependencies = [
  "tcode-services",
  "term",
  "uuid",
+]
+
+[[package]]
+name = "tcode-server"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "sync-host",
+ "sync-protocol",
+ "tcode-services",
 ]
 
 [[package]]
