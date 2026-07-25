@@ -8318,6 +8318,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync-client"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "log",
+ "sync-protocol",
+ "tcode-core",
+]
+
+[[package]]
 name = "sync-host"
 version = "0.1.0"
 dependencies = [
