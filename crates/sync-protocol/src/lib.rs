@@ -14,7 +14,10 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use agent::{AgentEvent, ProviderKind, SessionCommand, WorkspacePath};
+// `ApprovalDecision` is protocol vocabulary, not an implementation detail:
+// `SessionCommand::RespondApproval` carries it, so a client cannot answer an
+// approval without naming it.
+pub use agent::{AgentEvent, ApprovalDecision, ProviderKind, SessionCommand, WorkspacePath};
 
 /// Oldest protocol version this build can speak.
 pub const PROTOCOL_MIN_VERSION: u32 = 1;

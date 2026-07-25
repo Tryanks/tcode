@@ -7,9 +7,15 @@ use gpui::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     WindowOptions, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{ActiveTheme as _, Root, StyledExt as _};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Root, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    input::{Input, InputState},
+};
 use sync_client::{Client, ClientConfig};
-use sync_protocol::{ClientFrame, ClientInfo, HostFrame, SessionSummary};
+use sync_protocol::{
+    ApprovalDecision, ClientFrame, ClientInfo, HostFrame, SessionCommand, SessionSummary,
+};
 use tcode_ui::{ChatReadModel, ChatSessionReadModel, ChatView};
 use wasm_bindgen::{JsCast as _, closure::Closure, prelude::*};
 use web_sys::{CloseEvent, Event, MessageEvent, UrlSearchParams, WebSocket};
@@ -39,8 +45,21 @@ struct WebApp {
     sessions: Vec<SessionSummary>,
     selected: Option<String>,
     chat: Entity<ChatView>,
+    composer: Entity<InputState>,
     status: SharedString,
+    /// Retained so a dropped socket can be re-established. Mobile and laptop
+    /// networks drop connections constantly; a client that cannot reconnect is
+    /// a client that works once.
+    url: Option<String>,
+    hello: String,
+    /// Consecutive failed attempts, for backoff. Reset on a successful open.
+    reconnect_attempts: u32,
+    /// How many rejections had been reported the last time we looked, so a new
+    /// one can be surfaced. The host only sends these when a command could not
+    /// be applied, and staying silent would leave a turn rendered that never ran.
+    rejections_seen: usize,
     _poll: gpui::Task<()>,
+    _reconnect: Option<gpui::Task<()>>,
 }
 
 impl WebApp {
@@ -60,8 +79,12 @@ impl WebApp {
             .connect()
             .encode()
             .expect("the fixed hello frame must encode");
+        let retained_hello = hello.clone();
         let chat = cx.new(|cx| ChatView::from_read_model(ChatReadModel::default(), window, cx));
+        let composer =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Send a message to this session…"));
 
+        let retained_url = config.url.clone();
         let (socket, status) = match (config.url, config.token) {
             (Some(url), Some(_)) => match connect(&url, &hello, incoming.clone()) {
                 Ok(socket) => (Some(socket), "Connecting…".into()),
@@ -98,8 +121,14 @@ impl WebApp {
             sessions: Vec::new(),
             selected: None,
             chat,
+            composer,
             status,
+            url: retained_url,
+            hello: retained_hello,
+            reconnect_attempts: 0,
+            rejections_seen: 0,
             _poll: poll,
+            _reconnect: None,
         }
     }
 
@@ -109,6 +138,7 @@ impl WebApp {
             match event {
                 TransportEvent::Open => {
                     self.status = "Authenticating…".into();
+                    self.reconnect_attempts = 0;
                 }
                 TransportEvent::Text(text) => self.handle_text(&text, cx),
                 TransportEvent::Error => {
@@ -116,10 +146,11 @@ impl WebApp {
                 }
                 TransportEvent::Closed(reason) => {
                     self.status = if reason.is_empty() {
-                        "Disconnected".into()
+                        "Disconnected — reconnecting…".into()
                     } else {
-                        format!("Disconnected: {reason}").into()
+                        format!("Disconnected: {reason} — reconnecting…").into()
                     };
+                    self.schedule_reconnect(cx);
                 }
             }
         }
@@ -171,6 +202,16 @@ impl WebApp {
         if affects_selected {
             self.refresh_chat(cx);
         }
+
+        // A rejected command is the one failure the timeline cannot show: the
+        // host applied nothing, so no event will ever arrive to explain it.
+        let rejections = self.client.command_rejections();
+        if rejections.len() > self.rejections_seen {
+            if let Some(latest) = rejections.last() {
+                self.status = format!("Command rejected: {:?}", latest.reason).into();
+            }
+            self.rejections_seen = rejections.len();
+        }
     }
 
     fn send_all(&mut self, frames: Vec<ClientFrame>) {
@@ -203,6 +244,99 @@ impl WebApp {
         let subscribe = self.client.subscribe(session_id);
         self.send(subscribe);
         self.refresh_chat(cx);
+    }
+
+    /// Reconnect after a backoff, then resume every subscription from the
+    /// cursor this client already holds — so a reconnect costs the events that
+    /// were missed, not the whole log.
+    fn schedule_reconnect(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = self.url.clone() else {
+            return;
+        };
+        self.socket = None;
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        // Capped exponential backoff: a host that is down should not be
+        // hammered, but a transient drop should recover in well under a second.
+        let delay = Duration::from_millis(250u64 << self.reconnect_attempts.min(6));
+        let hello = self.hello.clone();
+        let incoming = self.incoming.clone();
+        self._reconnect = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                match connect(&url, &hello, incoming) {
+                    Ok(socket) => {
+                        this.socket = Some(socket);
+                        // The client keeps its cursors across the drop, so the
+                        // resubscribe below asks only for the gap.
+                        let resume: Vec<ClientFrame> = this
+                            .selected
+                            .clone()
+                            .map(|session_id| vec![this.client.subscribe(session_id)])
+                            .unwrap_or_default();
+                        this.send_all(resume);
+                    }
+                    Err(error) => {
+                        this.status = format!("Reconnect failed: {error:?}").into();
+                        this.schedule_reconnect(cx);
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Send whatever is in the composer as a turn.
+    ///
+    /// `Client::command` allocates and retains the `delivery_id`; the turn is
+    /// not accepted until `AgentEvent::TurnAccepted` echoes it back, which is
+    /// what the status line reports. That mechanism predates this client and is
+    /// reused rather than duplicated.
+    fn send_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session_id) = self.selected.clone() else {
+            return;
+        };
+        let text = self.composer.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        // Monotonic within the page: `Date::now` alone can repeat inside one
+        // millisecond, and a repeated delivery id would make two turns
+        // indistinguishable to the acknowledgement tracking.
+        let delivery_id = next_delivery_id();
+        let frame = self.client.command(
+            session_id.clone(),
+            SessionCommand::SendTurn {
+                delivery_id,
+                text,
+                options: None,
+                attachments: Vec::new(),
+            },
+        );
+        self.send(frame);
+        self.composer
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.status = "Turn sent — awaiting acceptance…".into();
+        cx.notify();
+    }
+
+    fn respond_approval(
+        &mut self,
+        request_id: String,
+        decision: ApprovalDecision,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.selected.clone() else {
+            return;
+        };
+        let frame = self.client.command(
+            session_id,
+            SessionCommand::RespondApproval {
+                request_id,
+                decision,
+            },
+        );
+        self.send(frame);
+        cx.notify();
     }
 
     fn refresh_chat(&mut self, cx: &mut Context<Self>) {
@@ -317,8 +451,104 @@ impl Render for WebApp {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .child(self.chat.clone()),
+                    .child(div().flex_1().min_h_0().child(self.chat.clone()))
+                    .children(self.render_approvals(cx))
+                    .child(self.render_composer(cx)),
             )
+    }
+}
+
+impl WebApp {
+    /// Pending approvals, rendered above the composer rather than inline in the
+    /// timeline.
+    ///
+    /// Approving a command while away from the desk is the reason a remote
+    /// client exists, so this must be impossible to scroll past. The requests
+    /// come from the synced `Timeline`, which the shared reducer already
+    /// maintains — the browser does not track them itself.
+    fn render_approvals(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(session_id) = self.selected.as_deref() else {
+            return Vec::new();
+        };
+        let Some(state) = self.client.session(session_id) else {
+            return Vec::new();
+        };
+        state
+            .timeline()
+            .pending_approvals
+            .iter()
+            .map(|request| {
+                let id = request.id.clone();
+                let approve = id.clone();
+                let deny = id.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .m_3()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().warning)
+                    .bg(cx.theme().warning.opacity(0.08))
+                    .child(div().text_sm().font_semibold().child("Approval needed"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(format!("{:?}", request.kind))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new(SharedString::from(format!("approve-{id}")))
+                                    .primary()
+                                    .label("Approve")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_approval(
+                                            approve.clone(),
+                                            ApprovalDecision::Approve,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("deny-{id}")))
+                                    .danger()
+                                    .label("Deny")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.respond_approval(
+                                            deny.clone(),
+                                            ApprovalDecision::Deny,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    fn render_composer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let live = self.selected.is_some() && self.socket.is_some();
+        div()
+            .flex()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(div().flex_1().min_w_0().child(Input::new(&self.composer)))
+            .child(
+                Button::new("send")
+                    .primary()
+                    .label("Send")
+                    .disabled(!live)
+                    .on_click(cx.listener(|this, _, window, cx| this.send_turn(window, cx))),
+            )
+            .into_any_element()
     }
 }
 
@@ -380,6 +610,19 @@ fn page_config() -> Result<PageConfig, JsValue> {
     Ok(PageConfig {
         url: params.get("url").filter(|value| !value.is_empty()),
         token: params.get("token").filter(|value| !value.is_empty()),
+    })
+}
+
+/// Delivery ids only need to be unique within this page's lifetime, since the
+/// host correlates them per session and the client forgets them once accepted.
+fn next_delivery_id() -> u64 {
+    thread_local! {
+        static NEXT: RefCell<u64> = RefCell::new(js_sys::Date::now() as u64);
+    }
+    NEXT.with(|next| {
+        let mut next = next.borrow_mut();
+        *next = next.wrapping_add(1);
+        *next
     })
 }
 
