@@ -21,3 +21,23 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+# On pinning gpui: the Zed dependency deliberately carries no `rev` in any
+# manifest, and Cargo.lock is the pin. Two things rule out the alternatives.
+#
+# Putting `rev = ...` on our own `gpui` entries does NOT pin the tree:
+# `gpui-component` depends on the same repository without a rev, so the graph
+# ends up with two distinct source ids (`git+…#rev` and `git+…?rev=…#rev`) —
+# two copies of `gpui` in one binary, and gpui-component's gpui types stop
+# being our gpui types.
+#
+# Collapsing them with `[patch."https://github.com/zed-industries/zed"]` is
+# also rejected: Cargo requires a patch to point at a *different* source, and
+# the only correct revision lives at that same URL. (Patching would additionally
+# need `version = "=0.2.2"`, because the tree carries a second package named
+# `gpui` — the 0.0.0 lint fixture under `tooling/lints/test_fixture/gpui`.)
+#
+# So the pin is Cargo.lock, enforced two ways: CI runs every cargo command with
+# `--locked`, and `crates/app/src/gpui_pin.rs` asserts the locked commit matches
+# a constant recorded there. Bumping gpui = update the lock and that constant in
+# one deliberate commit.
