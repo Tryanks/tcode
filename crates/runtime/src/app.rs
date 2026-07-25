@@ -689,6 +689,15 @@ impl ActiveSession {
         self.turn_in_flight
     }
 
+    /// Whether this session owns work which must stay live and surface as
+    /// "Working", regardless of whether it is active or parked.
+    fn has_work(&self) -> bool {
+        self.turn_in_flight
+            || self.delivery_in_flight.is_some()
+            || !self.queue.is_empty()
+            || self.background_task_count > 0
+    }
+
     pub fn queued(&self) -> &[QueuedMessage] {
         &self.queue
     }
@@ -4687,21 +4696,13 @@ impl AppState {
         cx.notify();
     }
 
-    /// Whether a turn is currently running for `session_id` (only the active
-    /// session can be running).
+    /// Whether `session_id` owns live or queued work.
     pub fn turn_running_for(&self, session_id: &str) -> bool {
-        if let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) {
-            return active.timeline.turn_running;
-        }
-        // A parked session is working when a turn is in flight or its queue
-        // still has messages to run (the parked timeline is stale by design, so
-        // the flags are the source of truth).
-        self.background.get(session_id).is_some_and(|s| {
-            s.turn_in_flight
-                || s.delivery_in_flight.is_some()
-                || !s.queue.is_empty()
-                || s.background_task_count > 0
-        })
+        self.active
+            .as_ref()
+            .filter(|session| session.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))
+            .is_some_and(ActiveSession::has_work)
     }
 
     /// The first approval currently blocking a session, including parked and
@@ -4734,33 +4735,12 @@ impl AppState {
     /// background tasks. Quitting stops all of it, so the quit guard must gate
     /// on this rather than on turns alone.
     pub fn working_sessions_count(&self) -> usize {
-        fn works(
-            turn_in_flight: bool,
-            delivery: bool,
-            queued: bool,
-            background_tasks: usize,
-        ) -> bool {
-            turn_in_flight || delivery || queued || background_tasks > 0
-        }
-        usize::from(self.active.as_ref().is_some_and(|s| {
-            works(
-                s.turn_in_flight,
-                s.delivery_in_flight.is_some(),
-                !s.queue.is_empty(),
-                s.background_task_count,
-            )
-        })) + self
-            .background
-            .values()
-            .filter(|s| {
-                works(
-                    s.turn_in_flight,
-                    s.delivery_in_flight.is_some(),
-                    !s.queue.is_empty(),
-                    s.background_task_count,
-                )
-            })
-            .count()
+        usize::from(self.active.as_ref().is_some_and(ActiveSession::has_work))
+            + self
+                .background
+                .values()
+                .filter(|session| session.has_work())
+                .count()
     }
 
     /// Record that a thread has been visited now (clears its unread dot).
@@ -5985,10 +5965,11 @@ impl AppState {
     }
 
     /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
-    /// so nothing needs undoing.
+    /// so nothing needs undoing. A submitted head cannot be removed until its
+    /// correlated provider acknowledgement commits it.
     pub fn drop_queued(&mut self, id: u64, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
-            active.queue.retain(|m| m.id != id);
+            let _ = active.take_queued(id);
         }
         cx.notify();
     }
@@ -12581,6 +12562,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
+    #[gpui::test]
+    fn submitted_queue_head_cannot_leak_delivery_after_turn_completion(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cwd =
+            std::env::temp_dir().join(format!("tcode-submitted-drop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let data = std::env::temp_dir().join(format!(
+            "tcode-submitted-drop-data-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (session, commands) = fake_live_session(cwd.clone());
+        let id = session.meta.id.clone();
+
+        state.update(cx, |state, cx| {
+            state.store.upsert_meta(&session.meta).unwrap();
+            state.sessions = state.store.load_index();
+            state.active = Some(session);
+            state.send_turn("finish this task".into(), Vec::new(), cx);
+            let delivery_id = match commands.try_recv() {
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+                other => panic!("expected SendTurn, got {other:?}"),
+            };
+
+            // The submitted head remains in the visible queue strip until its
+            // provider acknowledgement. Its ✕ must not invalidate correlation.
+            state.drop_queued(delivery_id, cx);
+            state.on_event(&id, AgentEvent::TurnAccepted { delivery_id }, cx);
+            state.on_event(
+                &id,
+                AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+                cx,
+            );
+            state.on_event(
+                &id,
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+            assert!(!state.turn_running_for(&id));
+
+            state.start_draft("proj".into(), cwd.clone(), cx);
+            state.select_session(&id, cx);
+            assert!(!state.turn_running_for(&id));
+            state.start_draft("proj".into(), cwd.clone(), cx);
+            assert!(
+                !state.turn_running_for(&id),
+                "the completed delivery became Working again after reparking"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[gpui::test]
+    fn turn_running_for_is_independent_of_active_or_parked_location(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-working-location-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let commands = async_channel::unbounded().0;
+
+        let mut idle = live_session(ProviderKind::ClaudeCode, commands.clone());
+        idle.meta.id = "idle".into();
+
+        let mut turn = live_session(ProviderKind::ClaudeCode, commands.clone());
+        turn.meta.id = "turn".into();
+        turn.turn_in_flight = true;
+
+        let mut delivery = live_session(ProviderKind::ClaudeCode, commands.clone());
+        delivery.meta.id = "delivery".into();
+        delivery.delivery_in_flight = Some(7);
+
+        let mut queued = live_session(ProviderKind::ClaudeCode, commands.clone());
+        queued.meta.id = "queued".into();
+        queued.push_queued("waiting".into(), Vec::new());
+
+        let mut background = live_session(ProviderKind::ClaudeCode, commands.clone());
+        background.meta.id = "background".into();
+        background.background_task_count = 1;
+
+        let mut stale_timeline = live_session(ProviderKind::ClaudeCode, commands);
+        stale_timeline.meta.id = "stale-timeline".into();
+        stale_timeline.timeline.apply_at(
+            None,
+            &AgentEvent::TurnStarted {
+                turn_id: "stale".into(),
+            },
+        );
+
+        state.update(cx, |state, _| {
+            for (label, session, expected) in [
+                ("idle", idle, false),
+                ("turn", turn, true),
+                ("delivery", delivery, true),
+                ("queued", queued, true),
+                ("background", background, true),
+                ("stale timeline", stale_timeline, false),
+            ] {
+                let id = session.meta.id.clone();
+                state.active = Some(session);
+                let active_answer = state.turn_running_for(&id);
+
+                let parked = state.active.take().unwrap();
+                state.background.insert(id.clone(), parked);
+                let parked_answer = state.turn_running_for(&id);
+
+                assert_eq!(
+                    active_answer, parked_answer,
+                    "{label} changed answer when moved between active and parked"
+                );
+                assert_eq!(active_answer, expected, "{label} work predicate");
+                state.background.remove(&id);
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     /// The T3 Code session-reaper failure class, our variant: switching to
     /// another thread must NOT kill a session whose turn is still running. The
     /// session parks in the background — process and queue alive, events still
@@ -12712,7 +12822,10 @@ mod tests {
                 },
                 cx,
             );
-            assert!(!state.turn_running_for(&id_a) || state.active.is_some());
+            assert!(
+                !state.turn_running_for(&id_a),
+                "a completed active session must not remain Working"
+            );
         });
 
         let _ = std::fs::remove_dir_all(&cwd);
