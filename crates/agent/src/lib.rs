@@ -481,7 +481,7 @@ pub enum InteractionMode {
 /// Per-turn overrides layered on top of the session's persisted options.
 /// Codex and OpenCode apply effort/variant per turn; Claude and pi use their
 /// session-level option selection.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnOptions {
     pub effort: Option<String>,
     pub interaction_mode: Option<InteractionMode>,
@@ -545,7 +545,17 @@ pub enum AgentError {
 }
 
 /// Commands the UI sends into a live session's actor loop.
-#[derive(Debug, Clone)]
+///
+/// Serializable because this is also the client-to-host half of the remote
+/// protocol (`docs/multiplatform-plan.md` §3.1): a phone or browser client
+/// cannot spawn a provider, so it sends these to whichever machine can.
+///
+/// Adjacently tagged rather than internally tagged like [`AgentEvent`]:
+/// `SetApprovalMode` and `SetInteractionMode` are newtype variants wrapping
+/// enums that serialize to strings, and Serde cannot represent those inside an
+/// internally tagged enum — it fails at runtime, not compile time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SessionCommand {
     SendTurn {
         /// Runtime queue id echoed by [`AgentEvent::TurnAccepted`] after the
@@ -1620,5 +1630,134 @@ mod thread_item_serde_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod session_command_wire_tests {
+    use super::*;
+
+    /// One fixture per [`SessionCommand`] variant.
+    ///
+    /// Kept honest by `discriminant`, whose match is exhaustive: adding a
+    /// variant stops this module compiling until the new command is covered
+    /// here as well. A command that cannot cross the wire would strand a
+    /// remote client on an action the desktop UI still offers, and that is
+    /// exactly the kind of gap a type system can close for us.
+    fn every_variant() -> Vec<SessionCommand> {
+        vec![
+            SessionCommand::SendTurn {
+                delivery_id: 7,
+                text: "hello".into(),
+                options: Some(TurnOptions {
+                    effort: Some("high".into()),
+                    interaction_mode: Some(InteractionMode::Plan),
+                }),
+                attachments: vec![Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "iVBORw0=".into(),
+                    source_path: None,
+                }],
+            },
+            SessionCommand::Interrupt,
+            SessionCommand::RespondApproval {
+                request_id: "req-1".into(),
+                decision: ApprovalDecision::Approve,
+            },
+            SessionCommand::RespondUserInput {
+                request_id: "req-2".into(),
+                answers: serde_json::json!({ "q1": "yes", "q2": ["a", "b"] })
+                    .as_object()
+                    .cloned()
+                    .expect("fixture is an object"),
+            },
+            SessionCommand::SetApprovalMode(ApprovalMode::default()),
+            SessionCommand::Steer {
+                request_id: "req-3".into(),
+                text: "actually, use ripgrep".into(),
+                attachments: Vec::new(),
+            },
+            SessionCommand::SetInteractionMode(InteractionMode::Plan),
+            SessionCommand::SetOption {
+                id: "reasoning".into(),
+                value: serde_json::json!({ "depth": 3 }),
+            },
+            SessionCommand::Rewind {
+                checkpoint_id: "ckpt-9".into(),
+                mode: RewindMode::Conversation,
+            },
+            SessionCommand::Shutdown,
+        ]
+    }
+
+    fn discriminant(command: &SessionCommand) -> &'static str {
+        match command {
+            SessionCommand::SendTurn { .. } => "send_turn",
+            SessionCommand::Interrupt => "interrupt",
+            SessionCommand::RespondApproval { .. } => "respond_approval",
+            SessionCommand::RespondUserInput { .. } => "respond_user_input",
+            SessionCommand::SetApprovalMode(_) => "set_approval_mode",
+            SessionCommand::Steer { .. } => "steer",
+            SessionCommand::SetInteractionMode(_) => "set_interaction_mode",
+            SessionCommand::SetOption { .. } => "set_option",
+            SessionCommand::Rewind { .. } => "rewind",
+            SessionCommand::Shutdown => "shutdown",
+        }
+    }
+
+    #[test]
+    fn every_variant_round_trips() {
+        for command in every_variant() {
+            let json = serde_json::to_string(&command)
+                .unwrap_or_else(|err| panic!("{command:?} must serialize: {err}"));
+            let back: SessionCommand = serde_json::from_str(&json)
+                .unwrap_or_else(|err| panic!("{command:?} must deserialize from {json}: {err}"));
+            assert_eq!(back, command, "round trip changed the command via {json}");
+        }
+    }
+
+    #[test]
+    fn fixtures_cover_every_variant() {
+        let mut seen: Vec<&str> = every_variant().iter().map(discriminant).collect();
+        seen.sort_unstable();
+        let mut deduped = seen.clone();
+        deduped.dedup();
+        assert_eq!(seen, deduped, "a variant is fixtured twice: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            10,
+            "fixtures no longer cover every SessionCommand variant: {seen:?}"
+        );
+    }
+
+    /// The two newtype variants are the reason this enum is adjacently tagged
+    /// rather than internally tagged like `AgentEvent`. Serde only fails on
+    /// them at runtime, so pin the shape here: an internally tagged enum could
+    /// not produce a string `data` field at all.
+    #[test]
+    fn newtype_variants_survive_the_tagging_scheme() {
+        let json = serde_json::to_value(SessionCommand::SetInteractionMode(InteractionMode::Plan))
+            .expect("newtype variant must serialize");
+        assert_eq!(json["type"], "set_interaction_mode");
+        assert!(
+            json["data"].is_string(),
+            "expected an adjacently tagged string payload, got {json}"
+        );
+    }
+
+    /// Struct variants share that shape, so a decoder never has to branch on
+    /// variant kind.
+    #[test]
+    fn struct_variants_nest_their_fields_under_data() {
+        let json = serde_json::to_value(SessionCommand::Interrupt).expect("unit variant");
+        assert_eq!(json["type"], "interrupt");
+
+        let json = serde_json::to_value(SessionCommand::RespondApproval {
+            request_id: "req-1".into(),
+            decision: ApprovalDecision::Approve,
+        })
+        .expect("struct variant");
+        assert_eq!(json["type"], "respond_approval");
+        assert_eq!(json["data"]["request_id"], "req-1");
     }
 }
