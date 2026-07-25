@@ -8,7 +8,7 @@ mod native {
     use std::error::Error;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use agent::{ApprovalDecision, SessionCommand};
+    use agent::{ApprovalDecision, ApprovalMode, SessionCommand};
     use futures_util::{SinkExt as _, StreamExt as _};
     use sync_client::{Client, ClientConfig};
     use sync_protocol::{ClientFrame, ClientInfo, HostFrame};
@@ -30,6 +30,10 @@ mod native {
         Send {
             session_id: String,
             text: String,
+        },
+        Mode {
+            session_id: String,
+            mode: ApprovalMode,
         },
         Approve {
             session_id: String,
@@ -69,6 +73,9 @@ mod native {
             Command::Send { session_id, text } => {
                 send_turn(&mut socket, &mut client, session_id, text).await
             }
+            Command::Mode { session_id, mode } => {
+                set_approval_mode(&mut socket, &mut client, session_id, mode).await
+            }
             Command::Approve {
                 session_id,
                 request_id,
@@ -105,6 +112,10 @@ mod native {
                 session_id: session_id.clone(),
                 text: text.clone(),
             },
+            [command, session_id, mode] if command == "mode" => Command::Mode {
+                session_id: session_id.clone(),
+                mode: parse_approval_mode(mode)?,
+            },
             [command, session_id, request_id, decision] if command == "approve" => {
                 Command::Approve {
                     session_id: session_id.clone(),
@@ -122,6 +133,19 @@ mod native {
             token,
             command,
         })
+    }
+
+    fn parse_approval_mode(value: &str) -> Result<ApprovalMode, Box<dyn Error>> {
+        match value {
+            "supervised" => Ok(ApprovalMode::Supervised),
+            "read-only" => Ok(ApprovalMode::ReadOnly),
+            "auto-accept-edits" => Ok(ApprovalMode::AutoAcceptEdits),
+            "full-access" => Ok(ApprovalMode::FullAccess),
+            _ => Err(format!(
+                "invalid mode {value:?}; use supervised, read-only, auto-accept-edits, or full-access"
+            )
+            .into()),
+        }
     }
 
     fn parse_decision(value: &str) -> Result<ApprovalDecision, Box<dyn Error>> {
@@ -147,6 +171,7 @@ mod native {
              \x20 list\n\
              \x20 watch <session-id>\n\
              \x20 send <session-id> <text>\n\
+             \x20 mode <session-id> <supervised|read-only|auto-accept-edits|full-access>\n\
              \x20 approve <session-id> <request-id> <decision>"
         );
     }
@@ -322,6 +347,19 @@ mod native {
         }
     }
 
+    async fn set_approval_mode(
+        socket: &mut Socket,
+        client: &mut Client,
+        session_id: String,
+        mode: ApprovalMode,
+    ) -> Result<(), Box<dyn Error>> {
+        subscribe_until_caught_up(socket, client, &session_id, false).await?;
+        let frame = client.command(&session_id, SessionCommand::SetApprovalMode(mode));
+        send_frame(socket, frame).await?;
+        println!("approval mode set to {mode:?} for session {session_id}");
+        Ok(())
+    }
+
     async fn approve(
         socket: &mut Socket,
         client: &mut Client,
@@ -370,6 +408,15 @@ mod native {
     }
 
     fn event_summary(event: &agent::AgentEvent) -> String {
+        if let agent::AgentEvent::ApprovalRequested(request) = event {
+            let detail =
+                serde_json::to_string(request).unwrap_or_else(|_| "unserializable request".into());
+            return format!(
+                "approval_requested request_id={} request={detail}",
+                request.id
+            );
+        }
+
         let Ok(mut value) = serde_json::to_value(event) else {
             return "unserializable event".into();
         };
@@ -392,6 +439,55 @@ mod native {
             summary = summary.chars().take(LIMIT - 1).collect::<String>() + "…";
         }
         summary
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn parses_every_approval_mode() {
+            assert_eq!(
+                parse_approval_mode("supervised").unwrap(),
+                ApprovalMode::Supervised
+            );
+            assert_eq!(
+                parse_approval_mode("read-only").unwrap(),
+                ApprovalMode::ReadOnly
+            );
+            assert_eq!(
+                parse_approval_mode("auto-accept-edits").unwrap(),
+                ApprovalMode::AutoAcceptEdits
+            );
+            assert_eq!(
+                parse_approval_mode("full-access").unwrap(),
+                ApprovalMode::FullAccess
+            );
+            assert!(parse_approval_mode("default").is_err());
+        }
+
+        #[test]
+        fn approval_summary_keeps_request_id_and_full_request() {
+            let command = "echo ".to_owned() + &"x".repeat(200);
+            let event = agent::AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: "request-42".into(),
+                turn_id: Some("turn-7".into()),
+                kind: agent::ApprovalKind::ExecCommand {
+                    command: command.clone(),
+                    cwd: Some("/tmp/example".into()),
+                    reason: Some("exercise the remote approval path".into()),
+                },
+                options: Vec::new(),
+            });
+
+            let summary = event_summary(&event);
+
+            assert!(summary.starts_with(
+                "approval_requested request_id=request-42 request={\"id\":\"request-42\""
+            ));
+            assert!(summary.contains(&command));
+            assert!(summary.contains("\"cwd\":\"/tmp/example\""));
+        }
     }
 }
 
