@@ -71,6 +71,7 @@ mod tests {
             "preview-mcp",
             "runtime",
             "services",
+            "sync-host",
             "sync-protocol",
             "term",
             "ui",

@@ -8298,6 +8298,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sync-host"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "log",
+ "sync-protocol",
+]
+
+[[package]]
 name = "sync-protocol"
 version = "0.1.0"
 dependencies = [
