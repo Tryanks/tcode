@@ -140,6 +140,7 @@ mod tests {
             "sync-client",
             "sync-host",
             "sync-protocol",
+            "tcode-android",
             "tcode-server",
             "tcode-web",
             "term",
