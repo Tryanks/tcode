@@ -204,7 +204,7 @@ mod tests {
     /// "pairing is broken" rather than as a typo.
     #[test]
     fn the_alphabet_omits_ambiguous_characters() {
-        for ambiguous in [b'O', b'0', b'I', b'1', b'L', b'S', b'5', b'B', b'8'] {
+        for ambiguous in *b"O0I1LS5B8" {
             assert!(
                 !ALPHABET.contains(&ambiguous),
                 "{} is easily misread",
