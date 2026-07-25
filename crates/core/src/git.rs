@@ -599,16 +599,19 @@ mod tests {
         let changes = [
             FileChange {
                 path: "/repo/src/lib.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: Some("--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+middle\n".into()),
             },
             FileChange {
                 path: "/repo/other.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: Some("-gone\n+new\n".into()),
             },
             FileChange {
                 path: "/repo/src/lib.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: Some("-middle\n-final\n+replacement\n".into()),
             },
