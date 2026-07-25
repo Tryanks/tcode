@@ -16,8 +16,10 @@
 //! by swapping the binary's `main`, which only works if nothing here reaches
 //! for a UI.
 
+pub mod server;
 pub mod store_source;
 
+pub use server::{SyncServer, start};
 pub use store_source::{CommandRequest, CommandSink, LiveFlags, LiveSessions, StoreSource};
 
 use std::collections::HashMap;
