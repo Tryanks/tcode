@@ -1,0 +1,12 @@
+[package]
+name = "sync-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sync-protocol = { path = "../sync-protocol" }
+# Types only. This crate runs on phones and in browsers, where there are no
+# provider processes to spawn — that is the entire reason it exists.
+agent = { path = "../agent", default-features = false }
+tcode-core = { path = "../core" }
+log = "0.4"
