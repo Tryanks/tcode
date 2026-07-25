@@ -400,10 +400,22 @@ client 能实时看到 host 上跑的会话并成功发送一个 turn、批准�
 
 ### 期 4 — iOS
 
-同期 3，外加一个**已确认的额外阻塞**：
-`gpui_wgpu` 的原生 instance 只启用 `Backends::VULKAN | GL`，**没有 METAL**
-（`wgpu_context.rs:183`）。iOS 无法靠"只提供 raw handle"复用它。
-这是一个小改动（加 Metal 后端选择），**优先走上游 PR**；上游不接则本地补丁。
+同期 3。**此前记录的"额外阻塞"是错的，已实测推翻。**
+
+原判断：`gpui_wgpu` 的原生 instance 只启用 `Backends::VULKAN | GL`
+（`wgpu_context.rs:184`），所以 iOS 需要上游加 Metal 支持。
+
+实测结果：那个 `instance()` 只是**便利函数，不是唯一入口**。
+`WgpuContext::new(instance, surface, compositor_gpu)`（`wgpu_context.rs:27`）
+接受调用方自己构造的 instance，而 `WgpuRenderer::new` 接受
+`GpuContext = Rc<RefCell<Option<WgpuContext>>>`（`wgpu_renderer.rs:105`）——
+一个共享槽位，只在为空时才自建。**预先填入 Metal 的 `WgpuContext` 就绕开了默认值。**
+
+在一个 scratch crate 里对 `aarch64-apple-ios` 实测，**0 错误**：`gpui` 编译通过、
+`gpui_wgpu` 编译通过、`Backends::METAL` 的 instance 可构造。
+
+**所以 iOS 不需要任何上游改动**，形状与 Android 相同：写 `Platform` 胶水，
+复用上游的渲染器与文字系统。§7 的"不 fork"策略在这里不需要任何例外。
 
 **Gate 4**：iOS 设备上跑通同一条端到端路径。
 
