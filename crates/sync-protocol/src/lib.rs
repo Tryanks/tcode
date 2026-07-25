@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use agent::{AgentEvent, ProviderKind, SessionCommand};
+pub use agent::{AgentEvent, ProviderKind, SessionCommand, WorkspacePath};
 
 /// Oldest protocol version this build can speak.
 pub const PROTOCOL_MIN_VERSION: u32 = 1;

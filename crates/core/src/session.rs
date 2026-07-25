@@ -1583,6 +1583,7 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/lib.rs".into(),
+                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: Some("-old\n+new\n".into()),
                     }],
@@ -1595,6 +1596,7 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/child.rs".into(),
+                        workspace_path: None,
                         kind: FileChangeKind::Create,
                         diff: Some("+child\n".into()),
                     }],
@@ -1623,6 +1625,7 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/lib.rs".into(),
+                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: Some("-intermediate\n+value\n".into()),
                     }],
@@ -1637,6 +1640,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 changes: vec![FileChange {
                     path: "src/lib.rs".into(),
+                    workspace_path: None,
                     kind: FileChangeKind::Modify,
                     diff: Some("-before\n+after\n".into()),
                 }],
@@ -1651,6 +1655,7 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "late.txt".into(),
+                        workspace_path: None,
                         kind: FileChangeKind::Create,
                         diff: Some("+late\n".into()),
                     }],
@@ -1692,6 +1697,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 changes: vec![FileChange {
                     path: "first.txt".into(),
+                    workspace_path: None,
                     kind: FileChangeKind::Create,
                     diff: Some("+first\n".into()),
                 }],
@@ -1716,6 +1722,7 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/lib.rs".into(),
+                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: None,
                     }],
@@ -2040,6 +2047,7 @@ mod tests {
     fn fold_codex_style_trace_with_approval() {
         let changes = vec![FileChange {
             path: "/tmp/probe-codex/hello.txt".into(),
+            workspace_path: None,
             kind: FileChangeKind::Create,
             diff: Some("hi\n".into()),
         }];
@@ -2587,6 +2595,7 @@ mod tests {
                 kind: ApprovalKind::ExecCommand {
                     command: "rm -rf /".into(),
                     cwd: None,
+                    workspace_cwd: None,
                     reason: None,
                 },
                 options: Vec::new(),

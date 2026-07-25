@@ -749,6 +749,7 @@ impl OpenCodeMapper {
                     .filter_map(Value::as_str)
                     .map(|path| FileChange {
                         path: path.to_owned(),
+                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: None,
                     })
@@ -943,6 +944,7 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            workspace_cwd: None,
             reason: metadata
                 .get("reason")
                 .and_then(Value::as_str)
@@ -953,6 +955,7 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
                 .iter()
                 .map(|path| FileChange {
                     path: path.clone(),
+                    workspace_path: None,
                     kind: FileChangeKind::Modify,
                     diff: None,
                 })
@@ -1026,6 +1029,7 @@ fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
             };
             Some(FileChange {
                 path,
+                workspace_path: None,
                 kind,
                 diff: diff.get("patch").and_then(Value::as_str).map(str::to_owned),
             })

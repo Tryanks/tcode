@@ -464,6 +464,11 @@ pub struct Attachment {
     /// the timeline can render the image without re-encoding the base64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    /// Workspace-relative counterpart of `source_path`, when the source lives
+    /// inside the session workspace. The absolute path remains authoritative
+    /// for local rendering; remote clients use this additive form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<WorkspacePath>,
 }
 
 /// A provider-native command or skill surfaced to the composer's `/` and `$`
@@ -853,6 +858,51 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    /// Add portable siblings to every typed workspace path in this event.
+    ///
+    /// This is intentionally enrichment rather than rewriting: local consumers
+    /// keep the exact host paths while persisted and synced events also carry
+    /// the form a remote client can resolve.
+    pub fn add_workspace_paths(&mut self, workspace_id: &str, workspace_root: &std::path::Path) {
+        match self {
+            Self::TurnChangesUpdated { changes, .. } => {
+                add_file_change_workspace_paths(changes, workspace_id, workspace_root);
+            }
+            Self::ItemStarted(item) | Self::ItemUpdated(item) | Self::ItemCompleted(item) => {
+                if let ItemContent::FileChange { changes, .. } = &mut item.content {
+                    add_file_change_workspace_paths(changes, workspace_id, workspace_root);
+                }
+            }
+            Self::ApprovalRequested(request) => match &mut request.kind {
+                ApprovalKind::ExecCommand {
+                    cwd, workspace_cwd, ..
+                } => {
+                    *workspace_cwd = cwd.as_deref().and_then(|cwd| {
+                        WorkspacePath::from_host_path(workspace_id, workspace_root, cwd)
+                    });
+                }
+                ApprovalKind::FileChange { changes, .. } => {
+                    add_file_change_workspace_paths(changes, workspace_id, workspace_root);
+                }
+                ApprovalKind::FileRead { .. } | ApprovalKind::ToolUse { .. } => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+fn add_file_change_workspace_paths(
+    changes: &mut [FileChange],
+    workspace_id: &str,
+    workspace_root: &std::path::Path,
+) {
+    for change in changes {
+        change.workspace_path =
+            WorkspacePath::from_host_path(workspace_id, workspace_root, &change.path);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
     pub step: String,
@@ -997,9 +1047,66 @@ pub enum ItemContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
+    /// Portable counterpart of `path`. Kept separate so old logs and the local
+    /// UI continue to use the provider's exact path unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<WorkspacePath>,
     pub kind: FileChangeKind,
     /// Unified diff for this file when the provider supplies one.
     pub diff: Option<String>,
+}
+
+/// A path a remote client can interpret without knowing the host filesystem.
+///
+/// `workspace_id` is the persisted project id, not its display name: basenames
+/// are neither unique nor stable enough to correlate paths across sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePath {
+    pub workspace_id: String,
+    pub relative_path: String,
+}
+
+impl WorkspacePath {
+    /// Build a portable path only when `path` is relative already or is inside
+    /// `workspace_root`. Outside paths deliberately stay host-only rather than
+    /// acquiring misleading `..` segments.
+    pub fn from_host_path(
+        workspace_id: &str,
+        workspace_root: &std::path::Path,
+        path: &str,
+    ) -> Option<Self> {
+        let path = std::path::Path::new(path);
+        let relative = if path.is_absolute() {
+            path.strip_prefix(workspace_root).ok()?
+        } else {
+            path
+        };
+        if relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let relative_path = if relative.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            relative.to_string_lossy().into_owned()
+        };
+        Some(Self {
+            workspace_id: workspace_id.to_owned(),
+            relative_path,
+        })
+    }
+}
+
+impl Attachment {
+    /// Add a portable sibling when this local source is a workspace file.
+    pub fn add_workspace_path(&mut self, workspace_id: &str, workspace_root: &std::path::Path) {
+        self.workspace_path = self
+            .source_path
+            .as_deref()
+            .and_then(|path| WorkspacePath::from_host_path(workspace_id, workspace_root, path));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1089,6 +1196,7 @@ pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, Str
 
             Ok(FileChange {
                 path,
+                workspace_path: None,
                 kind,
                 diff: Some(section),
             })
@@ -1134,6 +1242,10 @@ pub enum ApprovalKind {
     ExecCommand {
         command: String,
         cwd: Option<String>,
+        /// Portable counterpart of `cwd`; absent for legacy events and for
+        /// commands whose working directory is outside the workspace.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_cwd: Option<WorkspacePath>,
         reason: Option<String>,
     },
     /// A read-only file/search operation (Claude's `file_read_approval` family:
@@ -1578,6 +1690,7 @@ mod turn_diff_tests {
             turn_id: "turn-7".into(),
             changes: vec![FileChange {
                 path: "src/main.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
             }],
@@ -1593,6 +1706,78 @@ mod turn_diff_tests {
                 changes,
             } if turn_id == "turn-7" && changes[0].path == "src/main.rs"
         ));
+    }
+
+    #[test]
+    fn typed_paths_gain_portable_siblings_and_legacy_json_still_parses() {
+        let legacy = r#"{"type":"approval_requested","id":"approval-1","turn_id":null,"kind":{"kind":"exec_command","command":"cargo test","cwd":"/work/tcode","reason":null},"options":[]}"#;
+        let mut event: AgentEvent = serde_json::from_str(legacy).unwrap();
+
+        assert!(matches!(
+            &event,
+            AgentEvent::ApprovalRequested(ApprovalRequest {
+                kind: ApprovalKind::ExecCommand {
+                    workspace_cwd: None,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        event.add_workspace_paths("project-stable-id", std::path::Path::new("/work/tcode"));
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"]["cwd"], "/work/tcode");
+        assert_eq!(
+            json["kind"]["workspace_cwd"],
+            serde_json::json!({
+                "workspace_id": "project-stable-id",
+                "relative_path": "."
+            })
+        );
+
+        let mut change = AgentEvent::TurnChangesUpdated {
+            turn_id: "turn-1".into(),
+            changes: vec![FileChange {
+                path: "/work/tcode/src/main.rs".into(),
+                workspace_path: None,
+                kind: FileChangeKind::Modify,
+                diff: None,
+            }],
+            completeness: ChangeCompleteness::Exact,
+        };
+        change.add_workspace_paths("project-stable-id", std::path::Path::new("/work/tcode"));
+        let AgentEvent::TurnChangesUpdated { changes, .. } = change else {
+            unreachable!()
+        };
+        assert_eq!(
+            changes[0].workspace_path,
+            Some(WorkspacePath {
+                workspace_id: "project-stable-id".into(),
+                relative_path: "src/main.rs".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn attachment_source_path_gets_a_workspace_relative_sibling() {
+        let mut attachment = Attachment {
+            media_type: "image/png".into(),
+            data_base64: "AAAA".into(),
+            source_path: Some("/work/tcode/assets/diagram.png".into()),
+            workspace_path: None,
+        };
+        attachment.add_workspace_path("project-stable-id", std::path::Path::new("/work/tcode"));
+        assert_eq!(
+            attachment.workspace_path,
+            Some(WorkspacePath {
+                workspace_id: "project-stable-id".into(),
+                relative_path: "assets/diagram.png".into(),
+            })
+        );
+
+        let legacy = r#"{"media_type":"image/png","data_base64":"AAAA","source_path":"/work/tcode/assets/diagram.png"}"#;
+        let decoded: Attachment = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.workspace_path, None);
     }
 }
 
@@ -1679,6 +1864,7 @@ mod session_command_wire_tests {
                     media_type: "image/png".into(),
                     data_base64: "iVBORw0=".into(),
                     source_path: None,
+                    workspace_path: None,
                 }],
             },
             SessionCommand::Interrupt,

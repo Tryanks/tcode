@@ -1366,6 +1366,7 @@ impl Actor {
                         .unwrap_or_default()
                         .into(),
                     cwd: params.get("cwd").and_then(Value::as_str).map(str::to_owned),
+                    workspace_cwd: None,
                     reason: params
                         .get("reason")
                         .and_then(Value::as_str)
@@ -2024,6 +2025,7 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
     };
     Some(FileChange {
         path: change.get("path").and_then(Value::as_str)?.into(),
+        workspace_path: None,
         kind,
         diff: change
             .get("diff")
@@ -2336,6 +2338,7 @@ mod tests {
             media_type: "image/png".into(),
             data_base64: "AAAA".into(),
             source_path: None,
+            workspace_path: None,
         }];
         let params = actor.build_turn_params("what color?", None, &attachments);
         let input = params["input"].as_array().unwrap();

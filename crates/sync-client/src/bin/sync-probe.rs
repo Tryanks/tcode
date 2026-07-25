@@ -475,6 +475,7 @@ mod native {
                 kind: agent::ApprovalKind::ExecCommand {
                     command: command.clone(),
                     cwd: Some("/tmp/example".into()),
+                    workspace_cwd: None,
                     reason: Some("exercise the remote approval path".into()),
                 },
                 options: Vec::new(),

@@ -727,11 +727,16 @@ impl ActiveSession {
         &mut self,
         request_id: String,
         text: String,
-        attachments: Vec<Attachment>,
+        mut attachments: Vec<Attachment>,
     ) -> Result<(), ()> {
         let Runtime::Live(commands) = &self.runtime else {
             return Err(());
         };
+        if let Some(workspace_id) = self.meta.project_id.as_deref() {
+            for attachment in &mut attachments {
+                attachment.add_workspace_path(workspace_id, &self.meta.cwd);
+            }
+        }
         commands
             .try_send(SessionCommand::Steer {
                 request_id,
@@ -743,8 +748,13 @@ impl ActiveSession {
 
     /// Append a message to the queue, consuming the armed Ultrathink flag (it is
     /// per-send, so it belongs to this message, not to whatever is sent later).
-    fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
+    fn push_queued(&mut self, text: String, mut attachments: Vec<Attachment>) -> u64 {
         self.idle_since = None;
+        if let Some(workspace_id) = self.meta.project_id.as_deref() {
+            for attachment in &mut attachments {
+                attachment.add_workspace_path(workspace_id, &self.meta.cwd);
+            }
+        }
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let options = self.turn_options();
@@ -7484,6 +7494,27 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
+        let workspace = self
+            .active
+            .as_ref()
+            .filter(|active| active.meta.id == session_id)
+            .map(|active| &active.meta)
+            .or_else(|| {
+                self.background
+                    .get(session_id)
+                    .map(|background| &background.meta)
+            })
+            .or_else(|| self.sessions.iter().find(|meta| meta.id == session_id))
+            .and_then(|meta| {
+                meta.project_id
+                    .as_ref()
+                    .map(|project_id| (project_id.clone(), meta.cwd.clone()))
+            });
+        let mut event = event.clone();
+        if let Some((workspace_id, workspace_root)) = workspace {
+            event.add_workspace_paths(&workspace_id, &workspace_root);
+        }
+
         self.store_append_generation += 1;
         let ts = now_millis();
         self.enqueue_store_write(
@@ -7497,9 +7528,9 @@ impl AppState {
         if let Some(active) = self.active.as_mut()
             && active.meta.id == session_id
         {
-            active.timeline.apply_at(Some(ts), event);
+            active.timeline.apply_at(Some(ts), &event);
         } else if let Some(background) = self.background.get_mut(session_id) {
-            background.timeline.apply_at(Some(ts), event);
+            background.timeline.apply_at(Some(ts), &event);
         }
     }
 
@@ -10241,6 +10272,7 @@ mod tests {
                 kind: agent::ApprovalKind::ExecCommand {
                     command: "touch blocked".into(),
                     cwd: Some("/tmp/project".into()),
+                    workspace_cwd: None,
                     reason: None,
                 },
                 options: Vec::new(),
@@ -10303,6 +10335,7 @@ mod tests {
                     kind: agent::ApprovalKind::ExecCommand {
                         command: "touch allowed".into(),
                         cwd: None,
+                        workspace_cwd: None,
                         reason: None,
                     },
                     options: Vec::new(),
@@ -10361,6 +10394,7 @@ mod tests {
                     kind: agent::ApprovalKind::ExecCommand {
                         command: "touch blocked".into(),
                         cwd: None,
+                        workspace_cwd: None,
                         reason: None,
                     },
                     options: Vec::new(),
@@ -10405,6 +10439,7 @@ mod tests {
                     kind: agent::ApprovalKind::ExecCommand {
                         command: "cargo test".into(),
                         cwd: None,
+                        workspace_cwd: None,
                         reason: None,
                     },
                     options: Vec::new(),
@@ -11308,6 +11343,7 @@ mod tests {
             media_type: "image/png".into(),
             data_base64: "AAAA".into(),
             source_path: Some("/tmp/a.png".into()),
+            workspace_path: None,
         };
         active.push_queued(String::new(), vec![attachment.clone()]);
 

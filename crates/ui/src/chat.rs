@@ -4248,6 +4248,7 @@ This begins after the hard break."#;
                     .iter()
                     .map(|path| FileChange {
                         path: (*path).to_string(),
+                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: None,
                     })
@@ -4385,16 +4386,19 @@ This begins after the hard break."#;
         let changes = vec![
             FileChange {
                 path: "/work/repo/src/foo.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: None,
             },
             FileChange {
                 path: "/work/repo/crates/ui/src/chat.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: None,
             },
             FileChange {
                 path: "/elsewhere/vendor/bar.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Create,
                 diff: None,
             },
@@ -4453,11 +4457,13 @@ This begins after the hard break."#;
         let changes = vec![
             FileChange {
                 path: "/work/repo/src/foo.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: Some(REAL_DIFF.into()),
             },
             FileChange {
                 path: "/work/repo/src/bar.rs".into(),
+                workspace_path: None,
                 kind: FileChangeKind::Create,
                 diff: Some(String::new()),
             },
