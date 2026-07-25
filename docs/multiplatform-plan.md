@@ -307,6 +307,26 @@ client 能实时看到 host 上跑的会话并成功发送一个 turn、批准�
 **Gate 2**：浏览器里打开一个 host 上的活跃会话，能读、能发 turn、能批准。
 桌面布局，不做响应式。
 
+**实测的起点（2026-07-25）。** `cargo check --target wasm32-unknown-unknown` 错误数：
+
+| crate | 起始 | 现在 |
+| --- | ---: | ---: |
+| `tcode-i18n` | 0 | 0 |
+| `sync-protocol` / `sync-client` | — | 0 |
+| `tcode-core` | 2 | 0 |
+| `agent`（`--no-default-features`） | 7 | 0 |
+| `tcode-services`（同上） | 多 | 0 |
+| `tcode-ui` | — | **51** |
+
+`tcode-ui` 那 51 个**全部落在 4 个依赖 crate 里**，没有一个来自 `crates/ui/src/`：
+`mio` 48（经 tokio 的 `net` feature，由 `preview-mcp` / `computer-use-mcp` 引入）、
+`polling` 与 `errno`（经 `smol`）、`getrandom`（缺 wasm 的 `js`）。
+
+**但不能据此断言 UI 自身可移植。** cargo 先编依赖，`mio` 失败后 `tcode-ui` 本体根本没被检查到。
+门控这四条依赖是必要的下一步，之后才谈得上测量 UI 自身的真实代价——
+而那个数字才是 §6 风险台账里"`chat.rs`/`composer.rs` 拆不开"那一条的真正判据。
+
+
 ### 期 3 — Android
 
 1. `gpui-android`：`Platform`/`PlatformWindow`/`PlatformDispatcher`/`PlatformDisplay`
