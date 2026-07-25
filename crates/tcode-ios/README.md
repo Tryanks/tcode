@@ -43,15 +43,30 @@ stuck down forever. The Swift/Objective-C constants must match that list.
 
 ## What is verified
 
-Type-check and clippy for `aarch64-apple-ios`, for both this crate and
-`gpui-ios`.
+Type-check and clippy for `aarch64-apple-ios`, and — the part that matters —
+**the archive links**:
+
+```sh
+./crates/tcode-ios/tools/verify-link.sh
+```
+
+`cargo build` for a staticlib only archives object files; it never runs the
+linker, so it cannot tell you whether every symbol gpui, gpui_wgpu, Metal and
+cosmic-text need resolves. That script links the archive into a real arm64
+Mach-O executable against the iOS SDK, referencing all nine entry points so the
+linker must resolve the whole graph rather than proving most of it dead. Android
+gets this for free — a cdylib is linked by construction — so on iOS it is done
+deliberately.
+
+One benign warning remains: `psm`'s assembly object carries the installed SDK's
+minimum (26.5) while the probe links at 17.0. It is a metadata mismatch, not an
+incompatibility; the link succeeds either way.
 
 ## What is not
 
-No device, no simulator, no Xcode project, and — unlike Android, where
-`libtcode_android.so` links — **nothing here has been through a linker**. The
-first unexercised step is `metal_context`: Metal adapter selection and surface
-creation have never met real hardware.
+No device, no simulator, and no Xcode project. The first unexercised step is
+`metal_context`: Metal adapter selection and surface creation have never met
+real hardware.
 
 ## Deliberately unimplemented
 
