@@ -148,6 +148,14 @@ pub enum CommandRejection {
     Forbidden,
 }
 
+/// The command identity needed to reconcile a rejection with optimistic state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RejectedCommand {
+    Turn { delivery_id: u64 },
+    Approval { request_id: String },
+}
+
 /// Why a session stopped producing events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -248,6 +256,9 @@ pub enum HostFrame {
     /// never ran.
     CommandRejected {
         session_id: String,
+        /// Older hosts omit this, so clients must retain a send-order fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<RejectedCommand>,
         reason: CommandRejection,
     },
     SessionEnded {
@@ -376,6 +387,9 @@ mod tests {
             },
             HostFrame::CommandRejected {
                 session_id: "s1".into(),
+                command: Some(RejectedCommand::Approval {
+                    request_id: "approval-1".into(),
+                }),
                 reason: CommandRejection::SessionNotLive,
             },
             HostFrame::SessionEnded {
@@ -408,6 +422,35 @@ mod tests {
                 .encode()
                 .expect("a decoded frame must re-encode");
             assert_eq!(reencoded, text, "round trip changed {frame:?}");
+        }
+    }
+
+    #[test]
+    fn command_rejection_correlation_is_backward_compatible() {
+        for command in [
+            Some(RejectedCommand::Turn { delivery_id: 9 }),
+            Some(RejectedCommand::Approval {
+                request_id: "approval-1".into(),
+            }),
+            None,
+        ] {
+            let frame = HostFrame::CommandRejected {
+                session_id: "s1".into(),
+                command,
+                reason: CommandRejection::SessionNotLive,
+            };
+            let text = frame.encode().expect("rejection must encode");
+            let reencoded = HostFrame::decode(&text)
+                .expect("rejection must decode")
+                .encode()
+                .expect("decoded rejection must encode");
+            assert_eq!(reencoded, text);
+        }
+
+        let older_host = r#"{"type":"command_rejected","data":{"session_id":"s1","reason":{"kind":"session_not_live"}}}"#;
+        match HostFrame::decode(older_host).expect("older-host rejection must decode") {
+            HostFrame::CommandRejected { command, .. } => assert_eq!(command, None),
+            other => panic!("decoded as {other:?}"),
         }
     }
 

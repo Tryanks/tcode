@@ -32,8 +32,8 @@ use gpui_component::{
 };
 use sync_client::{Client, ClientConfig};
 use sync_protocol::{
-    AgentEvent, ApprovalDecision, ClientFrame, ClientInfo, HostFrame, SessionCommand,
-    SessionSummary,
+    AgentEvent, ApprovalDecision, ClientFrame, ClientInfo, HostFrame, RejectedCommand,
+    SessionCommand, SessionSummary,
 };
 use tcode_ui::{ChatReadModel, ChatSessionReadModel, ChatView};
 
@@ -157,12 +157,34 @@ impl CommandUiState {
         });
     }
 
-    fn rejected(&mut self, session_id: &str, reason: String) {
-        let Some(index) = self
-            .attempts
-            .iter()
-            .position(|attempt| attempt.session_id == session_id)
-        else {
+    fn rejected(&mut self, session_id: &str, command: Option<&RejectedCommand>, reason: String) {
+        let index = match command {
+            Some(RejectedCommand::Turn { delivery_id }) => {
+                self.attempts.iter().position(|attempt| {
+                    attempt.session_id == session_id
+                        && matches!(
+                            attempt.kind,
+                            CommandAttemptKind::Turn(id) if id == *delivery_id
+                        )
+                })
+            }
+            Some(RejectedCommand::Approval { request_id }) => {
+                self.attempts.iter().position(|attempt| {
+                    attempt.session_id == session_id
+                        && matches!(
+                            &attempt.kind,
+                            CommandAttemptKind::Approval(id) if id == request_id
+                        )
+                })
+            }
+            // Hosts predating correlation leave no safer choice than send order;
+            // consuming one attempt prevents optimistic state from hanging forever.
+            None => self
+                .attempts
+                .iter()
+                .position(|attempt| attempt.session_id == session_id),
+        };
+        let Some(index) = index else {
             return;
         };
         let Some(attempt) = self.attempts.remove(index) else {
@@ -654,9 +676,11 @@ impl ClientApp {
             _ => Vec::new(),
         };
         let rejected = match &frame {
-            HostFrame::CommandRejected { session_id, reason } => {
-                Some((session_id.clone(), format!("{reason:?}")))
-            }
+            HostFrame::CommandRejected {
+                session_id,
+                command,
+                reason,
+            } => Some((session_id.clone(), command.clone(), format!("{reason:?}"))),
             _ => None,
         };
 
@@ -666,8 +690,9 @@ impl ClientApp {
             self.command_ui.accepted_turn(delivery_id);
             self.status = "Turn accepted by host".into();
         }
-        if let Some((session_id, reason)) = rejected {
-            self.command_ui.rejected(&session_id, reason);
+        if let Some((session_id, command, reason)) = rejected {
+            self.command_ui
+                .rejected(&session_id, command.as_ref(), reason);
         }
 
         if !was_ready && self.client.is_ready() {
@@ -830,8 +855,11 @@ impl ClientApp {
         if sent {
             self.status = "Turn sent — awaiting acceptance…".into();
         } else {
-            self.command_ui
-                .rejected(&session_id, "transport could not send the command".into());
+            self.command_ui.rejected(
+                &session_id,
+                Some(&RejectedCommand::Turn { delivery_id }),
+                "transport could not send the command".into(),
+            );
         }
         cx.notify();
     }
@@ -848,10 +876,13 @@ impl ClientApp {
         let command = approval_command(request_id.clone(), decision);
         let frame = self.client.command(session_id.clone(), command);
         self.command_ui
-            .sent_approval(session_id.clone(), request_id);
+            .sent_approval(session_id.clone(), request_id.clone());
         if !self.send(frame) {
-            self.command_ui
-                .rejected(&session_id, "transport could not send the command".into());
+            self.command_ui.rejected(
+                &session_id,
+                Some(&RejectedCommand::Approval { request_id }),
+                "transport could not send the command".into(),
+            );
         }
         cx.notify();
     }
@@ -1305,7 +1336,7 @@ mod tests {
     fn rejection_marks_the_matching_optimistic_turn() {
         let mut state = CommandUiState::default();
         state.sent_turn("s1".into(), 7, "run tests".into());
-        state.rejected("s1", "session ended".into());
+        state.rejected("s1", None, "session ended".into());
 
         assert_eq!(
             state.turns[0].status,
@@ -1328,8 +1359,38 @@ mod tests {
         let mut state = CommandUiState::default();
         state.sent_approval("s1".into(), "approval-1".into());
         state.sent_turn("s1".into(), 8, "continue".into());
-        state.rejected("s1", "approval expired".into());
+        state.rejected("s1", None, "approval expired".into());
 
         assert_eq!(state.turns[0].status, LocalTurnStatus::AwaitingAcceptance);
+    }
+
+    #[test]
+    fn correlated_approval_rejection_does_not_reject_an_earlier_turn() {
+        let mut state = CommandUiState::default();
+        state.sent_turn("s1".into(), 8, "continue".into());
+        state.sent_approval("s1".into(), "approval-1".into());
+        state.rejected(
+            "s1",
+            Some(&RejectedCommand::Approval {
+                request_id: "approval-1".into(),
+            }),
+            "approval expired".into(),
+        );
+
+        assert_eq!(state.turns[0].status, LocalTurnStatus::AwaitingAcceptance);
+    }
+
+    #[test]
+    fn uncorrelated_rejection_still_consumes_the_oldest_attempt() {
+        let mut state = CommandUiState::default();
+        state.sent_turn("s1".into(), 8, "continue".into());
+        state.sent_approval("s1".into(), "approval-1".into());
+        state.rejected("s1", None, "older host refused command".into());
+
+        assert_eq!(
+            state.turns[0].status,
+            LocalTurnStatus::Rejected("older host refused command".into())
+        );
+        assert_eq!(state.attempts.len(), 1);
     }
 }
