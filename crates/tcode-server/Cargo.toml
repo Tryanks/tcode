@@ -13,3 +13,14 @@ sync-protocol = { path = "../sync-protocol" }
 tcode-services = { path = "../services" }
 log = "0.4"
 env_logger = "0.11"
+async-channel = "2"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
