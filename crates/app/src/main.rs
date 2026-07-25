@@ -13,6 +13,7 @@ use gpui::{
     App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
+use sync_protocol::HostInfo;
 use tcode_runtime::app::AppState;
 use tcode_services::{shell_env, store::SessionStore};
 use tcode_ui::{AppShell, Quit, TogglePalette};
@@ -330,7 +331,7 @@ fn main() {
             Theme::global_mut(cx).apply_config(&light);
             Theme::global_mut(cx).apply_config(&dark);
 
-            let app_state = cx.new(|_| AppState::new(store));
+            let app_state = cx.new(|_| AppState::new(store.clone()));
             cx.on_action::<Quit>({
                 let app_state = app_state.clone();
                 move |action, cx| handle_quit(action, &app_state, cx)
@@ -350,6 +351,25 @@ fn main() {
                     app_state.update(cx, |state, _| state.attach_orchestrate_mcp(server));
                 }
                 Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
+            }
+            let display_name = std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("COMPUTERNAME"))
+                .unwrap_or_else(|_| "tcode".into());
+            let host_info = HostInfo {
+                host_id: format!("{display_name}:{}", store.root().display()),
+                display_name,
+                platform: std::env::consts::OS.into(),
+                app_version: env!("CARGO_PKG_VERSION").into(),
+            };
+            match sync_host::start(store.clone(), host_info) {
+                Ok(server) => {
+                    log::info!("sync host listening at {}", server.url);
+                    app_state.update(cx, |state, cx| {
+                        state.attach_sync_host(server);
+                        state.pump_sync_commands(cx);
+                    });
+                }
+                Err(err) => log::warn!("sync host failed to start: {err}"),
             }
             match computer_use_mcp::start() {
                 Ok(server) => {
