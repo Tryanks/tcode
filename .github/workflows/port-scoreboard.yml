@@ -61,7 +61,7 @@ jobs:
           # Crates the plan expects to become portable, cheapest first. `term`
           # is absent on purpose: it is desktop-only forever (PTY + login shell
           # + tcgetpgrp), so counting its errors would only add noise.
-          crates="tcode-i18n tcode-core agent tcode-services tcode-runtime tcode-ui"
+          crates="tcode-i18n sync-protocol tcode-core agent tcode-services tcode-runtime tcode-ui"
 
           {
             echo "## ${{ matrix.target }}"
