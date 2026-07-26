@@ -1690,6 +1690,11 @@ impl Actor {
                     self.emit(AgentEvent::TokenUsage(usage)).await;
                 }
             }
+            "model/rerouted" => {
+                if let Some((model, reason)) = model_reroute(params) {
+                    self.emit(AgentEvent::ServedModel { model, reason }).await;
+                }
+            }
             "error" => {
                 // No message field → show the raw notification: a summary like
                 // "unknown error" leaves nothing to diagnose with.
@@ -2379,7 +2384,28 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
         used_tokens: last.get("totalTokens").and_then(Value::as_u64),
         context_window: value.get("modelContextWindow").and_then(Value::as_u64),
         total_processed_tokens,
+        cost_usd: None,
+        duration_ms: None,
     })
+}
+
+fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
+    // Read both spellings while app-server versions transition between Rust
+    // protocol names and JSON camelCase.
+    let _from = params
+        .get("fromModel")
+        .or_else(|| params.get("from_model"))
+        .and_then(Value::as_str);
+    let to = params
+        .get("toModel")
+        .or_else(|| params.get("to_model"))
+        .and_then(Value::as_str)?
+        .to_owned();
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((to, reason))
 }
 
 #[cfg(test)]
@@ -2817,6 +2843,30 @@ mod tests {
         assert_eq!(usage.used_tokens, Some(120));
         assert_eq!(usage.total_processed_tokens, Some(5000));
         assert_eq!(usage.context_window, Some(200000));
+    }
+
+    #[test]
+    fn model_rerouted_notification_maps_served_model_with_reason() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_notification(
+                    "model/rerouted",
+                    &json!({
+                        "from_model": "gpt-5",
+                        "toModel": "gpt-5-mini",
+                        "reason": "capacity"
+                    }),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ServedModel { model, reason }
+                    if model == "gpt-5-mini" && reason.as_deref() == Some("capacity")
+            ));
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]

@@ -2,6 +2,8 @@ app:
   name: "tcode"
 chat:
   relayed: "已从 %{from} 接力至 %{to}"
+  model_changed: "模型已切换：%{from} → %{to}"
+  model_changed_to: "模型已切换至 %{to}"
   new_thread: "新建对话"
   no_active_thread: "没有活动对话"
   work_log: "工作日志"

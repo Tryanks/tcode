@@ -1044,6 +1044,12 @@ pub(crate) struct Mapper {
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
     native_rewind: bool,
+    /// Last assistant model published to the canonical event stream.
+    last_served_model: Option<String>,
+    /// Latest structured stop reason for the active turn.
+    stop_reason: Option<String>,
+    /// Warning-bearing stop reason already emitted for this occurrence.
+    warned_stop_reason: Option<String>,
 }
 
 impl Mapper {
@@ -1078,6 +1084,9 @@ impl Mapper {
             background_task_history: HashSet::new(),
             pending_rewinds: HashMap::new(),
             native_rewind: false,
+            last_served_model: None,
+            stop_reason: None,
+            warned_stop_reason: None,
         }
     }
 
@@ -1106,6 +1115,8 @@ impl Mapper {
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
         self.exit_plan_captured = false;
+        self.stop_reason = None;
+        self.warned_stop_reason = None;
         id
     }
 
@@ -1116,6 +1127,8 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.exit_plan_captured = false;
+        self.stop_reason = None;
+        self.warned_stop_reason = None;
         id
     }
 
@@ -1661,12 +1674,15 @@ impl Mapper {
                 }]
             }
             Some("message_delta") => {
+                let mut events = self.observe_stop_reason(
+                    event.pointer("/delta/stop_reason").and_then(Value::as_str),
+                );
                 // Live usage growth; nice-to-have for token display.
                 if let Some(usage) = event.get("usage") {
                     let tu = map_usage(usage, None);
-                    return vec![AgentEvent::TokenUsage(tu)];
+                    events.push(AgentEvent::TokenUsage(tu));
                 }
-                Vec::new()
+                events
             }
             _ => Vec::new(),
         }
@@ -1684,6 +1700,17 @@ impl Mapper {
             Some(m) => m,
             None => return Vec::new(),
         };
+        let mut out = Vec::new();
+        if let Some(model) = message.get("model").and_then(Value::as_str)
+            && self.last_served_model.as_deref() != Some(model)
+        {
+            self.last_served_model = Some(model.to_owned());
+            out.push(AgentEvent::ServedModel {
+                model: model.to_owned(),
+                reason: None,
+            });
+        }
+        out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
         let msg_id = message
             .get("id")
             .and_then(Value::as_str)
@@ -1691,7 +1718,7 @@ impl Mapper {
             .to_string();
         let content = match message.get("content").and_then(Value::as_array) {
             Some(c) => c,
-            None => return Vec::new(),
+            None => return out,
         };
         // Continue the stream's block numbering across the CLI's split
         // `assistant` lines (see `assistant_blocks_seen`).
@@ -1702,7 +1729,6 @@ impl Mapper {
         let first_index = *seen;
         *seen += content.len();
 
-        let mut out = Vec::new();
         for (offset, block) in content.iter().enumerate() {
             let index = first_index + offset;
             match block.get("type").and_then(Value::as_str) {
@@ -1742,6 +1768,25 @@ impl Mapper {
             }
         }
         out
+    }
+
+    fn observe_stop_reason(&mut self, reason: Option<&str>) -> Vec<AgentEvent> {
+        let Some(reason) = reason.filter(|reason| !reason.is_empty()) else {
+            return Vec::new();
+        };
+        self.stop_reason = Some(reason.to_owned());
+        let message = match reason {
+            "refusal" => Some("Request declined by safety classifiers (stop_reason: refusal)"),
+            "max_tokens" => Some("Response truncated: max_tokens limit reached"),
+            _ => None,
+        };
+        if message.is_none() || self.warned_stop_reason.as_deref() == Some(reason) {
+            return Vec::new();
+        }
+        self.warned_stop_reason = Some(reason.to_owned());
+        vec![AgentEvent::Warning {
+            message: message.unwrap().to_owned(),
+        }]
     }
 
     fn on_tool_use(&mut self, block: &Value) -> Vec<AgentEvent> {
@@ -1937,7 +1982,22 @@ impl Mapper {
                     exit_code: if is_error { Some(1) } else { Some(0) },
                     status,
                 },
-                ToolItem::File { changes } => ItemContent::FileChange { changes, status },
+                ToolItem::File { mut changes } => {
+                    if let Some(structured_patch) = msg.pointer("/tool_use_result/structuredPatch")
+                    {
+                        let diff = render_structured_patch(structured_patch);
+                        let path = msg
+                            .pointer("/tool_use_result/filePath")
+                            .and_then(Value::as_str);
+                        for change in &mut changes {
+                            if let Some(path) = path {
+                                change.path = path.to_owned();
+                            }
+                            change.diff = diff.clone();
+                        }
+                    }
+                    ItemContent::FileChange { changes, status }
+                }
                 ToolItem::Tool { name, input } => ItemContent::ToolCall {
                     name,
                     input,
@@ -2244,13 +2304,14 @@ impl Mapper {
 
     fn on_result(&mut self, msg: &Value) -> Vec<AgentEvent> {
         self.awaiting_turn_checkpoint = false;
+        let mut events = self.observe_stop_reason(msg.get("stop_reason").and_then(Value::as_str));
         let turn_id = self
             .current_turn_id
             .take()
             .unwrap_or_else(|| format!("turn-{}", self.turn_counter.max(1)));
         // No message outlives its turn, so the block counters can go.
         self.assistant_blocks_seen.clear();
-        let mut status = result_status(msg);
+        let mut status = result_status(msg, self.stop_reason.as_deref());
         if std::mem::take(&mut self.interrupt_pending) && status != TurnStatus::Completed {
             status = TurnStatus::Interrupted;
         }
@@ -2259,9 +2320,10 @@ impl Mapper {
             // Accumulate this turn's processed tokens into the session total.
             self.cumulative_processed += usage.used_tokens.unwrap_or(0);
             usage.total_processed_tokens = Some(self.cumulative_processed);
+            usage.cost_usd = msg.get("total_cost_usd").and_then(Value::as_f64);
+            usage.duration_ms = msg.get("duration_ms").and_then(Value::as_u64);
             usage
         });
-        let mut events = Vec::new();
         if status == TurnStatus::Failed {
             // The `result` field carries the CLI's own error text (API errors,
             // crashes); a bare "failed" turn marker would discard it.
@@ -2533,6 +2595,29 @@ fn file_changes(name: &str, input: &Value) -> Vec<FileChange> {
     }
 }
 
+/// Render Claude's structured edit hunks as a unified diff body.
+fn render_structured_patch(value: &Value) -> Option<String> {
+    let hunks = value.as_array()?;
+    let mut rendered = Vec::new();
+    for hunk in hunks {
+        let old_start = hunk.get("oldStart").and_then(Value::as_u64)?;
+        let old_lines = hunk.get("oldLines").and_then(Value::as_u64)?;
+        let new_start = hunk.get("newStart").and_then(Value::as_u64)?;
+        let new_lines = hunk.get("newLines").and_then(Value::as_u64)?;
+        rendered.push(format!(
+            "@@ -{old_start},{old_lines} +{new_start},{new_lines} @@"
+        ));
+        rendered.extend(
+            hunk.get("lines")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    (!rendered.is_empty()).then(|| rendered.join("\n"))
+}
+
 /// Flatten a `tool_result` content field (string or block array) into text.
 fn tool_result_text(content: Option<&Value>) -> String {
     match content {
@@ -2555,12 +2640,24 @@ fn tool_result_text(content: Option<&Value>) -> String {
     }
 }
 
-fn result_status(msg: &Value) -> TurnStatus {
-    if msg.get("subtype").and_then(Value::as_str) == Some("success") {
+fn result_status(msg: &Value, stop_reason: Option<&str>) -> TurnStatus {
+    let subtype = msg.get("subtype").and_then(Value::as_str);
+    let is_error = msg.get("is_error").and_then(Value::as_bool);
+    if subtype == Some("success") && is_error != Some(true) {
         return TurnStatus::Completed;
     }
-    // Distinguish user-triggered interrupts from genuine failures by scanning the
-    // result text / error markers, matching the SDK's interrupted heuristic.
+    if matches!(
+        subtype,
+        Some("interrupted" | "interrupt" | "cancelled" | "canceled" | "aborted")
+    ) || matches!(
+        stop_reason,
+        Some("interrupted" | "interrupt" | "cancelled" | "canceled" | "aborted")
+    ) {
+        return TurnStatus::Interrupted;
+    }
+    // Older CLI error results have no structured interrupt marker. Restrict the
+    // legacy prose heuristic to those non-success results so ordinary answers
+    // mentioning cancellation cannot be misclassified.
     let haystack = format!(
         "{} {}",
         msg.get("result")
@@ -2606,6 +2703,8 @@ fn map_usage(usage: &Value, model_usage: Option<&Value>) -> TokenUsage {
         // Session-cumulative total is stamped by the caller (`on_result`); the
         // streaming/partial usage path leaves it unset.
         total_processed_tokens: None,
+        cost_usd: None,
+        duration_ms: None,
     }
 }
 
@@ -4823,5 +4922,90 @@ mod tests {
         );
         assert!(accepted_request_ids(&events).is_empty());
         assert_eq!(mapper.pending_steers.len(), 1);
+    }
+
+    #[test]
+    fn assistant_served_model_is_emitted_once_per_change() {
+        let mut mapper = Mapper::new();
+        let line = r#"{"type":"assistant","message":{"model":"claude-sonnet-4","id":"msg-1","content":[]}}"#;
+        let first = feed(&mut mapper, line);
+        let repeat = feed(&mut mapper, line);
+        assert!(matches!(
+            first.as_slice(),
+            [AgentEvent::ServedModel { model, reason: None }] if model == "claude-sonnet-4"
+        ));
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn refusal_stop_reason_warns_once_across_delta_and_assistant() {
+        let mut mapper = Mapper::new();
+        let delta = feed(
+            &mut mapper,
+            r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"refusal"}}}"#,
+        );
+        let assistant = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-1","stop_reason":"refusal","content":[]}}"#,
+        );
+        assert!(matches!(
+            delta.as_slice(),
+            [AgentEvent::Warning { message }]
+                if message == "Request declined by safety classifiers (stop_reason: refusal)"
+        ));
+        assert!(assistant.is_empty());
+    }
+
+    #[test]
+    fn successful_result_that_mentions_cancel_is_completed() {
+        let mut mapper = Mapper::new();
+        mapper.start_turn();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"You can cancel the operation from Settings."}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn structured_patch_renders_unified_diff() {
+        let patch = json!([{
+            "oldStart": 3,
+            "oldLines": 2,
+            "newStart": 3,
+            "newLines": 2,
+            "lines": [" keep", "-old", "+new"]
+        }]);
+        assert_eq!(
+            render_structured_patch(&patch).as_deref(),
+            Some("@@ -3,2 +3,2 @@\n keep\n-old\n+new")
+        );
+    }
+
+    #[test]
+    fn result_cost_and_duration_land_in_completed_usage() {
+        let mut mapper = Mapper::new();
+        mapper.start_turn();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.125,"duration_ms":4321,"usage":{"input_tokens":10,"output_tokens":2}}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::TurnCompleted {
+                usage: Some(TokenUsage {
+                    cost_usd: Some(cost),
+                    duration_ms: Some(4321),
+                    ..
+                }),
+                ..
+            }] if (*cost - 0.125).abs() < f64::EPSILON
+        ));
     }
 }

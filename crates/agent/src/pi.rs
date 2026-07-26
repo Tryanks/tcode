@@ -1216,6 +1216,8 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
         used_tokens: number(usage.get("totalTokens")),
         context_window: None,
         total_processed_tokens: None,
+        cost_usd: None,
+        duration_ms: None,
     })
 }
 

@@ -2,6 +2,8 @@ app:
   name: "tcode"
 chat:
   relayed: "Relayed from %{from} to %{to}"
+  model_changed: "Model changed: %{from} → %{to}"
+  model_changed_to: "Model changed to %{to}"
   new_thread: "New thread"
   no_active_thread: "No active thread"
   work_log: "Work Log"
