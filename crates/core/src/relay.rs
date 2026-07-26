@@ -246,6 +246,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
             EntryContent::ContextCompacted => {
                 activity(&mut body, "context", "provider", "compacted")
             }
+            EntryContent::ModelChanged { .. } => {}
             EntryContent::Reasoning { .. } => {}
         }
     }

@@ -187,6 +187,7 @@ fn plain_text_as_markdown(text: &str) -> String {
 enum Segment<'a> {
     ActivityRun(Vec<&'a TimelineEntry>),
     Relay(&'a TimelineEntry),
+    ModelChange(&'a TimelineEntry),
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Error(&'a TimelineEntry),
@@ -272,6 +273,10 @@ fn segment_entries<'a>(
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::Relay(entry));
             }
+            EntryContent::ModelChanged { .. } => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::ModelChange(entry));
+            }
             EntryContent::Assistant { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::Assistant(entry));
@@ -315,8 +320,9 @@ fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             | EntryContent::Assistant { .. }
             | EntryContent::Reasoning { .. }
             | EntryContent::Error { .. }
-            | EntryContent::ProviderStartError { .. } => {}
-            EntryContent::ProviderRelay { .. } => {}
+            | EntryContent::ProviderStartError { .. }
+            | EntryContent::ProviderRelay { .. }
+            | EntryContent::ModelChanged { .. } => {}
         }
     }
     counts.files = files.len();
@@ -473,6 +479,8 @@ fn index_turns(
                 turn.running.hash(&mut content);
                 // The finished bottom row renders the turn's breakdown.
                 turn.timing.hash(&mut content);
+                turn.served_model.hash(&mut content);
+                turn.cost_usd.map(f64::to_bits).hash(&mut content);
                 turn.status
                     .as_ref()
                     .map(std::mem::discriminant)
@@ -578,6 +586,11 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         } => {
             from_provider.hash(hash);
             to_provider.hash(hash);
+        }
+        EntryContent::ModelChanged { from, to, reason } => {
+            from.hash(hash);
+            to.hash(hash);
+            reason.hash(hash);
         }
         EntryContent::ContextCompacted => {}
     }
@@ -865,6 +878,18 @@ impl ChatView {
                         cx,
                     ));
                 }
+                Segment::ModelChange(entry) => {
+                    let EntryContent::ModelChanged { from, to, reason } = &entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(self.render_model_change_divider(
+                        &entry.id,
+                        from.as_deref(),
+                        to,
+                        reason.as_deref(),
+                        cx,
+                    ));
+                }
                 Segment::ActivityRun(activities) => {
                     let segment_id = activities[0].id.as_str();
                     column = column.child(self.render_work_log(
@@ -991,7 +1016,7 @@ impl ChatView {
         if !turn.running
             && let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts))
         {
-            column = column.child(self.render_timestamp(ts, turn.timing, cx));
+            column = column.child(self.render_timestamp(ts, turn, cx));
         }
 
         // Pending steers float below every live transcript/work-log element.
@@ -1056,6 +1081,46 @@ impl ChatView {
                     )),
             )
             .child(div().h(px(1.)).flex_1().bg(border))
+            .into_any_element()
+    }
+
+    fn render_model_change_divider(
+        &self,
+        id: &str,
+        from: Option<&str>,
+        to: &str,
+        reason: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let warning = cx.theme().warning;
+        let label = match from {
+            Some(from) => tcode_i18n::tr!("chat.model_changed", from = from, to = to).into_owned(),
+            None => tcode_i18n::tr!("chat.model_changed_to", to = to).into_owned(),
+        };
+        let label = match reason {
+            Some(reason) if !reason.is_empty() => format!("{label} ({reason})"),
+            _ => label,
+        };
+
+        h_flex()
+            .id(SharedString::from(format!("model-change-{id}")))
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(div().h(px(1.)).flex_1().bg(warning.opacity(0.45)))
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(warning.opacity(0.55))
+                    .text_size(px(11.))
+                    .text_color(warning)
+                    .child(label),
+            )
+            .child(div().h(px(1.)).flex_1().bg(warning.opacity(0.45)))
             .into_any_element()
     }
 
@@ -1749,6 +1814,15 @@ impl ChatView {
                 .start_ts
                 .map(|start| now_millis().saturating_sub(start) / 1000)
                 .unwrap_or(0);
+            let requested_model = self
+                .app_state
+                .read(cx)
+                .active
+                .as_ref()
+                .and_then(|active| active.meta.model.clone());
+            let served_model =
+                divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
+                    .map(str::to_owned);
             section = section.child(
                 h_flex()
                     .gap_2()
@@ -1759,7 +1833,14 @@ impl ChatView {
                     .child(tcode_i18n::tr!(
                         "chat.working_for",
                         duration = format_duration(secs)
-                    )),
+                    ))
+                    .when_some(served_model, |row, served| {
+                        row.child(
+                            div()
+                                .text_color(cx.theme().warning)
+                                .child(format!("⚠ {served}")),
+                        )
+                    }),
             );
         } else if let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts) {
             section = section.child(
@@ -2390,15 +2471,23 @@ impl ChatView {
 
     /// The finished turn's bottom row: the local completion clock, followed by
     /// the wall-clock breakdown when the turn's events supported deriving one.
-    fn render_timestamp(
-        &self,
-        ts: u64,
-        timing: Option<TurnTiming>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_timestamp(&self, ts: u64, turn: &TurnMeta, cx: &mut Context<Self>) -> AnyElement {
+        let requested_model = self
+            .app_state
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|active| active.meta.model.as_deref());
         turn_time_footer(
-            turn_time_parts(format_local_time(ts), timing),
+            turn_time_clauses(
+                format_local_time(ts),
+                turn.timing,
+                turn.cost_usd,
+                turn.served_model.as_deref(),
+                requested_model,
+            ),
             cx.theme().muted_foreground,
+            cx.theme().warning,
         )
         .into_any_element()
     }
@@ -3261,6 +3350,31 @@ fn format_span(secs: u64) -> String {
     }
 }
 
+fn divergent_served_model<'a>(
+    served_model: Option<&'a str>,
+    requested_model: Option<&str>,
+) -> Option<&'a str> {
+    match (served_model, requested_model) {
+        (Some(served), Some(requested)) if served != requested => Some(served),
+        _ => None,
+    }
+}
+
+fn format_cost_usd(cost: f64) -> String {
+    if cost.abs() >= 0.01 {
+        return format!("${cost:.2}");
+    }
+
+    let decimals = if (cost * 1_000.).round() != 0. { 3 } else { 4 };
+    let formatted = format!("{cost:.decimals$}");
+    let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+    if trimmed == "0" || trimmed == "-0" {
+        "$0.0000".to_string()
+    } else {
+        format!("${trimmed}")
+    }
+}
+
 /// A finished turn's bottom row, one clause per renderable unit: the completion
 /// clock, plus the turn's wall-clock breakdown when one was derivable. Legacy
 /// sessions without timestamps keep exactly the clock they showed before.
@@ -3280,21 +3394,59 @@ fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
     ]
 }
 
-/// The finished turn's bottom row, laid out from [`turn_time_parts`]. Each
-/// clause is its own item in a wrapping flow rather than one long string, so a
-/// narrow chat column (a diff panel is open, say) reflows the row at the middle
-/// dots instead of clipping the last clause at the divider. On a comfortable
-/// width the items pack onto one line and the row reads exactly as before.
-fn turn_time_footer(clauses: Vec<String>, muted: Hsla) -> Div {
-    /// Layout handles for the clauses, in render order (the last three only
-    /// exist when the turn had a derivable breakdown).
-    const SELECTORS: [&str; 4] = [
+#[derive(Clone)]
+struct TurnTimeClause {
+    text: String,
+    selector: &'static str,
+    warning: bool,
+}
+
+fn turn_time_clauses(
+    clock: String,
+    timing: Option<TurnTiming>,
+    cost_usd: Option<f64>,
+    served_model: Option<&str>,
+    requested_model: Option<&str>,
+) -> Vec<TurnTimeClause> {
+    const TIMING_SELECTORS: [&str; 4] = [
         "turn-time-clock",
         "turn-time-total",
         "turn-time-ai",
         "turn-time-tools",
     ];
 
+    let mut clauses = turn_time_parts(clock, timing)
+        .into_iter()
+        .zip(TIMING_SELECTORS)
+        .map(|(text, selector)| TurnTimeClause {
+            text,
+            selector,
+            warning: false,
+        })
+        .collect::<Vec<_>>();
+    if let Some(cost) = cost_usd {
+        clauses.push(TurnTimeClause {
+            text: format_cost_usd(cost),
+            selector: "turn-time-cost",
+            warning: false,
+        });
+    }
+    if let Some(served) = divergent_served_model(served_model, requested_model) {
+        clauses.push(TurnTimeClause {
+            text: format!("⚠ {served}"),
+            selector: "turn-time-model",
+            warning: true,
+        });
+    }
+    clauses
+}
+
+/// The finished turn's bottom row, laid out from [`turn_time_parts`]. Each
+/// clause is its own item in a wrapping flow rather than one long string, so a
+/// narrow chat column (a diff panel is open, say) reflows the row at the middle
+/// dots instead of clipping the last clause at the divider. On a comfortable
+/// width the items pack onto one line and the row reads exactly as before.
+fn turn_time_footer(clauses: Vec<TurnTimeClause>, muted: Hsla, warning: Hsla) -> Div {
     let last = clauses.len().saturating_sub(1);
     h_flex()
         .w_full()
@@ -3325,14 +3477,15 @@ fn turn_time_footer(clauses: Vec<String>, muted: Hsla) -> Div {
                     // break never strands a separator at the start of the next
                     // line. `min_w_0` lets a clause too wide for a line of its
                     // own wrap inside itself instead of spilling out of the row.
-                    let selector = SELECTORS.get(ix).copied().unwrap_or("turn-time-clause");
+                    let selector = clause.selector;
                     div()
                         .min_w_0()
                         .debug_selector(move || selector.into())
+                        .when(clause.warning, |element| element.text_color(warning))
                         .child(if ix == last {
-                            clause
+                            clause.text
                         } else {
-                            format!("{clause} ·")
+                            format!("{} ·", clause.text)
                         })
                 })),
         )
@@ -3573,8 +3726,9 @@ mod tests {
         copy_payload, diff_stats, displayed_error_text, file_edit_row, finished_work_log_label,
         format_duration, format_span, index_turns, list_sync, live_edit_counts, live_edit_rows,
         md_sync, plain_text_as_markdown, previous_logs_toggle_label, segment_entries,
-        timeline_overdraw, turn_time_footer, turn_time_parts, turn_work_log_summary,
-        work_log_auto_expands, work_log_counts, work_log_row_entries, work_log_summary,
+        timeline_overdraw, turn_time_clauses, turn_time_footer, turn_time_parts,
+        turn_work_log_summary, work_log_auto_expands, work_log_counts, work_log_row_entries,
+        work_log_summary,
     };
     use crate::markdown::MarkdownState;
     use agent::{FileChange, FileChangeKind, ItemStatus};
@@ -4952,7 +5106,7 @@ This begins after the hard break."#;
     /// Renders the production footer builder itself, so this layout test cannot
     /// drift from what a finished turn actually paints.
     struct TurnTimeFooterProbe {
-        clauses: Vec<String>,
+        clauses: Vec<super::TurnTimeClause>,
     }
 
     impl gpui::Render for TurnTimeFooterProbe {
@@ -4969,6 +5123,7 @@ This begins after the hard break."#;
             gpui_component::v_flex().size_full().child(turn_time_footer(
                 self.clauses.clone(),
                 cx.theme().muted_foreground,
+                cx.theme().warning,
             ))
         }
     }
@@ -4981,7 +5136,13 @@ This begins after the hard break."#;
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
-        let clauses = turn_time_parts("10:18 AM".into(), Some(TurnTiming::new(99_000, 0)));
+        let clauses = turn_time_clauses(
+            "10:18 AM".into(),
+            Some(TurnTiming::new(99_000, 0)),
+            None,
+            None,
+            None,
+        );
         // The footer's clauses, in render order (mirrors `turn_time_footer`).
         let selectors = [
             "turn-time-clock",
@@ -5050,6 +5211,53 @@ This begins after the hard break."#;
             wrapped,
             "the row never reflowed onto a second line, so a narrow column must be clipping it"
         );
+    }
+
+    #[test]
+    fn finished_time_clauses_format_cost_and_only_show_a_divergent_served_model() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+
+        let clauses = turn_time_clauses(
+            "3:04 PM".into(),
+            Some(TurnTiming::new(80_000, 35_000)),
+            Some(0.12),
+            Some("claude-opus-5"),
+            Some("claude-fable-5"),
+        );
+        assert_eq!(
+            clauses
+                .iter()
+                .map(|clause| (clause.selector, clause.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("turn-time-clock", "3:04 PM"),
+                ("turn-time-total", "Total 1m 20s"),
+                ("turn-time-ai", "AI thinking & response 45s"),
+                ("turn-time-tools", "Tool calls 35s"),
+                ("turn-time-cost", "$0.12"),
+                ("turn-time-model", "⚠ claude-opus-5"),
+            ]
+        );
+
+        let sub_cent = turn_time_clauses(
+            "3:04 PM".into(),
+            None,
+            Some(0.004),
+            Some("claude-fable-5"),
+            Some("claude-fable-5"),
+        );
+        assert_eq!(
+            sub_cent
+                .iter()
+                .map(|clause| (clause.selector, clause.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("turn-time-clock", "3:04 PM"), ("turn-time-cost", "$0.004"),]
+        );
+
+        let missing_requested =
+            turn_time_clauses("3:04 PM".into(), None, None, Some("served"), None);
+        assert_eq!(missing_requested.len(), 1);
     }
 
     #[test]
