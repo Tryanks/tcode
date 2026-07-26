@@ -8,11 +8,9 @@
 //! [`AgentEvent`], and fold them with [`tcode_core::session::fold_events`] into a
 //! [`tcode_core::session::Timeline`].
 
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use agent::ApprovalMode;
@@ -24,35 +22,18 @@ use tcode_core::project::WorktreeInfo;
 use tcode_core::project::{IndexFile, Project, SessionMeta, migrate_index};
 use tcode_core::session::StoredEvent;
 
-/// On-disk envelope wrapping each event with its record time and log position.
-/// Kept private: callers deal in [`StoredEvent`] (which tolerates the legacy
-/// bare form).
+/// On-disk envelope wrapping each event with its record time. Kept private:
+/// callers deal in [`StoredEvent`] (which tolerates the legacy bare form).
 #[derive(Serialize, Deserialize)]
 struct EventEnvelope {
     ts: u64,
-    /// 1-based position in this session's log. Absent on lines written before
-    /// the field existed; those are numbered by position on read, so a log may
-    /// mix the two forms and still present one contiguous sequence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    seq: Option<u64>,
     event: AgentEvent,
 }
 
 /// Cheap, cloneable handle to the on-disk data directory.
-///
-/// Clones share the sequence counters: they are per *store*, not per handle,
-/// so two clones appending to one session cannot hand out the same `seq`.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
-    /// Next `seq` to assign, per session id.
-    ///
-    /// Normally primed by `read_events`, which has already parsed the log and
-    /// so knows the answer for free. `scan_next_seq` is the fallback for a
-    /// session appended to without being read first. Either way it is computed
-    /// once per session, never per append — that would make writing a log
-    /// quadratic in its length.
-    next_seq: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl SessionStore {
@@ -71,10 +52,7 @@ impl SessionStore {
 
     pub fn open_at(root: PathBuf) -> std::io::Result<Self> {
         fs::create_dir_all(&root)?;
-        Ok(Self {
-            root,
-            next_seq: Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok(Self { root })
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -274,44 +252,11 @@ impl SessionStore {
         fs::rename(&tmp, self.index_path())
     }
 
-    /// Next unused `seq` for a session, scanning its log once and caching the
-    /// result. The scan takes the larger of the line count and the highest
-    /// explicit `seq`, so a log that mixes legacy (position-numbered) lines
-    /// with newer explicit ones never reissues a number.
-    fn reserve_seq(&self, id: &str) -> u64 {
-        let mut counters = self
-            .next_seq
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let next = counters
-            .entry(id.to_owned())
-            .or_insert_with(|| scan_next_seq(&self.events_path(id)));
-        let seq = *next;
-        *next += 1;
-        seq
-    }
-
-    /// Forget a session's cached counter, so the next append rescans the log.
-    /// Needed wherever the file changes behind the cache's back.
-    fn forget_seq(&self, id: &str) {
-        self.next_seq
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(id);
-    }
-
-    /// Append one event to the session's JSONL log, wrapped in an envelope
-    /// (`{"ts": <unix_ms>, "seq": <n>, "event": {…}}`), returning the `seq` it
-    /// was assigned.
-    ///
-    /// `seq` is assigned here rather than by the caller because this is the
-    /// point every write funnels through, so the numbers it hands out are
-    /// dense and gap-free by construction.
-    pub fn append_event(&self, id: &str, ts: u64, event: &AgentEvent) -> std::io::Result<u64> {
-        let seq = self.reserve_seq(id);
+    /// Append one event to the session's JSONL log, wrapped in a timestamped
+    /// envelope (`{"ts": <unix_ms>, "event": {…}}`).
+    pub fn append_event(&self, id: &str, ts: u64, event: &AgentEvent) -> std::io::Result<()> {
         let envelope = EventEnvelope {
             ts,
-            seq: Some(seq),
             event: event.clone(),
         };
         let line = serde_json::to_string(&envelope)
@@ -331,8 +276,7 @@ impl SessionStore {
             }
         }
         file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
-        Ok(seq)
+        file.write_all(b"\n")
     }
 
     /// Read and parse every persisted event for a session (skipping bad lines).
@@ -340,8 +284,6 @@ impl SessionStore {
     /// Each line is tolerantly parsed as either a timestamped envelope
     /// (`{"ts":…,"event":…}`) or a legacy bare event (`{"type":…}`), so logs
     /// written before the envelope format still replay (with `ts == None`).
-    /// Every returned event carries `Some(seq)`: explicit where the line has
-    /// one, positional otherwise.
     pub fn read_events(&self, id: &str) -> Vec<StoredEvent> {
         let path = self.events_path(id);
         let Ok(file) = File::open(&path) else {
@@ -355,31 +297,9 @@ impl SessionStore {
                 continue;
             }
             match parse_stored_line(trimmed) {
-                // Legacy lines carry no `seq`; number them by position so the
-                // sequence a caller sees is contiguous from 1 regardless of
-                // when each line was written. `events.len()` counts only lines
-                // that parsed, which is what keeps it contiguous — a corrupt
-                // line is skipped rather than consuming a number.
-                Ok(mut stored) => {
-                    stored.seq = stored.seq.or(Some(events.len() as u64 + 1));
-                    events.push(stored);
-                }
+                Ok(stored) => events.push(stored),
                 Err(err) => log::warn!("skipping unparseable event in {id}.jsonl: {err}"),
             }
-        }
-        // Replaying already parsed the whole log, so the highest seq is in
-        // hand. Priming the counter here means the common path — open a
-        // session, then append to it — never pays for `scan_next_seq`, which
-        // would re-read a log that can run to tens of megabytes.
-        //
-        // `or_insert` rather than overwrite: a counter that already exists has
-        // seen appends this read may predate, and must not be walked back.
-        if let Some(highest) = events.last().and_then(|stored| stored.seq) {
-            self.next_seq
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .entry(id.to_owned())
-                .or_insert(highest + 1);
         }
         events
     }
@@ -396,11 +316,7 @@ impl SessionStore {
         let dst = self.events_path(dst_id);
         let tmp = dst.with_extension("jsonl.tmp");
         fs::write(&tmp, data)?;
-        fs::rename(tmp, dst)?;
-        // The destination's log just changed behind any cached counter (a fork
-        // reuses an id whose counter may still say 1). Rescan on next append.
-        self.forget_seq(dst_id);
-        Ok(())
+        fs::rename(tmp, dst)
     }
 
     /// Remove a session from the index and delete its event log.
@@ -408,7 +324,6 @@ impl SessionStore {
         let mut file = self.read_file();
         file.sessions.retain(|meta| meta.id != id);
         self.write_file(&file)?;
-        self.forget_seq(id);
         match fs::remove_file(self.events_path(id)) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -425,66 +340,16 @@ fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
     match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => Ok(StoredEvent {
             ts: Some(envelope.ts),
-            seq: envelope.seq,
             event: envelope.event,
         }),
         Err(_envelope_err) => match serde_json::from_str::<AgentEvent>(line) {
-            Ok(event) => Ok(StoredEvent {
-                ts: None,
-                seq: None,
-                event,
-            }),
+            Ok(event) => Ok(StoredEvent { ts: None, event }),
             // Both forms failed: the line is genuinely corrupt. The bare-event
             // error is the more informative one (the envelope attempt always
             // fails on a bare event merely because `ts` is missing).
             Err(bare_err) => Err(bare_err),
         },
     }
-}
-
-/// The first `seq` that is safe to assign in an existing log.
-///
-/// The cold path. Opening a session calls `read_events`, which primes the
-/// counter from a parse it was doing anyway; this runs only when something
-/// appends to a session that was never read in this process. It reads each
-/// line's `seq` rather than parsing events, so it costs a file read rather
-/// than a full deserialization of a log that can reach tens of megabytes.
-///
-/// Takes the larger of the parsed-line count and the highest explicit `seq`
-/// because a log may hold both forms — legacy lines get positional numbers on
-/// read, and reusing one of those for a new line would break the order the
-/// numbers exist to provide. A missing file is an empty log, so `seq` starts
-/// at 1.
-fn scan_next_seq(path: &PathBuf) -> u64 {
-    let Ok(file) = File::open(path) else {
-        return 1;
-    };
-    let mut lines = 0_u64;
-    let mut highest = 0_u64;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { break };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // A corrupt line still occupies a position: `read_events` skips it and
-        // therefore never issues its number, so counting it here only leaves a
-        // gap. Overshooting is safe; colliding is not.
-        lines += 1;
-        if let Ok(seq) = serde_json::from_str::<SeqOnly>(trimmed)
-            && let Some(seq) = seq.seq
-        {
-            highest = highest.max(seq);
-        }
-    }
-    lines.max(highest) + 1
-}
-
-/// Just enough of an envelope to read its `seq` (see [`scan_next_seq`]).
-#[derive(Deserialize)]
-struct SeqOnly {
-    #[serde(default)]
-    seq: Option<u64>,
 }
 
 pub fn now_secs() -> u64 {
@@ -941,174 +806,5 @@ mod tests {
         store.clone_events("missing", "empty-fork").unwrap();
         assert!(!store.events_path("empty-fork").exists());
         let _ = fs::remove_dir_all(store.root());
-    }
-
-    // -- event sequence numbers ---------------------------------------------
-
-    fn assistant(text: &str) -> AgentEvent {
-        AgentEvent::Delta {
-            item_id: "item-1".into(),
-            kind: agent::DeltaKind::AssistantText,
-            text: text.into(),
-        }
-    }
-
-    fn seqs(store: &SessionStore, id: &str) -> Vec<u64> {
-        store
-            .read_events(id)
-            .into_iter()
-            .map(|stored| stored.seq.expect("read_events always assigns a seq"))
-            .collect()
-    }
-
-    #[test]
-    fn appended_events_are_numbered_from_one_and_the_number_is_returned() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let assigned: Vec<u64> = ["a", "b", "c"]
-            .iter()
-            .map(|text| store.append_event("s1", 1, &assistant(text)).unwrap())
-            .collect();
-
-        assert_eq!(assigned, vec![1, 2, 3], "append must hand back its own seq");
-        assert_eq!(seqs(&store, "s1"), vec![1, 2, 3]);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn sequences_are_per_session_not_global() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        store.append_event("s1", 1, &assistant("a")).unwrap();
-        store.append_event("s2", 1, &assistant("b")).unwrap();
-        store.append_event("s1", 1, &assistant("c")).unwrap();
-
-        assert_eq!(seqs(&store, "s1"), vec![1, 2]);
-        assert_eq!(seqs(&store, "s2"), vec![1]);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    /// Logs written before `seq` existed carry only `ts`. They must still
-    /// present a contiguous sequence, or a client resuming from a cursor would
-    /// silently skip the whole legacy prefix.
-    #[test]
-    fn legacy_lines_without_seq_are_numbered_by_position() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let path = store.events_path("s1");
-        fs::write(
-            &path,
-            "{\"ts\":10,\"event\":{\"type\":\"session_closed\"}}\n\
-             {\"type\":\"session_closed\"}\n\
-             {\"ts\":30,\"event\":{\"type\":\"session_closed\"}}\n",
-        )
-        .unwrap();
-
-        assert_eq!(seqs(&store, "s1"), vec![1, 2, 3]);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    /// The case the counter exists to survive: a log that already has legacy
-    /// lines, reopened by a fresh process, then appended to. The new lines must
-    /// continue past the positional numbers rather than restart and collide.
-    #[test]
-    fn appending_to_a_legacy_log_continues_past_the_positional_numbers() {
-        let root = temp_root();
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        fs::write(
-            store.events_path("s1"),
-            "{\"ts\":10,\"event\":{\"type\":\"session_closed\"}}\n\
-             {\"ts\":20,\"event\":{\"type\":\"session_closed\"}}\n",
-        )
-        .unwrap();
-
-        // A separate handle: nothing is cached, exactly like a restart.
-        let reopened = SessionStore::open_at(root.clone()).unwrap();
-        assert_eq!(reopened.append_event("s1", 30, &assistant("x")).unwrap(), 3);
-
-        let observed = seqs(&reopened, "s1");
-        assert_eq!(observed, vec![1, 2, 3]);
-        assert!(
-            observed.windows(2).all(|w| w[1] == w[0] + 1),
-            "sequence must stay contiguous across the format change: {observed:?}"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    /// A fork copies the log verbatim, so the destination inherits its
-    /// sequence. Appending to the fork must not restart at 1 and overwrite the
-    /// inherited numbering.
-    #[test]
-    fn cloning_a_log_carries_its_sequence_into_the_fork() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        store.append_event("src", 1, &assistant("a")).unwrap();
-        store.append_event("src", 2, &assistant("b")).unwrap();
-
-        // Touch the destination first so a stale counter would exist to catch.
-        store.append_event("dst", 1, &assistant("scratch")).unwrap();
-        store.clone_events("src", "dst").unwrap();
-
-        assert_eq!(store.append_event("dst", 3, &assistant("c")).unwrap(), 3);
-        assert_eq!(seqs(&store, "dst"), vec![1, 2, 3]);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    /// Deleting a session frees its id. If the counter outlived the file, the
-    /// next session reusing that id would start numbering mid-sequence.
-    #[test]
-    fn removing_a_session_resets_its_sequence() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        store.append_event("s1", 1, &assistant("a")).unwrap();
-        store.append_event("s1", 2, &assistant("b")).unwrap();
-        store.remove_session("s1").unwrap();
-
-        assert_eq!(store.append_event("s1", 3, &assistant("c")).unwrap(), 1);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    /// Opening a session must leave the counter primed, so the append that
-    /// follows does not re-read a log the replay just parsed. Checked directly
-    /// rather than through behaviour, because a working-but-rescanning
-    /// implementation passes every black-box assertion here.
-    #[test]
-    fn reading_a_log_primes_the_counter_so_appends_skip_the_rescan() {
-        let root = temp_root();
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        store.append_event("s1", 1, &assistant("a")).unwrap();
-        store.append_event("s1", 2, &assistant("b")).unwrap();
-
-        // A fresh handle has no cached counters, exactly like a restart.
-        let reopened = SessionStore::open_at(root.clone()).unwrap();
-        let primed = |store: &SessionStore| -> Option<u64> {
-            store.next_seq.lock().unwrap().get("s1").copied()
-        };
-        assert_eq!(primed(&reopened), None, "counter must start cold");
-
-        assert_eq!(reopened.read_events("s1").len(), 2);
-        assert_eq!(
-            primed(&reopened),
-            Some(3),
-            "replay must hand the counter its answer"
-        );
-        assert_eq!(reopened.append_event("s1", 3, &assistant("c")).unwrap(), 3);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    /// `seq` must not appear on the wire for events that never had one, so a
-    /// reader can tell "no seq recorded" from "seq zero".
-    #[test]
-    fn envelopes_omit_seq_when_absent_and_carry_it_when_present() {
-        let with = serde_json::to_string(&EventEnvelope {
-            ts: 5,
-            seq: Some(9),
-            event: assistant("a"),
-        })
-        .unwrap();
-        assert!(with.contains("\"seq\":9"), "{with}");
-
-        let without = serde_json::to_string(&EventEnvelope {
-            ts: 5,
-            seq: None,
-            event: assistant("a"),
-        })
-        .unwrap();
-        assert!(!without.contains("seq"), "{without}");
     }
 }

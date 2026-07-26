@@ -2,9 +2,6 @@
 // Debug builds keep the console so `RUST_LOG` output stays visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-// Lockfile guard only; nothing here is reachable from the binary.
-#[cfg(test)]
-mod gpui_pin;
 mod smoke;
 
 use std::{borrow::Cow, time::Duration};
@@ -13,9 +10,8 @@ use gpui::{
     App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
-use sync_protocol::HostInfo;
 use tcode_runtime::app::AppState;
-use tcode_services::{settings::SettingsStore, shell_env, store::SessionStore};
+use tcode_services::{shell_env, store::SessionStore};
 use tcode_ui::{AppShell, Quit, TogglePalette};
 use tcode_ui::{assets, settings};
 
@@ -331,7 +327,7 @@ fn main() {
             Theme::global_mut(cx).apply_config(&light);
             Theme::global_mut(cx).apply_config(&dark);
 
-            let app_state = cx.new(|_| AppState::new(store.clone()));
+            let app_state = cx.new(|_| AppState::new(store));
             cx.on_action::<Quit>({
                 let app_state = app_state.clone();
                 move |action, cx| handle_quit(action, &app_state, cx)
@@ -351,53 +347,6 @@ fn main() {
                     app_state.update(cx, |state, _| state.attach_orchestrate_mcp(server));
                 }
                 Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
-            }
-            let display_name = std::env::var("HOSTNAME")
-                .or_else(|_| std::env::var("COMPUTERNAME"))
-                .unwrap_or_else(|_| "tcode".into());
-            let host_info = HostInfo {
-                host_id: format!("{display_name}:{}", store.root().display()),
-                display_name,
-                platform: std::env::consts::OS.into(),
-                app_version: env!("CARGO_PKG_VERSION").into(),
-            };
-            let sync_server = SettingsStore::new(store.root().clone())
-                .load_or_create_sync_token()
-                .and_then(|token| {
-                    sync_host::start_on(
-                        store.clone(),
-                        host_info,
-                        token,
-                        std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
-                        sync_host::WakeSource::Broadcast,
-                    )
-                });
-            match sync_server {
-                Ok(server) => {
-                    log::info!("sync host listening at {}", server.url);
-                    // A pairing code, not the token: a phone cannot be handed a
-                    // credential the way a query string hands one to a browser,
-                    // and the code is what a person can read off this screen and
-                    // type into another. Single-use and short-lived, so logging
-                    // it is not the exposure logging the token would be.
-                    let code = server.pairing.issue(std::time::Instant::now(), || {
-                        // A v4 UUID's bytes, because they come from the system
-                        // CSPRNG. The clock is not an acceptable substitute: an
-                        // earlier attempt read it once per character and every
-                        // code came out `AAAAAA`.
-                        let bytes = *uuid::Uuid::new_v4().as_bytes();
-                        std::array::from_fn(|index| bytes[index])
-                    });
-                    log::info!(
-                        "pair a device within {}s with code {code}",
-                        sync_host::pairing::CODE_LIFETIME.as_secs()
-                    );
-                    app_state.update(cx, |state, cx| {
-                        state.attach_sync_host(server);
-                        state.pump_sync_commands(cx);
-                    });
-                }
-                Err(err) => log::warn!("sync host failed to start: {err}"),
             }
             match computer_use_mcp::start() {
                 Ok(server) => {

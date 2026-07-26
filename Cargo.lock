@@ -259,23 +259,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "android_log-sys"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d"
-
-[[package]]
-name = "android_logger"
-version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb4e440d04be07da1f1bf44fb4495ebd58669372fe0cffa6e48595ac5bd88a3"
-dependencies = [
- "android_log-sys",
- "env_filter 0.1.4",
- "log",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -748,7 +731,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -767,10 +749,8 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1322,21 +1302,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "client-app"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "gpui",
- "gpui-component",
- "log",
- "sync-client",
- "sync-protocol",
- "tcode-ui",
- "tokio",
- "tokio-tungstenite 0.28.0",
-]
 
 [[package]]
 name = "cocoa"
@@ -1928,12 +1893,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data-encoding"
-version = "2.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
-
-[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2275,16 +2234,6 @@ dependencies = [
 
 [[package]]
 name = "env_filter"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bf3c259d255ca70051b30e2e95b5446cdb8949ac4cd22c0d7fd634d89f568e2"
-dependencies = [
- "log",
- "regex",
-]
-
-[[package]]
-name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
@@ -2301,7 +2250,7 @@ checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
 dependencies = [
  "anstream",
  "anstyle",
- "env_filter 2.0.0",
+ "env_filter",
  "jiff",
  "log",
 ]
@@ -3242,20 +3191,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-android"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
- "gpui",
- "gpui_wgpu",
- "log",
- "ndk",
- "raw-window-handle",
- "uuid",
-]
-
-[[package]]
 name = "gpui-component"
 version = "0.5.2"
 source = "git+https://github.com/longbridge/gpui-component?rev=031555662e99a1b5a549990b47f246d475b8288a#031555662e99a1b5a549990b47f246d475b8288a"
@@ -3325,19 +3260,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "gpui-ios"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
- "gpui",
- "gpui_wgpu",
- "log",
- "raw-window-handle",
- "uuid",
 ]
 
 [[package]]
@@ -5516,16 +5438,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-core-location"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca347214e24bc973fc025fd0d36ebb179ff30536ed1f80252706db19ee452009"
-dependencies = [
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
-]
-
-[[package]]
 name = "objc2-core-media"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5746,18 +5658,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
 dependencies = [
  "bitflags 2.13.0",
- "block2 0.6.2",
  "objc2 0.6.4",
- "objc2-cloud-kit",
- "objc2-core-data 0.3.2",
  "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-image 0.3.2",
- "objc2-core-location",
- "objc2-core-text",
  "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
- "objc2-user-notifications",
 ]
 
 [[package]]
@@ -5765,16 +5668,6 @@ name = "objc2-uniform-type-identifiers"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
-dependencies = [
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
-]
-
-[[package]]
-name = "objc2-user-notifications"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
@@ -7852,17 +7745,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8416,48 +8298,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sync-client"
-version = "0.1.0"
-dependencies = [
- "agent",
- "futures-util",
- "log",
- "serde_json",
- "sync-protocol",
- "tcode-core",
- "tcode-services",
- "tokio",
- "tokio-tungstenite 0.28.0",
-]
-
-[[package]]
-name = "sync-host"
-version = "0.1.0"
-dependencies = [
- "agent",
- "async-channel",
- "axum",
- "futures-util",
- "log",
- "serde_json",
- "sync-protocol",
- "tcode-core",
- "tcode-services",
- "tokio",
- "tokio-tungstenite 0.28.0",
- "uuid",
-]
-
-[[package]]
-name = "sync-protocol"
-version = "0.1.0"
-dependencies = [
- "agent",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8633,28 +8473,10 @@ dependencies = [
  "log",
  "orchestrate-mcp",
  "preview-mcp",
- "sync-host",
- "sync-protocol",
  "tcode-i18n",
  "tcode-runtime",
  "tcode-services",
  "tcode-ui",
- "uuid",
-]
-
-[[package]]
-name = "tcode-android"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "anyhow",
- "client-app",
- "gpui",
- "gpui-android",
- "jni",
- "log",
- "ndk",
- "raw-window-handle",
 ]
 
 [[package]]
@@ -8677,20 +8499,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tcode-ios"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "client-app",
- "gpui",
- "gpui-ios",
- "log",
- "objc2 0.6.4",
- "objc2-foundation 0.3.2",
- "objc2-ui-kit",
-]
-
-[[package]]
 name = "tcode-runtime"
 version = "0.1.0"
 dependencies = [
@@ -8704,26 +8512,10 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "sync-host",
  "tcode-core",
  "tcode-services",
  "term",
  "uuid",
-]
-
-[[package]]
-name = "tcode-server"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "axum",
- "env_logger",
- "futures-util",
- "log",
- "sync-host",
- "sync-protocol",
- "tcode-services",
- "tokio",
 ]
 
 [[package]]
@@ -8786,23 +8578,6 @@ dependencies = [
  "tcode-runtime",
  "tcode-services",
  "term",
-]
-
-[[package]]
-name = "tcode-web"
-version = "0.1.0"
-dependencies = [
- "client-app",
- "gpui",
- "gpui-component",
- "gpui-component-assets",
- "gpui_platform",
- "js-sys",
- "sync-client",
- "sync-protocol",
- "tcode-ui",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -9072,30 +8847,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.28.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.29.0",
-]
-
-[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9332,39 +9083,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.4",
- "sha1",
- "thiserror 2.0.18",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.4",
- "sha1",
- "thiserror 2.0.18",
 ]
 
 [[package]]
