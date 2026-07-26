@@ -457,6 +457,13 @@ fn main() {
                     appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),
                     traffic_light_position: Some(point(px(12.), px(19.))),
                 }),
+                // macOS: the app owns titlebar dragging. AppKit's native
+                // titlebar-region drag sits on top of whatever gpui draws in the
+                // top strip — dragging the Preview URL bar moved the window
+                // instead of selecting text. Every draggable strip already goes
+                // through `window_drag_area` (`start_window_move`), so hand the
+                // whole content view to the app and let controls own their input.
+                app_owns_titlebar_drag: true,
                 // Spell out that Windows is client-decorated. (This field is
                 // advisory off Wayland; leaving it `None` elsewhere keeps Linux
                 // on whatever its compositor/backend already chose.)
