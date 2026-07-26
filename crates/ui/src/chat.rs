@@ -2992,11 +2992,10 @@ impl ChatView {
     }
 
     fn render_scroll_pill(&self, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .flex_shrink_0()
-            .w_full()
-            .justify_center()
-            .pb_1()
+        div()
+            .absolute()
+            .bottom(px(12.))
+            .mx_auto()
             .child(
                 Button::new("scroll-to-end")
                     .outline()
@@ -3145,11 +3144,12 @@ impl Render for ChatView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .child(timeline),
-            )
-            .when(
-                self.list_state.is_scrolled_to_end() == Some(false),
-                |this| this.child(self.render_scroll_pill(cx)),
+                    .relative()
+                    .child(timeline)
+                    .when(
+                        self.list_state.is_scrolled_to_end() == Some(false),
+                        |this| this.child(self.render_scroll_pill(cx)),
+                    ),
             )
             .child(self.composer.clone());
 
