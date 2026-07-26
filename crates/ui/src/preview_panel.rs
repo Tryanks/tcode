@@ -97,6 +97,13 @@ mod native {
     use crate::window_caption;
     use tcode_runtime::app::AppState;
 
+    fn wait_timeout_message(pending: &[String]) -> String {
+        format!(
+            "preview_wait_for timed out; unmet conditions: {}",
+            pending.join(", ")
+        )
+    }
+
     pub struct PreviewPanel {
         app_state: Entity<AppState>,
         /// One native WebView per session id, created on first use.
@@ -108,6 +115,8 @@ mod native {
         warm: HashSet<String>,
         /// Last URL loaded per session (drives the address bar + reload).
         urls: HashMap<String, String>,
+        /// Fixed WebView canvas dimensions per stable conversation key.
+        canvases: HashMap<String, (u32, u32)>,
         /// The shared address-bar input (reflects the active session's URL).
         url_input: Entity<InputState>,
         /// Session id whose URL is currently mirrored into `url_input`.
@@ -152,6 +161,7 @@ mod native {
                 webviews: HashMap::new(),
                 warm: HashSet::new(),
                 urls: HashMap::new(),
+                canvases: HashMap::new(),
                 url_input,
                 mirrored: None,
                 active_identity: None,
@@ -191,6 +201,11 @@ mod native {
                     && !self.urls.contains_key(key)
                 {
                     self.urls.insert(key.clone(), url);
+                }
+                if let Some(canvas) = self.canvases.remove(old_key)
+                    && !self.canvases.contains_key(key)
+                {
+                    self.canvases.insert(key.clone(), canvas);
                 }
                 if self.warm.remove(old_key) {
                     self.warm.insert(key.clone());
@@ -380,6 +395,24 @@ mod native {
             }
         }
 
+        /// The chrome's X: close the Preview tab *and* drop this conversation's
+        /// WebView, so the page is torn down (scripts, media, sockets) rather
+        /// than kept running behind a closed panel. The next open or agent op
+        /// recreates a fresh webview on demand.
+        fn close_panel(&mut self, cx: &mut Context<Self>) {
+            if let Some(key) = self.active_key(cx) {
+                self.webviews.remove(&key);
+                self.urls.remove(&key);
+                self.warm.remove(&key);
+            }
+            // Un-mirror so a later reopen refreshes the address bar from the
+            // (now empty) URL map instead of showing the stale address.
+            self.mirrored = None;
+            self.app_state
+                .update(cx, |state, cx| state.close_preview_panel(cx));
+            cx.notify();
+        }
+
         fn rescan_ports(&mut self, cx: &mut Context<Self>) {
             self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
             let generation = self.port_scan_generation;
@@ -475,7 +508,7 @@ mod native {
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
-                PreviewOp::Status => self.eval_json(&key, js::STATUS, reply, window, cx),
+                PreviewOp::Status => self.status(&key, reply, window, cx),
                 PreviewOp::Snapshot => self.eval_json(&key, js::SNAPSHOT, reply, window, cx),
                 PreviewOp::Evaluate { js: expr } => {
                     self.eval_json(&key, &js::evaluate(&expr), reply, window, cx)
@@ -486,8 +519,239 @@ mod native {
                 PreviewOp::Type { selector, text } => {
                     self.eval_json(&key, &js::type_text(&selector, &text), reply, window, cx)
                 }
+                PreviewOp::Resize { width, height } => {
+                    self.app_state.update(cx, |state, cx| {
+                        state.open_preview_panel_for(&session_id, cx)
+                    });
+                    let payload = match (width, height) {
+                        (Some(width), Some(height)) => {
+                            self.canvases.insert(key, (width, height));
+                            serde_json::json!({
+                                "ok": true,
+                                "mode": "fixed",
+                                "width": width,
+                                "height": height,
+                                "note": "fixed canvas is clamped to the panel if larger",
+                            })
+                        }
+                        _ => {
+                            self.canvases.remove(&key);
+                            serde_json::json!({
+                                "ok": true,
+                                "mode": "fill",
+                                "note": "preview fills the available panel",
+                            })
+                        }
+                    };
+                    self.sync_visibility(cx);
+                    cx.notify();
+                    let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
+                }
+                // `key` is the routed conversation key; bind the keyboard key
+                // apart so it cannot shadow it into `eval_json`'s session slot.
+                PreviewOp::Press {
+                    key: pressed,
+                    modifiers,
+                } => self.eval_json(&key, &js::press(&pressed, &modifiers), reply, window, cx),
+                PreviewOp::Scroll {
+                    delta_x,
+                    delta_y,
+                    selector,
+                } => self.eval_json(
+                    &key,
+                    &js::scroll(delta_x, delta_y, selector.as_deref()),
+                    reply,
+                    window,
+                    cx,
+                ),
+                PreviewOp::WaitFor {
+                    selector,
+                    text,
+                    url_includes,
+                    timeout_ms,
+                } => self.wait_for(
+                    &key,
+                    selector,
+                    text,
+                    url_includes,
+                    timeout_ms,
+                    reply,
+                    window,
+                    cx,
+                ),
                 PreviewOp::Screenshot => self.screenshot(&session_id, &key, reply, window, cx),
             }
+        }
+
+        /// Add this conversation's canvas setting to the otherwise opaque page
+        /// status object returned by JavaScript.
+        fn status(
+            &mut self,
+            key: &str,
+            reply: ReplyTx,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let canvas = self
+                .canvases
+                .get(key)
+                .map(|(width, height)| {
+                    serde_json::json!({
+                        "mode": "fixed",
+                        "width": width,
+                        "height": height,
+                    })
+                })
+                .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
+            let (status_reply, status_result) = async_channel::bounded(1);
+            cx.spawn(async move |_, _| {
+                let result = match status_result.recv().await {
+                    Ok(Ok(PreviewReply::Json(mut value))) => {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("canvas".into(), canvas);
+                            Ok(PreviewReply::Json(value))
+                        } else {
+                            Err("preview status returned a non-object value".into())
+                        }
+                    }
+                    Ok(result) => result,
+                    Err(_) => Err("preview status evaluation was dropped".into()),
+                };
+                let _ = reply.send(result).await;
+            })
+            .detach();
+            self.eval_json(key, js::STATUS, status_reply, window, cx);
+        }
+
+        /// Poll a one-shot page probe every 250ms until it matches or reaches
+        /// its deadline. Each evaluation has its own watchdog because native
+        /// WebViews can drop callbacks during navigation.
+        #[allow(clippy::too_many_arguments)]
+        fn wait_for(
+            &mut self,
+            key: &str,
+            selector: Option<String>,
+            text: Option<String>,
+            url_includes: Option<String>,
+            timeout_ms: u64,
+            reply: ReplyTx,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            if self.ensure_webview(key, window, cx).is_none() {
+                let err = self.webview_error.clone().unwrap_or_default();
+                let _ = reply.try_send(Err(unavailable_message(&err)));
+                return;
+            }
+            let cold = !self.warm.contains(key);
+            let key = key.to_string();
+            let probe = js::wait_for_probe(
+                selector.as_deref(),
+                text.as_deref(),
+                url_includes.as_deref(),
+            );
+            let mut pending = Vec::new();
+            if selector.is_some() {
+                pending.push("selector".to_string());
+            }
+            if text.is_some() {
+                pending.push("text".to_string());
+            }
+            if url_includes.is_some() {
+                pending.push("urlIncludes".to_string());
+            }
+            cx.spawn(async move |this, cx| {
+                let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+                if cold {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(700))
+                        .await;
+                    if this
+                        .update(cx, |panel, _| {
+                            panel.warm.insert(key.clone());
+                        })
+                        .is_err()
+                    {
+                        let _ = reply
+                            .send(Err("preview panel was dropped while waiting".into()))
+                            .await;
+                        return;
+                    }
+                }
+                loop {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        let _ = reply.send(Err(wait_timeout_message(&pending))).await;
+                        return;
+                    }
+                    let (probe_reply, probe_result) = async_channel::bounded(1);
+                    if this
+                        .update(cx, |panel, cx| {
+                            panel.eval_now(&key, &probe, probe_reply.clone(), cx);
+                        })
+                        .is_err()
+                    {
+                        let _ = reply
+                            .send(Err("preview panel was dropped while waiting".into()))
+                            .await;
+                        return;
+                    }
+
+                    let watchdog_delay = remaining.min(Duration::from_secs(5));
+                    let watchdog_reply = probe_reply;
+                    let watchdog_error = if remaining <= Duration::from_secs(5) {
+                        wait_timeout_message(&pending)
+                    } else {
+                        "preview wait probe evaluation timed out".into()
+                    };
+                    let watchdog_timer = cx.background_executor().timer(watchdog_delay);
+                    cx.background_executor()
+                        .spawn(async move {
+                            watchdog_timer.await;
+                            let _ = watchdog_reply.try_send(Err(watchdog_error));
+                        })
+                        .detach();
+
+                    let value = match probe_result.recv().await {
+                        Ok(Ok(PreviewReply::Json(value))) => value,
+                        Ok(Ok(PreviewReply::Image { .. })) => {
+                            let _ = reply
+                                .send(Err("preview wait probe returned an image".into()))
+                                .await;
+                            return;
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(error)).await;
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = reply
+                                .send(Err("preview wait probe evaluation was dropped".into()))
+                                .await;
+                            return;
+                        }
+                    };
+                    if value.get("matched").and_then(serde_json::Value::as_bool) == Some(true) {
+                        let _ = reply.send(Ok(PreviewReply::Json(value))).await;
+                        return;
+                    }
+                    pending = value
+                        .get("pending")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_else(|| pending.clone());
+                    cx.background_executor()
+                        .timer(Duration::from_millis(250))
+                        .await;
+                }
+            })
+            .detach();
         }
 
         /// Evaluate `script` and answer `reply` with the parsed JSON result.
@@ -677,7 +941,28 @@ mod native {
 
             let body: AnyElement = match &active {
                 Some(id) => match self.ensure_webview(id, window, cx) {
-                    Some(view) => div().flex_1().min_h_0().child(view).into_any_element(),
+                    Some(view) => {
+                        if let Some((width, height)) = self.canvases.get(id).copied() {
+                            div()
+                                .flex()
+                                .flex_1()
+                                .min_h_0()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(width as f32))
+                                        .h(px(height as f32))
+                                        .max_w_full()
+                                        .max_h_full()
+                                        .child(view),
+                                )
+                                .into_any_element()
+                        } else {
+                            div().flex_1().min_h_0().child(view).into_any_element()
+                        }
+                    }
                     None => v_flex()
                         .flex_1()
                         .gap_2()
@@ -783,6 +1068,15 @@ mod native {
                         .icon(IconName::ExternalLink)
                         .tooltip(tcode_i18n::tr!("preview.open_external"))
                         .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
+                )
+                .child(
+                    Button::new("preview-close")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .icon(IconName::Close)
+                        .tooltip(tcode_i18n::tr!("preview.close"))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
                 // Last child, so the chrome's own controls stay to its left.
                 .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))

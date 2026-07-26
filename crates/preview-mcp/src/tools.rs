@@ -20,7 +20,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
-use crate::{Broker, PreviewOp, PreviewReply};
+use crate::{Broker, PREVIEW_PRESETS, PreviewOp, PreviewReply};
 
 /// Optional-URL argument for `preview_open`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -58,6 +58,133 @@ pub struct TypeParams {
     pub selector: String,
     /// Text to set as the field's value.
     pub text: String,
+}
+
+/// Fixed-canvas dimensions or a named device preset.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ResizeParams {
+    /// Canvas mode: `fill` uses the whole panel; `fixed` uses a device-sized canvas.
+    pub mode: String,
+    /// Fixed canvas width in CSS pixels.
+    #[serde(default)]
+    pub width: Option<i64>,
+    /// Fixed canvas height in CSS pixels.
+    #[serde(default)]
+    pub height: Option<i64>,
+    /// Named device preset, as an alternative to width and height.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// `portrait` (default) or `landscape`.
+    #[serde(default)]
+    pub orientation: Option<String>,
+}
+
+/// A key and optional modifier keys to dispatch.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PressParams {
+    /// A `KeyboardEvent.key` value such as `Enter`, `Escape`, `Tab`, `a`, or `F5`.
+    pub key: String,
+    /// Zero or more of `Alt`, `Control`, `Meta`, and `Shift`.
+    #[serde(default)]
+    pub modifiers: Vec<String>,
+}
+
+/// Relative scrolling parameters.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollParams {
+    /// Horizontal scroll delta in CSS pixels.
+    #[serde(default)]
+    pub delta_x: Option<f64>,
+    /// Vertical scroll delta in CSS pixels.
+    #[serde(default)]
+    pub delta_y: Option<f64>,
+    /// CSS selector of a scroll container; omitted to scroll the window.
+    #[serde(default)]
+    pub selector: Option<String>,
+}
+
+/// Page conditions to poll until all are satisfied.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitForParams {
+    /// CSS selector that must match an element.
+    #[serde(default)]
+    pub selector: Option<String>,
+    /// Substring that must appear in the document text.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Substring that must appear in the current URL.
+    #[serde(default)]
+    pub url_includes: Option<String>,
+    /// Maximum wait in milliseconds (default 15000, clamped to 1000..=60000).
+    #[serde(default)]
+    pub timeout_ms: Option<i64>,
+}
+
+const MIN_CANVAS_DIMENSION: i64 = 240;
+const MAX_CANVAS_DIMENSION: i64 = 3840;
+const MAX_CANVAS_AREA: u64 = 3840 * 2160;
+
+fn resize_op(params: ResizeParams) -> Result<PreviewOp, String> {
+    let landscape = match params.orientation.as_deref().unwrap_or("portrait") {
+        "portrait" => false,
+        "landscape" => true,
+        other => {
+            return Err(format!(
+                "invalid orientation {other:?}; use portrait or landscape"
+            ));
+        }
+    };
+    match params.mode.as_str() {
+        "fill" => Ok(PreviewOp::Resize {
+            width: None,
+            height: None,
+        }),
+        "fixed" => {
+            let (mut width, mut height) = if let Some(preset) = params.preset {
+                if params.width.is_some() || params.height.is_some() {
+                    return Err(
+                        "preset is an alternative to width and height; provide only one".into(),
+                    );
+                }
+                PREVIEW_PRESETS
+                    .iter()
+                    .find(|(id, _, _)| *id == preset)
+                    .map(|(_, width, height)| (*width, *height))
+                    .ok_or_else(|| format!("unknown preview preset {preset:?}"))?
+            } else {
+                let width = params
+                    .width
+                    .ok_or_else(|| "fixed mode requires width and height, or a preset".to_string())?
+                    .clamp(MIN_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION)
+                    as u32;
+                let height = params
+                    .height
+                    .ok_or_else(|| "fixed mode requires width and height, or a preset".to_string())?
+                    .clamp(MIN_CANVAS_DIMENSION, MAX_CANVAS_DIMENSION)
+                    as u32;
+                (width, height)
+            };
+            if u64::from(width) * u64::from(height) > MAX_CANVAS_AREA {
+                return Err(format!(
+                    "fixed canvas area must not exceed {MAX_CANVAS_AREA} CSS pixels"
+                ));
+            }
+            if landscape {
+                std::mem::swap(&mut width, &mut height);
+            }
+            Ok(PreviewOp::Resize {
+                width: Some(width),
+                height: Some(height),
+            })
+        }
+        other => Err(format!("invalid mode {other:?}; use fill or fixed")),
+    }
+}
+
+fn tool_error(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message.into())])
 }
 
 /// The MCP server handler: one shared [`Broker`] plus the generated tool router.
@@ -144,6 +271,90 @@ impl PreviewTools {
             .await)
     }
 
+    /// Set the preview to fill the panel or use a fixed device-sized canvas.
+    #[tool(
+        description = "Resize the preview canvas. mode is fill or fixed. Fixed mode accepts width/height or one preset: iphone-se, iphone-xr, iphone-12-pro, iphone-14-pro-max, pixel-7, galaxy-s20-ultra, ipad-mini, ipad-air, ipad-pro-12-9, surface-pro-7."
+    )]
+    async fn preview_resize(
+        &self,
+        Parameters(params): Parameters<ResizeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let op = match resize_op(params) {
+            Ok(op) => op,
+            Err(message) => return Ok(tool_error(message)),
+        };
+        Ok(self.run(op).await)
+    }
+
+    /// Dispatch a keyboard press to the focused page element.
+    #[tool(
+        description = "Press a key in the preview page, optionally with Alt, Control, Meta, or Shift modifiers."
+    )]
+    async fn preview_press(
+        &self,
+        Parameters(params): Parameters<PressParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if let Some(modifier) = params
+            .modifiers
+            .iter()
+            .find(|modifier| !matches!(modifier.as_str(), "Alt" | "Control" | "Meta" | "Shift"))
+        {
+            return Ok(tool_error(format!(
+                "invalid modifier {modifier:?}; use Alt, Control, Meta, or Shift"
+            )));
+        }
+        Ok(self
+            .run(PreviewOp::Press {
+                key: params.key,
+                modifiers: params.modifiers,
+            })
+            .await)
+    }
+
+    /// Scroll the page window or a selected scroll container.
+    #[tool(
+        description = "Scroll the preview window or a CSS-selected container by deltaX and deltaY."
+    )]
+    async fn preview_scroll(
+        &self,
+        Parameters(params): Parameters<ScrollParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if params.delta_x.is_none() && params.delta_y.is_none() {
+            return Ok(tool_error("preview_scroll requires deltaX or deltaY"));
+        }
+        Ok(self
+            .run(PreviewOp::Scroll {
+                delta_x: params.delta_x.unwrap_or(0.0),
+                delta_y: params.delta_y.unwrap_or(0.0),
+                selector: params.selector,
+            })
+            .await)
+    }
+
+    /// Wait until all specified page conditions match.
+    #[tool(
+        description = "Wait for a selector, document-text substring, and/or URL substring in the preview page."
+    )]
+    async fn preview_wait_for(
+        &self,
+        Parameters(params): Parameters<WaitForParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if params.selector.is_none() && params.text.is_none() && params.url_includes.is_none() {
+            return Ok(tool_error(
+                "preview_wait_for requires selector, text, or urlIncludes",
+            ));
+        }
+        let timeout_ms = params.timeout_ms.unwrap_or(15_000).clamp(1_000, 60_000) as u64;
+        Ok(self
+            .run(PreviewOp::WaitFor {
+                selector: params.selector,
+                text: params.text,
+                url_includes: params.url_includes,
+                timeout_ms,
+            })
+            .await)
+    }
+
     /// Build a DOM outline of the page's interactive elements (role/name/selector).
     #[tool(
         description = "Snapshot the preview page: URL, title, visible text, and interactive elements (role/name/selector)."
@@ -183,7 +394,8 @@ impl ServerHandler for PreviewTools {
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "Drive the tcode embedded preview browser: open/navigate URLs, inspect and \
-                 automate the page, and capture screenshots.",
+                 automate the page, resize its canvas, press keys, scroll, wait for page \
+                 conditions, and capture screenshots.",
             )
     }
 }
@@ -329,6 +541,10 @@ mod tests {
             "preview_evaluate",
             "preview_click",
             "preview_type",
+            "preview_resize",
+            "preview_press",
+            "preview_scroll",
+            "preview_wait_for",
             "preview_snapshot",
             "preview_screenshot",
         ] {
