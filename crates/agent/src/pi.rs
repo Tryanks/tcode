@@ -1110,7 +1110,6 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
                 .map(|path| {
                     vec![FileChange {
                         path: path.to_owned(),
-                        workspace_path: None,
                         kind: if name == "write" {
                             FileChangeKind::Create
                         } else {
@@ -1153,7 +1152,6 @@ fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-            workspace_cwd: None,
             reason,
         },
         "edit" | "write" => ApprovalKind::FileChange {
@@ -1163,7 +1161,6 @@ fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
                 .map(|path| {
                     vec![FileChange {
                         path: path.to_owned(),
-                        workspace_path: None,
                         kind: if tool_name == "write" {
                             FileChangeKind::Create
                         } else {

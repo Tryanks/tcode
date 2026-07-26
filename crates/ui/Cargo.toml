@@ -3,48 +3,30 @@ name = "tcode-ui"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["desktop"]
-# Native application shell and controllers. `portable` intentionally does not
-# imply this feature: remote clients only need read-model-driven presentation.
-desktop = [
-    "agent/local",
-    "dep:async-channel",
-    "dep:computer-use-mcp",
-    "dep:preview-mcp",
-    "dep:smol",
-    "dep:tcode-runtime",
-    "dep:term",
-]
-portable = []
-
 [dependencies]
-agent = { path = "../agent", default-features = false }
+agent = { path = "../agent" }
 tcode-core = { path = "../core" }
 tcode-i18n = { path = "../i18n" }
-tcode-runtime = { path = "../runtime", optional = true }
-term = { path = "../term", optional = true }
-preview-mcp = { path = "../preview-mcp", optional = true }
-computer-use-mcp = { path = "../computer-use-mcp", optional = true }
+tcode-runtime = { path = "../runtime" }
+term = { path = "../term" }
+preview-mcp = { path = "../preview-mcp" }
+computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
-async-channel = { version = "2", optional = true }
+async-channel = "2"
 base64 = "0.22"
 chrono = "0.4"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-smol = { version = "2", optional = true }
+smol = "2"
 rushdown = "0.18.0"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 imara-diff = "0.2"
 
-# Platforms with an embeddable system WebView. Spelled out rather than written
-# as `not(target_os = "linux")`: that form silently classifies Android, iOS and
-# wasm as desktop, pulling native `wry` into targets that cannot use it.
-[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+[target.'cfg(not(target_os = "linux"))'.dependencies]
 gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }

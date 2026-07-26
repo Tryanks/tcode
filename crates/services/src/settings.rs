@@ -9,11 +9,6 @@ use agent::ProviderKind;
 use tcode_core::settings::{EnvVar, ProjectSort, ProviderSettings, ThemeMode};
 use tcode_core::settings::{Settings, provider_key};
 
-// Profile ids are alphanumeric slugs, so this bucket cannot be cleared as a
-// side effect of deleting a user-created provider profile.
-const APP_SECRETS: &str = "__tcode_app";
-const SYNC_TOKEN_SECRET: &str = "sync_token";
-
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
@@ -52,26 +47,6 @@ impl SettingsStore {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
-    }
-
-    /// Return the stable credential used by remote sync clients, creating it
-    /// on first use in the same protected file as provider credentials.
-    pub fn load_or_create_sync_token(&self) -> std::io::Result<String> {
-        let mut all = self.load_secrets();
-        if let Some(token) = all
-            .get(APP_SECRETS)
-            .and_then(|secrets| secrets.get(SYNC_TOKEN_SECRET))
-            .filter(|token| !token.is_empty())
-        {
-            return Ok(token.clone());
-        }
-
-        let token = uuid::Uuid::new_v4().to_string();
-        all.entry(APP_SECRETS.into())
-            .or_default()
-            .insert(SYNC_TOKEN_SECRET.into(), token.clone());
-        self.write_secrets(&all)?;
-        Ok(token)
     }
 
     /// The sensitive env values for one provider (used only when spawning).
@@ -344,30 +319,6 @@ mod tests {
             .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", None)
             .unwrap();
         assert!(store.provider_secrets(ProviderKind::ClaudeCode).is_empty());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn sync_token_survives_reopening_the_same_data_directory() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-sync-token-test-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-
-        let token = SettingsStore::new(root.clone())
-            .load_or_create_sync_token()
-            .unwrap();
-        let reopened = SettingsStore::new(root.clone());
-
-        assert_eq!(reopened.load_or_create_sync_token().unwrap(), token);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = fs::metadata(root.join("secrets.json"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
         let _ = fs::remove_dir_all(root);
     }
 

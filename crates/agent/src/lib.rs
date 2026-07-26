@@ -6,21 +6,12 @@
 //! types; nothing provider-shaped leaks past this crate except [`ResumeCursor`],
 //! which is intentionally opaque.
 
-// Provider adapters are local-only because they spawn and supervise child processes.
-#[cfg(feature = "local")]
 pub mod acp;
-#[cfg(feature = "local")]
 pub mod claude;
-#[cfg(feature = "local")]
 pub mod codex;
-#[cfg(feature = "local")]
 pub mod opencode;
-#[cfg(feature = "local")]
 pub mod pi;
-#[cfg(feature = "local")]
 mod process;
-// Subagent tailing is local-only because it reads provider transcript files.
-#[cfg(feature = "local")]
 mod subagent_tail;
 
 use std::path::PathBuf;
@@ -298,8 +289,6 @@ pub struct SelectOption {
 /// working-directory change makes PATH resolution unreliable (it fails outright
 /// when PATH holds unexpanded entries such as `~/.dotnet/tools`). Resolving the
 /// binary ourselves against the parent's PATH keeps the lookup deterministic.
-// Binary resolution is local-only because it probes PATH and the filesystem before spawning.
-#[cfg(feature = "local")]
 pub(crate) fn resolve_binary(
     binary_path: Option<&std::path::Path>,
     default_name: &str,
@@ -334,8 +323,6 @@ pub(crate) fn resolve_binary(
 ///
 /// Shared with the app crate (`crate::process`), which routes every bare-name
 /// spawn (npm, pnpm, bun, git, …) through it on Windows.
-// PATH lookup is local-only because it inspects host environment and filesystem state.
-#[cfg(feature = "local")]
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     find_in_dirs(
@@ -348,7 +335,6 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
 
 /// The executable extensions to try for a bare name: `PATHEXT` on Windows
 /// (falling back to its documented default), and nothing anywhere else.
-#[cfg(feature = "local")]
 fn path_extensions() -> Vec<String> {
     if !cfg!(windows) {
         return Vec::new();
@@ -369,7 +355,6 @@ fn path_extensions() -> Vec<String> {
 /// extensionless name tried last (so a Unix-style extensionless binary dropped
 /// on a Windows PATH still resolves). With an empty `pathext` (every non-Windows
 /// target) this is just `[name]`.
-#[cfg(feature = "local")]
 fn candidate_names(name: &str, pathext: &[String]) -> Vec<String> {
     if std::path::Path::new(name).extension().is_some() {
         return vec![name.to_string()];
@@ -382,7 +367,6 @@ fn candidate_names(name: &str, pathext: &[String]) -> Vec<String> {
 /// The PATH walk itself, parameterized on the directories, the extension list
 /// and the "is this executable" predicate so both platform branches are testable
 /// from any host (see `resolve_binary_tests`).
-#[cfg(feature = "local")]
 fn find_in_dirs(
     dirs: impl IntoIterator<Item = PathBuf>,
     name: &str,
@@ -406,7 +390,7 @@ fn find_in_dirs(
     None
 }
 
-#[cfg(all(feature = "local", unix))]
+#[cfg(unix)]
 fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path)
@@ -416,7 +400,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Windows has no exec bit: a regular file whose name matched a `PATHEXT`
 /// candidate *is* the executable.
-#[cfg(all(feature = "local", not(unix)))]
+#[cfg(not(unix))]
 fn is_executable(path: &std::path::Path) -> bool {
     path.is_file()
 }
@@ -464,11 +448,6 @@ pub struct Attachment {
     /// the timeline can render the image without re-encoding the base64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
-    /// Workspace-relative counterpart of `source_path`, when the source lives
-    /// inside the session workspace. The absolute path remains authoritative
-    /// for local rendering; remote clients use this additive form.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_path: Option<WorkspacePath>,
 }
 
 /// A provider-native command or skill surfaced to the composer's `/` and `$`
@@ -502,7 +481,7 @@ pub enum InteractionMode {
 /// Per-turn overrides layered on top of the session's persisted options.
 /// Codex and OpenCode apply effort/variant per turn; Claude and pi use their
 /// session-level option selection.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnOptions {
     pub effort: Option<String>,
     pub interaction_mode: Option<InteractionMode>,
@@ -511,8 +490,6 @@ pub struct TurnOptions {
 /// List the provider's models (spawn, query, teardown). `launch_env` carries the
 /// provider's configured environment/home so the catalog reflects the same CLI
 /// (and account) a session would actually run against.
-// Model discovery is local-only because it launches or queries provider processes.
-#[cfg(feature = "local")]
 pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
@@ -568,17 +545,7 @@ pub enum AgentError {
 }
 
 /// Commands the UI sends into a live session's actor loop.
-///
-/// Serializable because this is also the client-to-host half of the remote
-/// protocol (`docs/multiplatform-plan.md` §3.1): a phone or browser client
-/// cannot spawn a provider, so it sends these to whichever machine can.
-///
-/// Adjacently tagged rather than internally tagged like [`AgentEvent`]:
-/// `SetApprovalMode` and `SetInteractionMode` are newtype variants wrapping
-/// enums that serialize to strings, and Serde cannot represent those inside an
-/// internally tagged enum — it fails at runtime, not compile time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum SessionCommand {
     SendTurn {
         /// Runtime queue id echoed by [`AgentEvent::TurnAccepted`] after the
@@ -647,8 +614,6 @@ pub enum SessionCommand {
 
 /// A live provider session: send commands in, read canonical events out.
 /// Dropping both channels (or sending `Shutdown`) tears the child process down.
-// Session handles are local-only because their channels are owned by provider actors.
-#[cfg(feature = "local")]
 pub struct SessionHandle {
     pub provider: ProviderKind,
     pub commands: async_channel::Sender<SessionCommand>,
@@ -656,8 +621,6 @@ pub struct SessionHandle {
 }
 
 /// Start a new (or resumed) session with the given provider.
-// Session startup is local-only because every adapter launches a child process.
-#[cfg(feature = "local")]
 pub async fn start_session(
     provider: ProviderKind,
     opts: SessionOptions,
@@ -858,51 +821,6 @@ pub enum AgentEvent {
     },
 }
 
-impl AgentEvent {
-    /// Add portable siblings to every typed workspace path in this event.
-    ///
-    /// This is intentionally enrichment rather than rewriting: local consumers
-    /// keep the exact host paths while persisted and synced events also carry
-    /// the form a remote client can resolve.
-    pub fn add_workspace_paths(&mut self, workspace_id: &str, workspace_root: &std::path::Path) {
-        match self {
-            Self::TurnChangesUpdated { changes, .. } => {
-                add_file_change_workspace_paths(changes, workspace_id, workspace_root);
-            }
-            Self::ItemStarted(item) | Self::ItemUpdated(item) | Self::ItemCompleted(item) => {
-                if let ItemContent::FileChange { changes, .. } = &mut item.content {
-                    add_file_change_workspace_paths(changes, workspace_id, workspace_root);
-                }
-            }
-            Self::ApprovalRequested(request) => match &mut request.kind {
-                ApprovalKind::ExecCommand {
-                    cwd, workspace_cwd, ..
-                } => {
-                    *workspace_cwd = cwd.as_deref().and_then(|cwd| {
-                        WorkspacePath::from_host_path(workspace_id, workspace_root, cwd)
-                    });
-                }
-                ApprovalKind::FileChange { changes, .. } => {
-                    add_file_change_workspace_paths(changes, workspace_id, workspace_root);
-                }
-                ApprovalKind::FileRead { .. } | ApprovalKind::ToolUse { .. } => {}
-            },
-            _ => {}
-        }
-    }
-}
-
-fn add_file_change_workspace_paths(
-    changes: &mut [FileChange],
-    workspace_id: &str,
-    workspace_root: &std::path::Path,
-) {
-    for change in changes {
-        change.workspace_path =
-            WorkspacePath::from_host_path(workspace_id, workspace_root, &change.path);
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanStep {
     pub step: String,
@@ -1047,78 +965,9 @@ pub enum ItemContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
-    /// Portable counterpart of `path`. Kept separate so old logs and the local
-    /// UI continue to use the provider's exact path unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_path: Option<WorkspacePath>,
     pub kind: FileChangeKind,
     /// Unified diff for this file when the provider supplies one.
     pub diff: Option<String>,
-}
-
-/// A path a remote client can interpret without knowing the host filesystem.
-///
-/// `workspace_id` is the persisted project id, not its display name: basenames
-/// are neither unique nor stable enough to correlate paths across sessions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspacePath {
-    pub workspace_id: String,
-    pub relative_path: String,
-}
-
-impl WorkspacePath {
-    /// Build a portable path only when `path` is relative already or is inside
-    /// `workspace_root`. Outside paths deliberately stay host-only rather than
-    /// acquiring misleading `..` segments.
-    pub fn from_host_path(
-        workspace_id: &str,
-        workspace_root: &std::path::Path,
-        path: &str,
-    ) -> Option<Self> {
-        let path = std::path::Path::new(path);
-        // Not `is_absolute()`: on Windows that is false for a path beginning
-        // `/`, which has a root but no drive letter. Such a path would then take
-        // the relative branch and be emitted verbatim — claiming an absolute
-        // path is workspace-relative, which is exactly the misleading output
-        // this function refuses to produce for `..`. A drive prefix without a
-        // root (`C:file`) is not workspace-relative either, so both count.
-        let rooted = path.components().next().is_some_and(|first| {
-            matches!(
-                first,
-                std::path::Component::Prefix(_) | std::path::Component::RootDir
-            )
-        });
-        let relative = if rooted {
-            path.strip_prefix(workspace_root).ok()?
-        } else {
-            path
-        };
-        if relative
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-        {
-            return None;
-        }
-        let relative_path = if relative.as_os_str().is_empty() {
-            ".".to_owned()
-        } else {
-            relative.to_string_lossy().into_owned()
-        };
-        Some(Self {
-            workspace_id: workspace_id.to_owned(),
-            relative_path,
-        })
-    }
-}
-
-impl Attachment {
-    /// Add a portable sibling when this local source is a workspace file.
-    pub fn add_workspace_path(&mut self, workspace_id: &str, workspace_root: &std::path::Path) {
-        self.workspace_path = self
-            .source_path
-            .as_deref()
-            .and_then(|path| WorkspacePath::from_host_path(workspace_id, workspace_root, path));
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1208,7 +1057,6 @@ pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, Str
 
             Ok(FileChange {
                 path,
-                workspace_path: None,
                 kind,
                 diff: Some(section),
             })
@@ -1254,10 +1102,6 @@ pub enum ApprovalKind {
     ExecCommand {
         command: String,
         cwd: Option<String>,
-        /// Portable counterpart of `cwd`; absent for legacy events and for
-        /// commands whose working directory is outside the workspace.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace_cwd: Option<WorkspacePath>,
         reason: Option<String>,
     },
     /// A read-only file/search operation (Claude's `file_read_approval` family:
@@ -1388,7 +1232,7 @@ mod launch_env_tests {
     }
 }
 
-#[cfg(all(test, feature = "local"))]
+#[cfg(test)]
 mod resolve_binary_tests {
     use super::*;
 
@@ -1566,7 +1410,7 @@ mod resolve_binary_tests {
     }
 }
 
-#[cfg(all(test, feature = "local"))]
+#[cfg(test)]
 mod pathext_logic_tests {
     use super::*;
     use std::path::PathBuf;
@@ -1702,7 +1546,6 @@ mod turn_diff_tests {
             turn_id: "turn-7".into(),
             changes: vec![FileChange {
                 path: "src/main.rs".into(),
-                workspace_path: None,
                 kind: FileChangeKind::Modify,
                 diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
             }],
@@ -1718,98 +1561,6 @@ mod turn_diff_tests {
                 changes,
             } if turn_id == "turn-7" && changes[0].path == "src/main.rs"
         ));
-    }
-
-    #[test]
-    fn typed_paths_gain_portable_siblings_and_legacy_json_still_parses() {
-        let legacy = r#"{"type":"approval_requested","id":"approval-1","turn_id":null,"kind":{"kind":"exec_command","command":"cargo test","cwd":"/work/tcode","reason":null},"options":[]}"#;
-        let mut event: AgentEvent = serde_json::from_str(legacy).unwrap();
-
-        assert!(matches!(
-            &event,
-            AgentEvent::ApprovalRequested(ApprovalRequest {
-                kind: ApprovalKind::ExecCommand {
-                    workspace_cwd: None,
-                    ..
-                },
-                ..
-            })
-        ));
-
-        event.add_workspace_paths("project-stable-id", std::path::Path::new("/work/tcode"));
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["kind"]["cwd"], "/work/tcode");
-        assert_eq!(
-            json["kind"]["workspace_cwd"],
-            serde_json::json!({
-                "workspace_id": "project-stable-id",
-                "relative_path": "."
-            })
-        );
-
-        let mut change = AgentEvent::TurnChangesUpdated {
-            turn_id: "turn-1".into(),
-            changes: vec![FileChange {
-                path: "/work/tcode/src/main.rs".into(),
-                workspace_path: None,
-                kind: FileChangeKind::Modify,
-                diff: None,
-            }],
-            completeness: ChangeCompleteness::Exact,
-        };
-        change.add_workspace_paths("project-stable-id", std::path::Path::new("/work/tcode"));
-        let AgentEvent::TurnChangesUpdated { changes, .. } = change else {
-            unreachable!()
-        };
-        assert_eq!(
-            changes[0].workspace_path,
-            Some(WorkspacePath {
-                workspace_id: "project-stable-id".into(),
-                relative_path: "src/main.rs".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn attachment_source_path_gets_a_workspace_relative_sibling() {
-        let mut attachment = Attachment {
-            media_type: "image/png".into(),
-            data_base64: "AAAA".into(),
-            source_path: Some("/work/tcode/assets/diagram.png".into()),
-            workspace_path: None,
-        };
-        attachment.add_workspace_path("project-stable-id", std::path::Path::new("/work/tcode"));
-        assert_eq!(
-            attachment.workspace_path,
-            Some(WorkspacePath {
-                workspace_id: "project-stable-id".into(),
-                relative_path: "assets/diagram.png".into(),
-            })
-        );
-
-        let legacy = r#"{"media_type":"image/png","data_base64":"AAAA","source_path":"/work/tcode/assets/diagram.png"}"#;
-        let decoded: Attachment = serde_json::from_str(legacy).unwrap();
-        assert_eq!(decoded.workspace_path, None);
-    }
-
-    /// A path outside the workspace must produce nothing rather than a portable
-    /// path that lies about where it points.
-    ///
-    /// This caught a real Windows-only defect: the branch was chosen with
-    /// `is_absolute()`, which is false there for a rooted path carrying no drive
-    /// letter, so `/elsewhere/secret.txt` took the relative branch and came back
-    /// as a "workspace-relative" path to a file in neither the workspace nor any
-    /// relative location.
-    #[test]
-    fn a_path_outside_the_workspace_has_no_portable_form() {
-        assert_eq!(
-            WorkspacePath::from_host_path(
-                "project-stable-id",
-                std::path::Path::new("/work/tcode"),
-                "/elsewhere/secret.txt",
-            ),
-            None
-        );
     }
 }
 
@@ -1869,135 +1620,5 @@ mod thread_item_serde_tests {
                 ..
             })
         ));
-    }
-}
-
-#[cfg(test)]
-mod session_command_wire_tests {
-    use super::*;
-
-    /// One fixture per [`SessionCommand`] variant.
-    ///
-    /// Kept honest by `discriminant`, whose match is exhaustive: adding a
-    /// variant stops this module compiling until the new command is covered
-    /// here as well. A command that cannot cross the wire would strand a
-    /// remote client on an action the desktop UI still offers, and that is
-    /// exactly the kind of gap a type system can close for us.
-    fn every_variant() -> Vec<SessionCommand> {
-        vec![
-            SessionCommand::SendTurn {
-                delivery_id: 7,
-                text: "hello".into(),
-                options: Some(TurnOptions {
-                    effort: Some("high".into()),
-                    interaction_mode: Some(InteractionMode::Plan),
-                }),
-                attachments: vec![Attachment {
-                    media_type: "image/png".into(),
-                    data_base64: "iVBORw0=".into(),
-                    source_path: None,
-                    workspace_path: None,
-                }],
-            },
-            SessionCommand::Interrupt,
-            SessionCommand::RespondApproval {
-                request_id: "req-1".into(),
-                decision: ApprovalDecision::Approve,
-            },
-            SessionCommand::RespondUserInput {
-                request_id: "req-2".into(),
-                answers: serde_json::json!({ "q1": "yes", "q2": ["a", "b"] })
-                    .as_object()
-                    .cloned()
-                    .expect("fixture is an object"),
-            },
-            SessionCommand::SetApprovalMode(ApprovalMode::default()),
-            SessionCommand::Steer {
-                request_id: "req-3".into(),
-                text: "actually, use ripgrep".into(),
-                attachments: Vec::new(),
-            },
-            SessionCommand::SetInteractionMode(InteractionMode::Plan),
-            SessionCommand::SetOption {
-                id: "reasoning".into(),
-                value: serde_json::json!({ "depth": 3 }),
-            },
-            SessionCommand::Rewind {
-                checkpoint_id: "ckpt-9".into(),
-                mode: RewindMode::Conversation,
-            },
-            SessionCommand::Shutdown,
-        ]
-    }
-
-    fn discriminant(command: &SessionCommand) -> &'static str {
-        match command {
-            SessionCommand::SendTurn { .. } => "send_turn",
-            SessionCommand::Interrupt => "interrupt",
-            SessionCommand::RespondApproval { .. } => "respond_approval",
-            SessionCommand::RespondUserInput { .. } => "respond_user_input",
-            SessionCommand::SetApprovalMode(_) => "set_approval_mode",
-            SessionCommand::Steer { .. } => "steer",
-            SessionCommand::SetInteractionMode(_) => "set_interaction_mode",
-            SessionCommand::SetOption { .. } => "set_option",
-            SessionCommand::Rewind { .. } => "rewind",
-            SessionCommand::Shutdown => "shutdown",
-        }
-    }
-
-    #[test]
-    fn every_variant_round_trips() {
-        for command in every_variant() {
-            let json = serde_json::to_string(&command)
-                .unwrap_or_else(|err| panic!("{command:?} must serialize: {err}"));
-            let back: SessionCommand = serde_json::from_str(&json)
-                .unwrap_or_else(|err| panic!("{command:?} must deserialize from {json}: {err}"));
-            assert_eq!(back, command, "round trip changed the command via {json}");
-        }
-    }
-
-    #[test]
-    fn fixtures_cover_every_variant() {
-        let mut seen: Vec<&str> = every_variant().iter().map(discriminant).collect();
-        seen.sort_unstable();
-        let mut deduped = seen.clone();
-        deduped.dedup();
-        assert_eq!(seen, deduped, "a variant is fixtured twice: {seen:?}");
-        assert_eq!(
-            seen.len(),
-            10,
-            "fixtures no longer cover every SessionCommand variant: {seen:?}"
-        );
-    }
-
-    /// The two newtype variants are the reason this enum is adjacently tagged
-    /// rather than internally tagged like `AgentEvent`. Serde only fails on
-    /// them at runtime, so pin the shape here: an internally tagged enum could
-    /// not produce a string `data` field at all.
-    #[test]
-    fn newtype_variants_survive_the_tagging_scheme() {
-        let json = serde_json::to_value(SessionCommand::SetInteractionMode(InteractionMode::Plan))
-            .expect("newtype variant must serialize");
-        assert_eq!(json["type"], "set_interaction_mode");
-        assert!(
-            json["data"].is_string(),
-            "expected an adjacently tagged string payload, got {json}"
-        );
-    }
-
-    /// Struct variants share that shape, so a decoder never has to branch on
-    /// variant kind.
-    #[test]
-    fn struct_variants_nest_their_fields_under_data() {
-        let json = serde_json::to_value(SessionCommand::Interrupt).expect("unit variant");
-        assert_eq!(json["type"], "interrupt");
-
-        let json = serde_json::to_value(SessionCommand::RespondApproval {
-            request_id: "req-1".into(),
-            decision: ApprovalDecision::Approve,
-        })
-        .expect("struct variant");
-        assert_eq!(json["type"], "respond_approval");
-        assert_eq!(json["data"]["request_id"], "req-1");
     }
 }
