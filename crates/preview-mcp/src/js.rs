@@ -128,6 +128,130 @@ pub fn type_text(selector: &str, text: &str) -> String {
     )
 }
 
+/// JS to dispatch a keydown/keyup pair to the focused element. Printable keys
+/// also update editable targets because untrusted keyboard events have no
+/// browser default action.
+pub fn press(key: &str, modifiers: &[String]) -> String {
+    let key = json_string(key);
+    let alt = modifiers.iter().any(|modifier| modifier == "Alt");
+    let control = modifiers.iter().any(|modifier| modifier == "Control");
+    let meta = modifiers.iter().any(|modifier| modifier == "Meta");
+    let shift = modifiers.iter().any(|modifier| modifier == "Shift");
+    format!(
+        r#"(() => {{
+  try {{
+    const key = {key};
+    const target = document.activeElement || document.body;
+    if (!target) return {{ error: "document has no key target" }};
+    const opts = {{
+      key, bubbles: true, cancelable: true,
+      altKey: {alt}, ctrlKey: {control}, metaKey: {meta}, shiftKey: {shift}
+    }};
+    target.dispatchEvent(new KeyboardEvent("keydown", opts));
+    if (Array.from(key).length === 1 && !opts.ctrlKey && !opts.metaKey) {{
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {{
+        const start = target.selectionStart == null ? target.value.length : target.selectionStart;
+        const end = target.selectionEnd == null ? start : target.selectionEnd;
+        const value = target.value.slice(0, start) + key + target.value.slice(end);
+        const proto = target instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value");
+        if (setter && setter.set) setter.set.call(target, value); else target.value = value;
+        try {{ target.setSelectionRange(start + key.length, start + key.length); }} catch (_) {{}}
+        target.dispatchEvent(new InputEvent("input", {{
+          bubbles: true, data: key, inputType: "insertText"
+        }}));
+      }} else if (target.isContentEditable) {{
+        const selection = getSelection();
+        let range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+        if (!range || !target.contains(range.commonAncestorContainer)) {{
+          range = document.createRange();
+          range.selectNodeContents(target);
+          range.collapse(false);
+        }}
+        range.deleteContents();
+        const node = document.createTextNode(key);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+        if (selection) {{
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }}
+        target.dispatchEvent(new InputEvent("input", {{
+          bubbles: true, data: key, inputType: "insertText"
+        }}));
+      }}
+    }}
+    if (key === "Enter" && target instanceof HTMLInputElement) {{
+      const form = target.closest("form");
+      if (form && typeof form.requestSubmit === "function") form.requestSubmit();
+    }}
+    target.dispatchEvent(new KeyboardEvent("keyup", opts));
+    return {{ ok: true, key, target: target.tagName.toLowerCase() }};
+  }} catch (e) {{ return {{ error: String(e) }}; }}
+}})()"#
+    )
+}
+
+/// JS to scroll the window or the first `selector` match and report its final
+/// position.
+pub fn scroll(delta_x: f64, delta_y: f64, selector: Option<&str>) -> String {
+    let selector = selector
+        .map(json_string)
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        r#"(() => {{
+  try {{
+    const selector = {selector};
+    if (selector !== null) {{
+      const el = document.querySelector(selector);
+      if (!el) return {{ error: "no element matches selector" }};
+      el.scrollBy({{ left: {delta_x}, top: {delta_y}, behavior: "instant" }});
+      return {{ scrollLeft: el.scrollLeft, scrollTop: el.scrollTop }};
+    }}
+    window.scrollBy({{ left: {delta_x}, top: {delta_y}, behavior: "instant" }});
+    return {{ x: window.scrollX, y: window.scrollY }};
+  }} catch (e) {{ return {{ error: String(e) }}; }}
+}})()"#
+    )
+}
+
+/// JS to test all requested wait conditions once. The UI polls this probe so
+/// the WebView does not need to retain timers or callbacks across evaluations.
+pub fn wait_for_probe(
+    selector: Option<&str>,
+    text: Option<&str>,
+    url_includes: Option<&str>,
+) -> String {
+    let selector = selector
+        .map(json_string)
+        .unwrap_or_else(|| "null".to_string());
+    let text = text.map(json_string).unwrap_or_else(|| "null".to_string());
+    let url_includes = url_includes
+        .map(json_string)
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        r#"(() => {{
+  const selector = {selector};
+  const text = {text};
+  const urlIncludes = {url_includes};
+  const pending = [];
+  if (selector !== null) {{
+    try {{
+      if (!document.querySelector(selector)) pending.push("selector");
+    }} catch (_) {{
+      pending.push("selector");
+    }}
+  }}
+  const documentText = document.body ? (document.body.innerText || document.body.textContent || "") : "";
+  if (text !== null && !documentText.includes(text)) pending.push("text");
+  if (urlIncludes !== null && !location.href.includes(urlIncludes)) pending.push("urlIncludes");
+  return {{ matched: pending.length === 0, url: location.href, pending }};
+}})()"#
+    )
+}
+
 /// Wrap an arbitrary user expression so its value is returned to the callback.
 pub fn evaluate(expression: &str) -> String {
     // Parenthesize so an object-literal expression isn't parsed as a block.
@@ -204,5 +328,33 @@ mod tests {
         let js = type_text("#in", "he\"llo");
         assert!(js.contains(r##""#in""##));
         assert!(js.contains(r#""he\"llo""#));
+    }
+
+    #[test]
+    fn press_snippet_embeds_key_and_modifiers() {
+        let js = press("\"", &["Control".into(), "Shift".into()]);
+        assert!(js.contains(r#""\"""#));
+        assert!(js.contains("ctrlKey: true"));
+        assert!(js.contains("shiftKey: true"));
+        assert!(js.contains("requestSubmit"));
+    }
+
+    #[test]
+    fn scroll_snippet_targets_selector_and_deltas() {
+        let js = scroll(12.5, -40.0, Some("#feed"));
+        assert!(js.contains(r##""#feed""##));
+        assert!(js.contains("left: 12.5"));
+        assert!(js.contains("top: -40"));
+        assert!(js.contains("scrollLeft"));
+    }
+
+    #[test]
+    fn wait_probe_embeds_each_condition() {
+        let js = wait_for_probe(Some(".ready"), Some("Done"), Some("/result"));
+        assert!(js.contains(r#"".ready""#));
+        assert!(js.contains(r#""Done""#));
+        assert!(js.contains(r#""/result""#));
+        assert!(js.contains(r#"pending.push("selector")"#));
+        assert!(js.contains(r#"pending.push("urlIncludes")"#));
     }
 }
