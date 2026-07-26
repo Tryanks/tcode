@@ -1314,6 +1314,7 @@ impl Composer {
                     media_type: mime_from_path(&image.path),
                     data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
                     source_path: Some(image.path.to_string_lossy().into_owned()),
+                    workspace_path: None,
                 })
             })
             .collect()

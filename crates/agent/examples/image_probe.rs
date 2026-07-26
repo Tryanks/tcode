@@ -106,6 +106,7 @@ fn main() {
         media_type: mime_from_path(&image_path),
         data_base64: base64_encode(&bytes),
         source_path: None,
+        workspace_path: None,
     };
     eprintln!(
         "image_probe: provider={provider:?} image={} ({} bytes, {}) prompt={prompt:?}",

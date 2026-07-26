@@ -1,0 +1,115 @@
+# This workflow is a measurement, not a gate. It never fails the build.
+name: Port scoreboard
+
+# Tracks how far each crate is from compiling for the mobile and web targets
+# (docs/multiplatform-plan.md, phase 0). Every job is expected to fail today —
+# the number we care about is *how many* errors, trending down as crates get
+# split and feature-gated.
+#
+# Deliberately not run on pull requests: a permanently-red job on every PR
+# teaches people to ignore CI. Weekly, plus on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays, 04:00 UTC.
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-scoreboard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scoreboard:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: wasm32-unknown-unknown
+            # Matches Zed's own wasm CI: gpui needs a rebuilt std plus the
+            # atomics/shared-memory features its multithreaded web dispatcher
+            # assumes (crates/gpui_web/src/dispatcher.rs).
+            extra_flags: "-Zbuild-std=std,panic_abort"
+          - target: aarch64-linux-android
+            extra_flags: ""
+          - target: aarch64-apple-ios
+            extra_flags: ""
+            # iOS needs Apple's toolchain, so this row runs on macOS.
+            runner: macos-15
+    env:
+      CARGO_TERM_COLOR: never
+      RUSTC_BOOTSTRAP: "1"
+      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: "-C target-feature=+atomics,+bulk-memory,+mutable-globals"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly Rust with ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev
+
+      - name: Check each crate and count errors
+        run: |
+          # Crates the plan expects to become portable, cheapest first. `term`
+          # is absent on purpose: it is desktop-only forever (PTY + login shell
+          # + tcgetpgrp), so counting its errors would only add noise.
+          crates="tcode-i18n sync-protocol sync-client tcode-core agent tcode-services tcode-runtime tcode-ui"
+
+          # The platform backends only exist for one target each, and are added
+          # to their own row. gpui-android additionally needs an NDK this job
+          # does not install — psm assembles AArch64 during dependency checking
+          # — so it is deliberately absent rather than counted as broken.
+          case "${{ matrix.target }}" in
+            aarch64-apple-ios) crates="$crates gpui-ios tcode-ios" ;;
+          esac
+
+          {
+            echo "## ${{ matrix.target }}"
+            echo
+            echo "| crate | errors |"
+            echo "| --- | ---: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          total=0
+          for crate in $crates; do
+            log="/tmp/${crate}.log"
+            # `|| true`: every one of these is expected to fail right now.
+            # `-Z` flags go before the subcommand, matching the invocation
+            # Zed's own wasm CI uses (.github/workflows/run_tests.yml there).
+            cargo ${{ matrix.extra_flags }} check -p "$crate" \
+              --target "${{ matrix.target }}" --locked > "$log" 2>&1 || true
+
+            # Count distinct rustc errors, not lines: one error spans many.
+            errors=$(grep -cE '^error(\[E[0-9]+\])?:' "$log" || true)
+            total=$((total + errors))
+
+            if [ "$errors" -eq 0 ]; then
+              echo "| \`$crate\` | ✅ 0 |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| \`$crate\` | $errors |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            echo "::group::$crate ($errors errors)"
+            cat "$log"
+            echo "::endgroup::"
+          done
+
+          {
+            echo "| **total** | **$total** |"
+            echo
+            echo "Expected to be non-zero until the crate split lands."
+            echo "See \`docs/multiplatform-plan.md\` §3.2."
+          } >> "$GITHUB_STEP_SUMMARY"

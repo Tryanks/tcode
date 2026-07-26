@@ -10,14 +10,23 @@
 //!
 //! ## Platform support
 //!
-//! macOS + Windows get the real WebView. **Linux does not**: lb-wry's
-//! `build_as_child` is X11-only there *and* requires a GTK main loop (`gtk::init`
-//! plus `gtk::main_iteration_do` pumped on the UI thread), while gpui's Linux
-//! backend runs calloop/xcb and never pumps GTK — the webview would panic at
-//! construction and could never be driven. So `wry`/`gpui-wry` are not even
-//! dependencies on Linux (see the `[target.'cfg(not(target_os = "linux"))']`
-//! table in Cargo.toml); the tab renders a placeholder and every `preview_*` MCP
-//! tool answers with an error. The MCP server itself still starts, harmlessly.
+//! **macOS + Windows get the real WebView; every other target gets the
+//! placeholder.** The gate is spelled `any(target_os = "macos", target_os =
+//! "windows")` rather than `not(target_os = "linux")` because the latter also
+//! matches Android, iOS and wasm — which have no `target_os = "linux"` and
+//! would therefore have pulled in native `wry` as "desktop".
+//!
+//! Linux is excluded because lb-wry's `build_as_child` is X11-only there *and*
+//! requires a GTK main loop (`gtk::init` plus `gtk::main_iteration_do` pumped on
+//! the UI thread), while gpui's Linux backend runs calloop/xcb and never pumps
+//! GTK — the webview would panic at construction and could never be driven.
+//! Mobile and wasm are excluded because a native child view drawn over the gpui
+//! window is not a concept those platforms offer at all.
+//!
+//! So `wry`/`gpui-wry` are not even dependencies off macOS/Windows (see the
+//! matching target table in Cargo.toml); the tab renders a placeholder and every
+//! `preview_*` MCP tool answers with an error. The MCP server itself still
+//! starts, harmlessly.
 //!
 //! ## Known caveat — native overlay
 //!
@@ -31,10 +40,10 @@
 //! known limitation (documented, not fixed).
 
 use preview_mcp::PreviewReply;
-#[cfg(any(not(target_os = "linux"), test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use tcode_runtime::app::Route;
 
-#[cfg(any(not(target_os = "linux"), test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn visible_preview_key(
     active_key: Option<&str>,
     route: Route,
@@ -49,7 +58,7 @@ fn visible_preview_key(
 /// Resolve an MCP request's physical session id to the stable WebView key.
 /// Only the active surface can be an unsent project draft; every background
 /// request therefore keys directly by its stored session id.
-#[cfg(any(not(target_os = "linux"), test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn preview_key_for_session(
     requested_session_id: &str,
     active_session_id: Option<&str>,
@@ -65,13 +74,13 @@ fn preview_key_for_session(
 /// The reply channel a broker request is answered on.
 type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use native::PreviewPanel;
 
-#[cfg(target_os = "linux")]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use placeholder::PreviewPanel;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native {
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
@@ -1114,10 +1123,11 @@ mod native {
     }
 }
 
-/// Linux: no WebView (see the module docs). The tab still exists — it renders a
-/// muted placeholder — and the preview MCP server still starts, but every tool
-/// call answers with an error instead of driving a browser that cannot exist.
-#[cfg(target_os = "linux")]
+/// Linux, Android, iOS and wasm: no WebView (see the module docs). The tab still
+/// exists — it renders a muted placeholder — and the preview MCP server still
+/// starts, but every tool call answers with an error instead of driving a
+/// browser that cannot exist.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod placeholder {
     use gpui::{Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window};
     use gpui_component::{ActiveTheme as _, v_flex};
@@ -1171,8 +1181,8 @@ mod placeholder {
 }
 
 /// The error `preview_screenshot` reports where native-webview snapshots have no
-/// implementation. Linux has no webview at all, so it never gets this far.
-#[cfg(not(target_os = "linux"))]
+/// implementation. Targets without a webview at all never get this far.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS";
 
@@ -1205,7 +1215,7 @@ fn snapshot_reply(image: &objc2_app_kit::NSImage) -> Result<PreviewReply, String
 /// What an automation tool answers when the platform webview cannot be created
 /// (Windows without the WebView2 runtime): say so plainly, with the underlying
 /// error, rather than leaving the agent to guess why nothing happened.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn unavailable_message(err: &str) -> String {
     format!(
         "the preview browser is unavailable on this machine \
@@ -1214,7 +1224,7 @@ fn unavailable_message(err: &str) -> String {
 }
 
 /// Add a scheme to a bare host/port (so `localhost:5173` becomes a real URL).
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn normalize_url(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.contains("://") || trimmed.starts_with("about:") {
@@ -1290,7 +1300,7 @@ mod tests {
     /// Off macOS (but where a webview exists — i.e. Windows) `preview_screenshot`
     /// surfaces a plain tool error instead of a broken capture. On Linux there is
     /// no webview at all and the whole panel is a placeholder.
-    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     #[test]
     fn screenshot_is_unsupported_off_macos() {
         assert!(SCREENSHOT_UNSUPPORTED.contains("only supported on macOS"));

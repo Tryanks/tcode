@@ -65,6 +65,14 @@ promoted to a steer with one click.
 send it as context), an embedded preview browser the agent can drive over MCP,
 and a live plan/task panel.
 
+**Check in from elsewhere.** A running Tcode can be followed from a browser —
+same session, same timeline, and you can send turns and answer approval prompts
+from it. A phone reads the six-character code off your screen once and never
+asks again. The agent still runs on your machine; the other clients are remote
+controls, not copies. [`docs/remote-and-mobile.md`](docs/remote-and-mobile.md)
+covers setup, and is candid about what has been exercised versus what has only
+been built — the Android and iOS shells link but have not yet run on hardware.
+
 <div align="center">
 <img src="docs/images/diff.png" width="49%" alt="Diff panel">
 <img src="docs/images/queue.png" width="49%" alt="Queued messages above the composer">
@@ -168,6 +176,29 @@ events, and the UI localizes and presents them without learning provider-shaped
 details. The normal source command remains `cargo run` because `crates/app` is
 the workspace's sole default binary package. [`docs/DESIGN.md`](docs/DESIGN.md)
 is the visual contract.
+
+Remote work adds a second group. It hangs off the same event log the desktop UI
+already folds into a timeline, which is why it costs so little:
+
+```
+crates/sync-protocol     the wire vocabulary, shared by both ends
+crates/sync-host         host state machine, with no I/O and no GPUI in it
+crates/sync-client       the client half of the same conversation
+crates/tcode-server      headless host: sync-host with a different main
+crates/client-app        the client UI the browser and both phones mount
+crates/tcode-web         browser shell (wasm)
+crates/gpui-android      GPUI Platform backend for Android
+crates/gpui-ios          GPUI Platform backend for iOS
+crates/tcode-android     Android app shell (JNI)
+crates/tcode-ios         iOS app shell (UIKit)
+```
+
+`client-app` is deliberately outside the workspace — it needs `tcode-ui`'s
+`portable` feature, which is the mutually exclusive opposite of `desktop`, and
+Cargo unifies features across a workspace build. The root `Cargo.toml` says so
+at the exclusion. See [`docs/remote-and-mobile.md`](docs/remote-and-mobile.md)
+for how to run any of it and [`docs/sync-protocol.md`](docs/sync-protocol.md)
+for the protocol itself.
 
 ## Contributing
 
