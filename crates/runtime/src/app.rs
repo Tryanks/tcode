@@ -10889,10 +10889,8 @@ mod tests {
 
     #[gpui::test]
     fn profile_switch_within_one_provider_requires_a_relay(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-profile-relay-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("tcode-profile-relay-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let state = cx.new(|_| AppState::new(store));
         let (commands, _receiver) = async_channel::unbounded();
