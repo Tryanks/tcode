@@ -138,6 +138,7 @@ fn split_git_patch(raw: &str, cwd: &Path, repo_prefix: &str) -> Vec<ParsedFileCh
             Some(ParsedFileChange {
                 change: FileChange {
                     path: cwd.join(cwd_path).to_string_lossy().to_string(),
+                    workspace_path: None,
                     kind: if old_path.is_none() {
                         FileChangeKind::Create
                     } else if new_path.is_none() {
