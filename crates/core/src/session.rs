@@ -136,29 +136,12 @@ pub fn append_review_comments_to_prompt(prompt: &str, comments: &[ReviewComment]
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
     pub ts: Option<u64>,
-    /// Position in the session's log: 1-based, contiguous, and strictly
-    /// increasing. This — not `ts` — is the session's total order.
-    ///
-    /// `ts` cannot order events: it is a wall clock the writer explicitly
-    /// tolerates repeating or going backwards, so two events can share one
-    /// millisecond and a clock adjustment can invert a pair. Remote clients
-    /// resume from a `seq` cursor, which requires an order that actually holds.
-    ///
-    /// `None` means the event did not come from a log — a synthetic or
-    /// in-memory event. Everything `SessionStore::read_events` returns carries
-    /// `Some`, including lines written before the field existed (they are
-    /// numbered by position).
-    pub seq: Option<u64>,
     pub event: AgentEvent,
 }
 
 impl From<AgentEvent> for StoredEvent {
     fn from(event: AgentEvent) -> Self {
-        StoredEvent {
-            ts: None,
-            seq: None,
-            event,
-        }
+        StoredEvent { ts: None, event }
     }
 }
 
@@ -1583,7 +1566,6 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/lib.rs".into(),
-                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: Some("-old\n+new\n".into()),
                     }],
@@ -1596,7 +1578,6 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/child.rs".into(),
-                        workspace_path: None,
                         kind: FileChangeKind::Create,
                         diff: Some("+child\n".into()),
                     }],
@@ -1625,7 +1606,6 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/lib.rs".into(),
-                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: Some("-intermediate\n+value\n".into()),
                     }],
@@ -1640,7 +1620,6 @@ mod tests {
                 turn_id: "turn-1".into(),
                 changes: vec![FileChange {
                     path: "src/lib.rs".into(),
-                    workspace_path: None,
                     kind: FileChangeKind::Modify,
                     diff: Some("-before\n+after\n".into()),
                 }],
@@ -1655,7 +1634,6 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "late.txt".into(),
-                        workspace_path: None,
                         kind: FileChangeKind::Create,
                         diff: Some("+late\n".into()),
                     }],
@@ -1697,7 +1675,6 @@ mod tests {
                 turn_id: "turn-1".into(),
                 changes: vec![FileChange {
                     path: "first.txt".into(),
-                    workspace_path: None,
                     kind: FileChangeKind::Create,
                     diff: Some("+first\n".into()),
                 }],
@@ -1722,7 +1699,6 @@ mod tests {
                 content: ItemContent::FileChange {
                     changes: vec![FileChange {
                         path: "src/lib.rs".into(),
-                        workspace_path: None,
                         kind: FileChangeKind::Modify,
                         diff: None,
                     }],
@@ -2047,7 +2023,6 @@ mod tests {
     fn fold_codex_style_trace_with_approval() {
         let changes = vec![FileChange {
             path: "/tmp/probe-codex/hello.txt".into(),
-            workspace_path: None,
             kind: FileChangeKind::Create,
             diff: Some("hi\n".into()),
         }];
@@ -2220,19 +2195,16 @@ mod tests {
         let stored = vec![
             StoredEvent {
                 ts: Some(1_000_000),
-                seq: None,
                 event: user_msg("u1", "first"),
             },
             StoredEvent {
                 ts: Some(1_000_500),
-                seq: None,
                 event: AgentEvent::TurnStarted {
                     turn_id: "t1".into(),
                 },
             },
             StoredEvent {
                 ts: Some(1_002_000),
-                seq: None,
                 event: AgentEvent::ItemCompleted(ThreadItem {
                     id: "a1".into(),
                     parent_item_id: None,
@@ -2241,7 +2213,6 @@ mod tests {
             },
             StoredEvent {
                 ts: Some(1_005_500),
-                seq: None,
                 event: AgentEvent::TurnCompleted {
                     turn_id: "t1".into(),
                     status: TurnStatus::Completed,
@@ -2250,12 +2221,10 @@ mod tests {
             },
             StoredEvent {
                 ts: Some(2_000_000),
-                seq: None,
                 event: user_msg("u2", "second"),
             },
             StoredEvent {
                 ts: Some(2_000_400),
-                seq: None,
                 event: AgentEvent::TurnStarted {
                     turn_id: "t2".into(),
                 },
@@ -2595,7 +2564,6 @@ mod tests {
                 kind: ApprovalKind::ExecCommand {
                     command: "rm -rf /".into(),
                     cwd: None,
-                    workspace_cwd: None,
                     reason: None,
                 },
                 options: Vec::new(),
@@ -2801,7 +2769,6 @@ mod tests {
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {
         StoredEvent {
             ts: Some(ts),
-            seq: None,
             event,
         }
     }

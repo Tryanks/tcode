@@ -47,11 +47,6 @@ mod tests {
 
         let mut roots = Vec::new();
         let mut discovered = Vec::new();
-        // client-app is excluded from the workspace on purpose (see the root
-        // Cargo.toml): it builds only for the client targets, because it needs
-        // tcode-ui's `portable` feature and the desktop build needs `desktop`.
-        const NON_MEMBERS: &[&str] = &["client-app"];
-
         for entry in std::fs::read_dir(&crates_dir)
             .expect("workspace crates directory must be readable")
             .flatten()
@@ -61,11 +56,7 @@ mod tests {
             if !crate_dir.is_dir() || !source_root.is_dir() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if NON_MEMBERS.contains(&name.as_str()) {
-                continue;
-            }
-            discovered.push(name);
+            discovered.push(entry.file_name().to_string_lossy().into_owned());
             roots.push(source_root);
         }
         roots.sort();
@@ -75,20 +66,11 @@ mod tests {
             "app",
             "computer-use-mcp",
             "core",
-            "gpui-android",
-            "gpui-ios",
             "i18n",
             "orchestrate-mcp",
             "preview-mcp",
             "runtime",
             "services",
-            "sync-client",
-            "sync-host",
-            "sync-protocol",
-            "tcode-android",
-            "tcode-ios",
-            "tcode-server",
-            "tcode-web",
             "term",
             "ui",
         ]

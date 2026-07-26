@@ -3,34 +3,21 @@ name = "agent"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["local"]
-local = [
-    "dep:agent-client-protocol",
-    "dep:async-channel",
-    "dep:base64",
-    "dep:futures-lite",
-    "dep:log",
-    "dep:smol",
-    "dep:ureq",
-    "dep:uuid",
-]
-
 [dependencies]
 agent-client-protocol = { version = "1.2", features = [
     "unstable_auth_methods",
     "unstable_end_turn_token_usage",
-], optional = true }
-async-channel = { version = "2", optional = true }
-futures-lite = { version = "2", optional = true }
-log = { version = "0.4", optional = true }
-base64 = { version = "0.22", optional = true }
+] }
+async-channel = "2"
+futures-lite = "2"
+log = "0.4"
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-smol = { version = "2", optional = true }
+smol = "2"
 thiserror = "2"
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 env_logger = "0.11"

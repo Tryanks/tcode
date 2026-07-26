@@ -1,3 +1,0 @@
-# Not a workspace member, so it builds into its own target/ rather than
-# inheriting the root one that the top-level .gitignore covers.
-/target/
