@@ -183,6 +183,12 @@ pub struct TurnMeta {
     /// turn's end — a missing or untrustworthy timestamp yields no breakdown
     /// rather than an invented one.
     pub timing: Option<TurnTiming>,
+    /// Model that actually served this turn, when reported by the provider.
+    pub served_model: Option<String>,
+    /// Provider-reported cost for this turn, in US dollars.
+    pub cost_usd: Option<f64>,
+    /// Provider-reported duration, distinct from tcode's observed wall clock.
+    pub provider_duration_ms: Option<u64>,
 }
 
 impl TurnMeta {
@@ -474,6 +480,12 @@ pub enum EntryContent {
         to_provider: agent::ProviderKind,
         to_model: Option<String>,
     },
+    /// The provider changed the model actually serving this session.
+    ModelChanged {
+        from: Option<String>,
+        to: String,
+        reason: Option<String>,
+    },
     /// The provider compacted its context window (a "Context compacted" work-log row).
     ContextCompacted,
 }
@@ -533,6 +545,8 @@ pub struct Timeline {
     pub resume: Option<ResumeCursor>,
     pub provider_session_id: Option<String>,
     pub model: Option<String>,
+    /// Latest model reported by the serving provider. Seeded from `model`.
+    last_served_model: Option<String>,
     pub last_turn_status: Option<TurnStatus>,
     /// The turn currently accumulating entries, if any.
     current_turn: Option<usize>,
@@ -642,6 +656,26 @@ impl Timeline {
                 if model.is_some() {
                     self.model = model.clone();
                 }
+                self.last_served_model = self.model.clone();
+            }
+            AgentEvent::ServedModel { model, reason } => {
+                let turn = self.ensure_turn(ts);
+                self.turns[turn].served_model = Some(model.clone());
+                if self.last_served_model.as_deref() != Some(model.as_str()) {
+                    let from = self.last_served_model.clone();
+                    let id = self.synthetic_id("model");
+                    self.entries.push(Arc::new(TimelineEntry {
+                        id,
+                        content: EntryContent::ModelChanged {
+                            from,
+                            to: model.clone(),
+                            reason: reason.clone(),
+                        },
+                        ts,
+                        turn,
+                    }));
+                    self.last_served_model = Some(model.clone());
+                }
             }
             AgentEvent::TurnStarted { turn_id } => {
                 // Reuse the open turn (typically opened by the user message);
@@ -714,6 +748,10 @@ impl Timeline {
                     }
                     self.turns[turn].status = Some(*status);
                     self.turns[turn].running = false;
+                    if let Some(usage) = usage {
+                        self.turns[turn].cost_usd = usage.cost_usd;
+                        self.turns[turn].provider_duration_ms = usage.duration_ms;
+                    }
                     let clock = std::mem::take(&mut self.tool_clock);
                     // A repeated completion finds an already-spent clock; it
                     // must not erase the breakdown the first one derived.
@@ -948,6 +986,9 @@ impl Timeline {
             running: false,
             changes: None,
             timing: None,
+            served_model: None,
+            cost_usd: None,
+            provider_duration_ms: None,
         });
         let idx = self.turns.len() - 1;
         self.current_turn = Some(idx);
@@ -3279,5 +3320,39 @@ mod tests {
             (clamped_secs.total, clamped_secs.ai, clamped_secs.tools),
             (1, 0, 1)
         );
+    }
+
+    #[test]
+    fn served_model_change_sets_turn_meta_and_adds_one_divider() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::SessionStarted {
+                provider_session_id: "session".into(),
+                resume: ResumeCursor(json!({})),
+                model: Some("requested".into()),
+            },
+            user_msg("user", "hello"),
+            AgentEvent::ServedModel {
+                model: "served".into(),
+                reason: Some("capacity".into()),
+            },
+            AgentEvent::ServedModel {
+                model: "served".into(),
+                reason: Some("capacity".into()),
+            },
+        ]);
+        assert_eq!(timeline.turns[0].served_model.as_deref(), Some("served"));
+        let changes = timeline
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.content, EntryContent::ModelChanged { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            &changes[0].content,
+            EntryContent::ModelChanged { from, to, reason }
+                if from.as_deref() == Some("requested")
+                    && to == "served"
+                    && reason.as_deref() == Some("capacity")
+        ));
     }
 }

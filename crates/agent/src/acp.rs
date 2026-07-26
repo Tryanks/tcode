@@ -1431,6 +1431,8 @@ async fn finish_turn(
                 used_tokens: None,
                 context_window: None,
                 total_processed_tokens: Some(usage.total_tokens),
+                cost_usd: None,
+                duration_ms: None,
             });
             let (status, message) = stop_reason_status(response.stop_reason);
             (status, message, usage)
@@ -1961,6 +1963,11 @@ impl State {
                 let usage = TokenUsage {
                     used_tokens: Some(usage.used),
                     context_window: Some(usage.size),
+                    cost_usd: usage
+                        .cost
+                        .as_ref()
+                        .filter(|cost| cost.currency.eq_ignore_ascii_case("USD"))
+                        .map(|cost| cost.amount),
                     ..Default::default()
                 };
                 self.usage = Some(usage);

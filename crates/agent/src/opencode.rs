@@ -485,6 +485,7 @@ pub(crate) struct OpenCodeMapper {
     cumulative_processed: u64,
     turn_failed: bool,
     interrupted: bool,
+    last_served_model: Option<String>,
 }
 
 impl OpenCodeMapper {
@@ -502,6 +503,7 @@ impl OpenCodeMapper {
             cumulative_processed: 0,
             turn_failed: false,
             interrupted: false,
+            last_served_model: None,
         }
     }
 
@@ -591,6 +593,18 @@ impl OpenCodeMapper {
                     return mapped;
                 }
                 if info.get("role").and_then(Value::as_str) == Some("assistant") {
+                    if let Some(model) = info
+                        .get("modelID")
+                        .or_else(|| info.get("model_id"))
+                        .and_then(Value::as_str)
+                        && self.last_served_model.as_deref() != Some(model)
+                    {
+                        self.last_served_model = Some(model.to_owned());
+                        mapped.events.push(AgentEvent::ServedModel {
+                            model: model.to_owned(),
+                            reason: None,
+                        });
+                    }
                     if let Some(error) = info.get("error") {
                         self.turn_failed = true;
                         mapped.events.push(AgentEvent::Error {
@@ -599,8 +613,9 @@ impl OpenCodeMapper {
                         });
                     }
                     if info.pointer("/time/completed").is_some()
-                        && let Some(usage) = usage_from_tokens(info.get("tokens"))
+                        && let Some(mut usage) = usage_from_tokens(info.get("tokens"))
                     {
+                        usage.cost_usd = info.get("cost").and_then(Value::as_f64);
                         let key = info
                             .get("id")
                             .and_then(Value::as_str)
@@ -728,7 +743,11 @@ impl OpenCodeMapper {
             }
             Some("tool") => self.tool_updated(part),
             Some("step-finish") => {
-                if let Some(usage) = usage_from_tokens(part.get("tokens")) {
+                if let Some(mut usage) = usage_from_tokens(part.get("tokens")) {
+                    // The step-finish snapshot and completed message carry the
+                    // same cumulative per-message cost. Recording it here lets
+                    // the later reconciliation coalesce exactly.
+                    usage.cost_usd = part.get("cost").and_then(Value::as_f64);
                     let mut events = Vec::new();
                     let key = part
                         .get("messageID")
@@ -800,7 +819,8 @@ impl OpenCodeMapper {
             }
             _ => (ItemStatus::InProgress, None),
         };
-        let item = open_code_tool_item(&call_id, &name, input, output, status);
+        let exit_code = state.pointer("/metadata/exit").and_then(json_i32);
+        let item = open_code_tool_item(&call_id, &name, input, output, exit_code, status);
         vec![match state.get("status").and_then(Value::as_str) {
             Some("pending") => AgentEvent::ItemStarted(item),
             Some("completed" | "error") => AgentEvent::ItemCompleted(item),
@@ -849,6 +869,8 @@ fn same_token_usage(left: TokenUsage, right: TokenUsage) -> bool {
         && left.used_tokens == right.used_tokens
         && left.context_window == right.context_window
         && left.total_processed_tokens == right.total_processed_tokens
+        && left.cost_usd == right.cost_usd
+        && left.duration_ms == right.duration_ms
 }
 
 fn processed_tokens(usage: TokenUsage) -> u64 {
@@ -871,6 +893,14 @@ fn merge_token_usage(total: &mut TokenUsage, usage: TokenUsage) {
         (Some(left), Some(right)) => Some(left.max(right)),
         (left, right) => left.or(right),
     };
+    total.cost_usd = match (total.cost_usd, usage.cost_usd) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
+    };
+    total.duration_ms = match (total.duration_ms, usage.duration_ms) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (left, right) => left.or(right),
+    };
 }
 
 fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -885,6 +915,7 @@ fn open_code_tool_item(
     name: &str,
     input: Value,
     output: Option<String>,
+    exit_code: Option<i32>,
     status: ItemStatus,
 ) -> ThreadItem {
     let content = if name == "bash" {
@@ -895,7 +926,7 @@ fn open_code_tool_item(
                 .unwrap_or("")
                 .to_owned(),
             output: output.unwrap_or_default(),
-            exit_code: None,
+            exit_code,
             status,
         }
     } else {
@@ -1001,7 +1032,16 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
             .and_then(|total| total.checked_add(cache_write)),
         context_window: None,
         total_processed_tokens: None,
+        cost_usd: None,
+        duration_ms: None,
     })
+}
+
+fn json_i32(value: &Value) -> Option<i32> {
+    value
+        .as_i64()
+        .and_then(|number| i32::try_from(number).ok())
+        .or_else(|| value.as_str()?.parse().ok())
 }
 
 fn json_number(value: Option<&Value>) -> Option<u64> {
@@ -1714,6 +1754,7 @@ mod tests {
                     input_tokens: Some(10),
                     output_tokens: Some(5),
                     total_processed_tokens: Some(19),
+                    cost_usd: Some(0.1),
                     ..
                 }),
                 ..
@@ -1834,5 +1875,56 @@ mod tests {
             "Custom"
         );
         assert_eq!(configured["default"]["openai"], "gpt-test");
+    }
+
+    #[test]
+    fn assistant_model_change_is_emitted_once() {
+        let mut mapper = OpenCodeMapper::new("ses".into());
+        let event = json!({
+            "type": "message.updated",
+            "properties": {
+                "sessionID": "ses",
+                "info": {"role": "assistant", "id": "msg", "modelID": "gpt-5"}
+            }
+        });
+        let first = mapper.on_event(&event).events;
+        let repeat = mapper.on_event(&event).events;
+        assert!(matches!(
+            first.as_slice(),
+            [AgentEvent::ServedModel { model, reason: None }] if model == "gpt-5"
+        ));
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn bash_metadata_exit_populates_exit_code() {
+        let mut mapper = OpenCodeMapper::new("ses".into());
+        let event = json!({
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses",
+                "part": {
+                    "type": "tool",
+                    "callID": "call",
+                    "tool": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": {"command": "false"},
+                        "output": "",
+                        "metadata": {"exit": 7}
+                    }
+                }
+            }
+        });
+        assert!(matches!(
+            mapper.on_event(&event).events.as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    exit_code: Some(7),
+                    ..
+                },
+                ..
+            })]
+        ));
     }
 }

@@ -681,6 +681,12 @@ pub enum AgentEvent {
         resume: ResumeCursor,
         model: Option<String>,
     },
+    /// The model that actually served the response. Providers may reroute away
+    /// from the model selected when the session started.
+    ServedModel {
+        model: String,
+        reason: Option<String>,
+    },
     TurnStarted {
         turn_id: String,
     },
@@ -1138,6 +1144,7 @@ pub enum ApprovalDecision {
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
@@ -1149,6 +1156,10 @@ pub struct TokenUsage {
     /// `thread/tokenUsage` running total; Claude accumulated per-turn usage).
     /// Shown as "Total processed" in the context-meter popover.
     pub total_processed_tokens: Option<u64>,
+    /// Provider-reported cost for this turn/message, in US dollars.
+    pub cost_usd: Option<f64>,
+    /// Provider-reported turn duration, in milliseconds.
+    pub duration_ms: Option<u64>,
 }
 
 #[cfg(test)]
