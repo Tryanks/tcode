@@ -16,7 +16,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 async-channel = "2"
-base64 = "0.22"
+base64 = "0.23"
 chrono = "0.4"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
