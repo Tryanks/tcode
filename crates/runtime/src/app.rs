@@ -6436,6 +6436,22 @@ impl AppState {
         }
     }
 
+    /// The preview chrome's close button: close the right panel when it is
+    /// showing Preview. The PreviewPanel pairs this with dropping the
+    /// conversation's WebView so the page itself is torn down, not just hidden.
+    pub fn close_preview_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(active) = self.active.as_mut()
+            && active.diff_open
+            && active.right_tab == RightTab::Preview
+        {
+            active.diff_open = false;
+            if active.timeline.turn_running {
+                active.auto_open_suppressed = true;
+            }
+            cx.notify();
+        }
+    }
+
     /// Open the right panel on the Preview tab (used when the agent drives the
     /// preview so the webview surfaces without a manual toggle).
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {

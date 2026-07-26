@@ -380,6 +380,24 @@ mod native {
             }
         }
 
+        /// The chrome's X: close the Preview tab *and* drop this conversation's
+        /// WebView, so the page is torn down (scripts, media, sockets) rather
+        /// than kept running behind a closed panel. The next open or agent op
+        /// recreates a fresh webview on demand.
+        fn close_panel(&mut self, cx: &mut Context<Self>) {
+            if let Some(key) = self.active_key(cx) {
+                self.webviews.remove(&key);
+                self.urls.remove(&key);
+                self.warm.remove(&key);
+            }
+            // Un-mirror so a later reopen refreshes the address bar from the
+            // (now empty) URL map instead of showing the stale address.
+            self.mirrored = None;
+            self.app_state
+                .update(cx, |state, cx| state.close_preview_panel(cx));
+            cx.notify();
+        }
+
         fn rescan_ports(&mut self, cx: &mut Context<Self>) {
             self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
             let generation = self.port_scan_generation;
@@ -783,6 +801,15 @@ mod native {
                         .icon(IconName::ExternalLink)
                         .tooltip(tcode_i18n::tr!("preview.open_external"))
                         .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
+                )
+                .child(
+                    Button::new("preview-close")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .icon(IconName::Close)
+                        .tooltip(tcode_i18n::tr!("preview.close"))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
                 // Last child, so the chrome's own controls stay to its left.
                 .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))

@@ -676,7 +676,7 @@ impl DiffPanel {
 
     // -- top strip (tab look + right icon cluster) --------------------------
 
-    fn render_tab_strip(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let state = self.app_state.read(cx);
         let expanded = state.diff_panel_expanded();
         let active = state.right_tab();
@@ -764,10 +764,16 @@ impl DiffPanel {
                 }),
             )
             // The gap between the tabs and the icon cluster holds nothing, so
-            // it doubles as the window's native drag handle where one is needed.
-            // `h_full` is load-bearing: the strip centers its children, so
-            // without it the drag hitbox collapses to zero height.
-            .child(window_caption::drag_region(div().flex_1().h_full()))
+            // it doubles as the window's drag handle: `window_drag_area` for the
+            // app-owned move (macOS), `drag_region` for native HTCAPTION
+            // (Windows). `h_full` is load-bearing: the strip centers its
+            // children, so without it the drag hitbox collapses to zero height.
+            .child(window_caption::drag_region(crate::window_drag_area(
+                "right-panel-tabs-drag",
+                div().flex_1().h_full(),
+                window,
+                cx,
+            )))
             // Right icon cluster: expand toggle, a layout no-op, close.
             .child(
                 Button::new("diff-expand")
