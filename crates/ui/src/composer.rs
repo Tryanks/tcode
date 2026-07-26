@@ -816,8 +816,8 @@ impl Composer {
                     .title(tcode_i18n::tr!("composer.relay_title"))
                     .description(tcode_i18n::tr!(
                         "composer.relay_description",
-                        from = from.display_name(),
-                        to = to.display_name()
+                        from = from,
+                        to = to
                     ))
                     .button_props(
                         DialogButtonProps::default()

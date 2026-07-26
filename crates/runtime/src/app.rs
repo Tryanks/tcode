@@ -583,6 +583,10 @@ pub struct ActiveSession {
 struct PendingRelay {
     from_provider: ProviderKind,
     from_model: Option<String>,
+    /// The provider profile the history was produced against (`None` = the
+    /// built-in profile). Two profiles of one [`ProviderKind`] are distinct
+    /// backends with isolated homes, so a profile switch is a relay too.
+    from_profile: Option<String>,
 }
 
 impl ActiveSession {
@@ -3245,6 +3249,7 @@ impl AppState {
             let source = active.pending_relay.clone().unwrap_or(PendingRelay {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
+                from_profile: active.meta.profile_id.clone(),
             });
             if active.pending_relay.is_some() && source.from_provider == ProviderKind::Acp {
                 active.pending_relay = None;
@@ -5397,13 +5402,25 @@ impl AppState {
         cx.notify();
     }
 
-    /// Provider identities for the confirmation dialog, when the current
+    /// Display labels (from, to) for the confirmation dialog, when the current
     /// selection needs a canonical-timeline handoff before it can be sent.
-    pub fn relay_confirmation(&self) -> Option<(ProviderKind, ProviderKind)> {
+    /// Custom profiles show their card title so a same-kind profile switch
+    /// (e.g. official Claude → an Anthropic-compatible endpoint) reads as the
+    /// backend change it is.
+    pub fn relay_confirmation(&self) -> Option<(String, String)> {
         let active = self.active.as_ref()?;
         let pending = active.pending_relay.as_ref()?;
-        has_meaningful_history(&active.timeline)
-            .then_some((pending.from_provider, active.meta.provider))
+        if !has_meaningful_history(&active.timeline) {
+            return None;
+        }
+        let label = |provider: ProviderKind, profile: Option<&str>| match profile {
+            Some(id) => self.settings.profile_display_name(id),
+            None => provider.display_name().to_string(),
+        };
+        Some((
+            label(pending.from_provider, pending.from_profile.as_deref()),
+            label(active.meta.provider, active.meta.profile_id.as_deref()),
+        ))
     }
 
     /// Confirm the pending provider handoff and send the user's clean message.
@@ -5939,8 +5956,9 @@ impl AppState {
         provider: ProviderKind,
         model: Option<String>,
         // Which provider profile the picked row belongs to (`None` = the built-in
-        // profile for `provider`). Only bound while the session is a draft; a
-        // live thread's profile is fixed for its lifetime.
+        // profile for `provider`). Rebinding an established session's profile is
+        // a backend change and goes through the relay confirmation, exactly like
+        // a provider change.
         profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -5971,14 +5989,20 @@ impl AppState {
             cx.notify();
             return;
         }
-        // Established sessions can preview a different provider, but the
-        // provider-native cursor is retained until the user confirms a relay.
-        if active.meta.provider != provider {
+        // Established sessions can preview a different provider — or a
+        // different profile of the same provider, which is a different backend
+        // with its own isolated home — but the provider-native cursor is
+        // retained until the user confirms a relay.
+        if active.meta.provider != provider || active.meta.profile_id != profile_id {
             let source = active.pending_relay.clone().unwrap_or(PendingRelay {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
+                from_profile: active.meta.profile_id.clone(),
             });
-            if active.pending_relay.is_some() && source.from_provider == provider {
+            if active.pending_relay.is_some()
+                && source.from_provider == provider
+                && source.from_profile == profile_id
+            {
                 active.pending_relay = None;
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);
@@ -10821,6 +10845,7 @@ mod tests {
             active.pending_relay = Some(PendingRelay {
                 from_provider: ProviderKind::ClaudeCode,
                 from_model: Some("opus".into()),
+                from_profile: None,
             });
             active.timeline.apply_at(
                 None,
@@ -10857,6 +10882,79 @@ mod tests {
             assert_eq!(active.meta.interaction_mode, InteractionMode::Plan);
             assert!(state.plan_ready_markdown().is_some());
             assert!(receiver.try_recv().is_err());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn profile_switch_within_one_provider_requires_a_relay(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-profile-relay-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, _receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::ClaudeCode, commands);
+            active.meta.id = "profile-relay".into();
+            active.meta.model = Some("claude-opus-5".into());
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "user-1".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "hello".into(),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }),
+            );
+            active.timeline.apply_at(
+                None,
+                &AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            );
+            state.active = Some(active);
+
+            // Same ProviderKind, different profile: a different backend. The
+            // selection must park behind the relay confirmation and rebind the
+            // session's profile so the next launch uses the new endpoint.
+            state.set_active_model(
+                ProviderKind::ClaudeCode,
+                Some("kimi-k3".into()),
+                Some("kimi".into()),
+                cx,
+            );
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.meta.profile_id.as_deref(), Some("kimi"));
+            assert_eq!(active.meta.model.as_deref(), Some("kimi-k3"));
+            let pending = active.pending_relay.as_ref().expect("relay pending");
+            assert_eq!(pending.from_provider, ProviderKind::ClaudeCode);
+            assert_eq!(pending.from_model.as_deref(), Some("claude-opus-5"));
+            assert_eq!(pending.from_profile, None);
+            assert_eq!(
+                state.relay_confirmation(),
+                Some(("Claude Code".into(), "kimi".into()))
+            );
+
+            // Returning to the original profile cancels the pending relay.
+            state.set_active_model(
+                ProviderKind::ClaudeCode,
+                Some("claude-opus-5".into()),
+                None,
+                cx,
+            );
+            let active = state.active.as_ref().unwrap();
+            assert!(active.pending_relay.is_none());
+            assert_eq!(active.meta.profile_id, None);
+            assert!(state.relay_confirmation().is_none());
         });
 
         let _ = std::fs::remove_dir_all(root);
