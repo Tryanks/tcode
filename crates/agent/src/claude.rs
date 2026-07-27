@@ -2342,15 +2342,18 @@ impl Mapper {
                 fatal: false,
             });
         }
-        if msg.pointer("/origin/kind").and_then(Value::as_str) == Some("task-notification") {
-            // Publish the final liveness transition immediately before the
-            // follow-up TurnCompleted. A parked runtime then observes zero and
-            // finishes parking/restart decisions only after all completion
-            // output has landed.
-            events.push(AgentEvent::BackgroundTasksChanged {
-                count: self.background_tasks.len(),
-            });
-        }
+        // Publish the current background-task liveness with every result, not
+        // only task-notification-origin ones. `background_tasks_changed []`
+        // deliberately withholds the zero (see `on_background_tasks_changed`),
+        // so a result is the only place the runtime can learn the tasks are
+        // gone — and gating that on the CLI's `origin.kind` shape left the
+        // count pinned above zero (session stuck "Working") whenever the
+        // follow-up result arrived with a different origin. Re-publishing an
+        // unchanged count is harmless; a parked runtime still observes zero
+        // only after all completion output has landed.
+        events.push(AgentEvent::BackgroundTasksChanged {
+            count: self.background_tasks.len(),
+        });
         events.push(AgentEvent::TurnCompleted {
             turn_id,
             status,
@@ -3153,6 +3156,26 @@ mod tests {
         mapper.on_message(msg)
     }
 
+    /// Every `result` publishes the current background-task count immediately
+    /// before its `TurnCompleted` (the runtime's only reliable zero signal).
+    /// Assert that contract and return the completion event.
+    #[track_caller]
+    fn turn_completed_after_count(events: &[AgentEvent], count: usize) -> &AgentEvent {
+        let at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+            .unwrap_or_else(|| panic!("no TurnCompleted in {events:?}"));
+        assert!(
+            at > 0
+                && matches!(
+                    &events[at - 1],
+                    AgentEvent::BackgroundTasksChanged { count: published } if *published == count
+                ),
+            "TurnCompleted must follow BackgroundTasksChanged {{ count: {count} }}, got {events:?}"
+        );
+        &events[at]
+    }
+
     #[test]
     fn replayed_user_message_exposes_native_turn_checkpoint() {
         let mut mapper = Mapper::new();
@@ -3622,7 +3645,7 @@ mod tests {
             &mut m,
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":20}}"#,
         );
-        let first = match &evs[0] {
+        let first = match turn_completed_after_count(&evs, 0) {
             AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
             other => panic!("expected TurnCompleted, got {other:?}"),
         };
@@ -3633,7 +3656,7 @@ mod tests {
             &mut m,
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":30,"output_tokens":5}}"#,
         );
-        let second = match &evs[0] {
+        let second = match turn_completed_after_count(&evs, 0) {
             AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
             other => panic!("expected TurnCompleted, got {other:?}"),
         };
@@ -3885,7 +3908,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false}"#,
         );
         assert!(matches!(
-            &result[0],
+            turn_completed_after_count(&result, 1),
             AgentEvent::TurnCompleted {
                 turn_id: completed,
                 status: TurnStatus::Completed,
@@ -3965,7 +3988,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"Background command launched."}"#,
         );
         assert!(matches!(
-            &first_result[0],
+            turn_completed_after_count(&first_result, 1),
             AgentEvent::TurnCompleted {
                 turn_id,
                 status: TurnStatus::Completed,
@@ -4046,6 +4069,41 @@ mod tests {
         ));
     }
 
+    /// The zero-count publication must not depend on the CLI's `origin.kind`
+    /// shape: after `background_tasks_changed []` (whose zero is deliberately
+    /// withheld), ANY later result must tell the runtime the tasks are gone —
+    /// otherwise the session sits at "Working" forever on a live idle process.
+    #[test]
+    fn any_result_publishes_zero_after_background_tasks_drain() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"sleep"}]}"#,
+        );
+        let first = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        );
+        turn_completed_after_count(&first, 1);
+
+        // The drain event withholds its zero (parking guard)...
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+            )
+            .is_empty()
+        );
+        // ...so a later ordinary result — no `origin` at all — must publish it.
+        m.start_turn();
+        let second = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        );
+        turn_completed_after_count(&second, 0);
+    }
+
     #[test]
     fn unknown_task_notification_without_tool_use_id_does_not_wedge_turn() {
         let mut m = Mapper::new();
@@ -4063,7 +4121,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false}"#,
         );
         assert!(matches!(
-            &result[0],
+            turn_completed_after_count(&result, 0),
             AgentEvent::TurnCompleted {
                 turn_id: completed,
                 status: TurnStatus::Completed,
@@ -4450,7 +4508,7 @@ mod tests {
             &mut m,
             r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":10,"output_tokens":20},"modelUsage":{"claude-opus-4-8[1m]":{"contextWindow":1000000}}}"#,
         );
-        match &evs[0] {
+        match turn_completed_after_count(&evs, 0) {
             AgentEvent::TurnCompleted {
                 turn_id: tid,
                 status,
@@ -4485,7 +4543,7 @@ mod tests {
                 if message == "claude turn failed (error_during_execution): provider failed"
         ));
         assert!(matches!(
-            idle_result[1],
+            turn_completed_after_count(&idle_result, 0),
             AgentEvent::TurnCompleted {
                 status: TurnStatus::Failed,
                 ..
@@ -4501,7 +4559,7 @@ mod tests {
             r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"provider failed"}"#,
         );
         assert!(matches!(
-            attributed[0],
+            turn_completed_after_count(&attributed, 0),
             AgentEvent::TurnCompleted {
                 status: TurnStatus::Interrupted,
                 ..
@@ -4513,7 +4571,7 @@ mod tests {
             &mut m,
             r#"{"type":"result","subtype":"error_during_execution","is_error":false,"result":"Request was aborted"}"#,
         );
-        match &evs[0] {
+        match turn_completed_after_count(&evs, 0) {
             AgentEvent::TurnCompleted { status, .. } => {
                 assert_eq!(*status, TurnStatus::Interrupted)
             }
@@ -4965,11 +5023,11 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"You can cancel the operation from Settings."}"#,
         );
         assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::TurnCompleted {
+            turn_completed_after_count(&events, 0),
+            AgentEvent::TurnCompleted {
                 status: TurnStatus::Completed,
                 ..
-            }]
+            }
         ));
     }
 
@@ -4997,15 +5055,15 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.125,"duration_ms":4321,"usage":{"input_tokens":10,"output_tokens":2}}"#,
         );
         assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::TurnCompleted {
+            turn_completed_after_count(&events, 0),
+            AgentEvent::TurnCompleted {
                 usage: Some(TokenUsage {
                     cost_usd: Some(cost),
                     duration_ms: Some(4321),
                     ..
                 }),
                 ..
-            }] if (*cost - 0.125).abs() < f64::EPSILON
+            } if (*cost - 0.125).abs() < f64::EPSILON
         ));
     }
 }
