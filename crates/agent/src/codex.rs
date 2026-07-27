@@ -1338,6 +1338,7 @@ impl Actor {
                     fatal: false,
                 })
                 .await;
+                self.fail_rejected_turn_start(pending.as_ref()).await;
             } else if value.get("result").is_none() {
                 self.emit(AgentEvent::Error {
                     message: format!(
@@ -1347,6 +1348,7 @@ impl Actor {
                     fatal: false,
                 })
                 .await;
+                self.fail_rejected_turn_start(pending.as_ref()).await;
             } else {
                 match pending {
                     Some(PendingRequest::TurnStart) => {
@@ -1363,6 +1365,24 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// A `turn/start` the runtime already accepted was rejected by the server
+    /// (JSON-RPC error or missing result): no `turn/started` will follow, so no
+    /// `turn/completed` ever arrives and the runtime's turn flag would stay set
+    /// forever. Synthesize the terminal event the protocol will never send. The
+    /// `active_turn` guard keeps a late duplicate response from failing a turn
+    /// that did start.
+    async fn fail_rejected_turn_start(&mut self, pending: Option<&PendingRequest>) {
+        if !matches!(pending, Some(PendingRequest::TurnStart)) || self.active_turn.is_some() {
+            return;
+        }
+        self.emit(AgentEvent::TurnCompleted {
+            turn_id: String::new(),
+            status: TurnStatus::Failed,
+            usage: None,
+        })
+        .await;
     }
 
     async fn handle_server_request(&mut self, value: &Value) {
@@ -2552,6 +2572,87 @@ mod tests {
             assert!(
                 events.try_recv().is_err(),
                 "RPC errors must not accept a steer"
+            );
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// A `turn/start` the runtime already accepted but the server rejects gets
+    /// a synthesized failed completion: no `turn/started` will ever follow, so
+    /// without it the runtime's turn flag (and the sidebar's "Working" state)
+    /// would stay set forever.
+    #[test]
+    fn rejected_turn_start_synthesizes_failed_completion() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor
+                .handle_command(SessionCommand::SendTurn {
+                    delivery_id: 7,
+                    text: "hello".into(),
+                    options: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnAccepted { delivery_id: 7 }
+            ));
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed turn/start request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let id = request["id"].as_i64().unwrap();
+            actor
+                .handle_line(
+                    &json!({"id": id, "error": {"code": -32000, "message": "model overloaded"}})
+                        .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::Error { fatal: false, .. }
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCompleted {
+                    status: TurnStatus::Failed,
+                    ..
+                }
+            ));
+
+            // A rejection that races an already-started turn must not fail it.
+            actor
+                .handle_command(SessionCommand::SendTurn {
+                    delivery_id: 8,
+                    text: "again".into(),
+                    options: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let _ = events.recv().await.unwrap(); // TurnAccepted
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("expected echoed turn/start request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let id = request["id"].as_i64().unwrap();
+            actor.active_turn = Some("turn-live".into());
+            actor
+                .handle_line(
+                    &json!({"id": id, "error": {"code": -32000, "message": "late duplicate"}})
+                        .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::Error { .. }
+            ));
+            assert!(
+                events.try_recv().is_err(),
+                "an active turn must not be failed by a stray turn/start rejection"
             );
 
             let _ = actor.child.kill();

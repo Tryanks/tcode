@@ -6837,6 +6837,7 @@ impl AppState {
                         let commands = handle.commands.clone();
                         let events = handle.events.clone();
                         let pump_session = session_id.clone();
+                        let pump_commands = handle.commands.clone();
                         let pump = cx.spawn(async move |this, cx| {
                             while let Ok(event) = events.recv().await {
                                 if this
@@ -6845,9 +6846,12 @@ impl AppState {
                                     })
                                     .is_err()
                                 {
-                                    break;
+                                    return;
                                 }
                             }
+                            let _ = this.update(cx, |state, cx| {
+                                state.on_event_stream_ended(&pump_session, &pump_commands, cx);
+                            });
                         });
                         if matches_active {
                             let active = state.active.as_mut().unwrap();
@@ -6940,6 +6944,45 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// The provider's event stream ended without a `SessionClosed`. If the
+    /// session still owns that exact provider (same command channel, still
+    /// Live), the adapter died without announcing it — and the lifecycle flags
+    /// (`turn_in_flight`, `delivery_in_flight`, `background_task_count`) have
+    /// no other reset path, so the thread would sit at "Working" forever.
+    /// Synthesize the close so the ordinary teardown runs no matter which
+    /// adapter exit path forgot to emit it. The same-channel check keeps a
+    /// stale pump (session already closed, restarted, or shut down mid-event)
+    /// from tearing down a successor provider.
+    fn on_event_stream_ended(
+        &mut self,
+        session_id: &str,
+        pump_commands: &async_channel::Sender<SessionCommand>,
+        cx: &mut Context<Self>,
+    ) {
+        let still_owned = self
+            .active
+            .as_ref()
+            .filter(|active| active.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))
+            .is_some_and(|session| match &session.runtime {
+                Runtime::Live(current) => current.same_channel(pump_commands),
+                _ => false,
+            });
+        if !still_owned {
+            return;
+        }
+        log::warn!(
+            "provider event stream for {session_id} ended without SessionClosed; synthesizing close"
+        );
+        self.on_event(
+            session_id,
+            AgentEvent::SessionClosed {
+                reason: Some("provider event stream ended without a close".into()),
+            },
+            cx,
+        );
     }
 
     /// Handle one canonical event from the live provider.
@@ -12512,6 +12555,126 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The T-"stuck Working" family: an adapter whose event stream dies without
+    /// a `SessionClosed` must not leave the lifecycle flags set forever. The
+    /// pump synthesizes the close, which runs the ordinary teardown.
+    #[gpui::test]
+    fn dead_event_stream_without_close_clears_working_flags(cx: &mut gpui::TestAppContext) {
+        let data =
+            std::env::temp_dir().join(format!("tcode-dead-stream-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, _receiver) = async_channel::unbounded();
+
+        let id = state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::ClaudeCode, commands.clone());
+            active.turn_in_flight = true;
+            active.background_task_count = 2;
+            let id = active.meta.id.clone();
+            state.store.upsert_meta(&active.meta).unwrap();
+            state.sessions = state.store.load_index();
+            state.active = Some(active);
+            assert!(state.turn_running_for(&id));
+
+            state.on_event_stream_ended(&id, &commands, cx);
+
+            assert!(
+                !state.turn_running_for(&id),
+                "a dead event stream must not pin the session at Working"
+            );
+            let active = state.active.as_ref().unwrap();
+            assert!(matches!(active.runtime, Runtime::Idle));
+            id
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, _| {
+            // The synthesized close is durable evidence in the session log.
+            let replayed = state.store.read_events(&id);
+            assert!(
+                replayed
+                    .iter()
+                    .any(|stored| matches!(stored.event, AgentEvent::SessionClosed { .. })),
+                "the synthesized SessionClosed must be persisted"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Same leak, parked variant: the flags of a backgrounded session must
+    /// reset too (and the dead resident entry is released).
+    #[gpui::test]
+    fn dead_event_stream_clears_parked_working_flags(cx: &mut gpui::TestAppContext) {
+        let data = std::env::temp_dir().join(format!(
+            "tcode-dead-parked-stream-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, _receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut parked = live_session(ProviderKind::ClaudeCode, commands.clone());
+            parked.turn_in_flight = true;
+            parked.background_task_count = 1;
+            let id = parked.meta.id.clone();
+            state.store.upsert_meta(&parked.meta).unwrap();
+            state.sessions = state.store.load_index();
+            state.background.insert(id.clone(), parked);
+            assert!(state.turn_running_for(&id));
+
+            state.on_event_stream_ended(&id, &commands, cx);
+
+            assert!(
+                !state.turn_running_for(&id),
+                "a dead event stream must not pin a parked session at Working"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A stale pump (the session was already closed, restarted, or handed to a
+    /// new provider process) must not tear down the successor runtime when its
+    /// old event channel drains.
+    #[gpui::test]
+    fn stale_pump_close_leaves_successor_runtime_alone(cx: &mut gpui::TestAppContext) {
+        let data =
+            std::env::temp_dir().join(format!("tcode-stale-pump-test-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (old_commands, _old_receiver) = async_channel::unbounded();
+        let (new_commands, _new_receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::ClaudeCode, new_commands);
+            active.turn_in_flight = true;
+            let id = active.meta.id.clone();
+            state.store.upsert_meta(&active.meta).unwrap();
+            state.sessions = state.store.load_index();
+            state.active = Some(active);
+
+            // The old pump drains after the session moved to a new provider.
+            state.on_event_stream_ended(&id, &old_commands, cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert!(
+                matches!(active.runtime, Runtime::Live(_)),
+                "a stale pump must not tear down the successor provider"
+            );
+            assert!(active.turn_in_flight);
+            assert!(state.turn_running_for(&id));
+
+            // And an idle session ignores stream-end noise entirely.
+            state.active.as_mut().unwrap().runtime = Runtime::Idle;
+            state.active.as_mut().unwrap().turn_in_flight = false;
+            state.on_event_stream_ended(&id, &old_commands, cx);
+            assert!(!state.turn_running_for(&id));
+        });
+
         let _ = std::fs::remove_dir_all(&data);
     }
 
