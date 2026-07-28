@@ -3,7 +3,7 @@ use std::{
     ops::Range,
     panic::{self, AssertUnwindSafe},
     path::Path,
-    sync::{LazyLock, Mutex},
+    sync::{LazyLock, Mutex, PoisonError},
 };
 
 use gpui::HighlightStyle;
@@ -165,7 +165,13 @@ pub(crate) fn highlight_source(
         return vec![(0..src.len(), HighlightStyle::default())];
     };
     let name = syntax.name.as_str();
-    if POISONED_SYNTAXES.lock().is_ok_and(|set| set.contains(name)) {
+    // `into_inner` keeps this failing closed: a poisoned set must disable
+    // highlighting for the recorded syntaxes, never re-run a panicking parse.
+    if POISONED_SYNTAXES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(name)
+    {
         return vec![(0..src.len(), HighlightStyle::default())];
     }
 
@@ -175,9 +181,10 @@ pub(crate) fn highlight_source(
         Ok(runs) => runs,
         Err(_) => {
             log::error!("syntect panicked highlighting {name:?}; disabling it for this session");
-            if let Ok(mut set) = POISONED_SYNTAXES.lock() {
-                set.insert(name);
-            }
+            POISONED_SYNTAXES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(name);
             vec![(0..src.len(), HighlightStyle::default())]
         }
     }
@@ -300,11 +307,36 @@ mod tests {
         );
     }
 
-    /// Every pattern syntect will compile from the raw string must compile
-    /// under the backend this crate ships with. Guards `assets/syntaxes.bin`
-    /// regressions: a pattern failing here is a deferred runtime panic
-    /// (syntect `regex.rs` "regex string should be pre-tested"). Regenerate
-    /// the dump with `examples/sanitize_syntaxes.rs` when this fails.
+    /// Mirror of syntect's private `substitute_backrefs_in_regex` with the
+    /// placeholder substituter its YAML loader validates patterns with; kept
+    /// in sync with `examples/sanitize_syntaxes.rs`.
+    fn substitute_backrefs(regex_str: &str) -> String {
+        let mut result = String::with_capacity(regex_str.len());
+        let mut last_was_escape = false;
+        for c in regex_str.chars() {
+            if last_was_escape && c.is_ascii_digit() {
+                result.push_str("<placeholder>");
+            } else if last_was_escape {
+                result.push('\\');
+                result.push(c);
+            } else if c != '\\' {
+                result.push(c);
+            }
+            last_was_escape = c == '\\' && !last_was_escape;
+        }
+        if last_was_escape {
+            result.push('\\');
+        }
+        result
+    }
+
+    /// Every pattern syntect will compile must compile under the backend this
+    /// crate ships with — raw for ordinary patterns, after back-reference
+    /// placeholder substitution for capture patterns (matching syntect's own
+    /// YAML-loader validation). Guards `assets/syntaxes.bin` regressions: a
+    /// pattern failing here is a deferred runtime panic (syntect `regex.rs`
+    /// "regex string should be pre-tested"). Regenerate the dump with
+    /// `examples/sanitize_syntaxes.rs` when this fails.
     #[test]
     fn shipped_syntax_set_compiles_under_active_regex_backend() {
         use syntect::parsing::{Regex, SyntaxSet, syntax_definition::Pattern};
@@ -321,10 +353,15 @@ mod tests {
             }
             for context in syntax.contexts.values() {
                 for pattern in &context.patterns {
-                    if let Pattern::Match(pattern) = pattern
-                        && !pattern.has_captures
-                        && let Some(err) = Regex::try_compile(pattern.regex.regex_str())
-                    {
+                    let Pattern::Match(pattern) = pattern else {
+                        continue;
+                    };
+                    let probe = if pattern.has_captures {
+                        substitute_backrefs(pattern.regex.regex_str())
+                    } else {
+                        pattern.regex.regex_str().to_string()
+                    };
+                    if let Some(err) = Regex::try_compile(&probe) {
                         failures.push(format!("{}: {err}", syntax.name));
                     }
                 }
@@ -339,11 +376,15 @@ mod tests {
 
     /// Regression: this exact snippet used to panic syntect through a lazy
     /// compile of an Oniguruma-only JavaScript (Babel) pattern, aborting the
-    /// app mid-render (double panic during unwind).
+    /// app mid-render (double panic during unwind). Calls the unguarded
+    /// parser directly so the `catch_unwind` fallback cannot mask a dirty
+    /// dump.
     #[test]
     fn jsx_arrow_function_highlights_without_panicking() {
         let src = "const f = async (a, b) => a + b;\n";
-        let runs = highlight_source(src, "jsx", &HighlightTheme::default_dark());
+        let syntax = syntax_for_name_or_extension("jsx").expect("jsx syntax");
+        assert_eq!(syntax.name, "JavaScript (Babel)");
+        let runs = highlight_with_syntect(src, syntax, &HighlightTheme::default_dark());
         assert!(!runs.is_empty());
         assert!(runs.iter().all(|(range, _)| range.end <= src.len()));
     }
