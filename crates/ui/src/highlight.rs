@@ -1,4 +1,10 @@
-use std::{ops::Range, path::Path, sync::LazyLock};
+use std::{
+    collections::HashSet,
+    ops::Range,
+    panic::{self, AssertUnwindSafe},
+    path::Path,
+    sync::{LazyLock, Mutex},
+};
 
 use gpui::HighlightStyle;
 use gpui_component::highlighter::HighlightTheme;
@@ -136,6 +142,16 @@ fn push_merged(
     runs.push((range, style));
 }
 
+/// Syntaxes whose parsing has panicked; they render unhighlighted afterwards.
+///
+/// syntect compiles each grammar regex lazily on first use and panics when one
+/// fails to compile, and its parser has further internal panic paths. A panic
+/// mid-render unwinds through GPUI's element tree and has crashed the app with
+/// a double panic (see `examples/sanitize_syntaxes.rs`), so a syntax that
+/// panicked once is never handed to syntect again in this process.
+static POISONED_SYNTAXES: LazyLock<Mutex<HashSet<&'static str>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 /// Highlight a complete source string, returning original UTF-8 byte ranges.
 pub(crate) fn highlight_source(
     src: &str,
@@ -148,7 +164,30 @@ pub(crate) fn highlight_source(
     let Some(syntax) = syntax_for_name_or_extension(lang) else {
         return vec![(0..src.len(), HighlightStyle::default())];
     };
+    let name = syntax.name.as_str();
+    if POISONED_SYNTAXES.lock().is_ok_and(|set| set.contains(name)) {
+        return vec![(0..src.len(), HighlightStyle::default())];
+    }
 
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        highlight_with_syntect(src, syntax, theme)
+    })) {
+        Ok(runs) => runs,
+        Err(_) => {
+            log::error!("syntect panicked highlighting {name:?}; disabling it for this session");
+            if let Ok(mut set) = POISONED_SYNTAXES.lock() {
+                set.insert(name);
+            }
+            vec![(0..src.len(), HighlightStyle::default())]
+        }
+    }
+}
+
+fn highlight_with_syntect(
+    src: &str,
+    syntax: &SyntaxReference,
+    theme: &HighlightTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut parse_state = ParseState::new(syntax);
     let mut scope_stack = ScopeStack::new();
     let mut runs = Vec::new();
@@ -259,6 +298,54 @@ mod tests {
             syntax_for_name_or_extension("jsx").map(|syntax| syntax.name.as_str()),
             Some("JavaScript (Babel)")
         );
+    }
+
+    /// Every pattern syntect will compile from the raw string must compile
+    /// under the backend this crate ships with. Guards `assets/syntaxes.bin`
+    /// regressions: a pattern failing here is a deferred runtime panic
+    /// (syntect `regex.rs` "regex string should be pre-tested"). Regenerate
+    /// the dump with `examples/sanitize_syntaxes.rs` when this fails.
+    #[test]
+    fn shipped_syntax_set_compiles_under_active_regex_backend() {
+        use syntect::parsing::{Regex, SyntaxSet, syntax_definition::Pattern};
+
+        let set: SyntaxSet =
+            syntect::dumps::from_uncompressed_data(include_bytes!("../assets/syntaxes.bin"))
+                .expect("load shipped dump");
+        let mut failures = Vec::new();
+        for syntax in set.into_builder().syntaxes() {
+            if let Some(first_line) = &syntax.first_line_match
+                && let Some(err) = Regex::try_compile(first_line)
+            {
+                failures.push(format!("{}: first_line_match: {err}", syntax.name));
+            }
+            for context in syntax.contexts.values() {
+                for pattern in &context.patterns {
+                    if let Pattern::Match(pattern) = pattern
+                        && !pattern.has_captures
+                        && let Some(err) = Regex::try_compile(pattern.regex.regex_str())
+                    {
+                        failures.push(format!("{}: {err}", syntax.name));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "uncompilable patterns:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Regression: this exact snippet used to panic syntect through a lazy
+    /// compile of an Oniguruma-only JavaScript (Babel) pattern, aborting the
+    /// app mid-render (double panic during unwind).
+    #[test]
+    fn jsx_arrow_function_highlights_without_panicking() {
+        let src = "const f = async (a, b) => a + b;\n";
+        let runs = highlight_source(src, "jsx", &HighlightTheme::default_dark());
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(|(range, _)| range.end <= src.len()));
     }
 
     #[test]
