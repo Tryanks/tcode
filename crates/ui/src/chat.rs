@@ -3106,7 +3106,16 @@ impl Render for ChatView {
                             .get(index)
                             .cloned()
                             .unwrap_or_default(),
-                        active.timeline.entries[item.entry_range.clone()].to_vec(),
+                        // `entry_range` comes from `turn_items`, a snapshot
+                        // that can trail the live timeline by a frame (e.g.
+                        // adopting a running background thread whose timeline
+                        // is being re-folded), so it must not index blindly.
+                        active
+                            .timeline
+                            .entries
+                            .get(item.entry_range.clone())
+                            .map(<[_]>::to_vec)
+                            .unwrap_or_default(),
                     )
                 }) else {
                     return div().into_any_element();

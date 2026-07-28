@@ -1,4 +1,10 @@
-use std::{ops::Range, path::Path, sync::LazyLock};
+use std::{
+    collections::HashSet,
+    ops::Range,
+    panic::{self, AssertUnwindSafe},
+    path::Path,
+    sync::{LazyLock, Mutex, PoisonError},
+};
 
 use gpui::HighlightStyle;
 use gpui_component::highlighter::HighlightTheme;
@@ -136,6 +142,16 @@ fn push_merged(
     runs.push((range, style));
 }
 
+/// Syntaxes whose parsing has panicked; they render unhighlighted afterwards.
+///
+/// syntect compiles each grammar regex lazily on first use and panics when one
+/// fails to compile, and its parser has further internal panic paths. A panic
+/// mid-render unwinds through GPUI's element tree and has crashed the app with
+/// a double panic (see `examples/sanitize_syntaxes.rs`), so a syntax that
+/// panicked once is never handed to syntect again in this process.
+static POISONED_SYNTAXES: LazyLock<Mutex<HashSet<&'static str>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 /// Highlight a complete source string, returning original UTF-8 byte ranges.
 pub(crate) fn highlight_source(
     src: &str,
@@ -148,7 +164,37 @@ pub(crate) fn highlight_source(
     let Some(syntax) = syntax_for_name_or_extension(lang) else {
         return vec![(0..src.len(), HighlightStyle::default())];
     };
+    let name = syntax.name.as_str();
+    // `into_inner` keeps this failing closed: a poisoned set must disable
+    // highlighting for the recorded syntaxes, never re-run a panicking parse.
+    if POISONED_SYNTAXES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(name)
+    {
+        return vec![(0..src.len(), HighlightStyle::default())];
+    }
 
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        highlight_with_syntect(src, syntax, theme)
+    })) {
+        Ok(runs) => runs,
+        Err(_) => {
+            log::error!("syntect panicked highlighting {name:?}; disabling it for this session");
+            POISONED_SYNTAXES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(name);
+            vec![(0..src.len(), HighlightStyle::default())]
+        }
+    }
+}
+
+fn highlight_with_syntect(
+    src: &str,
+    syntax: &SyntaxReference,
+    theme: &HighlightTheme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut parse_state = ParseState::new(syntax);
     let mut scope_stack = ScopeStack::new();
     let mut runs = Vec::new();
@@ -259,6 +305,88 @@ mod tests {
             syntax_for_name_or_extension("jsx").map(|syntax| syntax.name.as_str()),
             Some("JavaScript (Babel)")
         );
+    }
+
+    /// Mirror of syntect's private `substitute_backrefs_in_regex` with the
+    /// placeholder substituter its YAML loader validates patterns with; kept
+    /// in sync with `examples/sanitize_syntaxes.rs`.
+    fn substitute_backrefs(regex_str: &str) -> String {
+        let mut result = String::with_capacity(regex_str.len());
+        let mut last_was_escape = false;
+        for c in regex_str.chars() {
+            if last_was_escape && c.is_ascii_digit() {
+                result.push_str("<placeholder>");
+            } else if last_was_escape {
+                result.push('\\');
+                result.push(c);
+            } else if c != '\\' {
+                result.push(c);
+            }
+            last_was_escape = c == '\\' && !last_was_escape;
+        }
+        if last_was_escape {
+            result.push('\\');
+        }
+        result
+    }
+
+    /// Every pattern syntect will compile must compile under the backend this
+    /// crate ships with — raw for ordinary patterns, after back-reference
+    /// placeholder substitution for capture patterns (matching syntect's own
+    /// YAML-loader validation). Guards `assets/syntaxes.bin` regressions: a
+    /// pattern failing here is a deferred runtime panic (syntect `regex.rs`
+    /// "regex string should be pre-tested"). Regenerate the dump with
+    /// `examples/sanitize_syntaxes.rs` when this fails.
+    #[test]
+    fn shipped_syntax_set_compiles_under_active_regex_backend() {
+        use syntect::parsing::{Regex, SyntaxSet, syntax_definition::Pattern};
+
+        let set: SyntaxSet =
+            syntect::dumps::from_uncompressed_data(include_bytes!("../assets/syntaxes.bin"))
+                .expect("load shipped dump");
+        let mut failures = Vec::new();
+        for syntax in set.into_builder().syntaxes() {
+            if let Some(first_line) = &syntax.first_line_match
+                && let Some(err) = Regex::try_compile(first_line)
+            {
+                failures.push(format!("{}: first_line_match: {err}", syntax.name));
+            }
+            for context in syntax.contexts.values() {
+                for pattern in &context.patterns {
+                    let Pattern::Match(pattern) = pattern else {
+                        continue;
+                    };
+                    let probe = if pattern.has_captures {
+                        substitute_backrefs(pattern.regex.regex_str())
+                    } else {
+                        pattern.regex.regex_str().to_string()
+                    };
+                    if let Some(err) = Regex::try_compile(&probe) {
+                        failures.push(format!("{}: {err}", syntax.name));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "uncompilable patterns:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Regression: this exact snippet used to panic syntect through a lazy
+    /// compile of an Oniguruma-only JavaScript (Babel) pattern, aborting the
+    /// app mid-render (double panic during unwind). Calls the unguarded
+    /// parser directly so the `catch_unwind` fallback cannot mask a dirty
+    /// dump.
+    #[test]
+    fn jsx_arrow_function_highlights_without_panicking() {
+        let src = "const f = async (a, b) => a + b;\n";
+        let syntax = syntax_for_name_or_extension("jsx").expect("jsx syntax");
+        assert_eq!(syntax.name, "JavaScript (Babel)");
+        let runs = highlight_with_syntect(src, syntax, &HighlightTheme::default_dark());
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(|(range, _)| range.end <= src.len()));
     }
 
     #[test]
