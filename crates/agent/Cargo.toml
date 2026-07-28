@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agent-client-protocol = { version = "1.2", features = [
+agent-client-protocol = { version = "2.0", features = [
     "unstable_auth_methods",
     "unstable_end_turn_token_usage",
 ] }
