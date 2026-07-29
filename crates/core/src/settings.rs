@@ -113,6 +113,25 @@ pub struct ProviderSettings {
     pub hidden_models: Vec<String>,
 }
 
+/// Serializable edits the UI can make to one provider profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProfileSettingsPatch {
+    SetEnabled {
+        enabled: bool,
+    },
+    ReplaceConfiguration {
+        display_name: Option<String>,
+        accent_color: Option<String>,
+        env: Vec<EnvVar>,
+        binary_path: Option<PathBuf>,
+        home_path: Option<PathBuf>,
+        launch_args: Option<String>,
+        custom_models: Vec<String>,
+        hidden_models: Vec<String>,
+    },
+}
+
 fn default_true() -> bool {
     true
 }

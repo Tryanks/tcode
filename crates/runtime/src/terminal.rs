@@ -2,6 +2,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use tcode_core::ui::TerminalSplitDirection;
+
 pub const MAX_TERMINALS_PER_SESSION: usize = 6;
 
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.
@@ -9,12 +11,6 @@ pub const MAX_TERMINALS_PER_SESSION: usize = 6;
 /// caches from aliasing two conversations whose first local tab would both be
 /// `1`.
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalSplitDirection {
-    Horizontal,
-    Vertical,
-}
 
 pub struct TerminalEntry {
     pub id: u64,

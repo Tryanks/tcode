@@ -10,13 +10,14 @@ use agent::{
     AgentEvent, ApprovalRequest, ChangeCompleteness, DeltaKind, FileChange, ItemContent,
     ItemStatus, PlanStep, ResumeCursor, ThreadItem, TokenUsage, TurnStatus, UserInputQuestion,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::git::merge_file_changes_by_path;
 
 /// A local review note attached to a range in the diff panel. These live in
 /// the composer draft until the next send; they are never written to session
 /// history as separate events.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub file: String,
     pub line_start: u32,
@@ -30,7 +31,8 @@ pub struct ReviewComment {
     pub(crate) end_index: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReviewSide {
     Old,
     New,

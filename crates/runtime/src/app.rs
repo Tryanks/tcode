@@ -16,7 +16,7 @@ use gpui::{BackgroundExecutor, Context, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
 use crate::blocking::unblock;
-use tcode_core::acp::InstalledAcpAgent as InstalledAgent;
+use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::git::{
     GitAction, GitFileEntry, GitStatus, MenuItem, QuickAction, build_commit_prompt, menu_items,
     quick_action, sanitize_commit_message,
@@ -35,9 +35,10 @@ use tcode_core::session::{
     plan_title,
 };
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProjectSort, ProviderProfile,
-    ProviderSettings, ResolvedProfile, Settings, provider_label,
+    ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProfileSettingsPatch, ProjectSort,
+    ProviderProfile, ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
+pub use tcode_core::ui::{RightTab, WorkspaceMode};
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
@@ -347,16 +348,6 @@ impl ConversationDestination {
             Self::ProjectDraft(id) => format!("draft:{id}"),
         }
     }
-}
-
-/// Which tab the right-side panel shows (it hosts the diff view and the
-/// plan/task view). Cached per conversation destination, in memory only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RightTab {
-    #[default]
-    Diff,
-    Plan,
-    Preview,
 }
 
 /// One-shot request from a changed-file row to focus that file in a turn diff.
@@ -947,17 +938,6 @@ pub struct ProviderVersionStatus {
     pub updating: bool,
     /// How the binary was installed (drives the update command).
     pub install_source: InstallSource,
-}
-
-/// The workspace a draft thread will run in (Group C): the project checkout, or
-/// a new dedicated git worktree branched from `base`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum WorkspaceMode {
-    #[default]
-    LocalCheckout,
-    NewWorktree {
-        base: String,
-    },
 }
 
 pub struct AppState {
@@ -2299,21 +2279,43 @@ impl AppState {
         parse_hex_color(&self.profile_settings(id).accent_color?)
     }
 
-    /// Persist a mutation to one profile's card settings, routing built-in ids to
-    /// their `providers` card and user ids to the `profiles` map.
+    /// Apply a serializable edit to one profile's card settings, routing built-in
+    /// ids to their `providers` card and user ids to the `profiles` map.
     pub fn update_profile_settings(
         &mut self,
         id: &str,
-        mutate: impl FnOnce(&mut ProviderSettings),
+        patch: ProfileSettingsPatch,
         cx: &mut Context<Self>,
     ) {
         let mut settings = self.settings.clone();
-        if let Some(kind) = Settings::builtin_kind_from_id(id) {
-            mutate(settings.provider_mut(kind));
+        let target = if let Some(kind) = Settings::builtin_kind_from_id(id) {
+            settings.provider_mut(kind)
         } else if let Some(profile) = settings.profiles.get_mut(id) {
-            mutate(&mut profile.settings);
+            &mut profile.settings
         } else {
             return;
+        };
+        match patch {
+            ProfileSettingsPatch::SetEnabled { enabled } => target.enabled = enabled,
+            ProfileSettingsPatch::ReplaceConfiguration {
+                display_name,
+                accent_color,
+                env,
+                binary_path,
+                home_path,
+                launch_args,
+                custom_models,
+                hidden_models,
+            } => {
+                target.display_name = display_name;
+                target.accent_color = accent_color;
+                target.env = env;
+                target.binary_path = binary_path;
+                target.home_path = home_path;
+                target.launch_args = launch_args;
+                target.custom_models = custom_models;
+                target.hidden_models = hidden_models;
+            }
         }
         self.update_settings(settings, cx);
     }
@@ -3229,14 +3231,15 @@ impl AppState {
     }
 
     /// Update one installed ACP agent in place (enable switch, env rows, args).
-    pub fn update_acp_agent(
-        &mut self,
-        id: &str,
-        edit: impl FnOnce(&mut InstalledAgent),
-        cx: &mut Context<Self>,
-    ) {
+    pub fn update_acp_agent(&mut self, id: &str, patch: AcpAgentPatch, cx: &mut Context<Self>) {
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
-            edit(agent);
+            match patch {
+                AcpAgentPatch::SetEnabled { enabled } => agent.enabled = enabled,
+                AcpAgentPatch::SetLaunchOptions { env, launch_args } => {
+                    agent.env = env;
+                    agent.launch_args = launch_args;
+                }
+            }
             let settings = self.settings.clone();
             self.enqueue_settings(&settings, cx);
             cx.notify();
