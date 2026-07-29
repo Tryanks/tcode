@@ -7,13 +7,14 @@ use tcode_core::{
     project::{SessionMeta, WorktreeInfo},
     provider_models::ResolvedModel,
     provider_status::ProviderSnapshot,
-    session::Timeline,
+    session::{ReviewComment, Timeline},
     settings::{ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
 use tcode_protocol::Command;
 use tcode_runtime::{
-    app::{AppState, ProjectGroup, ProviderVersionStatus},
-    ui_facade::{AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, RecentDir},
+    app::{AppState, ProjectGroup, ProviderVersionStatus, QueuedMessage},
+    terminal::TerminalContext,
+    ui_facade::{AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, PathEntry, RecentDir},
 };
 
 use crate::{composer::Composer, terminal_drawer::TerminalDrawer, window_state::WindowState};
@@ -32,6 +33,22 @@ pub enum ForkAvailability {
     Unsupported,
     Empty,
     Running,
+}
+
+pub(crate) struct ComposerCheckoutState {
+    pub branch: String,
+    pub branches: Vec<String>,
+    pub turn_running: bool,
+    pub is_draft: bool,
+    pub worktree_base: Option<String>,
+    pub worktree: Option<WorktreeInfo>,
+}
+
+pub(crate) struct ComposerActiveModel {
+    pub provider: agent::ProviderKind,
+    pub model: Option<String>,
+    pub acp_agent_id: Option<String>,
+    pub profile_id: Option<String>,
 }
 
 impl WorkspaceStore {
@@ -498,6 +515,223 @@ impl WorkspaceStore {
             .map(|active| read(&active.timeline))
     }
 
+    pub fn with_composer_destination<R>(
+        &self,
+        cx: &App,
+        read: impl FnOnce(bool, &str, Option<&str>) -> R,
+    ) -> Option<R> {
+        self.app.read(cx).active.as_ref().map(|active| {
+            read(
+                active.draft,
+                &active.meta.id,
+                active.meta.project_id.as_deref(),
+            )
+        })
+    }
+
+    pub fn composer_has_active_session(&self, cx: &App) -> bool {
+        self.app.read(cx).active.is_some()
+    }
+
+    pub fn take_native_rewind_prefill(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        self.app
+            .update(cx, |app, _| app.take_native_rewind_prefill())
+    }
+
+    pub fn composer_terminal_contexts(&self, cx: &App) -> Vec<TerminalContext> {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| active.terminal_workspace.contexts.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn composer_review_comments(&self, cx: &App) -> Vec<ReviewComment> {
+        self.app.read(cx).review_comments().to_vec()
+    }
+
+    pub fn composer_relay_confirmation(&self, cx: &App) -> Option<(String, String)> {
+        self.app.read(cx).relay_confirmation()
+    }
+
+    pub fn composer_active_cwd(&self, cx: &App) -> Option<PathBuf> {
+        self.app.read(cx).active_cwd()
+    }
+
+    pub fn list_active_workspace(&self, cx: &App) -> Task<Vec<PathEntry>> {
+        self.app
+            .read(cx)
+            .list_active_workspace(cx.background_executor())
+    }
+
+    pub fn composer_provider_commands(&self, cx: &App) -> Vec<agent::ProviderCommand> {
+        self.app.read(cx).active_provider_commands().to_vec()
+    }
+
+    pub fn composer_attachments_dir(&self, cx: &App) -> Option<PathBuf> {
+        self.app.read(cx).attachments_dir()
+    }
+
+    pub fn save_attachment_to_dir(
+        dir: &std::path::Path,
+        bytes: &[u8],
+        ext: &str,
+    ) -> std::io::Result<PathBuf> {
+        AppState::save_attachment_to_dir(dir, bytes, ext)
+    }
+
+    pub fn remove_user_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        tcode_runtime::ui_facade::remove_user_file(path)
+    }
+
+    pub fn composer_pending_user_input(
+        &self,
+        cx: &App,
+    ) -> Option<(String, Vec<agent::UserInputQuestion>)> {
+        self.with_active_timeline(cx, |timeline| timeline.pending_user_input.clone())
+            .flatten()
+    }
+
+    pub(crate) fn composer_active_model(&self, cx: &App) -> Option<ComposerActiveModel> {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| ComposerActiveModel {
+                provider: active.meta.provider,
+                model: active.meta.model.clone(),
+                acp_agent_id: active.meta.acp_agent_id.clone(),
+                profile_id: active.meta.profile_id.clone(),
+            })
+    }
+
+    pub fn composer_picker_models(
+        &self,
+        provider: agent::ProviderKind,
+        cx: &App,
+    ) -> Vec<ResolvedModel> {
+        self.app.read(cx).picker_models(provider)
+    }
+
+    pub fn composer_models_loading(&self, provider: agent::ProviderKind, cx: &App) -> bool {
+        self.app.read(cx).models_loading(provider)
+    }
+
+    pub fn composer_model_pending_restart(&self, cx: &App) -> bool {
+        self.app.read(cx).model_pending_restart()
+    }
+
+    pub fn composer_active_model_spec(&self, cx: &App) -> Option<agent::ModelSpec> {
+        self.app.read(cx).active_model_spec()
+    }
+
+    pub fn composer_active_option_descriptors(&self, cx: &App) -> Vec<agent::OptionDescriptor> {
+        self.app.read(cx).active_option_descriptors()
+    }
+
+    pub fn composer_active_option_selections(&self, cx: &App) -> Vec<agent::OptionSelection> {
+        self.app.read(cx).active_option_selections()
+    }
+
+    pub fn composer_ultrathink_armed(&self, cx: &App) -> bool {
+        self.app.read(cx).ultrathink_armed()
+    }
+
+    pub fn composer_options_pending_restart(&self, cx: &App) -> bool {
+        self.app.read(cx).options_pending_restart()
+    }
+
+    pub fn composer_interaction_mode(&self, cx: &App) -> agent::InteractionMode {
+        self.app.read(cx).active_interaction_mode()
+    }
+
+    pub fn composer_context(
+        &self,
+        cx: &App,
+    ) -> (Option<agent::TokenUsage>, Option<agent::ProviderKind>) {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .map_or((None, None), |active| {
+                (active.timeline.usage, Some(active.meta.provider))
+            })
+    }
+
+    pub fn composer_approval_mode(&self, cx: &App) -> agent::ApprovalMode {
+        self.app.read(cx).active_approval_mode()
+    }
+
+    pub fn composer_approval_pending_restart(&self, cx: &App) -> bool {
+        self.app.read(cx).approval_pending_restart()
+    }
+
+    pub fn composer_queue(&self, cx: &App) -> Option<(Vec<QueuedMessage>, bool, &'static str)> {
+        self.app.read(cx).active.as_ref().map(|active| {
+            (
+                active.queued().to_vec(),
+                active.supports_steering(),
+                active.meta.provider.display_name(),
+            )
+        })
+    }
+
+    pub fn composer_supports_steering(&self, cx: &App) -> bool {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .is_some_and(|active| active.supports_steering())
+    }
+
+    pub fn composer_preparing_worktree(&self, cx: &App) -> bool {
+        self.app.read(cx).preparing_worktree()
+    }
+
+    pub fn composer_plan_ready_markdown(&self, cx: &App) -> Option<String> {
+        self.app.read(cx).plan_ready_markdown()
+    }
+
+    pub(crate) fn composer_checkout_state(&self, cx: &App) -> Option<ComposerCheckoutState> {
+        let app = self.app.read(cx);
+        let active = app.active.as_ref()?;
+        let branch = active.git_branch.clone().or_else(|| {
+            active
+                .meta
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.branch.clone())
+        })?;
+        let worktree_base = match app.draft_workspace_mode() {
+            Some(tcode_core::ui::WorkspaceMode::NewWorktree { base }) => Some(base),
+            _ => None,
+        };
+        Some(ComposerCheckoutState {
+            branch,
+            branches: active.branches.clone(),
+            turn_running: active.timeline.turn_running,
+            is_draft: active.draft,
+            worktree_base,
+            worktree: active.meta.worktree.clone(),
+        })
+    }
+
+    pub fn composer_render_state(&self, cx: &App) -> (bool, Option<agent::ApprovalRequest>, usize) {
+        self.with_active_timeline(cx, |timeline| {
+            (
+                timeline.turn_running,
+                timeline.pending_approvals.first().cloned(),
+                timeline.pending_approvals.len(),
+            )
+        })
+        .unwrap_or((false, None, 0))
+    }
+
+    pub fn composer_is_favorite_model(&self, model: &str, cx: &App) -> bool {
+        self.app.read(cx).is_favorite_model(model)
+    }
+
     pub fn chat_active_session(&self, cx: &App) -> Option<(String, PathBuf, bool)> {
         self.app.read(cx).active.as_ref().map(|active| {
             (
@@ -581,8 +815,7 @@ impl WorkspaceStore {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Composer> {
-        let app = store.read(cx).app.clone();
-        cx.new(|cx| Composer::new(app, window_state, window, cx))
+        cx.new(|cx| Composer::new(store, window_state, window, cx))
     }
 
     pub(crate) fn new_terminal_drawer(store: Entity<Self>, cx: &mut App) -> Entity<TerminalDrawer> {

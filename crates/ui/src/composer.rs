@@ -41,10 +41,13 @@ use crate::context_meter;
 use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::shortcut::format_secondary_shortcut;
+use crate::store::WorkspaceStore;
 use crate::window_state::WindowState;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
-use tcode_runtime::app::{AppState, WorkspaceMode, mime_from_path};
+use tcode_core::ui::WorkspaceMode;
+use tcode_protocol::Command;
+use tcode_runtime::app::mime_from_path;
 use tcode_runtime::ui_facade::PathEntry;
 
 /// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
@@ -109,9 +112,10 @@ fn provider_short(provider: ProviderKind) -> &'static str {
 
 /// The provider glyph tinted with the accent configured on its Settings →
 /// Providers card, falling back to the provider's own brand tint.
-fn tinted_provider_glyph(provider: ProviderKind, app_state: &AppState) -> Icon {
+fn tinted_provider_glyph(provider: ProviderKind, store: &WorkspaceStore, cx: &App) -> Icon {
     let glyph = provider_glyph(provider);
-    match app_state.provider_accent(provider) {
+    let profile_id = tcode_core::settings::Settings::builtin_profile_id(provider);
+    match store.provider_profile_accent(profile_id, cx) {
         Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,
     }
@@ -119,9 +123,9 @@ fn tinted_provider_glyph(provider: ProviderKind, app_state: &AppState) -> Icon {
 
 /// A profile's rail glyph: the kind's glyph tinted with the profile's own accent
 /// (so a third-party profile can be told apart from the built-in at a glance).
-fn tinted_profile_glyph(profile_id: &str, app_state: &AppState) -> Icon {
-    let glyph = provider_glyph(app_state.profile_kind(profile_id));
-    match app_state.profile_accent(profile_id) {
+fn tinted_profile_glyph(profile_id: &str, store: &WorkspaceStore, cx: &App) -> Icon {
+    let glyph = provider_glyph(store.provider_profile_kind(profile_id, cx));
+    match store.provider_profile_accent(profile_id, cx) {
         Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,
     }
@@ -409,7 +413,7 @@ fn transcode_image_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
 }
 
 pub struct Composer {
-    app_state: Entity<AppState>,
+    workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     input: Entity<InputState>,
     /// Dedicated free-form answer field shown inside an agent question card.
@@ -478,7 +482,7 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     pub fn new(
-        app_state: Entity<AppState>,
+        workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -502,7 +506,7 @@ impl Composer {
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
             // skills feed arrives after session start, feeding the `/`+`$` menus).
-            cx.observe(&app_state, |_, _, cx| cx.notify()),
+            cx.observe(&workspace_store, |_, _, cx| cx.notify()),
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
                 match event {
                     InputEvent::PressEnter {
@@ -553,7 +557,7 @@ impl Composer {
         ];
 
         Self {
-            app_state,
+            workspace_store,
             window_state,
             input,
             user_input_custom,
@@ -589,13 +593,11 @@ impl Composer {
     /// is updated before `set_value`, so the resulting recursive Change event
     /// cannot be attributed to the destination being left.
     fn sync_text_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let destination = self.app_state.read(cx).active.as_ref().and_then(|active| {
-            composer_destination(
-                active.draft,
-                &active.meta.id,
-                active.meta.project_id.as_deref(),
-            )
-        });
+        let destination = self
+            .workspace_store
+            .read(cx)
+            .with_composer_destination(cx, composer_destination)
+            .flatten();
         let outgoing_text = self.input.read(cx).value().to_string();
         let Some(incoming_text) = self.text_cache.switch_to(destination, &outgoing_text) else {
             return;
@@ -613,8 +615,8 @@ impl Composer {
     /// can edit or resend it; no inline transcript editor is involved.
     fn sync_native_rewind_prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prefill = self
-            .app_state
-            .update(cx, |state, _| state.take_native_rewind_prefill());
+            .workspace_store
+            .update(cx, |store, cx| store.take_native_rewind_prefill(cx));
         let Some(prefill) = prefill else {
             return;
         };
@@ -639,12 +641,20 @@ impl Composer {
         if compose.is_none() && image.is_none() {
             // Nothing to seed, but only latch once a session exists so the seed
             // survives the initial empty frame.
-            if self.app_state.read(cx).active.is_some() {
+            if self
+                .workspace_store
+                .read(cx)
+                .composer_has_active_session(cx)
+            {
                 self.debug_applied = true;
             }
             return;
         }
-        if self.app_state.read(cx).active.is_none() {
+        if !self
+            .workspace_store
+            .read(cx)
+            .composer_has_active_session(cx)
+        {
             return;
         }
         self.debug_applied = true;
@@ -668,18 +678,21 @@ impl Composer {
     fn has_sendable_content(&self, cx: &App) -> bool {
         !self.input.read(cx).value().trim().is_empty()
             || !self.pending_images.is_empty()
-            || self
-                .app_state
+            || !self
+                .workspace_store
                 .read(cx)
-                .active
-                .as_ref()
-                .is_some_and(|active| !active.terminal_workspace.contexts.is_empty())
-            || !self.app_state.read(cx).review_comments().is_empty()
+                .composer_terminal_contexts(cx)
+                .is_empty()
+            || !self
+                .workspace_store
+                .read(cx)
+                .composer_review_comments(cx)
+                .is_empty()
     }
 
     /// Send the composer's contents. `steer` is set by the ⌘/Ctrl+Enter gesture:
     /// inject into the running turn rather than queue behind it. It is a no-op
-    /// when no turn is running (`AppState::steer` just sends), and degrades to
+    /// when no turn is running (steering just sends), and degrades to
     /// queueing (with a notice) on providers that cannot steer.
     fn submit(
         &mut self,
@@ -696,17 +709,15 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        let terminal_contexts = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .map(|active| active.terminal_workspace.contexts.clone())
-            .unwrap_or_default();
+        let terminal_contexts = self.workspace_store.read(cx).composer_terminal_contexts(cx);
         if !self.has_sendable_content(cx) {
             return;
         }
-        if self.app_state.read(cx).active.is_none() {
+        if !self
+            .workspace_store
+            .read(cx)
+            .composer_has_active_session(cx)
+        {
             window.push_notification(
                 Notification::info(tcode_i18n::tr!("composer.no_session")),
                 cx,
@@ -721,11 +732,21 @@ impl Composer {
             self.text_cache.clear_current();
             input.update(cx, |state, cx| state.set_value("", window, cx));
             match command {
-                SlashCommand::Plan => self.app_state.update(cx, |state, cx| {
-                    state.set_interaction_mode(InteractionMode::Plan, cx)
+                SlashCommand::Plan => self.workspace_store.update(cx, |store, cx| {
+                    store.dispatch(
+                        Command::SetInteractionMode {
+                            mode: InteractionMode::Plan,
+                        },
+                        cx,
+                    )
                 }),
-                SlashCommand::Default => self.app_state.update(cx, |state, cx| {
-                    state.set_interaction_mode(InteractionMode::Build, cx)
+                SlashCommand::Default => self.workspace_store.update(cx, |store, cx| {
+                    store.dispatch(
+                        Command::SetInteractionMode {
+                            mode: InteractionMode::Build,
+                        },
+                        cx,
+                    )
                 }),
                 SlashCommand::Model => {
                     self.model_picker_token = self.model_picker_token.wrapping_add(1);
@@ -742,7 +763,11 @@ impl Composer {
             .iter()
             .map(|image| image.path.clone())
             .collect::<Vec<_>>();
-        if let Some((from, to)) = self.app_state.read(cx).relay_confirmation() {
+        if let Some((from, to)) = self
+            .workspace_store
+            .read(cx)
+            .composer_relay_confirmation(cx)
+        {
             let composer = cx.entity();
             let input = input.clone();
             window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -811,16 +836,29 @@ impl Composer {
         self.pending_images.clear();
         self.image_load_generation = self.image_load_generation.wrapping_add(1);
         self.pending_image_loads = 0;
-        self.app_state.update(cx, |state, cx| {
-            if relay {
-                state.confirm_relay_and_send(sent_text, attachment_paths, cx)
+        self.workspace_store.update(cx, |store, cx| {
+            let command = if relay {
+                Command::ConfirmRelayAndSend {
+                    text: sent_text,
+                    attachment_paths,
+                }
             } else if orchestrate {
-                state.orchestrate_turn(sent_text, attachment_paths, cx)
+                Command::OrchestrateTurn {
+                    text: sent_text,
+                    attachment_paths,
+                }
             } else if steer {
-                state.steer(sent_text, attachment_paths, cx)
+                Command::Steer {
+                    text: sent_text,
+                    attachment_paths,
+                }
             } else {
-                state.send_turn(sent_text, attachment_paths, cx)
-            }
+                Command::SendTurn {
+                    text: sent_text,
+                    attachment_paths,
+                }
+            };
+            store.dispatch(command, cx);
         });
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
@@ -859,17 +897,14 @@ impl Composer {
     /// Load the workspace file/folder listing for the active session cwd in the
     /// background (gitignore-respected), the first time a mention menu opens.
     fn ensure_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(cwd) = self.app_state.read(cx).active_cwd() else {
+        let Some(cwd) = self.workspace_store.read(cx).composer_active_cwd(cx) else {
             return;
         };
         if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
             return;
         }
         self.workspace_loading = true;
-        let walked = self
-            .app_state
-            .read(cx)
-            .list_active_workspace(cx.background_executor());
+        let walked = self.workspace_store.read(cx).list_active_workspace(cx);
         cx.spawn(async move |this, cx| {
             let walked = walked.await;
             let _ = this.update(cx, |this, cx| {
@@ -918,24 +953,20 @@ impl Composer {
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // fuzzily filtered by the `$` query with no item cap.
-                let state = self.app_state.read(cx);
-                let rows = filter_provider_commands(
-                    state.active_provider_commands(),
-                    ProviderCommandKind::Skill,
-                    &trigger.query,
-                )
-                .into_iter()
-                .map(|c| MenuRow {
-                    primary: format!("${}", c.name),
-                    secondary: c
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| tcode_i18n::tr!("composer.run_skill").into_owned()),
-                    icon: MenuIcon::Skill,
-                    accept: MenuAccept::InsertSkill(c.name.clone()),
-                    group: Some("composer.group_skills"),
-                })
-                .collect();
+                let commands = self.workspace_store.read(cx).composer_provider_commands(cx);
+                let rows =
+                    filter_provider_commands(&commands, ProviderCommandKind::Skill, &trigger.query)
+                        .into_iter()
+                        .map(|c| MenuRow {
+                            primary: format!("${}", c.name),
+                            secondary: c.description.clone().unwrap_or_else(|| {
+                                tcode_i18n::tr!("composer.run_skill").into_owned()
+                            }),
+                            icon: MenuIcon::Skill,
+                            accept: MenuAccept::InsertSkill(c.name.clone()),
+                            group: Some("composer.group_skills"),
+                        })
+                        .collect();
                 (
                     rows,
                     tcode_i18n::tr!("composer.no_skills").into_owned(),
@@ -987,10 +1018,10 @@ impl Composer {
                     .collect();
                 // Provider-native slash commands (Claude `slash_commands`), shown
                 // after the built-in group, fuzzily filtered without truncation.
-                let state = self.app_state.read(cx);
+                let commands = self.workspace_store.read(cx).composer_provider_commands(cx);
                 rows.extend(
                     filter_provider_commands(
-                        state.active_provider_commands(),
+                        &commands,
                         ProviderCommandKind::Command,
                         &trigger.query,
                     )
@@ -1049,8 +1080,9 @@ impl Composer {
             MenuAccept::SetMode(mode) => {
                 let mode = *mode;
                 self.replace_trigger("", window, cx);
-                self.app_state
-                    .update(cx, |state, cx| state.set_interaction_mode(mode, cx));
+                self.workspace_store.update(cx, |store, cx| {
+                    store.dispatch(Command::SetInteractionMode { mode }, cx)
+                });
             }
         }
         self.active_trigger = None;
@@ -1063,11 +1095,7 @@ impl Composer {
     /// Reset the thumbnail strip when the active session changes (its pending
     /// images belong to a specific session).
     fn sync_images_session(&mut self, cx: &mut Context<Self>) {
-        let id = self
-            .app_state
-            .read(cx)
-            .active_session_id()
-            .map(str::to_string);
+        let id = self.workspace_store.read(cx).active_session_id(cx);
         if id != self.images_session {
             self.images_session = id;
             self.pending_images.clear();
@@ -1100,12 +1128,8 @@ impl Composer {
             window.push_notification(Notification::error(attach_error_message(&err)), cx);
             return false;
         }
-        let session_id = self
-            .app_state
-            .read(cx)
-            .active_session_id()
-            .map(str::to_string);
-        let attachments_dir = self.app_state.read(cx).attachments_dir();
+        let session_id = self.workspace_store.read(cx).active_session_id(cx);
+        let attachments_dir = self.workspace_store.read(cx).composer_attachments_dir(cx);
         let current_count = self.pending_images.len() + self.pending_image_loads;
         self.pending_image_loads += 1;
         let generation = self.image_load_generation;
@@ -1144,13 +1168,14 @@ impl Composer {
                     ))
                 })?;
                 let ext = image_extension(&mime, &name);
-                AppState::save_attachment_to_dir(&dir, &bytes, &ext).map_err(AddImageError::Persist)
+                WorkspaceStore::save_attachment_to_dir(&dir, &bytes, &ext)
+                    .map_err(AddImageError::Persist)
             })
             .await;
             let _ = this.update_in(cx, |composer, window, cx| {
                 if composer.image_load_generation != generation
                     || composer.images_session != session_id
-                    || composer.app_state.read(cx).active_session_id() != session_id.as_deref()
+                    || composer.workspace_store.read(cx).active_session_id(cx) != session_id
                 {
                     return;
                 }
@@ -1240,18 +1265,19 @@ impl Composer {
     fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.pending_images.len() {
             let removed = self.pending_images.remove(index);
-            let _ = tcode_runtime::ui_facade::remove_user_file(&removed.path);
+            let _ = self
+                .workspace_store
+                .read(cx)
+                .remove_user_file(&removed.path);
             cx.notify();
         }
     }
 
     /// The active session's pending user-input request, if any.
     fn pending_user_input(&self, cx: &App) -> Option<(String, Vec<UserInputQuestion>)> {
-        self.app_state
+        self.workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .and_then(|a| a.timeline.pending_user_input.clone())
+            .composer_pending_user_input(cx)
     }
 
     /// The rail the picker shows: an explicit user choice, else Favorites when
@@ -1281,33 +1307,31 @@ impl Composer {
 
     /// The model-picker button + popover (anchored above, ~360px).
     fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let app_state = self.app_state.read(cx);
-        let (provider, current_model, acp_agent_id, active_profile) = match &app_state.active {
-            Some(active) => (
-                active.meta.provider,
-                active.meta.model.clone(),
-                active.meta.acp_agent_id.clone(),
-                active.meta.profile_id.clone(),
-            ),
-            None => return div().into_any_element(),
+        let store = self.workspace_store.read(cx);
+        let Some(active_model) = store.composer_active_model(cx) else {
+            return div().into_any_element();
         };
-        let catalog = app_state.models_for(provider);
+        let provider = active_model.provider;
+        let current_model = active_model.model;
+        let acp_agent_id = active_model.acp_agent_id;
+        let active_profile = active_model.profile_id;
+        let catalog = store.provider_model_catalog(provider, cx);
         // The picker honors the provider card's Models section: hidden models
         // are gone, custom slugs are present, and the persisted order (plus
         // favorites-first) decides the sequence. When a third-party profile is
         // active, resolve against *its* card so its custom models are named.
         let resolved = match &active_profile {
-            Some(id) => app_state.picker_models_for_profile(id),
-            None => app_state.picker_models(provider),
+            Some(id) => store.picker_models_for_profile(id, cx),
+            None => store.composer_picker_models(provider, cx),
         };
-        let display = current_model_name_resolved(&resolved, catalog, current_model.as_deref());
+        let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
 
         // Build the filtered row list for the current frame. Favorites open
         // first when any exist (S1 §2).
         let query = self.model_search.read(cx).value().to_lowercase();
         let has_favorites = PICKER_PROVIDER_KINDS
             .into_iter()
-            .flat_map(|p| app_state.picker_models(p))
+            .flat_map(|p| store.composer_picker_models(p, cx))
             .any(|m| m.favorite);
         let rail = self.rail_for(
             provider,
@@ -1319,8 +1343,8 @@ impl Composer {
             PickerRail::Favorites => PICKER_PROVIDER_KINDS
                 .into_iter()
                 .flat_map(|p| {
-                    app_state
-                        .picker_models(p)
+                    store
+                        .composer_picker_models(p, cx)
                         .into_iter()
                         .filter(|m| m.favorite)
                         .map(move |m| ModelRow {
@@ -1336,11 +1360,11 @@ impl Composer {
             // built-in profiles show the official catalog; a third-party profile
             // (e.g. Klaude Kode → Kimi) shows only the models added to its card.
             PickerRail::Profile(id) => {
-                let kind = app_state.profile_kind(id);
+                let kind = store.provider_profile_kind(id, cx);
                 let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
                 let profile_id = id.clone();
-                app_state
-                    .picker_models_for_profile(id)
+                store
+                    .picker_models_for_profile(id, cx)
                     .into_iter()
                     .map(move |m| ModelRow {
                         id: m.id,
@@ -1353,13 +1377,12 @@ impl Composer {
             }
             // One row: "use this agent". Its models arrive as ProviderOptions
             // once the session starts and render in the traits picker.
-            PickerRail::Acp(id) => app_state
-                .settings
-                .acp_agent(id)
+            PickerRail::Acp(id) => store
+                .installed_acp_agent(id, cx)
                 .into_iter()
                 .map(|agent| ModelRow {
-                    id: agent.id.clone(),
-                    name: agent.name.clone(),
+                    id: agent.id,
+                    name: agent.name,
                     provider: ProviderKind::Acp,
                     profile_id: None,
                     acp: true,
@@ -1372,24 +1395,24 @@ impl Composer {
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
-        let loading = app_state.models_loading(provider)
+        let loading = store.composer_models_loading(provider, cx)
             && matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id))
             && rows.is_empty()
             && query.is_empty();
 
         let composer = cx.entity();
-        let app_entity = self.app_state.clone();
+        let store_entity = self.workspace_store.clone();
         let model_search = self.model_search.clone();
-        let pending_restart = app_state.model_pending_restart();
+        let pending_restart = store.composer_model_pending_restart(cx);
         // On an ACP rail the "selected" row is the agent itself.
         let selected = match provider {
             ProviderKind::Acp => acp_agent_id.clone(),
             _ => current_model.clone(),
         };
-        let acp_rail_agents: Vec<(String, String)> = app_state
-            .settings
-            .enabled_acp_agents()
+        let acp_rail_agents: Vec<(String, String)> = store
+            .settings_installed_acp_agents(cx)
             .into_iter()
+            .filter(|agent| agent.enabled)
             .map(|agent| (agent.id.clone(), agent.name.clone()))
             .collect();
 
@@ -1398,7 +1421,7 @@ impl Composer {
                 .gap_1p5()
                 .items_center()
                 .text_size(px(13.))
-                .child(tinted_provider_glyph(provider, app_state).small())
+                .child(tinted_provider_glyph(provider, store, cx).small())
                 .child(div().font_medium().child(display))
                 .child(
                     Icon::new(IconName::ChevronDown)
@@ -1417,7 +1440,7 @@ impl Composer {
             .trigger(trigger)
             .content(move |_state, _window, cx| {
                 let rows = rows.clone();
-                let app_entity = app_entity.clone();
+                let store_entity = store_entity.clone();
                 let model_search = model_search.clone();
                 let composer = composer.clone();
                 let selected = selected.clone();
@@ -1431,7 +1454,7 @@ impl Composer {
                     &acp_rail_agents,
                     pending_restart,
                     loading,
-                    &app_entity,
+                    &store_entity,
                     &model_search,
                     &composer,
                     &popover,
@@ -1444,15 +1467,15 @@ impl Composer {
     /// The traits chip ("High · 200k") + descriptor popover. Empty element when
     /// the current model has no descriptors.
     fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let app_state = self.app_state.read(cx);
+        let store = self.workspace_store.read(cx);
         // Native providers describe their options through the model catalog; ACP
         // agents push theirs over the wire (`AgentEvent::ProviderOptions`). Both
         // arrive as `OptionDescriptor`s and render through this one picker.
-        let descriptors = app_state.active_option_descriptors();
+        let descriptors = store.composer_active_option_descriptors(cx);
         if descriptors.is_empty() {
             return div().into_any_element();
         }
-        let spec = match app_state.active_model_spec() {
+        let spec = match store.composer_active_model_spec(cx) {
             Some(spec) => spec,
             None => ModelSpec {
                 id: String::new(),
@@ -1461,8 +1484,8 @@ impl Composer {
                 options: descriptors,
             },
         };
-        let selections = app_state.active_option_selections();
-        let ultrathink_armed = app_state.ultrathink_armed();
+        let selections = store.composer_active_option_selections(cx);
+        let ultrathink_armed = store.composer_ultrathink_armed(cx);
         let Some(label) = traits_chip_label(&spec, &selections, ultrathink_armed) else {
             return div().into_any_element();
         };
@@ -1475,7 +1498,7 @@ impl Composer {
             .value()
             .to_lowercase()
             .contains("ultrathink");
-        let pending_restart = app_state.options_pending_restart();
+        let pending_restart = store.composer_options_pending_restart(cx);
 
         let trigger = Button::new("traits-chip").ghost().compact().child(
             h_flex()
@@ -1487,7 +1510,7 @@ impl Composer {
                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
         );
 
-        let app_entity = self.app_state.clone();
+        let store_entity = self.workspace_store.clone();
         Popover::new("traits-popover")
             // T3 overlay contour (shadow_xl at the 14px overlay radius).
             .rounded(crate::material::radius_overlay())
@@ -1501,7 +1524,7 @@ impl Composer {
                     ultrathink_armed,
                     locked,
                     pending_restart,
-                    &app_entity,
+                    &store_entity,
                     &cx.entity(),
                     cx,
                 )
@@ -1511,7 +1534,7 @@ impl Composer {
 
     /// The Build/Plan interaction-mode chip (S1 §4).
     fn render_mode_chip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = self.app_state.read(cx).active_interaction_mode();
+        let mode = self.workspace_store.read(cx).composer_interaction_mode(cx);
         let muted = cx.theme().muted_foreground;
         let (icon, label, tooltip) = match mode {
             InteractionMode::Build => (
@@ -1539,8 +1562,9 @@ impl Composer {
                     .child(label),
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.app_state
-                    .update(cx, |state, cx| state.toggle_interaction_mode(cx));
+                this.workspace_store.update(cx, |store, cx| {
+                    store.dispatch(Command::ToggleInteractionMode, cx)
+                });
             }))
             .into_any_element()
     }
@@ -1548,13 +1572,7 @@ impl Composer {
     /// The circular context-window meter (ring showing used%, red > 90%) + a
     /// hover/click popover (T3's `ContextWindowMeter`).
     fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (usage, provider) = {
-            let state = self.app_state.read(cx);
-            (
-                state.active.as_ref().and_then(|a| a.timeline.usage),
-                state.active.as_ref().map(|a| a.meta.provider),
-            )
-        };
+        let (usage, provider) = self.workspace_store.read(cx).composer_context(cx);
         let pct = usage.and_then(|u| context_meter::used_percentage(&u));
         let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
         let ring_color: Hsla = if overloaded {
@@ -1585,7 +1603,7 @@ impl Composer {
     /// label) opening a popover of the three modes (icon + bold name + muted
     /// description, ✓ on the current one).
     fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.app_state.read(cx).active_approval_mode();
+        let current = self.workspace_store.read(cx).composer_approval_mode(cx);
         let (label, _, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
 
@@ -1600,8 +1618,11 @@ impl Composer {
                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
         );
 
-        let app_entity = self.app_state.clone();
-        let pending_restart = self.app_state.read(cx).approval_pending_restart();
+        let store_entity = self.workspace_store.clone();
+        let pending_restart = self
+            .workspace_store
+            .read(cx)
+            .composer_approval_pending_restart(cx);
         Popover::new("permission-popover")
             // T3 overlay contour (shadow_xl at the 14px overlay radius).
             .rounded(crate::material::radius_overlay())
@@ -1609,7 +1630,7 @@ impl Composer {
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_permission_pane(current, pending_restart, &app_entity, &cx.entity(), cx)
+                render_permission_pane(current, pending_restart, &store_entity, &cx.entity(), cx)
             })
             .into_any_element()
     }
@@ -1617,16 +1638,11 @@ impl Composer {
     /// The "⋯" overflow button + popover holding the context / permission /
     /// mode controls when the control row is too narrow to show them inline.
     fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let usage = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .and_then(|a| a.timeline.usage);
+        let usage = self.workspace_store.read(cx).composer_context(cx).0;
         let muted = cx.theme().muted_foreground;
-        let mode = self.app_state.read(cx).active_approval_mode();
-        let interaction = self.app_state.read(cx).active_interaction_mode();
-        let app_entity = self.app_state.clone();
+        let mode = self.workspace_store.read(cx).composer_approval_mode(cx);
+        let interaction = self.workspace_store.read(cx).composer_interaction_mode(cx);
+        let store_entity = self.workspace_store.clone();
 
         let trigger = Button::new("overflow-controls")
             .ghost()
@@ -1641,7 +1657,7 @@ impl Composer {
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_overflow_pane(usage, mode, interaction, &app_entity, &cx.entity(), cx)
+                render_overflow_pane(usage, mode, interaction, &store_entity, &cx.entity(), cx)
             })
             .into_any_element()
     }
@@ -1786,15 +1802,7 @@ impl Composer {
     /// each with a steer button (inject it into the running turn NOW) and an ✕
     /// (drop it). Rows are reorderable-by-removal only.
     fn render_queue_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (queued, can_steer, agent) = {
-            let state = self.app_state.read(cx);
-            let active = state.active.as_ref()?;
-            (
-                active.queued().to_vec(),
-                active.supports_steering(),
-                active.meta.provider.display_name(),
-            )
-        };
+        let (queued, can_steer, agent) = self.workspace_store.read(cx).composer_queue(cx)?;
         if queued.is_empty() {
             return None;
         }
@@ -1853,8 +1861,9 @@ impl Composer {
                             .disabled(!can_steer)
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.app_state
-                                    .update(cx, |state, cx| state.steer_queued(id, cx));
+                                this.workspace_store.update(cx, |store, cx| {
+                                    store.dispatch(Command::SteerQueued { id }, cx)
+                                });
                             })),
                     )
                     .child(
@@ -1864,8 +1873,9 @@ impl Composer {
                             .icon(IconName::Close)
                             .tooltip(tcode_i18n::tr!("composer.drop_queued"))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.app_state
-                                    .update(cx, |state, cx| state.drop_queued(id, cx));
+                                this.workspace_store.update(cx, |store, cx| {
+                                    store.dispatch(Command::DropQueued { id }, cx)
+                                });
                             })),
                     ),
             );
@@ -1950,12 +1960,7 @@ impl Composer {
         if turn_running {
             // Providers with native mid-turn steering keep a send button active
             // beside Stop while a turn runs.
-            let steers = self
-                .app_state
-                .read(cx)
-                .active
-                .as_ref()
-                .is_some_and(|a| a.supports_steering());
+            let steers = self.workspace_store.read(cx).composer_supports_steering(cx);
             let has_text = !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
                 .gap_2()
@@ -2017,7 +2022,8 @@ impl Composer {
                     .hover(|s| s.opacity(0.9))
                     .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state.update(cx, |state, cx| state.interrupt(cx));
+                        this.workspace_store
+                            .update(cx, |store, cx| store.dispatch(Command::Interrupt, cx));
                     })),
                 )
                 .into_any_element();
@@ -2025,7 +2031,11 @@ impl Composer {
 
         // Group C: while the first send is creating a worktree, show a disabled
         // "Preparing worktree…" pill instead of the send button.
-        if self.app_state.read(cx).preparing_worktree() {
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_preparing_worktree(cx)
+        {
             return h_flex()
                 .gap_2()
                 .items_center()
@@ -2074,7 +2084,12 @@ impl Composer {
         if turn_running {
             return self.render_send_or_stop(true, cx);
         }
-        if self.app_state.read(cx).plan_ready_markdown().is_some() {
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_plan_ready_markdown(cx)
+            .is_some()
+        {
             if self.has_sendable_content(cx) && self.refines_the_plan(cx) {
                 // Refine: send the feedback and stay in Plan mode (a normal send
                 // while the session is in Plan mode continues planning).
@@ -2098,7 +2113,7 @@ impl Composer {
     /// The plan stays implementable from either mode, but only Plan mode turns
     /// typed feedback into refinement.
     fn refines_the_plan(&self, cx: &App) -> bool {
-        self.app_state.read(cx).active_interaction_mode() == InteractionMode::Plan
+        self.workspace_store.read(cx).composer_interaction_mode(cx) == InteractionMode::Plan
     }
 
     /// The Implement split-button: primary "Implement" + a chevron menu with
@@ -2106,7 +2121,7 @@ impl Composer {
     fn render_implement_split(&self, cx: &mut Context<Self>) -> AnyElement {
         let primary = cx.theme().primary;
         let fg = cx.theme().primary_foreground;
-        let app_main = self.app_state.clone();
+        let store_main = self.workspace_store.clone();
 
         let chevron = Popover::new("implement-menu")
             // T3 overlay contour (shadow_xl at the 14px overlay radius).
@@ -2121,7 +2136,7 @@ impl Composer {
             )
             .content(move |_state, _window, cx| {
                 let app = cx.entity();
-                let app_state = app_main.clone();
+                let store = store_main.clone();
                 let popover = cx.entity();
                 v_flex()
                     .w(px(220.))
@@ -2141,8 +2156,9 @@ impl Composer {
                             .child(Icon::new(IconName::Plus).xsmall())
                             .child(tcode_i18n::tr!("plan.implement_new_thread"))
                             .on_click(move |_, window, cx| {
-                                app_state.update(cx, |state, cx| {
-                                    let Some(markdown) = state.plan_ready_markdown() else {
+                                store.update(cx, |store, cx| {
+                                    let Some(markdown) = store.composer_plan_ready_markdown(cx)
+                                    else {
                                         return;
                                     };
                                     let title = match tcode_core::session::plan_title(&markdown) {
@@ -2154,7 +2170,7 @@ impl Composer {
                                             tcode_i18n::tr!("plan.implement_untitled").into_owned()
                                         }
                                     };
-                                    state.implement_plan_in_new_thread(title, cx);
+                                    store.dispatch(Command::ImplementPlanInNewThread { title }, cx);
                                 });
                                 let _ = &app;
                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
@@ -2163,7 +2179,7 @@ impl Composer {
                     .into_any_element()
             });
 
-        let app_impl = self.app_state.clone();
+        let store_impl = self.workspace_store.clone();
         h_flex()
             .flex_none()
             .h(px(32.))
@@ -2184,7 +2200,8 @@ impl Composer {
                     .hover(|s| s.opacity(0.9))
                     .child(tcode_i18n::tr!("plan.implement"))
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        app_impl.update(cx, |state, cx| state.implement_plan(cx));
+                        store_impl
+                            .update(cx, |store, cx| store.dispatch(Command::ImplementPlan, cx));
                     })),
             )
             .child(div().w_px().h(px(16.)).bg(fg).opacity(0.3))
@@ -2195,7 +2212,7 @@ impl Composer {
     /// The "Plan Ready" header strip shown atop the composer while a proposed
     /// plan awaits a decision (S1 §5).
     fn render_plan_ready_header(&self, title: String, cx: &mut Context<Self>) -> AnyElement {
-        let app_state = self.app_state.clone();
+        let store = self.workspace_store.clone();
         h_flex()
             .w_full()
             .px_4()
@@ -2232,7 +2249,7 @@ impl Composer {
                     .icon(IconName::Close)
                     .tooltip(tcode_i18n::tr!("plan.dismiss"))
                     .on_click(move |_, _, cx| {
-                        app_state.update(cx, |state, cx| state.dismiss_plan(cx));
+                        store.update(cx, |store, cx| store.dispatch(Command::DismissPlan, cx));
                     }),
             )
             .into_any_element()
@@ -2243,12 +2260,11 @@ impl Composer {
     /// Keep the per-request question state in sync: reset the index/selections
     /// when a new request arrives (or the pending one resolves).
     fn sync_user_input_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.app_state.read(cx).active.as_ref().and_then(|a| {
-            a.timeline
-                .pending_user_input
-                .as_ref()
-                .map(|(id, _)| id.clone())
-        });
+        let current = self
+            .workspace_store
+            .read(cx)
+            .composer_pending_user_input(cx)
+            .map(|(id, _)| id);
         if current != self.ui_request_id {
             self.ui_request_id = current;
             self.ui_question_index = 0;
@@ -2654,8 +2670,14 @@ impl Composer {
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.ui_selections.clear();
         self.ui_question_index = 0;
-        self.app_state.update(cx, |state, cx| {
-            state.respond_user_input(request_id, answers, cx)
+        self.workspace_store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::RespondUserInput {
+                    request_id,
+                    answers,
+                },
+                cx,
+            )
         });
         cx.notify();
     }
@@ -2663,29 +2685,13 @@ impl Composer {
     // -- below-card + approval ---------------------------------------------
 
     fn render_checkout_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (branch, branches, turn_running, is_draft, worktree_base, worktree) = {
-            let state = self.app_state.read(cx);
-            let active = state.active.as_ref()?;
-            // Worktrees have a `.git` file (not dir), so `read_git_branch` yields
-            // None; fall back to the recorded worktree branch so the row shows.
-            let branch = active
-                .git_branch
-                .clone()
-                .or_else(|| active.meta.worktree.as_ref().map(|w| w.branch.clone()))?;
-            // The base the worktree draft will branch from (Some in worktree mode).
-            let worktree_base = match state.draft_workspace_mode() {
-                Some(WorkspaceMode::NewWorktree { base }) => Some(base),
-                _ => None,
-            };
-            (
-                branch,
-                active.branches.clone(),
-                active.timeline.turn_running,
-                active.draft,
-                worktree_base,
-                active.meta.worktree.clone(),
-            )
-        };
+        let checkout = self.workspace_store.read(cx).composer_checkout_state(cx)?;
+        let branch = checkout.branch;
+        let branches = checkout.branches;
+        let turn_running = checkout.turn_running;
+        let is_draft = checkout.is_draft;
+        let worktree_base = checkout.worktree_base;
+        let worktree = checkout.worktree;
         let muted = cx.theme().muted_foreground;
         // In worktree draft mode the right-hand picker chooses the *base* branch
         // (its current value is the chosen base, defaulting to the live branch).
@@ -2710,8 +2716,8 @@ impl Composer {
                 )
                 .into_any_element()
         } else {
-            let app_open = self.app_state.clone();
-            let app_content = self.app_state.clone();
+            let store_open = self.workspace_store.clone();
+            let store_content = self.workspace_store.clone();
             let current = picker_current.clone();
             let trigger = Button::new("branch-picker").ghost().compact().child(
                 h_flex()
@@ -2732,7 +2738,8 @@ impl Composer {
                 .on_open_change(move |open, _window, cx| {
                     // Load branches lazily each time the popover opens.
                     if *open {
-                        app_open.update(cx, |state, cx| state.load_branches(cx));
+                        store_open
+                            .update(cx, |store, cx| store.dispatch(Command::LoadBranches, cx));
                     }
                 })
                 .content(move |_state, _window, cx| {
@@ -2767,7 +2774,7 @@ impl Composer {
                         for (index, name) in branches.iter().enumerate() {
                             let is_current = *name == current;
                             let branch_name = name.clone();
-                            let app_pick = app_content.clone();
+                            let store_pick = store_content.clone();
                             let pop = popover.clone();
                             col = col.child(
                                 h_flex()
@@ -2798,18 +2805,20 @@ impl Composer {
                                     })
                                     .on_click(move |_, window, cx| {
                                         let branch_name = branch_name.clone();
-                                        app_pick.update(cx, |state, cx| {
-                                            if worktree_mode {
+                                        store_pick.update(cx, |store, cx| {
+                                            let command = if worktree_mode {
                                                 // Choose the worktree's base branch.
-                                                state.set_draft_workspace(
-                                                    WorkspaceMode::NewWorktree {
+                                                Command::SetDraftWorkspace {
+                                                    mode: WorkspaceMode::NewWorktree {
                                                         base: branch_name,
                                                     },
-                                                    cx,
-                                                );
+                                                }
                                             } else {
-                                                state.checkout_branch(branch_name, cx);
-                                            }
+                                                Command::CheckoutBranch {
+                                                    branch: branch_name,
+                                                }
+                                            };
+                                            store.dispatch(command, cx);
                                         });
                                         pop.update(cx, |st, cx| st.dismiss(window, cx));
                                     }),
@@ -2875,7 +2884,7 @@ impl Composer {
                 .into_any_element();
         }
 
-        let app_content = self.app_state.clone();
+        let store_content = self.workspace_store.clone();
         let base_default = base_default.to_string();
         let trigger = Button::new("workspace-picker").ghost().compact().child(
             h_flex()
@@ -2895,8 +2904,8 @@ impl Composer {
             .trigger(trigger)
             .content(move |_state, _window, cx| {
                 let popover = cx.entity();
-                let app_local = app_content.clone();
-                let app_worktree = app_content.clone();
+                let store_local = store_content.clone();
+                let store_worktree = store_content.clone();
                 let pop_local = popover.clone();
                 let pop_worktree = popover.clone();
                 let base = base_default.clone();
@@ -2946,8 +2955,13 @@ impl Composer {
                         )
                         .id("workspace-local")
                         .on_click(move |_, window, cx| {
-                            app_local.update(cx, |state, cx| {
-                                state.set_draft_workspace(WorkspaceMode::LocalCheckout, cx);
+                            store_local.update(cx, |store, cx| {
+                                store.dispatch(
+                                    Command::SetDraftWorkspace {
+                                        mode: WorkspaceMode::LocalCheckout,
+                                    },
+                                    cx,
+                                );
                             });
                             pop_local.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -2961,8 +2975,13 @@ impl Composer {
                         .id("workspace-worktree")
                         .on_click(move |_, window, cx| {
                             let base = base.clone();
-                            app_worktree.update(cx, |state, cx| {
-                                state.set_draft_workspace(WorkspaceMode::NewWorktree { base }, cx);
+                            store_worktree.update(cx, |store, cx| {
+                                store.dispatch(
+                                    Command::SetDraftWorkspace {
+                                        mode: WorkspaceMode::NewWorktree { base },
+                                    },
+                                    cx,
+                                );
                             });
                             pop_worktree.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -3206,8 +3225,14 @@ impl Composer {
 
     fn respond(&mut self, request_id: String, decision: ApprovalDecision, cx: &mut Context<Self>) {
         self.approval_expanded = false;
-        self.app_state.update(cx, |state, cx| {
-            state.respond_approval(request_id, decision, cx)
+        self.workspace_store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::RespondApproval {
+                    request_id,
+                    decision,
+                },
+                cx,
+            )
         });
     }
 }
@@ -3219,17 +3244,8 @@ impl Render for Composer {
         self.sync_text_destination(window, cx);
         self.sync_native_rewind_prefill(window, cx);
         self.apply_debug_seed(window, cx);
-        let (turn_running, approval, approval_count) = {
-            let state = self.app_state.read(cx);
-            match &state.active {
-                Some(active) => (
-                    active.timeline.turn_running,
-                    active.timeline.pending_approvals.first().cloned(),
-                    active.timeline.pending_approvals.len(),
-                ),
-                None => (false, None, 0),
-            }
-        };
+        let (turn_running, approval, approval_count) =
+            self.workspace_store.read(cx).composer_render_state(cx);
 
         let border = cx.theme().border;
         let divider = move || div().w_px().h(px(16.)).bg(border);
@@ -3301,13 +3317,14 @@ impl Render for Composer {
         });
 
         // Plan-ready state: a "Plan Ready" header strip + refine placeholder.
-        let plan_ready_title = {
-            let state = self.app_state.read(cx);
-            state.plan_ready_markdown().map(|md| {
+        let plan_ready_title = self
+            .workspace_store
+            .read(cx)
+            .composer_plan_ready_markdown(cx)
+            .map(|md| {
                 tcode_core::session::plan_title(&md)
                     .unwrap_or_else(|| tcode_i18n::tr!("plan.proposed_plan").into_owned())
-            })
-        };
+            });
         // Only Plan mode refines: in Build a typed message is an ordinary build
         // turn, so promising refinement there would misdescribe what Enter does.
         let desired_placeholder = if plan_ready_title.is_some() && self.refines_the_plan(cx) {
@@ -3326,13 +3343,7 @@ impl Render for Composer {
 
         // Dropping image files onto the card attaches them (T3 drag-drop).
         let composer = cx.entity();
-        let terminal_contexts = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .map(|active| active.terminal_workspace.contexts.clone())
-            .unwrap_or_default();
+        let terminal_contexts = self.workspace_store.read(cx).composer_terminal_contexts(cx);
         let has_terminal_contexts = !terminal_contexts.is_empty();
         let context_chips =
             h_flex()
@@ -3352,11 +3363,13 @@ impl Render for Composer {
                         .label(format!("{} · {}  ×", context.terminal_label, range))
                         .tooltip(context.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.app_state
-                                .update(cx, |state, cx| state.remove_terminal_context(id, cx));
+                            this.workspace_store.update(cx, |store, cx| {
+                                store
+                                    .dispatch(Command::RemoveTerminalContext { context_id: id }, cx)
+                            });
                         }))
                 }));
-        let review_comments = self.app_state.read(cx).review_comments().to_vec();
+        let review_comments = self.workspace_store.read(cx).composer_review_comments(cx);
         let has_review_comments = !review_comments.is_empty();
         let review_chips = h_flex().w_full().flex_wrap().gap_1().children(
             review_comments
@@ -3374,8 +3387,9 @@ impl Render for Composer {
                         .label(format!("{} {}  ×", comment.file, range))
                         .tooltip(comment.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.app_state
-                                .update(cx, |state, cx| state.remove_review_comment(index, cx));
+                            this.workspace_store.update(cx, |store, cx| {
+                                store.dispatch(Command::RemoveReviewComment { index }, cx)
+                            });
                         }))
                 }),
         );
@@ -3486,8 +3500,9 @@ impl Render for Composer {
             // Shift+Tab toggles Build ↔ Plan (S1 §4).
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
-                    this.app_state
-                        .update(cx, |state, cx| state.toggle_interaction_mode(cx));
+                    this.workspace_store.update(cx, |store, cx| {
+                        store.dispatch(Command::ToggleInteractionMode, cx)
+                    });
                     cx.notify();
                 }
             }))
@@ -3523,7 +3538,7 @@ fn render_model_pane(
     acp_agents: &[(String, String)],
     pending_restart: bool,
     loading: bool,
-    app_entity: &Entity<AppState>,
+    store_entity: &Entity<WorkspaceStore>,
     model_search: &Entity<InputState>,
     composer: &Entity<Composer>,
     popover: &Entity<PopoverState>,
@@ -3581,20 +3596,21 @@ fn render_model_pane(
     // One entry per *enabled* native profile: every built-in plus any
     // user-created profiles whose switch is on. Each is its own rail.
     let profile_ids: Vec<String> = {
-        let st = app_entity.read(cx);
+        let store = store_entity.read(cx);
+        let profiles = store.enabled_provider_profiles(cx);
         PICKER_PROVIDER_KINDS
             .into_iter()
             .flat_map(|kind| {
-                st.settings
-                    .enabled_profiles_for_kind(kind)
-                    .into_iter()
-                    .map(|profile| profile.id)
+                profiles
+                    .iter()
+                    .filter(move |profile| profile.kind == kind)
+                    .map(|profile| profile.id.clone())
             })
             .collect()
     };
     for id in profile_ids {
-        let glyph = tinted_profile_glyph(&id, app_entity.read(cx));
-        let label = app_entity.read(cx).profile_display_name(&id);
+        let glyph = tinted_profile_glyph(&id, store_entity.read(cx), cx);
+        let label = store_entity.read(cx).provider_profile_display_name(&id, cx);
         rail_col = rail_col.child(rail_icon(
             gpui::SharedString::from(format!("rail-profile-{id}")),
             label.into(),
@@ -3631,7 +3647,12 @@ fn render_model_pane(
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
     for (index, row) in rows.iter().enumerate() {
         list = list.child(render_model_row(
-            row, index, selected, app_entity, popover, cx,
+            row,
+            index,
+            selected,
+            store_entity,
+            popover,
+            cx,
         ));
     }
     if rows.is_empty() {
@@ -3688,7 +3709,7 @@ fn render_model_pane(
 
     // Secondary+1-9 selects the corresponding row while the popover is open.
     let key_rows: Vec<ModelRow> = rows.iter().take(9).cloned().collect();
-    let app_key = app_entity.clone();
+    let store_key = store_entity.clone();
     let popover_key = popover.clone();
 
     h_flex()
@@ -3706,12 +3727,17 @@ fn render_model_pane(
                 && n <= key_rows.len()
             {
                 let row = key_rows[n - 1].clone();
-                app_key.update(cx, |s, cx| {
-                    if row.acp {
-                        s.set_active_acp_agent(&row.id, cx);
+                store_key.update(cx, |store, cx| {
+                    let command = if row.acp {
+                        Command::SetActiveAcpAgent { id: row.id }
                     } else {
-                        s.set_active_model(row.provider, Some(row.id), row.profile_id, cx);
-                    }
+                        Command::SetActiveModel {
+                            provider: row.provider,
+                            model: Some(row.id),
+                            profile_id: row.profile_id,
+                        }
+                    };
+                    store.dispatch(command, cx);
                 });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
@@ -3725,23 +3751,26 @@ fn render_model_row(
     row: &ModelRow,
     index: usize,
     selected: &Option<String>,
-    app_entity: &Entity<AppState>,
+    store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let is_current = selected.as_deref() == Some(row.id.as_str());
     let is_acp = row.acp;
-    let is_fav = !is_acp && app_entity.read(cx).is_favorite_model(&row.id);
+    let is_fav = !is_acp
+        && store_entity
+            .read(cx)
+            .composer_is_favorite_model(&row.id, cx);
     let name = row.name.clone();
     let id = row.id.clone();
     let provider = row.provider;
     let profile_id = row.profile_id.clone();
     let fav_id = row.id.clone();
 
-    let app_select = app_entity.clone();
+    let store_select = store_entity.clone();
     let popover_select = popover.clone();
-    let app_fav = app_entity.clone();
+    let store_fav = store_entity.clone();
     let popover_fav = popover.clone();
 
     let accessible_label =
@@ -3762,13 +3791,20 @@ fn render_model_row(
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().muted))
         .on_click(move |_, window, cx| {
-            if is_acp {
-                app_select.update(cx, |s, cx| s.set_active_acp_agent(&id, cx));
-            } else {
-                app_select.update(cx, |s, cx| {
-                    s.set_active_model(provider, Some(id.clone()), profile_id.clone(), cx)
-                });
-            }
+            let id = id.clone();
+            let profile_id = profile_id.clone();
+            store_select.update(cx, |store, cx| {
+                let command = if is_acp {
+                    Command::SetActiveAcpAgent { id }
+                } else {
+                    Command::SetActiveModel {
+                        provider,
+                        model: Some(id),
+                        profile_id,
+                    }
+                };
+                store.dispatch(command, cx);
+            });
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })
         .child(
@@ -3795,7 +3831,9 @@ fn render_model_row(
                         .items_center()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(tinted_provider_glyph(row.provider, app_entity.read(cx)).xsmall())
+                        .child(
+                            tinted_provider_glyph(row.provider, store_entity.read(cx), cx).xsmall(),
+                        )
                         .child(provider_short(row.provider)),
                 ),
         )
@@ -3845,7 +3883,10 @@ fn render_model_row(
             )
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
-                app_fav.update(cx, |s, cx| s.toggle_favorite_model(&fav_id, cx));
+                let fav_id = fav_id.clone();
+                store_fav.update(cx, |store, cx| {
+                    store.dispatch(Command::ToggleFavoriteModel { model: fav_id }, cx)
+                });
                 // Refresh the open popover so the star + ordering update.
                 popover_fav.update(cx, |_, cx| cx.notify());
             }),
@@ -3859,7 +3900,7 @@ fn render_model_row(
 fn render_permission_pane(
     current: ApprovalMode,
     pending_restart: bool,
-    app_entity: &Entity<AppState>,
+    store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -3876,7 +3917,7 @@ fn render_permission_pane(
     for (index, (mode, label, description, icon_path)) in APPROVAL_MODES.iter().enumerate() {
         let mode = *mode;
         let is_current = mode == current;
-        let app = app_entity.clone();
+        let store = store_entity.clone();
         let popover = popover.clone();
         let accessible_label = tcode_i18n::tr!(
             "approval.mode_option",
@@ -3900,7 +3941,9 @@ fn render_permission_pane(
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().muted))
                 .on_click(move |_, window, cx| {
-                    app.update(cx, |s, cx| s.set_active_approval_mode(mode, cx));
+                    store.update(cx, |store, cx| {
+                        store.dispatch(Command::SetActiveApprovalMode { mode }, cx)
+                    });
                     popover.update(cx, |st, cx| st.dismiss(window, cx));
                 })
                 .child(
@@ -3962,7 +4005,7 @@ fn render_traits_pane(
     ultrathink_armed: bool,
     locked: bool,
     pending_restart: bool,
-    app_entity: &Entity<AppState>,
+    store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -4022,7 +4065,7 @@ fn render_traits_pane(
                     if is_default {
                         text.push_str(&default_suffix);
                     }
-                    let app = app_entity.clone();
+                    let store = store_entity.clone();
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     let opt_value = opt.value.clone();
@@ -4044,16 +4087,18 @@ fn render_traits_pane(
                                 this.child(Icon::new(IconName::Check).xsmall().text_color(primary))
                             })
                             .on_click(move |_, window, cx| {
-                                app.update(cx, |s, cx| {
-                                    if is_ultra {
-                                        s.select_ultrathink(cx);
+                                let opt_id = opt_id.clone();
+                                let opt_value = opt_value.clone();
+                                store.update(cx, |store, cx| {
+                                    let command = if is_ultra {
+                                        Command::SelectUltrathink
                                     } else {
-                                        s.set_active_option(
-                                            &opt_id,
-                                            Some(serde_json::Value::String(opt_value.clone())),
-                                            cx,
-                                        );
-                                    }
+                                        Command::SetActiveOption {
+                                            id: opt_id,
+                                            value: Some(serde_json::Value::String(opt_value)),
+                                        }
+                                    };
+                                    store.dispatch(command, cx);
                                 });
                                 pop.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
@@ -4075,7 +4120,7 @@ fn render_traits_pane(
                 .enumerate()
                 {
                     let is_selected = on == value;
-                    let app = app_entity.clone();
+                    let store = store_entity.clone();
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     pane = pane.child(
@@ -4096,10 +4141,13 @@ fn render_traits_pane(
                                 this.child(Icon::new(IconName::Check).xsmall().text_color(primary))
                             })
                             .on_click(move |_, window, cx| {
-                                app.update(cx, |s, cx| {
-                                    s.set_active_option(
-                                        &opt_id,
-                                        Some(serde_json::Value::Bool(value)),
+                                let opt_id = opt_id.clone();
+                                store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::SetActiveOption {
+                                            id: opt_id,
+                                            value: Some(serde_json::Value::Bool(value)),
+                                        },
                                         cx,
                                     );
                                 });
@@ -4147,7 +4195,7 @@ fn render_overflow_pane(
     usage: Option<TokenUsage>,
     mode: ApprovalMode,
     interaction: InteractionMode,
-    app_entity: &Entity<AppState>,
+    store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -4176,7 +4224,7 @@ fn render_overflow_pane(
         InteractionMode::Build => InteractionMode::Plan,
         InteractionMode::Plan => InteractionMode::Build,
     };
-    let interaction_app = app_entity.clone();
+    let interaction_store = store_entity.clone();
     let interaction_popover = popover.clone();
     v_flex()
         .w(px(220.))
@@ -4208,8 +4256,13 @@ fn render_overflow_pane(
                 )
                 .child(interaction_label)
                 .on_click(move |_, window, cx| {
-                    interaction_app.update(cx, |state, cx| {
-                        state.set_interaction_mode(next_interaction, cx)
+                    interaction_store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::SetInteractionMode {
+                                mode: next_interaction,
+                            },
+                            cx,
+                        )
                     });
                     interaction_popover.update(cx, |state, cx| state.dismiss(window, cx));
                 }),
