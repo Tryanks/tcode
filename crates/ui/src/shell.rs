@@ -216,14 +216,30 @@ impl AppShell {
         Self {
             sidebar: cx
                 .new(|cx| SessionsSidebar::new(workspace_store.clone(), window_state.clone(), cx)),
-            chat: cx.new(|cx| ChatView::new(app_state.clone(), window_state.clone(), window, cx)),
-            diff: cx.new(|cx| DiffPanel::new(app_state.clone(), window_state.clone(), cx)),
+            chat: cx.new(|cx| {
+                ChatView::new(
+                    app_state.clone(),
+                    workspace_store.clone(),
+                    window_state.clone(),
+                    window,
+                    cx,
+                )
+            }),
+            diff: cx.new(|cx| {
+                DiffPanel::new(
+                    app_state.clone(),
+                    workspace_store.clone(),
+                    window_state.clone(),
+                    cx,
+                )
+            }),
             preview,
             settings_page: cx.new(|cx| {
                 SettingsPage::new(workspace_store.clone(), window_state.clone(), window, cx)
             }),
-            palette: cx
-                .new(|cx| CommandPalette::new(app_state.clone(), window_state.clone(), window, cx)),
+            palette: cx.new(|cx| {
+                CommandPalette::new(workspace_store.clone(), window_state.clone(), window, cx)
+            }),
             toasts,
             operation_toasts: HashMap::new(),
             app_state,

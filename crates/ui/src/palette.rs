@@ -22,11 +22,12 @@ use gpui_component::{
     v_flex,
 };
 
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
+use crate::store::WorkspaceStore;
 use crate::time::now_secs;
 use crate::window_state::WindowState;
 
@@ -107,7 +108,7 @@ struct Group {
 }
 
 pub struct CommandPalette {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     query: Entity<InputState>,
     focus_handle: FocusHandle,
@@ -117,7 +118,7 @@ pub struct CommandPalette {
 
 impl CommandPalette {
     pub fn new(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -127,7 +128,7 @@ impl CommandPalette {
         });
 
         let subscriptions = vec![
-            cx.observe(&app_state, |_, _, cx| cx.notify()),
+            cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &query,
                 window,
@@ -145,7 +146,7 @@ impl CommandPalette {
         ];
 
         Self {
-            app_state,
+            store,
             window_state,
             query,
             focus_handle: cx.focus_handle(),
@@ -189,7 +190,7 @@ impl CommandPalette {
         } else {
             raw
         };
-        let state = self.app_state.read(cx);
+        let store = self.store.read(cx);
 
         // Actions.
         let mut actions: Vec<(i32, Item)> = Vec::new();
@@ -208,7 +209,7 @@ impl CommandPalette {
                 ));
             }
         };
-        for group in state.grouped_sessions() {
+        for group in store.palette_groups(cx) {
             push_action(
                 tcode_i18n::tr!("palette.new_thread", project = group.project.name).into_owned(),
                 IconName::Plus,
@@ -261,7 +262,7 @@ impl CommandPalette {
         // Threads (fuzzy over titles) — suppressed in `>`-actions-only mode.
         if !actions_only {
             let mut threads: Vec<(i32, Item)> = Vec::new();
-            for group in state.grouped_sessions() {
+            for group in store.palette_groups(cx) {
                 for meta in &group.sessions {
                     if let Some(score) = fuzzy_score(&query, &meta.title) {
                         threads.push((
@@ -307,8 +308,8 @@ impl CommandPalette {
         match action {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
-                self.app_state.update(cx, |state, cx| {
-                    state.start_draft(project_id, cwd, cx);
+                self.store.update(cx, |store, cx| {
+                    store.dispatch(Command::StartDraft { project_id, cwd }, cx);
                 });
             }
             Action::OpenSettings => {
@@ -322,37 +323,41 @@ impl CommandPalette {
                 } else {
                     ThemeMode::Dark
                 };
-                self.app_state.update(cx, |state, cx| {
-                    let mut settings = state.settings.clone();
+                self.store.update(cx, |store, cx| {
+                    let mut settings = store.palette_settings(cx);
                     settings.theme_mode = next;
-                    state.update_settings(settings, cx);
+                    store.dispatch(Command::UpdateSettings { settings }, cx);
                 });
                 apply_theme(next, window, cx);
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                self.app_state
-                    .update(cx, |state, cx| state.toggle_diff_panel(cx));
+                self.store
+                    .update(cx, |store, cx| store.dispatch(Command::ToggleDiffPanel, cx));
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                self.app_state
-                    .update(cx, |state, cx| state.toggle_terminal_panel(cx));
+                self.store.update(cx, |store, cx| {
+                    store.dispatch(Command::ToggleTerminalPanel, cx)
+                });
                 self.close(cx);
             }
             Action::OpenPreview => {
-                self.app_state
-                    .update(cx, |state, cx| state.open_preview_panel(cx));
+                self.store.update(cx, |store, cx| {
+                    store.dispatch(Command::OpenPreviewPanel, cx)
+                });
                 self.close(cx);
             }
             Action::CheckUpdates => {
-                self.app_state
-                    .update(cx, |state, cx| state.check_provider_versions(cx));
+                self.store.update(cx, |store, cx| {
+                    store.dispatch(Command::CheckProviderVersions, cx)
+                });
                 self.close(cx);
             }
             Action::OpenThread { session_id } => {
-                self.app_state
-                    .update(cx, |state, cx| state.select_session(&session_id, cx));
+                self.store.update(cx, |store, cx| {
+                    store.dispatch(Command::SelectSession { session_id }, cx);
+                });
                 self.close(cx);
             }
         }
@@ -569,6 +574,7 @@ impl Focusable for CommandPalette {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+    use tcode_runtime::app::AppState;
     use tcode_services::store::SessionStore;
 
     struct PaletteHarness {
@@ -576,10 +582,10 @@ mod tests {
     }
 
     impl PaletteHarness {
-        fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
             let window_state = cx.new(|_| WindowState::new(false));
             Self {
-                palette: cx.new(|cx| CommandPalette::new(app_state, window_state, window, cx)),
+                palette: cx.new(|cx| CommandPalette::new(store, window_state, window, cx)),
             }
         }
     }
@@ -655,9 +661,10 @@ mod tests {
         ));
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let app_state = cx.new(|_| AppState::new(store));
-        let palette_state = app_state.clone();
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(app_state.clone(), cx));
+        let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
-            PaletteHarness::new(palette_state.clone(), window, cx)
+            PaletteHarness::new(palette_store.clone(), window, cx)
         });
         let cx: &mut VisualTestContext = cx;
         let palette = cx.update(|_, cx| harness.read(cx).palette.clone());
@@ -688,6 +695,7 @@ mod tests {
         });
 
         drop(palette);
+        drop(workspace_store);
         drop(app_state);
         let _ = std::fs::remove_dir_all(root);
     }
