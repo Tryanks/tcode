@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -14,7 +14,7 @@ use gpui_component::{
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
 use tcode_runtime::app::{AppEvent, AppState, RightTab, Route};
-use tcode_runtime::event::{RuntimeEvent, RuntimeOperationId};
+use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
 use crate::diff::DiffPanel;
@@ -226,9 +226,13 @@ impl AppShell {
 
     fn present_app_event(&mut self, event: &AppEvent, window: &mut Window, cx: &mut Context<Self>) {
         let toast = match event {
-            RuntimeEvent::Effect(effect) => {
+            RuntimeEvent::Effect(effect @ RuntimeEffect::ApplyLocale { .. }) => {
                 apply_runtime_effect(effect);
                 cx.notify();
+                return;
+            }
+            RuntimeEvent::Effect(RuntimeEffect::CopyToClipboard { text }) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
                 return;
             }
             RuntimeEvent::Error(_) | RuntimeEvent::Notice(_) => {

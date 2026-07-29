@@ -90,7 +90,7 @@ impl GitStatus {
 // ---------------------------------------------------------------------------
 
 /// An executable git operation behind the quick-action button / dropdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GitAction {
     /// Open the commit dialog, then `git commit` the selected files.
     Commit,
