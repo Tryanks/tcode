@@ -131,6 +131,9 @@ fn round_trips_commands_for_serialized_ui_mutation_gaps() {
         Command::SetRightTab {
             tab: RightTab::Plan,
         },
+        Command::WriteRelaunchMarker {
+            reopen_settings: "computer_use".into(),
+        },
     ];
     for command in commands {
         round_trip(&command);

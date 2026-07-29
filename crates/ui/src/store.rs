@@ -1,12 +1,18 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui::{App, Context, Entity, Window};
 use tcode_core::{
     project::{SessionMeta, WorktreeInfo},
-    settings::{ProjectSort, Settings},
+    provider_models::ResolvedModel,
+    provider_status::ProviderSnapshot,
+    settings::{ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
 use tcode_protocol::Command;
-use tcode_runtime::app::{AppState, ProjectGroup};
+use tcode_runtime::{
+    app::{AppState, ProjectGroup, ProviderVersionStatus},
+    ui_facade::AcpMarketplaceItem,
+};
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -80,6 +86,9 @@ impl WorkspaceStore {
             Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
             Command::SetActiveAcpAgent { id } => app.set_active_acp_agent(&id, cx),
             Command::ResetSettings => app.reset_settings(cx),
+            Command::WriteRelaunchMarker { reopen_settings } => {
+                app.write_relaunch_marker(&reopen_settings)
+            }
             Command::ToggleDiffPanel => app.toggle_diff_panel(cx),
             Command::OpenDiffForTurn { turn } => app.open_diff_for_turn(turn, cx),
             Command::OpenDiffForFile { turn, path } => app.open_diff_for_file(turn, path, cx),
@@ -244,6 +253,158 @@ impl WorkspaceStore {
 
     pub fn sidebar_settings(&self, cx: &App) -> Settings {
         self.app.read(cx).settings.clone()
+    }
+
+    pub fn orchestrate_editor_settings(&self, cx: &App) -> Settings {
+        self.app.read(cx).settings.clone()
+    }
+
+    pub fn settings_page_settings(&self, cx: &App) -> Settings {
+        self.app.read(cx).settings.clone()
+    }
+
+    pub fn settings_provider_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
+        self.app.read(cx).all_profiles()
+    }
+
+    pub fn settings_installed_acp_agents(
+        &self,
+        cx: &App,
+    ) -> Vec<tcode_core::acp::InstalledAcpAgent> {
+        self.app
+            .read(cx)
+            .settings
+            .installed_acp_agents()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn providers_checked_at(&self, cx: &App) -> Option<u64> {
+        self.app.read(cx).providers_checked_at()
+    }
+
+    pub fn providers_checking(&self, cx: &App) -> bool {
+        self.app.read(cx).providers_checking()
+    }
+
+    pub fn window_caption_state(&self, cx: &App) -> (bool, tcode_core::ui::RightTab) {
+        let app = self.app.read(cx);
+        (app.diff_panel_open(), app.right_tab())
+    }
+
+    pub fn enabled_provider_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
+        self.app.read(cx).enabled_profiles()
+    }
+
+    pub fn provider_profile_kind(&self, profile_id: &str, cx: &App) -> agent::ProviderKind {
+        self.app.read(cx).profile_kind(profile_id)
+    }
+
+    pub fn provider_profile_settings(&self, profile_id: &str, cx: &App) -> ProviderSettings {
+        self.app.read(cx).profile_settings(profile_id)
+    }
+
+    pub fn provider_model_catalog(
+        &self,
+        provider: agent::ProviderKind,
+        cx: &App,
+    ) -> Vec<agent::ModelSpec> {
+        self.app.read(cx).models_for(provider).to_vec()
+    }
+
+    pub fn picker_models_for_profile(&self, profile_id: &str, cx: &App) -> Vec<ResolvedModel> {
+        self.app.read(cx).picker_models_for_profile(profile_id)
+    }
+
+    pub fn provider_profile_display_name(&self, profile_id: &str, cx: &App) -> String {
+        self.app.read(cx).profile_display_name(profile_id)
+    }
+
+    pub fn provider_profile_snapshot(
+        &self,
+        profile_id: &str,
+        cx: &App,
+    ) -> Option<ProviderSnapshot> {
+        self.app.read(cx).profile_snapshot(profile_id).cloned()
+    }
+
+    pub fn provider_version_status(
+        &self,
+        provider: agent::ProviderKind,
+        cx: &App,
+    ) -> Option<ProviderVersionStatus> {
+        self.app.read(cx).provider_version(provider).cloned()
+    }
+
+    pub fn provider_profile_accent(&self, profile_id: &str, cx: &App) -> Option<u32> {
+        self.app.read(cx).profile_accent(profile_id)
+    }
+
+    pub fn provider_update_command(
+        &self,
+        provider: agent::ProviderKind,
+        cx: &App,
+    ) -> Option<String> {
+        self.app.read(cx).provider_update_command(provider)
+    }
+
+    pub fn provider_profile_stored_secret_names(
+        &self,
+        profile_id: &str,
+        cx: &App,
+    ) -> HashSet<String> {
+        self.app
+            .read(cx)
+            .launch_env_for_profile(profile_id)
+            .env
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    pub fn provider_profile_model_catalog(
+        &self,
+        profile_id: &str,
+        cx: &App,
+    ) -> Vec<agent::ModelSpec> {
+        self.app.read(cx).profile_catalog(profile_id)
+    }
+
+    pub fn provider_dialog_models(
+        &self,
+        profile_id: &str,
+        custom_models: &[String],
+        hidden_models: &[String],
+        cx: &App,
+    ) -> Vec<ResolvedModel> {
+        self.app
+            .read(cx)
+            .draft_models_for_profile(profile_id, custom_models, hidden_models)
+    }
+
+    pub fn installed_acp_agent(
+        &self,
+        agent_id: &str,
+        cx: &App,
+    ) -> Option<tcode_core::acp::InstalledAcpAgent> {
+        self.app.read(cx).settings.acp_agent(agent_id).cloned()
+    }
+
+    pub fn acp_marketplace_items(&self, cx: &App) -> Vec<AcpMarketplaceItem> {
+        self.app.read(cx).acp_marketplace_items()
+    }
+
+    pub fn acp_registry_loading(&self, cx: &App) -> bool {
+        self.app.read(cx).acp_registry_loading
+    }
+
+    pub fn acp_registry_error(&self, cx: &App) -> Option<String> {
+        self.app.read(cx).acp_registry_error.clone()
+    }
+
+    pub fn acp_installing(&self, agent_id: &str, cx: &App) -> bool {
+        self.app.read(cx).acp_installing.contains(agent_id)
     }
 
     pub fn project_ids(&self, cx: &App) -> Vec<String> {
