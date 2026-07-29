@@ -13,7 +13,8 @@ use gpui_component::{
     notification::Notification,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
-use tcode_runtime::app::{AppEvent, AppState, RightTab};
+use tcode_core::ui::RightTab;
+use tcode_protocol::Command;
 use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
@@ -86,7 +87,7 @@ pub(crate) fn window_drag_area(
 }
 
 pub struct AppShell {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     sidebar: Entity<SessionsSidebar>,
     chat: Entity<ChatView>,
@@ -158,37 +159,34 @@ fn next_sidebar_overlay_visibility(
 
 impl AppShell {
     pub fn new(
-        app_state: Entity<AppState>,
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let toasts = cx.new(|_| ToastCenter::new());
-        let window_title = |state: &AppState| -> String {
-            match state.active.as_ref() {
-                Some(active) if active.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
-                Some(active) => active.meta.title.clone(),
-                None => "tcode".to_string(),
-            }
-        };
-        window.set_window_title(&window_title(app_state.read(cx)));
-        let subscription = cx.observe_in(&app_state, window, move |_, state, window, cx| {
-            window.set_window_title(&window_title(state.read(cx)));
+        window.set_window_title(&workspace_store.read(cx).shell_window_title(cx));
+        let subscription = cx.observe_in(&workspace_store, window, move |_, store, window, cx| {
+            window.set_window_title(&store.read(cx).shell_window_title(cx));
             cx.notify();
         });
-        let event_subscription =
-            cx.subscribe_in(&app_state, window, |this, _, event: &AppEvent, w, cx| {
+        let event_subscription = cx.subscribe_in(
+            &workspace_store,
+            window,
+            |this, _, event: &RuntimeEvent, w, cx| {
                 this.present_app_event(event, w, cx);
-            });
-        let window_subscription = cx.observe(&window_state, |_, _, cx| cx.notify());
-        let preview =
-            cx.new(|cx| PreviewPanel::new(app_state.clone(), window_state.clone(), window, cx));
+            },
+        );
+        let window_subscription = cx.observe(&window_state, |_, _, cx| {
+            cx.notify();
+        });
+        let preview = cx
+            .new(|cx| PreviewPanel::new(workspace_store.clone(), window_state.clone(), window, cx));
 
         // Pump preview automation requests from the MCP server into the live
         // WebView. The receiver is taken once; requests are resolved on the gpui
         // main thread (WKWebView `evaluate_script` must run there).
-        let requests = app_state.update(cx, |state, _| state.take_preview_requests());
+        let requests = workspace_store.update(cx, |store, cx| store.take_preview_requests(cx));
         if let Some(requests) = requests {
             let preview = preview.clone();
             cx.spawn_in(window, async move |_, cx| {
@@ -211,7 +209,7 @@ impl AppShell {
             .detach();
         }
 
-        app_state.update(cx, |state, cx| state.pump_orchestrate_requests(cx));
+        workspace_store.update(cx, |store, cx| store.pump_orchestrate_requests(cx));
 
         Self {
             sidebar: cx
@@ -228,7 +226,7 @@ impl AppShell {
             }),
             toasts,
             operation_toasts: HashMap::new(),
-            app_state,
+            store: workspace_store,
             window_state,
             palette_was_open: false,
             split: cx.new(|_| ResizableState::default()),
@@ -242,7 +240,12 @@ impl AppShell {
         }
     }
 
-    fn present_app_event(&mut self, event: &AppEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn present_app_event(
+        &mut self,
+        event: &RuntimeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let toast = match event {
             RuntimeEvent::Effect(effect @ RuntimeEffect::ApplyLocale { .. }) => {
                 apply_runtime_effect(effect);
@@ -308,18 +311,20 @@ impl AppShell {
 
         if let Some(request) = presented.retry {
             let toasts = self.toasts.clone();
-            let app_state = self.app_state.clone();
+            let store = self.store.clone();
             let retry = ToastAction::new(
                 tcode_i18n::tr!("git.toast.retry").into_owned(),
                 move |_window, cx| {
                     toasts.update(cx, |center, cx| center.dismiss(toast_id, cx));
                     let request = request.clone();
-                    app_state.update(cx, |state, cx| {
-                        state.run_git_action(
-                            request.action,
-                            request.message,
-                            request.included,
-                            request.feature_branch,
+                    store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::RunGitAction {
+                                action: request.action,
+                                message: request.message,
+                                included: request.included,
+                                feature_branch: request.feature_branch,
+                            },
                             cx,
                         );
                     });
@@ -373,12 +378,10 @@ impl Render for AppShell {
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let diff_open = self.app_state.read(cx).diff_panel_open();
-        let right_tab = self.app_state.read(cx).right_tab();
+        let (diff_open, right_tab, diff_expanded) = self.store.read(cx).shell_panel_state(cx);
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
-        let diff_expanded =
-            self.app_state.read(cx).diff_panel_expanded() && right_tab != RightTab::Preview;
+        let diff_expanded = diff_expanded && right_tab != RightTab::Preview;
 
         // A native WebView is not composited into GPUI and survives removal of
         // its layout node. Synchronize it before the settings early-return or a

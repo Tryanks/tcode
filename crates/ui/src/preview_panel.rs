@@ -94,9 +94,10 @@ mod native {
     use super::{
         ReplyTx, normalize_url, preview_key_for_session, unavailable_message, visible_preview_key,
     };
+    use crate::store::WorkspaceStore;
     use crate::window_caption;
     use crate::window_state::WindowState;
-    use tcode_runtime::app::AppState;
+    use tcode_protocol::Command;
 
     fn wait_timeout_message(pending: &[String]) -> String {
         format!(
@@ -106,7 +107,7 @@ mod native {
     }
 
     pub struct PreviewPanel {
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         /// One native WebView per session id, created on first use.
         webviews: HashMap<String, Entity<WebView>>,
@@ -141,7 +142,7 @@ mod native {
 
     impl PreviewPanel {
         pub fn new(
-            app_state: Entity<AppState>,
+            store: Entity<WorkspaceStore>,
             window_state: Entity<WindowState>,
             window: &mut Window,
             cx: &mut Context<Self>,
@@ -150,9 +151,9 @@ mod native {
                 InputState::new(window, cx).placeholder(tcode_i18n::tr!("preview.url_placeholder"))
             });
             let subscriptions = vec![
-                cx.observe(&app_state, |this, _, cx| {
+                cx.observe(&store, |this, _, cx| {
                     // Native child views outlive GPUI layout nodes. Visibility
-                    // therefore follows AppState directly, even while this
+                    // therefore follows WorkspaceStore directly, even while this
                     // entity is no longer mounted in the right-panel tree.
                     this.sync_visibility(cx);
                     cx.notify();
@@ -160,7 +161,7 @@ mod native {
                 cx.subscribe_in(&url_input, window, Self::on_url_event),
             ];
             Self {
-                app_state,
+                store,
                 window_state,
                 webviews: HashMap::new(),
                 warm: HashSet::new(),
@@ -180,14 +181,7 @@ mod native {
         /// Draft -> stored-thread commits retain the same session id, so move
         /// all cached browser state across that one key transition.
         fn active_key(&mut self, cx: &Context<Self>) -> Option<String> {
-            let current = {
-                let state = self.app_state.read(cx);
-                state.active_session_id().and_then(|session_id| {
-                    state
-                        .active_conversation_ui_key()
-                        .map(|key| (session_id.to_string(), key))
-                })
-            };
+            let current = self.store.read(cx).preview_active_identity(cx);
 
             if let (Some((old_session, old_key)), Some((session, key))) =
                 (self.active_identity.as_ref(), current.as_ref())
@@ -225,11 +219,7 @@ mod native {
 
         fn routed_key(&mut self, session_id: &str, cx: &Context<Self>) -> String {
             let active_key = self.active_key(cx);
-            let active_session_id = self
-                .app_state
-                .read(cx)
-                .active_session_id()
-                .map(str::to_string);
+            let active_session_id = self.store.read(cx).preview_active_session_id(cx);
             preview_key_for_session(
                 session_id,
                 active_session_id.as_deref(),
@@ -254,13 +244,12 @@ mod native {
         fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
             let active = self.active_key(cx);
             let visible = {
-                let state = self.app_state.read(cx);
                 let window_state = self.window_state.read(cx);
                 visible_preview_key(
                     active.as_deref(),
                     window_state.route,
                     window_state.palette_open,
-                    state.preview_panel_showing(),
+                    self.store.read(cx).preview_panel_showing(cx),
                 )
                 .map(str::to_string)
             };
@@ -413,8 +402,9 @@ mod native {
             // Un-mirror so a later reopen refreshes the address bar from the
             // (now empty) URL map instead of showing the stale address.
             self.mirrored = None;
-            self.app_state
-                .update(cx, |state, cx| state.close_preview_panel(cx));
+            self.store.update(cx, |store, cx| {
+                store.dispatch(Command::ClosePreviewPanel, cx);
+            });
             cx.notify();
         }
 
@@ -455,7 +445,7 @@ mod native {
 
             // Gate on the Browser settings: a disabled browser rejects every op;
             // `allow_evaluate` gates only `preview_evaluate`.
-            let browser = self.app_state.read(cx).settings.browser.clone();
+            let browser = self.store.read(cx).preview_browser_settings(cx);
             if !browser.enabled {
                 let _ = reply.try_send(Err(tcode_i18n::tr!("browser.disabled_error").into_owned()));
                 return;
@@ -469,8 +459,13 @@ mod native {
 
             match op {
                 PreviewOp::Open { url } => {
-                    self.app_state.update(cx, |state, cx| {
-                        state.open_preview_panel_for(&session_id, cx)
+                    self.store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::OpenPreviewPanelFor {
+                                session_id: session_id.clone(),
+                            },
+                            cx,
+                        );
                     });
                     if let Some(url) = url.as_deref() {
                         self.navigate(&key, url, window, cx);
@@ -498,8 +493,13 @@ mod native {
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
                 PreviewOp::Navigate { url } => {
-                    self.app_state.update(cx, |state, cx| {
-                        state.open_preview_panel_for(&session_id, cx)
+                    self.store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::OpenPreviewPanelFor {
+                                session_id: session_id.clone(),
+                            },
+                            cx,
+                        );
                     });
                     self.navigate(&key, &url, window, cx);
                     if let Some(err) = &self.webview_error {
@@ -525,8 +525,13 @@ mod native {
                     self.eval_json(&key, &js::type_text(&selector, &text), reply, window, cx)
                 }
                 PreviewOp::Resize { width, height } => {
-                    self.app_state.update(cx, |state, cx| {
-                        state.open_preview_panel_for(&session_id, cx)
+                    self.store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::OpenPreviewPanelFor {
+                                session_id: session_id.clone(),
+                            },
+                            cx,
+                        );
                     });
                     let payload = match (width, height) {
                         (Some(width), Some(height)) => {
@@ -837,9 +842,9 @@ mod native {
             use wry::WebViewExtMacOS as _;
 
             let visible = {
-                let state = self.app_state.read(cx);
                 let window_state = self.window_state.read(cx);
-                if state.active_session_id() != Some(session_id) {
+                if self.store.read(cx).preview_active_session_id(cx).as_deref() != Some(session_id)
+                {
                     let _ = reply.try_send(Err(
                         "preview is not visible; the user is viewing another conversation".into(),
                     ));
@@ -849,7 +854,7 @@ mod native {
                     Some(key),
                     window_state.route,
                     window_state.palette_open,
-                    state.preview_panel_showing(),
+                    self.store.read(cx).preview_panel_showing(cx),
                 ) == Some(key)
             };
             if !visible {
@@ -912,7 +917,7 @@ mod native {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             // When the embedded browser is turned off in Settings → Browser, hide
             // the chrome and webview entirely and show a quiet placeholder.
-            if !self.app_state.read(cx).settings.browser.enabled {
+            if !self.store.read(cx).preview_browser_settings(cx).enabled {
                 return v_flex()
                     .size_full()
                     .items_center()
@@ -927,8 +932,8 @@ mod native {
             // Honor a queued `--open-preview <url>` navigation once a session exists.
             if active.is_some()
                 && let Some(url) = self
-                    .app_state
-                    .update(cx, |state, _| state.take_pending_preview_url())
+                    .store
+                    .update(cx, |store, cx| store.take_pending_preview_url(cx))
             {
                 self.navigate(active.as_deref().unwrap(), &url, window, cx);
             }
@@ -1014,12 +1019,12 @@ mod native {
             // drop the trailing/vertical padding on the caption side so the
             // buttons reach the window's true top-right corner.
             let hosts_caption = {
-                let state = self.app_state.read(cx);
+                let (diff_open, right_tab) = self.store.read(cx).window_caption_state(cx);
                 window_caption::hosts_caption_for_state(
                     window_caption::CaptionSurface::Preview,
                     self.window_state.read(cx).route,
-                    state.diff_panel_open(),
-                    state.right_tab(),
+                    diff_open,
+                    right_tab,
                 )
             };
             h_flex()
@@ -1135,14 +1140,14 @@ mod placeholder {
     use preview_mcp::PreviewOp;
 
     use super::ReplyTx;
+    use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
-    use tcode_runtime::app::AppState;
 
     pub struct PreviewPanel;
 
     impl PreviewPanel {
         pub fn new(
-            _app_state: Entity<AppState>,
+            _store: Entity<WorkspaceStore>,
             _window_state: Entity<WindowState>,
             _window: &mut Window,
             _cx: &mut Context<Self>,

@@ -1,18 +1,19 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use gpui::{App, AppContext as _, Context, Entity, Task, Window};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction},
     project::{SessionMeta, WorktreeInfo},
     provider_models::ResolvedModel,
     provider_status::ProviderSnapshot,
     session::{ReviewComment, Timeline},
-    settings::{ProjectSort, ProviderSettings, ResolvedProfile, Settings},
+    settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
 use tcode_protocol::Command;
 use tcode_runtime::{
     app::{AppState, ProjectGroup, ProviderVersionStatus, QueuedMessage},
+    event::RuntimeEvent,
     terminal::{TerminalContext, TerminalWorkspace},
     ui_facade::{
         AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, GitDiffResult, GitDiffScope,
@@ -70,6 +71,10 @@ pub(crate) struct DiffActiveState {
 impl WorkspaceStore {
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&app, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&app, |_, _, event: &RuntimeEvent, cx| {
+            cx.emit(event.clone());
+        })
+        .detach();
         Self { app }
     }
 
@@ -337,6 +342,59 @@ impl WorkspaceStore {
     pub fn window_caption_state(&self, cx: &App) -> (bool, tcode_core::ui::RightTab) {
         let app = self.app.read(cx);
         (app.diff_panel_open(), app.right_tab())
+    }
+
+    pub fn shell_window_title(&self, cx: &App) -> String {
+        match self.app.read(cx).active.as_ref() {
+            Some(active) if active.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
+            Some(active) => active.meta.title.clone(),
+            None => "tcode".to_string(),
+        }
+    }
+
+    pub fn shell_panel_state(&self, cx: &App) -> (bool, tcode_core::ui::RightTab, bool) {
+        let app = self.app.read(cx);
+        (
+            app.diff_panel_open(),
+            app.right_tab(),
+            app.diff_panel_expanded(),
+        )
+    }
+
+    pub fn preview_active_identity(&self, cx: &App) -> Option<(String, String)> {
+        let app = self.app.read(cx);
+        app.active_session_id().and_then(|session_id| {
+            app.active_conversation_ui_key()
+                .map(|key| (session_id.to_string(), key))
+        })
+    }
+
+    pub fn preview_active_session_id(&self, cx: &App) -> Option<String> {
+        self.app.read(cx).active_session_id().map(str::to_owned)
+    }
+
+    pub fn preview_panel_showing(&self, cx: &App) -> bool {
+        self.app.read(cx).preview_panel_showing()
+    }
+
+    pub fn preview_browser_settings(&self, cx: &App) -> BrowserSettings {
+        self.app.read(cx).settings.browser.clone()
+    }
+
+    pub fn take_pending_preview_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        self.app.update(cx, |app, _| app.take_pending_preview_url())
+    }
+
+    pub fn take_preview_requests(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
+        self.app.update(cx, |app, _| app.take_preview_requests())
+    }
+
+    pub fn pump_orchestrate_requests(&mut self, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |app, cx| app.pump_orchestrate_requests(cx));
     }
 
     pub fn enabled_provider_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
@@ -999,3 +1057,5 @@ impl WorkspaceStore {
         crate::add_project_dialog::open(store, window, cx);
     }
 }
+
+impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
