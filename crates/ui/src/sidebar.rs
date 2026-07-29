@@ -152,10 +152,7 @@ fn visible_threads<'a>(
 /// Startup fold state: every thread with visible direct children begins
 /// collapsed, except the active thread and its ancestors so the restored
 /// selection stays on screen (and, when it is itself a parent, open).
-fn initial_collapsed_parents(
-    sessions: &[SessionMeta],
-    active_id: Option<&str>,
-) -> HashSet<String> {
+fn initial_collapsed_parents(sessions: &[SessionMeta], active_id: Option<&str>) -> HashSet<String> {
     let visible: Vec<&SessionMeta> = sessions
         .iter()
         .filter(|meta| meta.archived_at.is_none())
