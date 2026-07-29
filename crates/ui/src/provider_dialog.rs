@@ -829,10 +829,13 @@ impl ProviderDialog {
                 Button::new(("model-hide", index))
                     .ghost()
                     .xsmall()
+                    // Like the star beside it, the icon mirrors the model's
+                    // current state (slashed eye = hidden); the tooltip names
+                    // the action.
                     .icon(if hidden {
-                        IconName::Eye
-                    } else {
                         IconName::EyeOff
+                    } else {
+                        IconName::Eye
                     })
                     .tooltip(if hidden {
                         tcode_i18n::tr!("providers.models.show")
