@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use gpui::{Context, Entity};
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
+
+use crate::store::WorkspaceStore;
 
 /// Window-global UI state owned by the GPUI layer.
 pub struct WindowState {
@@ -49,12 +51,17 @@ impl WindowState {
 
     pub fn toggle_sidebar_collapsed(
         &mut self,
-        app_state: &Entity<AppState>,
+        store: &Entity<WorkspaceStore>,
         cx: &mut Context<Self>,
     ) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
-        app_state.update(cx, |state, cx| {
-            state.set_sidebar_collapsed(self.sidebar_collapsed, cx)
+        store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::SetSidebarCollapsed {
+                    collapsed: self.sidebar_collapsed,
+                },
+                cx,
+            )
         });
         cx.notify();
     }

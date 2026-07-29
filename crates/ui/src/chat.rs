@@ -30,12 +30,14 @@ use tcode_core::session::{
     EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming,
     parse_orchestrate_callback,
 };
-use tcode_runtime::app::{AppState, RightTab};
+use tcode_core::ui::RightTab;
+use tcode_protocol::Command;
 
 use crate::commit_dialog::CommitDialog;
 use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::markdown::{MarkdownState, MarkdownView};
+use crate::store::WorkspaceStore;
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_millis;
 use crate::window_caption;
@@ -653,8 +655,7 @@ impl MdState {
 }
 
 pub struct ChatView {
-    app_state: Entity<AppState>,
-    workspace_store: Entity<crate::store::WorkspaceStore>,
+    workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
@@ -677,14 +678,13 @@ pub struct ChatView {
 
 impl ChatView {
     pub fn new(
-        app_state: Entity<AppState>,
-        workspace_store: Entity<crate::store::WorkspaceStore>,
+        workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let composer =
-            cx.new(|cx| Composer::new(app_state.clone(), window_state.clone(), window, cx));
+            WorkspaceStore::new_composer(workspace_store.clone(), window_state.clone(), window, cx);
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -697,15 +697,14 @@ impl ChatView {
                 this.list_state.scroll_to_end();
                 cx.notify();
             }),
-            cx.observe(&app_state, |this, _, cx| {
+            cx.observe(&workspace_store, |this, _, cx| {
                 this.sync_markdown_states(cx);
                 cx.notify();
             }),
         ];
-        let terminal_drawer = cx.new(|cx| TerminalDrawer::new(app_state.clone(), cx));
+        let terminal_drawer = WorkspaceStore::new_terminal_drawer(workspace_store.clone(), cx);
 
         let mut this = Self {
-            app_state,
             workspace_store,
             window_state,
             composer,
@@ -727,16 +726,13 @@ impl ChatView {
 
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
-        let (session_key, texts, running, turn_items) = {
-            let state = self.app_state.read(cx);
-            let session_key = state.active_session_id().map(str::to_string);
-            let mut texts: Vec<(String, String)> = Vec::new();
-            let mut running = false;
-            let mut turn_items = Vec::new();
-            if let Some(active) = &state.active {
-                let timeline = &active.timeline;
-                running = timeline.turn_running;
-                turn_items = index_turns(
+        let session_key = self.workspace_store.read(cx).active_session_id(cx);
+        let (texts, running, turn_items) = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(cx, |timeline| {
+                let mut texts: Vec<(String, String)> = Vec::new();
+                let turn_items = index_turns(
                     &timeline.turns,
                     &timeline.entries,
                     timeline
@@ -764,9 +760,9 @@ impl ChatView {
                 if let Some(plan) = &timeline.proposed_plan {
                     texts.push((format!("plan:{}", plan.item_id), plan.markdown.clone()));
                 }
-            }
-            (session_key, texts, running, turn_items)
-        };
+                (texts, timeline.turn_running, turn_items)
+            })
+            .unwrap_or_default();
 
         let session_changed = session_key != self.session_key;
         let list_sync = list_sync(&self.turn_items, &turn_items, session_changed);
@@ -990,15 +986,18 @@ impl ChatView {
         }
 
         // Proposed-plan card (the captured plan for this turn).
-        if let Some((item_id, markdown)) = {
-            let state = self.app_state.read(cx);
-            state
-                .active
-                .as_ref()
-                .and_then(|a| a.timeline.proposed_plan.as_ref())
-                .filter(|plan| plan.turn == index)
-                .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
-        } {
+        if let Some((item_id, markdown)) = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(cx, |timeline| {
+                timeline
+                    .proposed_plan
+                    .as_ref()
+                    .filter(|plan| plan.turn == index)
+                    .map(|plan| (plan.item_id.clone(), plan.markdown.clone()))
+            })
+            .flatten()
+        {
             column =
                 column.child(self.render_proposed_plan_card(index, &item_id, &markdown, cwd, cx));
         }
@@ -1009,15 +1008,8 @@ impl ChatView {
         // silently. Replay marks turns idle (mark_idle), so finished turns from
         // stored sessions still render the card.
         if !turn.running {
-            let (changes, completeness) = {
-                let state = self.app_state.read(cx);
-                (
-                    state.turn_file_changes(index).unwrap_or_default(),
-                    state
-                        .turn_change_completeness(index)
-                        .unwrap_or(ChangeCompleteness::Partial),
-                )
-            };
+            let (changes, completeness) =
+                self.workspace_store.read(cx).chat_turn_changes(index, cx);
             if !changes.is_empty() {
                 column =
                     column.child(self.render_changed_files(index, cwd, &changes, completeness, cx));
@@ -1141,23 +1133,10 @@ impl ChatView {
         turn: usize,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (available, disabled) = {
-            let state = self.app_state.read(cx);
-            let active = state.active.as_ref()?;
-            (
-                active.meta.provider == agent::ProviderKind::ClaudeCode
-                    && active
-                        .timeline
-                        .turns
-                        .get(turn)
-                        .and_then(|turn| turn.provider_checkpoint_id.as_ref())
-                        .is_some(),
-                active.is_turn_running()
-                    || active.timeline.turn_running
-                    || !active.queued().is_empty()
-                    || state.native_rewind_pending(),
-            )
-        };
+        let (available, disabled) = self
+            .workspace_store
+            .read(cx)
+            .chat_native_rewind_state(turn, cx)?;
         if !available {
             return None;
         }
@@ -1172,7 +1151,7 @@ impl ChatView {
                 tcode_i18n::tr!("chat.rewind")
             })
             .disabled(disabled);
-        let app_state = self.app_state.clone();
+        let workspace_store = self.workspace_store.clone();
         Some(
             Popover::new(("rewind-menu", turn))
                 // T3 overlay contour (shadow_xl at the 14px overlay radius).
@@ -1207,7 +1186,7 @@ impl ChatView {
                         .role(Role::Menu)
                         .aria_label(tcode_i18n::tr!("chat.rewind"));
                     for (index, (mode, label)) in modes.into_iter().enumerate() {
-                        let app_state = app_state.clone();
+                        let workspace_store = workspace_store.clone();
                         let popover = popover.clone();
                         menu = menu.child(
                             crate::material::accessible_clickable(
@@ -1230,7 +1209,9 @@ impl ChatView {
                             .child(label)
                             .on_click(move |_, window, cx| {
                                 popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                app_state.update(cx, |state, cx| state.rewind_turn(turn, mode, cx));
+                                workspace_store.update(cx, |store, cx| {
+                                    store.dispatch(Command::RewindTurn { turn, mode }, cx)
+                                });
                             }),
                         );
                     }
@@ -1826,12 +1807,7 @@ impl ChatView {
                 .start_ts
                 .map(|start| now_millis().saturating_sub(start) / 1000)
                 .unwrap_or(0);
-            let requested_model = self
-                .app_state
-                .read(cx)
-                .active
-                .as_ref()
-                .and_then(|active| active.meta.model.clone());
+            let requested_model = self.workspace_store.read(cx).chat_requested_model(cx);
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
@@ -2026,19 +2002,16 @@ impl ChatView {
         let key = format!("subagent-{}", entry.id);
         let expanded = self.expanded.contains(&key);
         let parent_id = entry.id.clone();
-        let (children, truncated) = {
-            let state = self.app_state.read(cx);
-            state
-                .active
-                .as_ref()
-                .map(|active| {
-                    (
-                        active.timeline.children(&parent_id).to_vec(),
-                        active.timeline.children_truncated(&parent_id),
-                    )
-                })
-                .unwrap_or_default()
-        };
+        let (children, truncated) = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(cx, |timeline| {
+                (
+                    timeline.children(&parent_id).to_vec(),
+                    timeline.children_truncated(&parent_id),
+                )
+            })
+            .unwrap_or_default();
         let muted = cx.theme().muted_foreground;
         let finished = !matches!(status, ItemStatus::InProgress);
         let turn = entry.turn;
@@ -2227,8 +2200,9 @@ impl ChatView {
                     .label(tcode_i18n::tr!("chat.view_diff"))
                     .tooltip(tcode_i18n::tr!("chat.view_diff_tooltip"))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.open_diff_for_turn(index, cx));
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.dispatch(Command::OpenDiffForTurn { turn: index }, cx)
+                        });
                     })),
             );
 
@@ -2286,8 +2260,14 @@ impl ChatView {
                         .cursor_pointer()
                         .hover(|s| s.bg(cx.theme().list_hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.app_state.update(cx, |state, cx| {
-                                state.open_diff_for_file(index, path.clone(), cx)
+                            this.workspace_store.update(cx, |store, cx| {
+                                store.dispatch(
+                                    Command::OpenDiffForFile {
+                                        turn: index,
+                                        path: path.clone(),
+                                    },
+                                    cx,
+                                )
                             });
                         }))
                         .child(Icon::new(IconName::File).xsmall().text_color(muted))
@@ -2415,7 +2395,9 @@ impl ChatView {
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
-                                this.app_state.update(cx, |s, cx| s.copy_plan(md, cx));
+                                this.workspace_store.update(cx, |store, cx| {
+                                    store.dispatch(Command::CopyPlan { markdown: md }, cx)
+                                });
                                 this.mark_copied("plan".into(), cx);
                             })),
                     )
@@ -2428,8 +2410,15 @@ impl ChatView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_download.clone();
                                 let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
-                                this.app_state
-                                    .update(cx, |s, cx| s.download_plan(md, fallback, cx));
+                                this.workspace_store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::DownloadPlan {
+                                            markdown: md,
+                                            fallback_title: fallback,
+                                        },
+                                        cx,
+                                    )
+                                });
                             })),
                     )
                     .child(
@@ -2440,8 +2429,10 @@ impl ChatView {
                             .label(tcode_i18n::tr!("plan.save_workspace"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_save.clone();
-                                this.app_state
-                                    .update(cx, |s, cx| s.save_plan_to_workspace(md, cx));
+                                this.workspace_store.update(cx, |store, cx| {
+                                    store
+                                        .dispatch(Command::SavePlanToWorkspace { markdown: md }, cx)
+                                });
                             })),
                     ),
             );
@@ -2484,19 +2475,14 @@ impl ChatView {
     /// The finished turn's bottom row: the local completion clock, followed by
     /// the wall-clock breakdown when the turn's events supported deriving one.
     fn render_timestamp(&self, ts: u64, turn: &TurnMeta, cx: &mut Context<Self>) -> AnyElement {
-        let requested_model = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .and_then(|active| active.meta.model.as_deref());
+        let requested_model = self.workspace_store.read(cx).chat_requested_model(cx);
         turn_time_footer(
             turn_time_clauses(
                 format_local_time(ts),
                 turn.timing,
                 turn.cost_usd,
                 turn.served_model.as_deref(),
-                requested_model,
+                requested_model.as_deref(),
             ),
             cx.theme().muted_foreground,
             cx.theme().warning,
@@ -2525,10 +2511,12 @@ impl ChatView {
         // Windows: with no right panel open this header is the window's
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
-        let hosts_caption = window_caption::hosts_caption(
+        let (right_panel_open, right_tab) = self.workspace_store.read(cx).window_caption_state(cx);
+        let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Chat,
             self.window_state.read(cx).route,
-            self.app_state.read(cx),
+            right_panel_open,
+            right_tab,
         );
         let base = h_flex()
             .flex_shrink_0()
@@ -2560,9 +2548,9 @@ impl ChatView {
                 tcode_i18n::tr!("sidebar.collapse")
             })
             .on_click(cx.listener(|this, _, _, cx| {
-                let app_state = this.app_state.clone();
+                let workspace_store = this.workspace_store.clone();
                 this.window_state.update(cx, |state, cx| {
-                    state.toggle_sidebar_collapsed(&app_state, cx)
+                    state.toggle_sidebar_collapsed(&workspace_store, cx)
                 });
             }));
 
@@ -2604,13 +2592,9 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        let diff_showing = {
-            let state = self.app_state.read(cx);
-            state.diff_panel_open() && state.right_tab() == RightTab::Diff
-        };
-        let plan_showing = self.app_state.read(cx).plan_panel_showing();
-        let preview_showing = self.app_state.read(cx).preview_panel_showing();
-        let terminal_open = self.app_state.read(cx).terminal_panel_open();
+        let (right_panel_open, right_tab, plan_showing, preview_showing, terminal_open, _) =
+            self.workspace_store.read(cx).chat_panel_state(cx);
+        let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
             .child(window_caption::drag_region(title_el))
@@ -2630,9 +2614,9 @@ impl ChatView {
                                     .selected(terminal_open)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_terminal"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.app_state.update(cx, |state, cx| {
-                                            state.toggle_terminal_panel(cx)
-                                        });
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.dispatch(Command::ToggleTerminalPanel, cx)
+                                        })
                                     })),
                             )
                             .child(
@@ -2644,8 +2628,9 @@ impl ChatView {
                                     .selected(plan_showing)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_plan"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.app_state
-                                            .update(cx, |state, cx| state.toggle_plan_panel(cx));
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.dispatch(Command::TogglePlanPanel, cx)
+                                        });
                                     })),
                             )
                             .child(
@@ -2657,8 +2642,9 @@ impl ChatView {
                                     .selected(preview_showing)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_preview"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.app_state
-                                            .update(cx, |state, cx| state.toggle_preview_panel(cx));
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.dispatch(Command::TogglePreviewPanel, cx)
+                                        });
                                     })),
                             )
                             .child(
@@ -2670,8 +2656,9 @@ impl ChatView {
                                     .selected(diff_showing)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_diff"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.app_state
-                                            .update(cx, |state, cx| state.toggle_diff_panel(cx));
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.dispatch(Command::ToggleDiffPanel, cx)
+                                        });
                                     })),
                             ),
                     )
@@ -2687,9 +2674,8 @@ impl ChatView {
     /// Pull / Publish branch / Initialize Git, or a disabled status hint); the
     /// chevron lists the applicable subset. Ported from T3's `GitActionsControl`.
     fn render_git_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let quick = self.app_state.read(cx).git_quick_action()?;
+        let (quick, items) = self.workspace_store.read(cx).chat_git_controls(cx)?;
         let border = cx.theme().border;
-        let items = self.app_state.read(cx).git_menu_items();
 
         // Main action segment.
         let label: SharedString = tcode_i18n::tr!(git_action_label_key(quick.label))
@@ -2830,8 +2816,16 @@ impl ChatView {
         if action.opens_commit_dialog() {
             self.open_commit_dialog(action, window, cx);
         } else {
-            self.app_state.update(cx, |state, cx| {
-                state.run_git_action(action, None, None, None, cx)
+            self.workspace_store.update(cx, |store, cx| {
+                store.dispatch(
+                    Command::RunGitAction {
+                        action,
+                        message: None,
+                        included: None,
+                        feature_branch: None,
+                    },
+                    cx,
+                )
             });
         }
     }
@@ -3033,7 +3027,7 @@ impl Render for ChatView {
         // Screenshot-only: `--debug-git-dialog` opens the commit dialog once the
         // background git status has landed (a header click is not drivable
         // headlessly). Consumed once.
-        let git_status_loaded = self.app_state.read(cx).git_status.is_some();
+        let git_status_loaded = self.workspace_store.read(cx).chat_git_status_loaded(cx);
         let open_commit_dialog = self.window_state.update(cx, |state, _| {
             let armed = state.debug_open_commit_dialog && git_status_loaded;
             if armed {
@@ -3045,16 +3039,7 @@ impl Render for ChatView {
             self.open_commit_dialog(GitAction::Commit, window, cx);
         }
 
-        let active = {
-            let state = self.app_state.read(cx);
-            state.active.as_ref().map(|active| {
-                (
-                    active.meta.title.clone(),
-                    active.meta.cwd.clone(),
-                    active.draft,
-                )
-            })
-        };
+        let active = self.workspace_store.read(cx).chat_active_session(cx);
 
         let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
 
@@ -3066,14 +3051,8 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
-        let terminal_open = self.app_state.read(cx).terminal_panel_open();
-        let terminal_height = self
-            .app_state
-            .read(cx)
-            .active
-            .as_ref()
-            .map(|a| a.terminal_workspace.height)
-            .unwrap_or(240.);
+        let (_, _, _, _, terminal_open, terminal_height) =
+            self.workspace_store.read(cx).chat_panel_state(cx);
 
         // Group entries by turn and render each turn section into the centered
         // content column. The column fills the available width up to
@@ -3082,27 +3061,26 @@ impl Render for ChatView {
         // diff panel narrows the chat region.
         // The newest user / assistant message: their action rows stay visible
         // (hover is not the only way to reach Copy / native rewind).
-        let (last_user_id, last_assistant_id) = {
-            let state = self.app_state.read(cx);
-            let entries = &state
-                .active
-                .as_ref()
-                .expect("active session")
-                .timeline
-                .entries;
-            (
-                entries
-                    .iter()
-                    .rev()
-                    .find(|entry| matches!(entry.content, EntryContent::User { .. }))
-                    .map(|entry| entry.id.clone()),
-                entries
-                    .iter()
-                    .rev()
-                    .find(|entry| matches!(entry.content, EntryContent::Assistant { .. }))
-                    .map(|entry| entry.id.clone()),
-            )
-        };
+        let (last_user_id, last_assistant_id) = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(cx, |timeline| {
+                (
+                    timeline
+                        .entries
+                        .iter()
+                        .rev()
+                        .find(|entry| matches!(entry.content, EntryContent::User { .. }))
+                        .map(|entry| entry.id.clone()),
+                    timeline
+                        .entries
+                        .iter()
+                        .rev()
+                        .find(|entry| matches!(entry.content, EntryContent::Assistant { .. }))
+                        .map(|entry| entry.id.clone()),
+                )
+            })
+            .unwrap_or_default();
 
         let item_count = self.turn_items.len();
         let item_cwd = cwd.clone();
@@ -3113,28 +3091,26 @@ impl Render for ChatView {
                     return div().into_any_element();
                 };
                 // Clone only the handful of entries in this visible/overdrawn
-                // turn. The full history remains in AppState and is never
+                // turn. The full history remains behind the store and is never
                 // cloned by the render path.
-                let Some((turn, entries)) = this.app_state.read(cx).active.as_ref().map(|active| {
-                    (
-                        active
-                            .timeline
-                            .turns
-                            .get(index)
-                            .cloned()
-                            .unwrap_or_default(),
-                        // `entry_range` comes from `turn_items`, a snapshot
-                        // that can trail the live timeline by a frame (e.g.
-                        // adopting a running background thread whose timeline
-                        // is being re-folded), so it must not index blindly.
-                        active
-                            .timeline
-                            .entries
-                            .get(item.entry_range.clone())
-                            .map(<[_]>::to_vec)
-                            .unwrap_or_default(),
-                    )
-                }) else {
+                let Some((turn, entries)) =
+                    this.workspace_store
+                        .read(cx)
+                        .with_active_timeline(cx, |timeline| {
+                            (
+                                timeline.turns.get(index).cloned().unwrap_or_default(),
+                                // `entry_range` comes from `turn_items`, a snapshot
+                                // that can trail the live timeline by a frame (e.g.
+                                // adopting a running background thread whose timeline
+                                // is being re-folded), so it must not index blindly.
+                                timeline
+                                    .entries
+                                    .get(item.entry_range.clone())
+                                    .map(<[_]>::to_vec)
+                                    .unwrap_or_default(),
+                            )
+                        })
+                else {
                     return div().into_any_element();
                 };
                 let rendered = this.render_turn(
@@ -3898,13 +3874,7 @@ This begins after the hard break."#;
         let window_state = cx.new(|_| WindowState::new(false));
 
         let (view, cx) = cx.add_window_view(|window, cx| {
-            ChatView::new(
-                app_state.clone(),
-                workspace_store.clone(),
-                window_state,
-                window,
-                cx,
-            )
+            ChatView::new(workspace_store.clone(), window_state, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
