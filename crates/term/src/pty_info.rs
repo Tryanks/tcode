@@ -1,9 +1,11 @@
 use std::{
-    fs::File,
     path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
