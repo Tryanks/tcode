@@ -149,6 +149,39 @@ fn visible_threads<'a>(
         .collect()
 }
 
+/// Startup fold state: every thread with visible direct children begins
+/// collapsed, except the active thread and its ancestors so the restored
+/// selection stays on screen (and, when it is itself a parent, open).
+fn initial_collapsed_parents(sessions: &[SessionMeta], active_id: Option<&str>) -> HashSet<String> {
+    let visible: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|meta| meta.archived_at.is_none())
+        .collect();
+    let mut collapsed: HashSet<String> = visible
+        .iter()
+        .filter(|meta| {
+            visible
+                .iter()
+                .any(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
+        })
+        .map(|meta| meta.id.clone())
+        .collect();
+    let mut current = active_id;
+    let mut walked = HashSet::new();
+    while let Some(id) = current {
+        // A cyclic parent chain in a corrupt index must not hang startup.
+        if !walked.insert(id) {
+            break;
+        }
+        collapsed.remove(id);
+        current = visible
+            .iter()
+            .find(|meta| meta.id == id)
+            .and_then(|meta| meta.parent_session_id.as_deref());
+    }
+    collapsed
+}
+
 fn toggle_parent_for_row_click(
     collapsed_parents: &mut HashSet<String>,
     parent_id: &str,
@@ -218,10 +251,14 @@ pub struct SessionsSidebar {
 impl SessionsSidebar {
     pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        let collapsed_parents = {
+            let state = app_state.read(cx);
+            initial_collapsed_parents(&state.sessions, state.active_session_id())
+        };
         Self {
             app_state,
             expanded_groups: HashSet::new(),
-            collapsed_parents: HashSet::new(),
+            collapsed_parents,
             renaming: None,
             auto_archive_notice: None,
             _subscriptions: subscriptions,
@@ -1617,6 +1654,64 @@ mod tests {
             });
         assert!(!state.is_child);
         assert!(!state.show_unread);
+    }
+
+    #[test]
+    fn startup_collapses_every_parent_except_the_active_chain() {
+        let sessions = vec![
+            session("parent-a", None),
+            session("child-a", Some("parent-a")),
+            session("parent-b", None),
+            session("child-b", Some("parent-b")),
+            session("grandchild-b", Some("child-b")),
+            session("plain", None),
+        ];
+
+        let collapsed = initial_collapsed_parents(&sessions, None);
+        assert_eq!(
+            collapsed,
+            HashSet::from([
+                "parent-a".to_string(),
+                "parent-b".to_string(),
+                "child-b".to_string()
+            ]),
+            "with no selection, every parent starts folded and leaves do not"
+        );
+
+        let collapsed = initial_collapsed_parents(&sessions, Some("grandchild-b"));
+        assert!(collapsed.contains("parent-a"));
+        assert!(
+            !collapsed.contains("parent-b") && !collapsed.contains("child-b"),
+            "the selected thread's ancestor chain stays open"
+        );
+
+        let collapsed = initial_collapsed_parents(&sessions, Some("parent-a"));
+        assert!(
+            !collapsed.contains("parent-a"),
+            "a selected parent keeps its own children visible"
+        );
+    }
+
+    #[test]
+    fn startup_fold_ignores_archived_children_and_orphan_parent_ids() {
+        let mut archived_child = session("archived-child", Some("quiet-parent"));
+        archived_child.archived_at = Some(1);
+        let sessions = vec![
+            session("quiet-parent", None),
+            archived_child,
+            session("orphan", Some("missing-parent")),
+        ];
+
+        let collapsed = initial_collapsed_parents(&sessions, None);
+        assert!(
+            !collapsed.contains("quiet-parent"),
+            "archived children do not make their parent fold"
+        );
+        assert!(
+            !collapsed.contains("missing-parent"),
+            "a nonexistent parent id must never enter the fold set, or its \
+             orphaned children would be hidden with no row to toggle"
+        );
     }
 
     #[test]
