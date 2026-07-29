@@ -7,6 +7,7 @@ edition = "2024"
 agent = { path = "../agent" }
 tcode-core = { path = "../core" }
 tcode-i18n = { path = "../i18n" }
+tcode-protocol = { path = "../protocol" }
 tcode-runtime = { path = "../runtime" }
 term = { path = "../term" }
 preview-mcp = { path = "../preview-mcp" }
