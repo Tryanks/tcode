@@ -93,7 +93,8 @@ impl CommitDialog {
         }
         self.generating = true;
         let included = self.included();
-        let task = self.store.read(cx).generate_commit_message(included, cx);
+        let store = self.store.clone();
+        let task = store.update(cx, |store, cx| store.generate_commit_message(included, cx));
         let message = self.message.clone();
         self._gen_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;

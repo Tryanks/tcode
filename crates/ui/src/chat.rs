@@ -3835,8 +3835,8 @@ This begins after the hard break."#;
             tcode_services::store::now_millis()
         ));
         let store = SessionStore::open_at(data_root).expect("test session store");
-        let app_state = cx.new(|cx| {
-            let mut state = AppState::new(store);
+        let app_state = cx.new(|_| AppState::new(store));
+        AppState::update(&app_state, cx, |state, cx| {
             state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
             let active = state.active.as_mut().expect("active draft");
             active.timeline.turns = vec![TurnMeta::default()];
@@ -3858,7 +3858,6 @@ This begins after the hard break."#;
                 ),
             ];
             active.draft = false;
-            state
         });
         let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(app_state.clone(), cx));
         let (session_id, timeline) = app_state.read_with(cx, |state, _| {

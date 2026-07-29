@@ -14,10 +14,12 @@
 
 use gpui::{BackgroundExecutor, Task};
 
+use crate::host::{HostCx, HostTask};
+
 /// Run `f` on gpui's background executor.
 ///
 /// ```ignore
-/// let status = blocking::unblock(cx.background_executor(), move || read_status(&cwd)).await;
+/// let status = blocking::unblock(cx, move || read_status(&cwd)).await;
 /// ```
 pub fn unblock<R, F>(executor: &BackgroundExecutor, f: F) -> Task<R>
 where
@@ -25,6 +27,15 @@ where
     F: FnOnce() -> R + Send + 'static,
 {
     executor.spawn(async move { f() })
+}
+
+/// Run blocking work through the runtime-owned host seam.
+pub fn unblock_host<R, F>(cx: &HostCx, f: F) -> HostTask<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    cx.spawn_background(async move { f() })
 }
 
 #[cfg(test)]

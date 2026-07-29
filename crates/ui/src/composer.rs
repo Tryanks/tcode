@@ -900,7 +900,8 @@ impl Composer {
             return;
         }
         self.workspace_loading = true;
-        let walked = self.workspace_store.read(cx).list_active_workspace(cx);
+        let store = self.workspace_store.clone();
+        let walked = store.update(cx, |store, cx| store.list_active_workspace(cx));
         cx.spawn(async move |this, cx| {
             let walked = walked.await;
             let _ = this.update(cx, |this, cx| {
