@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use gpui::{App, Context, Entity, Task, Window};
+use gpui::{App, AppContext as _, Context, Entity, Task, Window};
 use tcode_core::{
-    git::GitFileEntry,
+    git::{GitFileEntry, MenuItem, QuickAction},
     project::{SessionMeta, WorktreeInfo},
     provider_models::ResolvedModel,
     provider_status::ProviderSnapshot,
+    session::Timeline,
     settings::{ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
 use tcode_protocol::Command;
@@ -14,6 +15,8 @@ use tcode_runtime::{
     app::{AppState, ProjectGroup, ProviderVersionStatus},
     ui_facade::{AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, RecentDir},
 };
+
+use crate::{composer::Composer, terminal_drawer::TerminalDrawer, window_state::WindowState};
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -481,6 +484,110 @@ impl WorkspaceStore {
             app.git_branch_name(),
             app.git_on_default_branch(),
         )
+    }
+
+    pub fn with_active_timeline<R>(
+        &self,
+        cx: &App,
+        read: impl FnOnce(&Timeline) -> R,
+    ) -> Option<R> {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| read(&active.timeline))
+    }
+
+    pub fn chat_active_session(&self, cx: &App) -> Option<(String, PathBuf, bool)> {
+        self.app.read(cx).active.as_ref().map(|active| {
+            (
+                active.meta.title.clone(),
+                active.meta.cwd.clone(),
+                active.draft,
+            )
+        })
+    }
+
+    pub fn chat_requested_model(&self, cx: &App) -> Option<String> {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|active| active.meta.model.clone())
+    }
+
+    pub fn chat_turn_changes(
+        &self,
+        turn: usize,
+        cx: &App,
+    ) -> (Vec<agent::FileChange>, agent::ChangeCompleteness) {
+        let app = self.app.read(cx);
+        (
+            app.turn_file_changes(turn).unwrap_or_default(),
+            app.turn_change_completeness(turn)
+                .unwrap_or(agent::ChangeCompleteness::Partial),
+        )
+    }
+
+    pub fn chat_native_rewind_state(&self, turn: usize, cx: &App) -> Option<(bool, bool)> {
+        let app = self.app.read(cx);
+        let active = app.active.as_ref()?;
+        Some((
+            active.meta.provider == agent::ProviderKind::ClaudeCode
+                && active
+                    .timeline
+                    .turns
+                    .get(turn)
+                    .and_then(|turn| turn.provider_checkpoint_id.as_ref())
+                    .is_some(),
+            active.is_turn_running()
+                || active.timeline.turn_running
+                || !active.queued().is_empty()
+                || app.native_rewind_pending(),
+        ))
+    }
+
+    pub fn chat_panel_state(
+        &self,
+        cx: &App,
+    ) -> (bool, tcode_core::ui::RightTab, bool, bool, bool, f32) {
+        let app = self.app.read(cx);
+        (
+            app.diff_panel_open(),
+            app.right_tab(),
+            app.plan_panel_showing(),
+            app.preview_panel_showing(),
+            app.terminal_panel_open(),
+            app.active
+                .as_ref()
+                .map(|active| active.terminal_workspace.height)
+                .unwrap_or(240.),
+        )
+    }
+
+    pub fn chat_git_controls(&self, cx: &App) -> Option<(QuickAction, Vec<MenuItem>)> {
+        let app = self.app.read(cx);
+        app.git_quick_action()
+            .map(|quick| (quick, app.git_menu_items()))
+    }
+
+    pub fn chat_git_status_loaded(&self, cx: &App) -> bool {
+        self.app.read(cx).git_status.is_some()
+    }
+
+    pub(crate) fn new_composer(
+        store: Entity<Self>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Composer> {
+        let app = store.read(cx).app.clone();
+        cx.new(|cx| Composer::new(app, window_state, window, cx))
+    }
+
+    pub(crate) fn new_terminal_drawer(store: Entity<Self>, cx: &mut App) -> Entity<TerminalDrawer> {
+        let app = store.read(cx).app.clone();
+        cx.new(|cx| TerminalDrawer::new(app, cx))
     }
 
     pub fn generate_commit_message(
