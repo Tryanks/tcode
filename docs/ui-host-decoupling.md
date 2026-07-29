@@ -11,7 +11,7 @@ Mac. That future is **explicitly out of scope here** (no listener, no pairing,
 no network transport in this effort); it is what the pipeline enables. §7
 sketches it only so the pipeline is not designed into a corner.
 
-Status: plan only. Nothing here is implemented yet. Coupling inventory that
+Status: **P0 implemented** (2026-07-29); P1–P3 planned. Coupling inventory that
 grounds this plan was swept 2026-07-29 (all of `crates/ui`, `crates/runtime`).
 
 ## 1. Where we are
@@ -173,14 +173,17 @@ Each phase compiles, passes `cargo test --workspace`, and ships behind no flag.
 Verification per phase: existing smoke mode (`--smoke`), plus a protocol
 loopback test harness added in P1.
 
-- **P0 — Purify the boundary** (mechanical, delegatable).
-  Split window state out of `AppState` into a client-side struct. Kill direct
-  field writes from UI (composer's `active.as_mut()`, one-shot debug consumes)
-  by adding commands. Move prompt assembly + slash-command routing from
-  composer into runtime. Make `RuntimeEvent` + boundary DTOs serde; replace
-  public `Rgba` with hex strings; move `copy_plan` clipboard to a UI effect.
-  Exit: UI performs no direct field mutation; runtime's public surface is
-  serde-serializable in principle.
+- **P0 — Purify the boundary** ✅ done.
+  Window state (route, palette, sidebar collapse, quit confirm, debug seeds)
+  lives in a UI-owned `WindowState`; the UI performs no direct backend-field
+  writes; the send commands take typed text + attachment paths and the runtime
+  assembles terminal contexts, review comments and attachment encoding itself;
+  `RuntimeEvent` + boundary DTOs are serde; accents are plain `u32` colors;
+  the plan-copy clipboard write is a UI-handled effect.
+  Deliberate deviation from the original wording: slash-command *interception*
+  (`/plan` `/default` `/model`, and `/orchestrate` prefix detection) stays in
+  the composer — it is input UX in the same class as the trigger menus; the
+  runtime remains authoritative for everything that reaches a provider.
 
 - **P1 — `tcode-protocol` crate.**
   Define Command/Query/Event/Subscription enums covering the inventoried
