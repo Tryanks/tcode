@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
 tcode-core = { path = "../core" }
+tcode-protocol = { path = "../protocol" }
 tcode-services = { path = "../services" }
 term = { path = "../term" }
 uuid = { version = "1", features = ["v4"] }

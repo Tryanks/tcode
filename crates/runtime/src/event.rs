@@ -3,6 +3,13 @@
 use agent::{ProviderKind, RewindMode};
 use tcode_core::git::GitAction;
 
+#[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Fixed protocol boundary shape keeps envelopes directly typed.
+pub enum HostEvent {
+    Runtime(RuntimeEvent),
+    Domain(tcode_protocol::EventEnvelope),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeEvent {
     Error(RuntimeError),

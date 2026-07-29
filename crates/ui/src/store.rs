@@ -4,16 +4,16 @@ use std::path::PathBuf;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction},
-    project::{SessionMeta, WorktreeInfo},
-    provider_models::ResolvedModel,
+    project::{Project, SessionMeta, WorktreeInfo, group_sessions},
+    provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
     session::{ReviewComment, Timeline},
     settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
-use tcode_protocol::Command;
+use tcode_protocol::{Command, EventEnvelope, ServerEvent, Topic};
 use tcode_runtime::{
     app::{AppState, ProjectGroup, ProviderVersionStatus, QueuedMessage},
-    event::RuntimeEvent,
+    event::{HostEvent, RuntimeEvent},
     terminal::{TerminalContext, TerminalWorkspace},
     ui_facade::{
         AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, GitDiffResult, GitDiffScope,
@@ -29,6 +29,8 @@ use crate::{composer::Composer, terminal_drawer::TerminalDrawer, window_state::W
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     app: Entity<AppState>,
+    index_replica: (Vec<SessionMeta>, Vec<Project>),
+    settings_replica: Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,12 +72,106 @@ pub(crate) struct DiffActiveState {
 
 impl WorkspaceStore {
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let (index_replica, settings_replica) = {
+            let state = app.read(cx);
+            (
+                (state.sessions.clone(), state.projects.clone()),
+                state.settings.clone(),
+            )
+        };
         cx.observe(&app, |_, _, cx| cx.notify()).detach();
-        cx.subscribe(&app, |_, _, event: &RuntimeEvent, cx| {
-            cx.emit(event.clone());
+        cx.subscribe(&app, |store, _, event: &HostEvent, cx| {
+            match event {
+                HostEvent::Runtime(event) => cx.emit(event.clone()),
+                HostEvent::Domain(envelope) => store.apply_domain_event(envelope),
+            }
+            cx.notify();
         })
         .detach();
-        Self { app }
+        Self {
+            app,
+            index_replica,
+            settings_replica,
+        }
+    }
+
+    fn apply_domain_event(&mut self, envelope: &EventEnvelope) {
+        match (&envelope.topic, &envelope.event) {
+            (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
+                match self
+                    .index_replica
+                    .0
+                    .iter_mut()
+                    .find(|existing| existing.id == meta.id)
+                {
+                    Some(existing) => *existing = meta.clone(),
+                    None => self.index_replica.0.push(meta.clone()),
+                }
+                self.index_replica
+                    .0
+                    .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+            }
+            (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
+                match self
+                    .index_replica
+                    .1
+                    .iter_mut()
+                    .find(|existing| existing.id == project.id)
+                {
+                    Some(existing) => *existing = project.clone(),
+                    None => self.index_replica.1.push(project.clone()),
+                }
+            }
+            (Topic::Index, ServerEvent::IndexRemoveSession { session_id }) => {
+                self.index_replica.0.retain(|meta| meta.id != *session_id);
+            }
+            (Topic::Index, ServerEvent::IndexRemoveProject { project_id }) => {
+                self.index_replica
+                    .1
+                    .retain(|project| project.id != *project_id);
+            }
+            (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
+                self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+            }
+            (Topic::Settings, ServerEvent::SettingsReplaced(settings))
+            | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
+                self.settings_replica = settings.clone();
+            }
+            _ => {}
+        }
+    }
+
+    fn all_provider_profiles(&self) -> Vec<ResolvedProfile> {
+        let mut profiles = Vec::new();
+        for kind in [
+            agent::ProviderKind::Codex,
+            agent::ProviderKind::ClaudeCode,
+            agent::ProviderKind::Pi,
+            agent::ProviderKind::OpenCode,
+        ] {
+            profiles.extend(self.settings_replica.profiles_for_kind(kind));
+        }
+        profiles
+    }
+
+    fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
+        self.all_provider_profiles()
+            .into_iter()
+            .filter(|profile| profile.settings.enabled)
+            .collect()
+    }
+
+    fn profile_catalog(&self, profile_id: &str, cx: &App) -> Vec<agent::ModelSpec> {
+        if Settings::is_builtin_profile_id(profile_id) {
+            let kind = self
+                .settings_replica
+                .resolved_profile(profile_id)
+                .map(|profile| profile.kind)
+                .unwrap_or(agent::ProviderKind::ClaudeCode);
+            self.app.read(cx).models_for(kind).to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Dispatch a serializable backend mutation.
@@ -242,28 +338,60 @@ impl WorkspaceStore {
         });
     }
 
-    pub fn grouped_sessions(&self, cx: &App) -> Vec<ProjectGroup> {
-        self.app.read(cx).grouped_sessions()
+    pub fn grouped_sessions(&self, _cx: &App) -> Vec<ProjectGroup> {
+        let visible: Vec<_> = self
+            .index_replica
+            .0
+            .iter()
+            .filter(|meta| meta.archived_at.is_none())
+            .cloned()
+            .collect();
+        group_sessions(
+            &self.index_replica.1,
+            &visible,
+            self.settings_replica.project_sort,
+        )
     }
 
     pub fn palette_groups(&self, cx: &App) -> Vec<ProjectGroup> {
-        self.app.read(cx).grouped_sessions()
+        self.grouped_sessions(cx)
     }
 
-    pub fn palette_settings(&self, cx: &App) -> Settings {
-        self.app.read(cx).settings.clone()
+    pub fn palette_settings(&self, _cx: &App) -> Settings {
+        self.settings_replica.clone()
     }
 
-    pub fn archived_groups(&self, cx: &App) -> Vec<ProjectGroup> {
-        self.app.read(cx).archived_groups()
+    pub fn archived_groups(&self, _cx: &App) -> Vec<ProjectGroup> {
+        let archived: Vec<_> = self
+            .index_replica
+            .0
+            .iter()
+            .filter(|meta| meta.archived_at.is_some())
+            .cloned()
+            .collect();
+        let mut groups = group_sessions(
+            &self.index_replica.1,
+            &archived,
+            self.settings_replica.project_sort,
+        );
+        for group in &mut groups {
+            group
+                .sessions
+                .sort_by_key(|meta| std::cmp::Reverse(meta.archived_at));
+        }
+        groups.retain(|group| !group.sessions.is_empty());
+        groups
     }
 
-    pub fn project_sort(&self, cx: &App) -> ProjectSort {
-        self.app.read(cx).project_sort()
+    pub fn project_sort(&self, _cx: &App) -> ProjectSort {
+        self.settings_replica.project_sort
     }
 
-    pub fn is_project_collapsed(&self, project_id: &str, cx: &App) -> bool {
-        self.app.read(cx).is_project_collapsed(project_id)
+    pub fn is_project_collapsed(&self, project_id: &str, _cx: &App) -> bool {
+        self.settings_replica
+            .collapsed_projects
+            .iter()
+            .any(|id| id == project_id)
     }
 
     pub fn active_session_id(&self, cx: &App) -> Option<String> {
@@ -275,7 +403,21 @@ impl WorkspaceStore {
     }
 
     pub fn session_unread(&self, session_id: &str, cx: &App) -> bool {
-        self.app.read(cx).session_unread(session_id)
+        if self.app.read(cx).active_session_id() == Some(session_id) {
+            return false;
+        }
+        let Some(meta) = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+        else {
+            return false;
+        };
+        self.settings_replica
+            .last_visited
+            .get(session_id)
+            .is_some_and(|visited| meta.updated_at > *visited)
     }
 
     pub fn pending_approval_for(&self, session_id: &str, cx: &App) -> bool {
@@ -284,7 +426,12 @@ impl WorkspaceStore {
 
     pub fn fork_availability(&self, session_id: &str, cx: &App) -> ForkAvailability {
         let app = self.app.read(cx);
-        let Some(meta) = app.sessions.iter().find(|meta| meta.id == session_id) else {
+        let Some(meta) = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+        else {
             return ForkAvailability::Available;
         };
         if !meta.provider.supports_fork() {
@@ -298,33 +445,31 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn sidebar_sessions(&self, cx: &App) -> Vec<SessionMeta> {
-        self.app.read(cx).sessions.clone()
+    pub fn sidebar_sessions(&self, _cx: &App) -> Vec<SessionMeta> {
+        self.index_replica.0.clone()
     }
 
-    pub fn sidebar_settings(&self, cx: &App) -> Settings {
-        self.app.read(cx).settings.clone()
+    pub fn sidebar_settings(&self, _cx: &App) -> Settings {
+        self.settings_replica.clone()
     }
 
-    pub fn orchestrate_editor_settings(&self, cx: &App) -> Settings {
-        self.app.read(cx).settings.clone()
+    pub fn orchestrate_editor_settings(&self, _cx: &App) -> Settings {
+        self.settings_replica.clone()
     }
 
-    pub fn settings_page_settings(&self, cx: &App) -> Settings {
-        self.app.read(cx).settings.clone()
+    pub fn settings_page_settings(&self, _cx: &App) -> Settings {
+        self.settings_replica.clone()
     }
 
-    pub fn settings_provider_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
-        self.app.read(cx).all_profiles()
+    pub fn settings_provider_profiles(&self, _cx: &App) -> Vec<ResolvedProfile> {
+        self.all_provider_profiles()
     }
 
     pub fn settings_installed_acp_agents(
         &self,
-        cx: &App,
+        _cx: &App,
     ) -> Vec<tcode_core::acp::InstalledAcpAgent> {
-        self.app
-            .read(cx)
-            .settings
+        self.settings_replica
             .installed_acp_agents()
             .into_iter()
             .cloned()
@@ -377,8 +522,8 @@ impl WorkspaceStore {
         self.app.read(cx).preview_panel_showing()
     }
 
-    pub fn preview_browser_settings(&self, cx: &App) -> BrowserSettings {
-        self.app.read(cx).settings.browser.clone()
+    pub fn preview_browser_settings(&self, _cx: &App) -> BrowserSettings {
+        self.settings_replica.browser.clone()
     }
 
     pub fn take_pending_preview_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
@@ -397,16 +542,22 @@ impl WorkspaceStore {
             .update(cx, |app, cx| app.pump_orchestrate_requests(cx));
     }
 
-    pub fn enabled_provider_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
-        self.app.read(cx).enabled_profiles()
+    pub fn enabled_provider_profiles(&self, _cx: &App) -> Vec<ResolvedProfile> {
+        self.enabled_profiles()
     }
 
-    pub fn provider_profile_kind(&self, profile_id: &str, cx: &App) -> agent::ProviderKind {
-        self.app.read(cx).profile_kind(profile_id)
+    pub fn provider_profile_kind(&self, profile_id: &str, _cx: &App) -> agent::ProviderKind {
+        self.settings_replica
+            .resolved_profile(profile_id)
+            .map(|profile| profile.kind)
+            .unwrap_or(agent::ProviderKind::ClaudeCode)
     }
 
-    pub fn provider_profile_settings(&self, profile_id: &str, cx: &App) -> ProviderSettings {
-        self.app.read(cx).profile_settings(profile_id)
+    pub fn provider_profile_settings(&self, profile_id: &str, _cx: &App) -> ProviderSettings {
+        self.settings_replica
+            .resolved_profile(profile_id)
+            .map(|profile| profile.settings)
+            .unwrap_or_default()
     }
 
     pub fn provider_model_catalog(
@@ -418,11 +569,15 @@ impl WorkspaceStore {
     }
 
     pub fn picker_models_for_profile(&self, profile_id: &str, cx: &App) -> Vec<ResolvedModel> {
-        self.app.read(cx).picker_models_for_profile(profile_id)
+        picker_models(
+            &self.profile_catalog(profile_id, cx),
+            &self.provider_profile_settings(profile_id, cx),
+            &self.settings_replica.favorite_models,
+        )
     }
 
-    pub fn provider_profile_display_name(&self, profile_id: &str, cx: &App) -> String {
-        self.app.read(cx).profile_display_name(profile_id)
+    pub fn provider_profile_display_name(&self, profile_id: &str, _cx: &App) -> String {
+        self.settings_replica.profile_display_name(profile_id)
     }
 
     pub fn provider_profile_snapshot(
@@ -441,8 +596,16 @@ impl WorkspaceStore {
         self.app.read(cx).provider_version(provider).cloned()
     }
 
-    pub fn provider_profile_accent(&self, profile_id: &str, cx: &App) -> Option<u32> {
-        self.app.read(cx).profile_accent(profile_id)
+    pub fn provider_profile_accent(&self, profile_id: &str, _cx: &App) -> Option<u32> {
+        let raw = self
+            .settings_replica
+            .resolved_profile(profile_id)?
+            .settings
+            .accent_color?;
+        let hex = raw.trim().trim_start_matches('#');
+        (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(hex, 16).ok())
+            .flatten()
     }
 
     pub fn provider_update_command(
@@ -472,7 +635,7 @@ impl WorkspaceStore {
         profile_id: &str,
         cx: &App,
     ) -> Vec<agent::ModelSpec> {
-        self.app.read(cx).profile_catalog(profile_id)
+        self.profile_catalog(profile_id, cx)
     }
 
     pub fn provider_dialog_models(
@@ -482,21 +645,30 @@ impl WorkspaceStore {
         hidden_models: &[String],
         cx: &App,
     ) -> Vec<ResolvedModel> {
-        self.app
-            .read(cx)
-            .draft_models_for_profile(profile_id, custom_models, hidden_models)
+        let mut settings = self.provider_profile_settings(profile_id, cx);
+        settings.custom_models = custom_models.to_vec();
+        settings.hidden_models = hidden_models.to_vec();
+        resolve_models(
+            &self.profile_catalog(profile_id, cx),
+            &settings,
+            &self.settings_replica.favorite_models,
+        )
     }
 
     pub fn installed_acp_agent(
         &self,
         agent_id: &str,
-        cx: &App,
+        _cx: &App,
     ) -> Option<tcode_core::acp::InstalledAcpAgent> {
-        self.app.read(cx).settings.acp_agent(agent_id).cloned()
+        self.settings_replica.acp_agent(agent_id).cloned()
     }
 
     pub fn acp_marketplace_items(&self, cx: &App) -> Vec<AcpMarketplaceItem> {
-        self.app.read(cx).acp_marketplace_items()
+        let mut items = self.app.read(cx).acp_marketplace_items();
+        for item in &mut items {
+            item.installed = self.settings_replica.acp_agents.contains_key(&item.id);
+        }
+        items
     }
 
     pub fn acp_registry_loading(&self, cx: &App) -> bool {
@@ -511,42 +683,40 @@ impl WorkspaceStore {
         self.app.read(cx).acp_installing.contains(agent_id)
     }
 
-    pub fn project_ids(&self, cx: &App) -> Vec<String> {
-        self.app
-            .read(cx)
-            .projects
+    pub fn project_ids(&self, _cx: &App) -> Vec<String> {
+        self.index_replica
+            .1
             .iter()
             .map(|project| project.id.clone())
             .collect()
     }
 
-    pub fn project_summary(&self, project_id: &str, cx: &App) -> Option<(String, usize)> {
-        let app = self.app.read(cx);
-        let project = app
-            .projects
+    pub fn project_summary(&self, project_id: &str, _cx: &App) -> Option<(String, usize)> {
+        let project = self
+            .index_replica
+            .1
             .iter()
             .find(|project| project.id == project_id)?;
-        let count = app
-            .sessions
+        let count = self
+            .index_replica
+            .0
             .iter()
             .filter(|meta| meta.project_id.as_deref() == Some(project_id))
             .count();
         Some((project.name.clone(), count))
     }
 
-    pub fn project_root(&self, project_id: &str, cx: &App) -> Option<PathBuf> {
-        self.app
-            .read(cx)
-            .projects
+    pub fn project_root(&self, project_id: &str, _cx: &App) -> Option<PathBuf> {
+        self.index_replica
+            .1
             .iter()
             .find(|project| project.id == project_id)
             .map(|project| project.root.clone())
     }
 
-    pub fn project_id_for_root(&self, root: &std::path::Path, cx: &App) -> Option<String> {
-        self.app
-            .read(cx)
-            .projects
+    pub fn project_id_for_root(&self, root: &std::path::Path, _cx: &App) -> Option<String> {
+        self.index_replica
+            .1
             .iter()
             .find(|project| project.root == root)
             .map(|project| project.id.clone())
@@ -640,8 +810,8 @@ impl WorkspaceStore {
         self.app.read(cx).diff_refresh_generation
     }
 
-    pub fn diff_word_wrap(&self, cx: &App) -> bool {
-        self.app.read(cx).settings.word_wrap_diffs
+    pub fn diff_word_wrap(&self, _cx: &App) -> bool {
+        self.settings_replica.word_wrap_diffs
     }
 
     pub fn diff_panel_chrome_state(
@@ -1037,10 +1207,9 @@ impl WorkspaceStore {
         (app.proposed_plan_markdown(), app.plan_steps())
     }
 
-    pub fn archived_session_count(&self, project_id: Option<&str>, cx: &App) -> usize {
-        self.app
-            .read(cx)
-            .sessions
+    pub fn archived_session_count(&self, project_id: Option<&str>, _cx: &App) -> usize {
+        self.index_replica
+            .0
             .iter()
             .filter(|meta| {
                 meta.archived_at.is_some()
@@ -1049,8 +1218,21 @@ impl WorkspaceStore {
             .count()
     }
 
-    pub fn worktree_orphaned_by_delete(&self, session_id: &str, cx: &App) -> Option<WorktreeInfo> {
-        self.app.read(cx).worktree_orphaned_by_delete(session_id)
+    pub fn worktree_orphaned_by_delete(&self, session_id: &str, _cx: &App) -> Option<WorktreeInfo> {
+        let meta = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)?;
+        let worktree = meta.worktree.clone()?;
+        let shared = self.index_replica.0.iter().any(|meta| {
+            meta.id != session_id
+                && meta
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|other| other.branch == worktree.branch)
+        });
+        (!shared).then_some(worktree)
     }
 
     pub(crate) fn open_add_project_dialog(store: Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -1059,3 +1241,92 @@ impl WorkspaceStore {
 }
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
+
+#[cfg(test)]
+mod tests {
+    use agent::ProviderKind;
+    use gpui::{AppContext as _, TestAppContext};
+    use tcode_core::project::{Project, SessionMeta};
+    use tcode_protocol::Command;
+    use tcode_runtime::app::AppState;
+    use tcode_services::store::SessionStore;
+
+    use super::WorkspaceStore;
+
+    #[gpui::test]
+    fn index_and_settings_replicas_follow_representative_commands(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-replica-consistency-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let app = cx.new(|_| AppState::new(session_store));
+        let seed_project = Project::from_root(root.join("seed"));
+        let mut seed_session =
+            SessionMeta::new(ProviderKind::Codex, seed_project.root.clone(), None);
+        seed_session.project_id = Some(seed_project.id.clone());
+        let seed_session_id = seed_session.id.clone();
+        app.update(cx, |state, _| {
+            let AppState {
+                projects, sessions, ..
+            } = state;
+            projects.push(seed_project);
+            sessions.push(seed_session);
+        });
+        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
+
+        workspace.update(cx, |store, cx| {
+            store.dispatch(
+                Command::CreateProject {
+                    root: root.join("created"),
+                },
+                cx,
+            );
+            store.dispatch(
+                Command::ArchiveSession {
+                    session_id: seed_session_id,
+                },
+                cx,
+            );
+            let mut settings = store.settings_page_settings(cx);
+            settings.word_wrap_diffs = !settings.word_wrap_diffs;
+            store.dispatch(Command::UpdateSettings { settings }, cx);
+        });
+
+        let live_index = app.read_with(cx, |state, _| {
+            let AppState {
+                sessions, projects, ..
+            } = state;
+            (
+                serde_json::to_value(sessions).unwrap(),
+                serde_json::to_value(projects).unwrap(),
+            )
+        });
+        let live_settings = app.read_with(cx, |state, _| {
+            serde_json::to_value(&state.settings).unwrap()
+        });
+        let replica_index = workspace.read_with(cx, |store, _| {
+            (
+                serde_json::to_value(&store.index_replica.0).unwrap(),
+                serde_json::to_value(&store.index_replica.1).unwrap(),
+            )
+        });
+        let replica_settings = workspace.read_with(cx, |store, _| {
+            serde_json::to_value(&store.settings_replica).unwrap()
+        });
+        assert_eq!(
+            replica_index.0, live_index.0,
+            "session replica diverged from live state"
+        );
+        assert_eq!(
+            replica_index.1, live_index.1,
+            "project replica diverged from live state"
+        );
+        assert_eq!(
+            replica_settings, live_settings,
+            "settings replica diverged from live state"
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+}

@@ -274,20 +274,26 @@ impl SessionsSidebar {
                 store.dispatch(Command::AutoArchiveSweep { project_id }, cx);
             });
         }
-        let archived = store
-            .read(cx)
-            .archived_session_count(None, cx)
-            .saturating_sub(archived_before);
-        let startup_archive_dialog = {
-            let settings = store.read(cx).sidebar_settings(cx);
-            (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
-                (
-                    archived,
-                    settings.auto_archive_max_idle_days.max(1),
-                    settings.auto_archive_keep_count.max(1),
-                )
-            })
-        };
+        let sidebar = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = sidebar.update(cx, |sidebar, cx| {
+                let archived = sidebar
+                    .store
+                    .read(cx)
+                    .archived_session_count(None, cx)
+                    .saturating_sub(archived_before);
+                let settings = sidebar.store.read(cx).sidebar_settings(cx);
+                sidebar.startup_archive_dialog =
+                    (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
+                        (
+                            archived,
+                            settings.auto_archive_max_idle_days.max(1),
+                            settings.auto_archive_keep_count.max(1),
+                        )
+                    });
+                cx.notify();
+            });
+        });
         let collapsed_parents = {
             let sessions = store.read(cx).sidebar_sessions(cx);
             let active_id = store.read(cx).active_session_id(cx);
@@ -300,7 +306,7 @@ impl SessionsSidebar {
             collapsed_parents,
             renaming: None,
             auto_archive_notice: None,
-            startup_archive_dialog,
+            startup_archive_dialog: None,
             _subscriptions: subscriptions,
         }
     }
@@ -343,18 +349,22 @@ impl SessionsSidebar {
                     cx,
                 );
             });
-            let count = self
-                .store
-                .read(cx)
-                .archived_session_count(Some(project_id), cx)
-                .saturating_sub(count_before);
             self.expanded_groups.insert(project_id.to_string());
-            if count > 0 {
-                self.auto_archive_notice = Some((project_id.to_string(), count));
-                if !notice_shown {
-                    self.show_auto_archive_dialog(count, days, keep, window, cx);
+            let project_id = project_id.to_string();
+            cx.defer_in(window, move |sidebar, window, cx| {
+                let count = sidebar
+                    .store
+                    .read(cx)
+                    .archived_session_count(Some(&project_id), cx)
+                    .saturating_sub(count_before);
+                if count > 0 {
+                    sidebar.auto_archive_notice = Some((project_id, count));
+                    if !notice_shown {
+                        sidebar.show_auto_archive_dialog(count, days, keep, window, cx);
+                    }
                 }
-            }
+                cx.notify();
+            });
         }
         cx.notify();
     }
@@ -1760,6 +1770,7 @@ mod tests {
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
+        cx.run_until_parked();
 
         app_state.update(cx, |state, _| {
             let mut archived: Vec<&str> = state

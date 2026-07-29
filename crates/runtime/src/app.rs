@@ -39,6 +39,7 @@ use tcode_core::settings::{
     ProviderProfile, ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
 pub use tcode_core::ui::{RightTab, WorkspaceMode};
+use tcode_protocol::{EventEnvelope, ServerEvent, Topic};
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
@@ -70,8 +71,8 @@ use crate::ui_facade::{
 #[rustfmt::skip]
 pub use tcode_core::project::{group_sessions, ProjectGroup};
 pub use crate::event::{
-    GitActionRequest, RuntimeEffect, RuntimeError, RuntimeEvent as AppEvent, RuntimeNotice,
-    RuntimeOperationId, RuntimeToast,
+    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent as AppEvent,
+    RuntimeNotice, RuntimeOperationId, RuntimeToast,
 };
 pub use crate::terminal::{
     MAX_TERMINALS_PER_SESSION, TerminalContext, TerminalEntry, TerminalSplit,
@@ -1031,6 +1032,9 @@ pub struct AppState {
     pub git_busy: bool,
     /// Source of ids used to correlate semantic operation lifecycle events.
     next_operation_id: u64,
+    /// Per-topic sequence numbers for replicated protocol domains.
+    index_event_seq: u64,
+    settings_event_seq: u64,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -1070,7 +1074,11 @@ fn computer_use_config(settings: &Settings) -> computer_use_mcp::config::Compute
     }
 }
 
-impl EventEmitter<AppEvent> for AppState {}
+impl EventEmitter<HostEvent> for AppState {}
+
+fn emit_runtime(cx: &mut Context<AppState>, event: AppEvent) {
+    cx.emit(HostEvent::Runtime(event));
+}
 
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
@@ -1157,6 +1165,8 @@ impl AppState {
             git_status: None,
             git_busy: false,
             next_operation_id: 1,
+            index_event_seq: 0,
+            settings_event_seq: 0,
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
@@ -1226,6 +1236,24 @@ impl AppState {
     }
 
     fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut Context<Self>) {
+        let index_event = match &write {
+            StoreWrite::UpsertMeta { meta, .. } => {
+                Some(ServerEvent::IndexUpsertSession((**meta).clone()))
+            }
+            StoreWrite::UpsertProject(project) => {
+                Some(ServerEvent::IndexUpsertProject(project.clone()))
+            }
+            StoreWrite::RemoveSession(session_id) => Some(ServerEvent::IndexRemoveSession {
+                session_id: session_id.clone(),
+            }),
+            StoreWrite::RemoveProject(project_id) => Some(ServerEvent::IndexRemoveProject {
+                project_id: project_id.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(event) = index_event {
+            self.emit_domain(Topic::Index, event, cx);
+        }
         self.start_store_writer(cx);
         if self.store_writes.try_send(write).is_err() {
             log::error!("session store writer stopped before accepting a write");
@@ -1233,6 +1261,11 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
+        self.emit_domain(
+            Topic::Settings,
+            ServerEvent::SettingsReplaced(settings.clone()),
+            cx,
+        );
         match serde_json::to_vec_pretty(settings) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
             Err(err) => self.report_error(
@@ -1242,6 +1275,20 @@ impl AppState {
                 cx,
             ),
         }
+    }
+
+    fn emit_domain(&mut self, topic: Topic, event: ServerEvent, cx: &mut Context<Self>) {
+        let seq = match topic {
+            Topic::Index => &mut self.index_event_seq,
+            Topic::Settings => &mut self.settings_event_seq,
+            _ => unreachable!("replication slice only emits index and settings domains"),
+        };
+        *seq += 1;
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            topic,
+            seq: *seq,
+            event,
+        }));
     }
 
     fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
@@ -2584,10 +2631,13 @@ impl AppState {
                         && !already
                         && let Some(version) = &latest_pretty
                     {
-                        cx.emit(AppEvent::Notice(RuntimeNotice::UpdateAvailable {
-                            provider,
-                            version: version.clone(),
-                        }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::UpdateAvailable {
+                                provider,
+                                version: version.clone(),
+                            }),
+                        );
                     }
                     cx.notify();
                 });
@@ -2614,9 +2664,10 @@ impl AppState {
             return;
         }
         status.updating = true;
-        cx.emit(AppEvent::Notice(RuntimeNotice::UpdatingProvider {
-            provider,
-        }));
+        emit_runtime(
+            cx,
+            AppEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
+        );
         cx.notify();
         cx.spawn(async move |this, cx| {
             let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
@@ -2626,7 +2677,7 @@ impl AppState {
                     status.updating = false;
                 }
                 if ok {
-                    cx.emit(AppEvent::Notice(RuntimeNotice::UpdateDone { provider }));
+                    emit_runtime(cx, AppEvent::Notice(RuntimeNotice::UpdateDone { provider }));
                     // Refresh the version so the "update available" state clears.
                     state.check_provider_versions(cx);
                 } else {
@@ -2934,7 +2985,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if self.git_busy {
-            cx.emit(AppEvent::Toast(RuntimeToast::GitBusy));
+            emit_runtime(cx, AppEvent::Toast(RuntimeToast::GitBusy));
             return;
         }
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
@@ -2949,10 +3000,10 @@ impl AppState {
             included: included.clone(),
             feature_branch: feature_branch.clone(),
         };
-        cx.emit(AppEvent::Toast(RuntimeToast::GitStarted {
-            operation,
-            action,
-        }));
+        emit_runtime(
+            cx,
+            AppEvent::Toast(RuntimeToast::GitStarted { operation, action }),
+        );
 
         cx.spawn(async move |this, cx| {
             let (result, git_branch) = unblock(cx.background_executor(), move || {
@@ -2971,15 +3022,18 @@ impl AppState {
             let _ = this.update(cx, |state, cx| {
                 state.git_busy = false;
                 match &result {
-                    Ok(_) => cx.emit(AppEvent::Toast(RuntimeToast::GitSucceeded {
-                        operation,
-                        action,
-                    })),
-                    Err(detail) => cx.emit(AppEvent::Toast(RuntimeToast::GitFailed {
-                        operation,
-                        detail: detail.clone(),
-                        retry,
-                    })),
+                    Ok(_) => emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::GitSucceeded { operation, action }),
+                    ),
+                    Err(detail) => emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::GitFailed {
+                            operation,
+                            detail: detail.clone(),
+                            retry,
+                        }),
+                    ),
                 }
                 if let Some(active) = state.active.as_mut() {
                     active.git_branch = git_branch;
@@ -3032,15 +3086,17 @@ impl AppState {
             let _ = this.update(cx, |_state, cx| match result {
                 Ok(message) => {
                     log::info!("generated commit message:\n{message}");
-                    cx.emit(AppEvent::Toast(RuntimeToast::CommitMessageGenerated {
-                        message,
-                    }));
+                    emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::CommitMessageGenerated { message }),
+                    );
                 }
                 Err(err) => {
                     log::warn!("commit message generation failed: {err}");
-                    cx.emit(AppEvent::Toast(RuntimeToast::CommitMessageFailed {
-                        detail: err,
-                    }));
+                    emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::CommitMessageFailed { detail: err }),
+                    );
                 }
             });
         })
@@ -3133,10 +3189,13 @@ impl AppState {
         let operation = self.next_operation_id();
         let data_dir = self.store.root().clone();
         let name = agent.name.clone();
-        cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallStarted {
-            operation,
-            name: name.clone(),
-        }));
+        emit_runtime(
+            cx,
+            AppEvent::Toast(RuntimeToast::AcpInstallStarted {
+                operation,
+                name: name.clone(),
+            }),
+        );
         cx.spawn(async move |this, cx| {
             let result = unblock(cx.background_executor(), move || {
                 install(&agent, &data_dir, |_done, _total| {})
@@ -3149,16 +3208,19 @@ impl AppState {
                         state.settings.acp_agents.insert(id.clone(), installed);
                         let settings = state.settings.clone();
                         state.enqueue_settings(&settings, cx);
-                        cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallSucceeded {
+                        emit_runtime(
+                            cx,
+                            AppEvent::Toast(RuntimeToast::AcpInstallSucceeded { operation, name }),
+                        );
+                    }
+                    Err(err) => emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::AcpInstallFailed {
                             operation,
                             name,
-                        }));
-                    }
-                    Err(err) => cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallFailed {
-                        operation,
-                        name,
-                        detail: err.to_string(),
-                    })),
+                            detail: err.to_string(),
+                        }),
+                    ),
                 }
                 cx.notify();
             });
@@ -4244,7 +4306,10 @@ impl AppState {
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
         computer_use_mcp::config::set(computer_use_config(&self.settings));
-        cx.emit(AppEvent::Effect(RuntimeEffect::ApplyLocale { language }));
+        emit_runtime(
+            cx,
+            AppEvent::Effect(RuntimeEffect::ApplyLocale { language }),
+        );
         cx.notify();
     }
 
@@ -6368,9 +6433,10 @@ impl AppState {
 
     /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
     pub fn copy_plan(&mut self, markdown: String, cx: &mut Context<Self>) {
-        cx.emit(AppEvent::Effect(RuntimeEffect::CopyToClipboard {
-            text: markdown,
-        }));
+        emit_runtime(
+            cx,
+            AppEvent::Effect(RuntimeEffect::CopyToClipboard { text: markdown }),
+        );
     }
 
     /// Write the plan markdown to `PLAN-<n>.md` in the session cwd, choosing the
@@ -6391,7 +6457,10 @@ impl AppState {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
+                        );
                     }
                     Err(err) => state.report_error(
                         RuntimeError::PersistEvent {
@@ -6429,7 +6498,10 @@ impl AppState {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
+                        );
                     }
                     Err(err) => state.report_error(
                         RuntimeError::PersistEvent {
@@ -6644,13 +6716,16 @@ impl AppState {
                         {
                             state.refresh_session_git_branch(session_id.clone(), cwd, cx);
                         }
-                        cx.emit(AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
+                        );
                     }
                     Err(CheckoutError::Dirty) => {
-                        cx.emit(AppEvent::Error(RuntimeError::DirtyTree));
+                        emit_runtime(cx, AppEvent::Error(RuntimeError::DirtyTree));
                     }
                     Err(CheckoutError::Git(message)) => {
-                        cx.emit(AppEvent::Error(RuntimeError::External(message)))
+                        emit_runtime(cx, AppEvent::Error(RuntimeError::External(message)))
                     }
                 }
                 cx.notify();
@@ -7323,22 +7398,25 @@ impl AppState {
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
-                cx.emit(AppEvent::Notice(RuntimeNotice::NativeRewindCompleted {
-                    mode: *mode,
-                }));
+                emit_runtime(
+                    cx,
+                    AppEvent::Notice(RuntimeNotice::NativeRewindCompleted { mode: *mode }),
+                );
             }
             AgentEvent::Error { message, .. } => {
-                cx.emit(AppEvent::Error(RuntimeError::ProviderMessage(
-                    message.clone(),
-                )));
+                emit_runtime(
+                    cx,
+                    AppEvent::Error(RuntimeError::ProviderMessage(message.clone())),
+                );
             }
             AgentEvent::Warning { message } => {
                 // Provider warnings (config problems, deprecations, failed
                 // mode switches) explain later misbehavior: a log line alone
                 // hides them from the person who needs to act on them.
-                cx.emit(AppEvent::Notice(RuntimeNotice::ProviderMessage(
-                    message.clone(),
-                )));
+                emit_runtime(
+                    cx,
+                    AppEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
+                );
             }
             _ => {}
         }
@@ -7809,7 +7887,7 @@ impl AppState {
 
     fn report_error(&mut self, error: RuntimeError, cx: &mut Context<Self>) {
         log::error!("{error:?}");
-        cx.emit(AppEvent::Error(error));
+        emit_runtime(cx, AppEvent::Error(error));
     }
 }
 
