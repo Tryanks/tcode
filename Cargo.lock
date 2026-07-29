@@ -8617,6 +8617,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcode-protocol"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "base64 0.23.0",
+ "serde",
+ "serde_json",
+ "tcode-core",
+]
+
+[[package]]
 name = "tcode-runtime"
 version = "0.1.0"
 dependencies = [

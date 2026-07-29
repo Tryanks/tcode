@@ -1,0 +1,14 @@
+[package]
+name = "tcode-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "tcode_protocol"
+
+[dependencies]
+agent = { path = "../agent" }
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tcode-core = { path = "../core" }
