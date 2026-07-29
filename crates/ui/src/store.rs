@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use gpui::{App, Context, Entity, Window};
+use gpui::{App, Context, Entity, Task, Window};
 use tcode_core::{
+    git::GitFileEntry,
     project::{SessionMeta, WorktreeInfo},
     provider_models::ResolvedModel,
     provider_status::ProviderSnapshot,
@@ -11,7 +12,7 @@ use tcode_core::{
 use tcode_protocol::Command;
 use tcode_runtime::{
     app::{AppState, ProjectGroup, ProviderVersionStatus},
-    ui_facade::AcpMarketplaceItem,
+    ui_facade::{AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, RecentDir},
 };
 
 /// The client-facing projection and command boundary for workspace state.
@@ -201,6 +202,14 @@ impl WorkspaceStore {
 
     pub fn grouped_sessions(&self, cx: &App) -> Vec<ProjectGroup> {
         self.app.read(cx).grouped_sessions()
+    }
+
+    pub fn palette_groups(&self, cx: &App) -> Vec<ProjectGroup> {
+        self.app.read(cx).grouped_sessions()
+    }
+
+    pub fn palette_settings(&self, cx: &App) -> Settings {
+        self.app.read(cx).settings.clone()
     }
 
     pub fn archived_groups(&self, cx: &App) -> Vec<ProjectGroup> {
@@ -439,6 +448,54 @@ impl WorkspaceStore {
             .map(|project| project.root.clone())
     }
 
+    pub fn project_id_for_root(&self, root: &std::path::Path, cx: &App) -> Option<String> {
+        self.app
+            .read(cx)
+            .projects
+            .iter()
+            .find(|project| project.root == root)
+            .map(|project| project.id.clone())
+    }
+
+    pub fn scan_external_history(&self, cx: &App) -> Task<Vec<RecentDir>> {
+        self.app
+            .read(cx)
+            .scan_external_history(cx.background_executor())
+    }
+
+    pub fn start_external_import(
+        &self,
+        project_id: &str,
+        threads: Vec<ExternalThread>,
+        cx: &App,
+    ) -> Option<async_channel::Receiver<ExternalImportUpdate>> {
+        self.app
+            .read(cx)
+            .start_external_import(project_id, threads, cx.background_executor())
+    }
+
+    pub fn commit_dialog_state(&self, cx: &App) -> (Vec<GitFileEntry>, Option<String>, bool) {
+        let app = self.app.read(cx);
+        (
+            app.git_changed_files(),
+            app.git_branch_name(),
+            app.git_on_default_branch(),
+        )
+    }
+
+    pub fn generate_commit_message(
+        &self,
+        included: Option<Vec<String>>,
+        cx: &App,
+    ) -> Task<Result<String, String>> {
+        self.app.read(cx).generate_commit_message(included, cx)
+    }
+
+    pub fn plan_panel_state(&self, cx: &App) -> (Option<String>, Vec<agent::PlanStep>) {
+        let app = self.app.read(cx);
+        (app.proposed_plan_markdown(), app.plan_steps())
+    }
+
     pub fn archived_session_count(&self, project_id: Option<&str>, cx: &App) -> usize {
         self.app
             .read(cx)
@@ -455,7 +512,7 @@ impl WorkspaceStore {
         self.app.read(cx).worktree_orphaned_by_delete(session_id)
     }
 
-    pub(crate) fn open_add_project_dialog(&self, window: &mut Window, cx: &mut App) {
-        crate::add_project_dialog::open(self.app.clone(), window, cx);
+    pub(crate) fn open_add_project_dialog(store: Entity<Self>, window: &mut Window, cx: &mut App) {
+        crate::add_project_dialog::open(store, window, cx);
     }
 }

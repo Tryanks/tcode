@@ -30,6 +30,7 @@ use super::model::{
 };
 use super::parse::RowKind;
 use crate::plan_panel::PlanPanel;
+use crate::store::WorkspaceStore;
 use crate::window_caption;
 use crate::window_state::WindowState;
 use crate::{highlight, material};
@@ -239,12 +240,13 @@ pub struct DiffPanel {
 impl DiffPanel {
     pub fn new(
         app_state: Entity<AppState>,
+        workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Soft-wrap defaults to the user's "Word wrap in diffs" setting.
         let wrap = app_state.read(cx).settings.word_wrap_diffs;
-        let plan = cx.new(|cx| PlanPanel::new(app_state.clone(), cx));
+        let plan = cx.new(|cx| PlanPanel::new(workspace_store, cx));
         let subscriptions = vec![cx.observe(&app_state, |this, state, cx| {
             let comments = state.read(cx).review_comments();
             if this.observed_review_comments != comments {

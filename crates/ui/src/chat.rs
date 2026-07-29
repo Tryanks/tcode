@@ -654,6 +654,7 @@ impl MdState {
 
 pub struct ChatView {
     app_state: Entity<AppState>,
+    workspace_store: Entity<crate::store::WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
@@ -677,6 +678,7 @@ pub struct ChatView {
 impl ChatView {
     pub fn new(
         app_state: Entity<AppState>,
+        workspace_store: Entity<crate::store::WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -704,6 +706,7 @@ impl ChatView {
 
         let mut this = Self {
             app_state,
+            workspace_store,
             window_state,
             composer,
             terminal_drawer,
@@ -2840,7 +2843,8 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let dialog = cx.new(|cx| CommitDialog::new(self.app_state.clone(), action, window, cx));
+        let dialog =
+            cx.new(|cx| CommitDialog::new(self.workspace_store.clone(), action, window, cx));
         self.commit_dialog = Some(dialog.clone());
         window.open_dialog(cx, move |dlg, window, cx| {
             let content = dialog.clone();
@@ -3890,10 +3894,17 @@ This begins after the hard break."#;
             ];
             state
         });
+        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(app_state.clone(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
 
         let (view, cx) = cx.add_window_view(|window, cx| {
-            ChatView::new(app_state.clone(), window_state, window, cx)
+            ChatView::new(
+                app_state.clone(),
+                workspace_store.clone(),
+                window_state,
+                window,
+                cx,
+            )
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));

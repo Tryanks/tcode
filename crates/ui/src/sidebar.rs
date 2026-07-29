@@ -309,9 +309,7 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.open_add_project_dialog(window, cx);
-        });
+        WorkspaceStore::open_add_project_dialog(self.store.clone(), window, cx);
     }
 
     fn toggle_group(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {

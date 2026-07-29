@@ -17,8 +17,9 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::store::WorkspaceStore;
 use crate::time::now_secs;
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 use tcode_runtime::ui_facade::{ExternalImportUpdate, ExternalThread, RecentDir, SourceTool};
 
 const RECENT_LIMIT: usize = 15;
@@ -31,14 +32,14 @@ enum RecentState {
 }
 
 pub(super) struct AddProjectDialog {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     path_input: Entity<InputState>,
     recent: RecentState,
     path_error: bool,
 }
 
-pub(super) fn open(app_state: Entity<AppState>, window: &mut Window, cx: &mut App) {
-    let dialog = cx.new(|cx| AddProjectDialog::new(app_state, window, cx));
+pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
+    let dialog = cx.new(|cx| AddProjectDialog::new(store, window, cx));
     dialog.update(cx, |dialog, cx| dialog.scan(cx));
     let content = dialog.clone();
     let footer = dialog.clone();
@@ -58,13 +59,13 @@ pub(super) fn open(app_state: Entity<AppState>, window: &mut Window, cx: &mut Ap
 }
 
 impl AddProjectDialog {
-    fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let path_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(tcode_i18n::tr!("sidebar.path_placeholder").into_owned())
         });
         Self {
-            app_state,
+            store,
             path_input,
             recent: RecentState::Loading,
             path_error: false,
@@ -72,10 +73,7 @@ impl AddProjectDialog {
     }
 
     fn scan(&mut self, cx: &mut Context<Self>) {
-        let recent = self
-            .app_state
-            .read(cx)
-            .scan_external_history(cx.background_executor());
+        let recent = self.store.read(cx).scan_external_history(cx);
         cx.spawn(async move |this, cx| {
             let recent = recent.await;
             let _ = this.update(cx, |dialog, cx| {
@@ -135,10 +133,17 @@ impl AddProjectDialog {
     }
 
     fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let created = self.app_state.update(cx, |state, cx| {
-            state.create_project(path.clone(), cx).map(|project_id| {
-                state.start_draft(project_id, path, cx);
-            })
+        let created = self.store.update(cx, |store, cx| {
+            store.dispatch(Command::CreateProject { root: path.clone() }, cx);
+            let project_id = store.project_id_for_root(&path, cx)?;
+            store.dispatch(
+                Command::StartDraft {
+                    project_id,
+                    cwd: path,
+                },
+                cx,
+            );
+            Some(())
         });
         if created.is_some() {
             window.close_dialog(cx);
@@ -147,9 +152,10 @@ impl AddProjectDialog {
 
     fn choose_recent(&mut self, recent: RecentDir, window: &mut Window, cx: &mut Context<Self>) {
         let path = recent.path.clone();
-        let project_id = self
-            .app_state
-            .update(cx, |state, cx| state.create_project(path, cx));
+        let project_id = self.store.update(cx, |store, cx| {
+            store.dispatch(Command::CreateProject { root: path.clone() }, cx);
+            store.project_id_for_root(&path, cx)
+        });
         let Some(project_id) = project_id else {
             return;
         };
@@ -159,16 +165,16 @@ impl AddProjectDialog {
             .first()
             .map(|thread| thread.source.display_name().to_string())
             .unwrap_or_default();
-        let Some(receiver) = self.app_state.read(cx).start_external_import(
-            &project_id,
-            threads,
-            cx.background_executor(),
-        ) else {
+        let Some(receiver) = self
+            .store
+            .read(cx)
+            .start_external_import(&project_id, threads, cx)
+        else {
             return;
         };
 
         window.close_dialog(cx);
-        let progress = cx.new(|_| ImportProgress::new(self.app_state.clone(), project_id));
+        let progress = cx.new(|_| ImportProgress::new(self.store.clone(), project_id));
         progress.update(cx, |progress, cx| {
             progress.start(receiver, total, current_tool, cx)
         });
@@ -330,7 +336,7 @@ impl Render for AddProjectDialog {
 }
 
 struct ImportProgress {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     project_id: String,
     done: usize,
     total: usize,
@@ -339,9 +345,9 @@ struct ImportProgress {
 }
 
 impl ImportProgress {
-    fn new(app_state: Entity<AppState>, project_id: String) -> Self {
+    fn new(store: Entity<WorkspaceStore>, project_id: String) -> Self {
         Self {
-            app_state,
+            store,
             project_id,
             done: 0,
             total: 0,
@@ -372,8 +378,13 @@ impl ImportProgress {
                         }
                         ExternalImportUpdate::Finished { imported, skipped } => {
                             progress.summary = Some((imported, skipped));
-                            progress.app_state.update(cx, |state, cx| {
-                                state.finish_external_import(&progress.project_id, cx);
+                            progress.store.update(cx, |store, cx| {
+                                store.dispatch(
+                                    Command::FinishExternalImport {
+                                        project_id: progress.project_id.clone(),
+                                    },
+                                    cx,
+                                );
                             });
                         }
                     }
