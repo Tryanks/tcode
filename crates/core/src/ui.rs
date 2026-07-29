@@ -27,3 +27,30 @@ pub enum RightTab {
     Plan,
     Preview,
 }
+
+/// Stable identity for client-owned state attached to a conversation surface.
+///
+/// Stored threads follow their session id. An unsent draft follows its project
+/// because reopening that project's New thread surface creates a fresh
+/// transient session id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ConversationDestination {
+    Thread(String),
+    ProjectDraft(String),
+}
+
+impl ConversationDestination {
+    /// Backward-compatible key for persisted per-conversation preferences.
+    pub fn preference_key(&self) -> String {
+        match self {
+            Self::Thread(id) => id.clone(),
+            Self::ProjectDraft(id) => format!("draft:{id}"),
+        }
+    }
+
+    /// String key used by native client resources such as WebViews.
+    pub fn ui_key(&self) -> String {
+        self.preference_key()
+    }
+}

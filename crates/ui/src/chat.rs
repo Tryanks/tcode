@@ -2200,9 +2200,8 @@ impl ChatView {
                     .label(tcode_i18n::tr!("chat.view_diff"))
                     .tooltip(tcode_i18n::tr!("chat.view_diff_tooltip"))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.workspace_store.update(cx, |store, cx| {
-                            store.dispatch(Command::OpenDiffForTurn { turn: index }, cx)
-                        });
+                        this.workspace_store
+                            .update(cx, |store, cx| store.open_diff_for_turn(index, cx));
                     })),
             );
 
@@ -2261,13 +2260,7 @@ impl ChatView {
                         .hover(|s| s.bg(cx.theme().list_hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store.update(cx, |store, cx| {
-                                store.dispatch(
-                                    Command::OpenDiffForFile {
-                                        turn: index,
-                                        path: path.clone(),
-                                    },
-                                    cx,
-                                )
+                                store.open_diff_for_file(index, path.clone(), cx)
                             });
                         }))
                         .child(Icon::new(IconName::File).xsmall().text_color(muted))
@@ -2614,9 +2607,8 @@ impl ChatView {
                                     .selected(terminal_open)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_terminal"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.dispatch(Command::ToggleTerminalPanel, cx)
-                                        })
+                                        this.workspace_store
+                                            .update(cx, |store, cx| store.toggle_terminal_panel(cx))
                                     })),
                             )
                             .child(
@@ -2628,9 +2620,8 @@ impl ChatView {
                                     .selected(plan_showing)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_plan"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.dispatch(Command::TogglePlanPanel, cx)
-                                        });
+                                        this.workspace_store
+                                            .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
                             .child(
@@ -2642,9 +2633,8 @@ impl ChatView {
                                     .selected(preview_showing)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_preview"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.dispatch(Command::TogglePreviewPanel, cx)
-                                        });
+                                        this.workspace_store
+                                            .update(cx, |store, cx| store.toggle_preview_panel(cx));
                                     })),
                             )
                             .child(
@@ -2656,9 +2646,8 @@ impl ChatView {
                                     .selected(diff_showing)
                                     .tooltip(tcode_i18n::tr!("chat.toggle_diff"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.dispatch(Command::ToggleDiffPanel, cx)
-                                        });
+                                        this.workspace_store
+                                            .update(cx, |store, cx| store.toggle_diff_panel(cx));
                                     })),
                             ),
                     )

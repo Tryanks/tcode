@@ -34,8 +34,6 @@ pub struct TerminalContext {
 }
 
 pub struct TerminalWorkspace {
-    pub open: bool,
-    pub height: f32,
     pub terminals: Vec<TerminalEntry>,
     pub active_id: Option<u64>,
     pub splits: Vec<TerminalSplit>,
@@ -46,8 +44,6 @@ pub struct TerminalWorkspace {
 impl Default for TerminalWorkspace {
     fn default() -> Self {
         Self {
-            open: false,
-            height: 240.,
             terminals: Vec::new(),
             active_id: None,
             splits: Vec::new(),

@@ -24,6 +24,7 @@ pub struct WindowState {
     pub debug_acp_dialog: bool,
     pub debug_provider_expanded: Option<String>,
     pub debug_open_commit_dialog: bool,
+    pub pending_preview_url: Option<String>,
 }
 
 impl WindowState {
@@ -46,6 +47,7 @@ impl WindowState {
             debug_acp_dialog: false,
             debug_provider_expanded: None,
             debug_open_commit_dialog: false,
+            pending_preview_url: None,
         }
     }
 

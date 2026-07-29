@@ -45,7 +45,7 @@ use crate::store::WorkspaceStore;
 use crate::window_state::WindowState;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
-use tcode_core::ui::WorkspaceMode;
+use tcode_core::ui::{ConversationDestination, WorkspaceMode};
 use tcode_protocol::Command;
 use tcode_runtime::app::mime_from_path;
 use tcode_runtime::ui_facade::PathEntry;
@@ -219,13 +219,9 @@ fn slash_command(text: &str) -> Option<SlashCommand> {
 /// The stable destination for unsent composer text. Draft session ids are
 /// deliberately excluded: opening a project's New thread page allocates a new
 /// transient session id each time.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum ComposerDestination {
-    Thread(String),
-    ProjectDraft(String),
-}
+pub(crate) type ComposerDestination = ConversationDestination;
 
-fn composer_destination(
+pub(crate) fn composer_destination(
     is_draft: bool,
     session_id: &str,
     project_id: Option<&str>,

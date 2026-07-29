@@ -9,6 +9,7 @@ use tcode_core::{
     provider_status::ProviderSnapshot,
     session::{ReviewComment, StoredEvent, Timeline},
     settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
+    ui::{ConversationDestination, RightTab},
 };
 use tcode_protocol::{
     Command, EventEnvelope, QueuedMessageStatus, ServerEvent, SessionStatus, Topic,
@@ -23,7 +24,12 @@ use tcode_runtime::{
     },
 };
 
-use crate::{composer::Composer, terminal_drawer::TerminalDrawer, window_state::WindowState};
+use crate::{
+    composer::Composer,
+    conversation_ui::{ConversationUi, DiffFocus},
+    terminal_drawer::TerminalDrawer,
+    window_state::WindowState,
+};
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -36,6 +42,8 @@ pub struct WorkspaceStore {
     session_replica: Option<(String, Timeline)>,
     session_status_replica: Option<SessionStatus>,
     background_session_flags: HashMap<String, (bool, bool)>,
+    active_destination: Option<ConversationDestination>,
+    conversation_ui: ConversationUi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,13 +70,6 @@ pub(crate) struct ComposerActiveModel {
     pub profile_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DiffFocus {
-    pub session: String,
-    pub turn: usize,
-    pub path: String,
-}
-
 pub(crate) struct DiffActiveState {
     pub session: String,
     pub cwd: PathBuf,
@@ -76,6 +77,19 @@ pub(crate) struct DiffActiveState {
 }
 
 impl WorkspaceStore {
+    fn destination(status: &SessionStatus) -> ConversationDestination {
+        if status.draft {
+            ConversationDestination::ProjectDraft(
+                status
+                    .project_id
+                    .clone()
+                    .unwrap_or_else(|| status.session_id.clone()),
+            )
+        } else {
+            ConversationDestination::Thread(status.session_id.clone())
+        }
+    }
+
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let (index_replica, settings_replica, session_status_replica, background_session_flags) = {
             let state = app.read(cx);
@@ -96,6 +110,17 @@ impl WorkspaceStore {
                     .collect(),
             )
         };
+        let active_destination = session_status_replica.as_ref().map(Self::destination);
+        let mut conversation_ui = ConversationUi::default();
+        if let Some(destination) = active_destination.clone() {
+            let (terminal_open, terminal_height) = app.read(cx).active_terminal_ui_preferences();
+            conversation_ui.ensure(
+                destination,
+                settings_replica.word_wrap_diffs,
+                terminal_open,
+                terminal_height,
+            );
+        }
         cx.observe(&app, |store, app, cx| {
             let state = app.read(cx);
             let active = state
@@ -119,6 +144,26 @@ impl WorkspaceStore {
                 store.session_status_replica =
                     active.and_then(|(id, _)| state.session_status_snapshot(id));
             }
+            let destination = store.session_status_replica.as_ref().map(Self::destination);
+            if let Some(destination) = destination.clone() {
+                if let Some(previous) = store.active_destination.as_ref()
+                    && previous != &destination
+                    && matches!(previous, ConversationDestination::ProjectDraft(_))
+                    && matches!(destination, ConversationDestination::Thread(_))
+                {
+                    store
+                        .conversation_ui
+                        .move_entry(previous, destination.clone());
+                }
+                let (terminal_open, terminal_height) = state.active_terminal_ui_preferences();
+                store.conversation_ui.ensure(
+                    destination.clone(),
+                    store.settings_replica.word_wrap_diffs,
+                    terminal_open,
+                    terminal_height,
+                );
+            }
+            store.active_destination = destination;
             cx.notify();
         })
         .detach();
@@ -137,7 +182,31 @@ impl WorkspaceStore {
             session_replica: None,
             session_status_replica,
             background_session_flags,
+            active_destination,
+            conversation_ui,
         }
+    }
+
+    pub fn sync_active_conversation_ui(&mut self, cx: &App) {
+        let (status, terminal_open, terminal_height) = {
+            let app = self.app.read(cx);
+            let status = app
+                .active_session_id()
+                .and_then(|id| app.session_status_snapshot(id));
+            let (open, height) = app.active_terminal_ui_preferences();
+            (status, open, height)
+        };
+        self.session_status_replica = status;
+        let destination = self.session_status_replica.as_ref().map(Self::destination);
+        if let Some(destination) = destination.clone() {
+            self.conversation_ui.ensure(
+                destination,
+                self.settings_replica.word_wrap_diffs,
+                terminal_open,
+                terminal_height,
+            );
+        }
+        self.active_destination = destination;
     }
 
     fn apply_domain_event(&mut self, envelope: &EventEnvelope, _cx: &App) {
@@ -169,11 +238,15 @@ impl WorkspaceStore {
             }
             (Topic::Index, ServerEvent::IndexRemoveSession { session_id }) => {
                 self.index_replica.0.retain(|meta| meta.id != *session_id);
+                self.conversation_ui
+                    .remove(&ConversationDestination::Thread(session_id.clone()));
             }
             (Topic::Index, ServerEvent::IndexRemoveProject { project_id }) => {
                 self.index_replica
                     .1
                     .retain(|project| project.id != *project_id);
+                self.conversation_ui
+                    .remove(&ConversationDestination::ProjectDraft(project_id.clone()));
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
@@ -216,11 +289,36 @@ impl WorkspaceStore {
                 self.session_replica = Some((session_id.clone(), timeline));
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                self.apply_conversation_event(session_id, &record.event);
                 if let Some((replica_id, timeline)) = self.session_replica.as_mut()
                     && replica_id == session_id
                 {
                     timeline.apply_at(record.ts, &record.event);
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_conversation_event(&mut self, session_id: &str, event: &agent::AgentEvent) {
+        let destination = ConversationDestination::Thread(session_id.to_string());
+        let Some(ui) = self.conversation_ui.get_mut(&destination) else {
+            return;
+        };
+        match event {
+            agent::AgentEvent::TurnStarted { .. } => {
+                ui.auto_open_task_suppressed = false;
+            }
+            agent::AgentEvent::PlanUpdated { .. }
+                if self.settings_replica.auto_open_task_panel
+                    && !ui.auto_open_task_suppressed
+                    && !(ui.right_panel_open && ui.right_tab == RightTab::Plan) =>
+            {
+                ui.right_panel_open = true;
+                ui.right_tab = RightTab::Plan;
+            }
+            agent::AgentEvent::TurnCompleted { .. } | agent::AgentEvent::RewindCompleted { .. } => {
+                ui.refresh_diff()
             }
             _ => {}
         }
@@ -312,11 +410,6 @@ impl WorkspaceStore {
             Command::WriteRelaunchMarker { reopen_settings } => {
                 app.write_relaunch_marker(&reopen_settings)
             }
-            Command::ToggleDiffPanel => app.toggle_diff_panel(cx),
-            Command::OpenDiffForTurn { turn } => app.open_diff_for_turn(turn, cx),
-            Command::OpenDiffForFile { turn, path } => app.open_diff_for_file(turn, path, cx),
-            Command::SelectDiffTurn { turn } => app.select_diff_turn(turn, cx),
-            Command::DiscardDiffFocus => app.discard_diff_focus(),
             Command::SetTerminalHeight { height } => app.set_terminal_height(height, cx),
             Command::ToggleTerminalPanel => app.toggle_terminal_panel(cx),
             Command::CloseTerminalPanel => app.close_terminal_panel(cx),
@@ -331,10 +424,8 @@ impl WorkspaceStore {
             Command::RemoveTerminalContext { context_id } => {
                 app.remove_terminal_context(context_id, cx)
             }
-            Command::CloseDiffPanel => app.close_diff_panel(cx),
             Command::AddReviewComment { comment } => app.add_review_comment(comment, cx),
             Command::RemoveReviewComment { index } => app.remove_review_comment(index, cx),
-            Command::ToggleDiffExpanded => app.toggle_diff_expanded(cx),
             Command::CycleProjectSort => app.cycle_project_sort(cx),
             Command::CreateProject { root } => {
                 app.create_project(root, cx);
@@ -407,20 +498,278 @@ impl WorkspaceStore {
                 markdown,
                 fallback_title,
             } => app.download_plan(markdown, fallback_title, cx),
-            Command::TogglePlanPanel => app.toggle_plan_panel(cx),
-            Command::SetRightTab { tab } => app.set_right_tab(tab, cx),
-            Command::TogglePreviewPanel => app.toggle_preview_panel(cx),
-            Command::ClosePreviewPanel => app.close_preview_panel(cx),
-            Command::OpenPreviewPanel => app.open_preview_panel(cx),
-            Command::OpenPreviewPanelFor { session_id } => {
-                app.open_preview_panel_for(&session_id, cx)
-            }
             Command::LoadBranches => app.load_branches(cx),
             Command::CheckoutBranch { branch } => app.checkout_branch(branch, cx),
             Command::SetActiveApprovalMode { mode } => app.set_active_approval_mode(mode, cx),
             Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
             Command::RewindTurn { turn, mode } => app.rewind_turn(turn, mode, cx),
         });
+    }
+
+    fn active_conversation_ui(&self) -> Option<&crate::conversation_ui::ConversationUiState> {
+        self.conversation_ui.get(self.active_destination.as_ref()?)
+    }
+
+    fn active_conversation_ui_mut(
+        &mut self,
+    ) -> Option<&mut crate::conversation_ui::ConversationUiState> {
+        let destination = self.active_destination.clone()?;
+        self.conversation_ui.get_mut(&destination)
+    }
+
+    fn active_turn_running(&self) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.turn_running)
+    }
+
+    fn suppress_task_auto_open_if_running(&mut self) {
+        let running = self.active_turn_running();
+        if running && let Some(ui) = self.active_conversation_ui_mut() {
+            ui.auto_open_task_suppressed = true;
+        }
+    }
+
+    pub fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
+        let closing = self
+            .active_conversation_ui()
+            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Diff);
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            if closing {
+                ui.right_panel_open = false;
+                ui.pending_diff_focus = None;
+            } else {
+                ui.right_panel_open = true;
+                ui.right_tab = RightTab::Diff;
+                ui.refresh_diff();
+            }
+        }
+        if closing {
+            self.suppress_task_auto_open_if_running();
+        }
+        cx.notify();
+    }
+
+    pub fn open_diff_for_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.pending_diff_focus = None;
+            ui.right_panel_open = true;
+            ui.right_tab = RightTab::Diff;
+            ui.diff_selected_turn = Some(turn);
+            ui.refresh_diff();
+            cx.notify();
+        }
+    }
+
+    pub fn open_diff_for_file(&mut self, turn: usize, path: String, cx: &mut Context<Self>) {
+        let session = self
+            .session_status_replica
+            .as_ref()
+            .map(|status| status.session_id.clone());
+        if let (Some(session), Some(ui)) = (session, self.active_conversation_ui_mut()) {
+            ui.right_panel_open = true;
+            ui.right_tab = RightTab::Diff;
+            ui.diff_selected_turn = Some(turn);
+            ui.pending_diff_focus = Some(DiffFocus {
+                session,
+                turn,
+                path,
+            });
+            ui.refresh_diff();
+            cx.notify();
+        }
+    }
+
+    pub fn select_diff_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.pending_diff_focus = None;
+            ui.diff_selected_turn = Some(turn);
+            ui.refresh_diff();
+            cx.notify();
+        }
+    }
+
+    pub fn discard_diff_focus(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.discard_diff_focus();
+            cx.notify();
+        }
+    }
+
+    pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.pending_diff_focus = None;
+            ui.right_panel_open = false;
+        }
+        self.suppress_task_auto_open_if_running();
+        cx.notify();
+    }
+
+    pub fn toggle_diff_expanded(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.right_panel_expanded = !ui.right_panel_expanded;
+            cx.notify();
+        }
+    }
+
+    pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.right_tab = tab;
+            cx.notify();
+        }
+    }
+
+    fn toggle_tab_panel(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+        let closing = self
+            .active_conversation_ui()
+            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == tab);
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.right_panel_open = !closing;
+            ui.right_tab = tab;
+        }
+        if closing {
+            self.suppress_task_auto_open_if_running();
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_tab_panel(RightTab::Plan, cx);
+    }
+
+    pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
+        self.toggle_tab_panel(RightTab::Preview, cx);
+    }
+
+    pub fn close_preview_panel(&mut self, cx: &mut Context<Self>) {
+        let showing = self
+            .active_conversation_ui()
+            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview);
+        if showing && let Some(ui) = self.active_conversation_ui_mut() {
+            ui.right_panel_open = false;
+        }
+        if showing {
+            self.suppress_task_auto_open_if_running();
+            cx.notify();
+        }
+    }
+
+    pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut()
+            && !(ui.right_panel_open && ui.right_tab == RightTab::Preview)
+        {
+            ui.right_panel_open = true;
+            ui.right_tab = RightTab::Preview;
+            cx.notify();
+        }
+    }
+
+    pub fn open_preview_panel_for(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let destination = if self
+            .session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.session_id == session_id)
+        {
+            self.active_destination
+                .clone()
+                .unwrap_or_else(|| ConversationDestination::Thread(session_id.to_string()))
+        } else {
+            ConversationDestination::Thread(session_id.to_string())
+        };
+        self.conversation_ui
+            .open_preview_for(destination, self.settings_replica.word_wrap_diffs);
+        cx.notify();
+    }
+
+    pub fn preview_url(&self, key: &str) -> Option<String> {
+        self.conversation_ui
+            .get_by_key(key)
+            .and_then(|ui| ui.preview_url.clone())
+    }
+
+    pub fn set_preview_url(&mut self, key: &str, url: String, cx: &mut Context<Self>) {
+        if let Some(ui) = self.conversation_ui.get_mut_by_key(key) {
+            ui.preview_url = Some(url);
+            cx.notify();
+        }
+    }
+
+    pub fn preview_canvas(&self, key: &str) -> Option<(u32, u32)> {
+        self.conversation_ui
+            .get_by_key(key)
+            .and_then(|ui| ui.preview_canvas)
+    }
+
+    pub fn set_preview_canvas(
+        &mut self,
+        key: &str,
+        canvas: Option<(u32, u32)>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ui) = self.conversation_ui.get_mut_by_key(key) {
+            ui.preview_canvas = canvas;
+            cx.notify();
+        }
+    }
+
+    pub fn clear_preview_chrome(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(ui) = self.conversation_ui.get_mut_by_key(key) {
+            ui.preview_url = None;
+            ui.preview_canvas = None;
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        let opening = !self
+            .active_conversation_ui()
+            .is_some_and(|ui| ui.terminal_open);
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.terminal_open = opening;
+        }
+        if opening {
+            self.dispatch(Command::ToggleTerminalPanel, cx);
+        } else {
+            self.dispatch(Command::CloseTerminalPanel, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.terminal_open = false;
+        }
+        self.dispatch(Command::CloseTerminalPanel, cx);
+        cx.notify();
+    }
+
+    pub fn show_terminal_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.terminal_open = true;
+            cx.notify();
+        }
+    }
+
+    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.terminal_height = height;
+        }
+        self.dispatch(Command::SetTerminalHeight { height }, cx);
+        cx.notify();
+    }
+
+    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        let closes_drawer = self
+            .app
+            .read(cx)
+            .active
+            .as_ref()
+            .is_some_and(|active| active.terminal_workspace.terminals.len() <= 1);
+        if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
+            ui.terminal_open = false;
+        }
+        self.dispatch(Command::CloseTerminal { terminal_id }, cx);
+        cx.notify();
     }
 
     pub fn grouped_sessions(&self, _cx: &App) -> Vec<ProjectGroup> {
@@ -592,9 +941,10 @@ impl WorkspaceStore {
         self.app.read(cx).providers_checking()
     }
 
-    pub fn window_caption_state(&self, cx: &App) -> (bool, tcode_core::ui::RightTab) {
-        let app = self.app.read(cx);
-        (app.diff_panel_open(), app.right_tab())
+    pub fn window_caption_state(&self, _cx: &App) -> (bool, tcode_core::ui::RightTab) {
+        self.active_conversation_ui()
+            .map(|ui| (ui.right_panel_open, ui.right_tab))
+            .unwrap_or((false, RightTab::default()))
     }
 
     pub fn shell_window_title(&self, cx: &App) -> String {
@@ -606,13 +956,10 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn shell_panel_state(&self, cx: &App) -> (bool, tcode_core::ui::RightTab, bool) {
-        let app = self.app.read(cx);
-        (
-            app.diff_panel_open(),
-            app.right_tab(),
-            app.diff_panel_expanded(),
-        )
+    pub fn shell_panel_state(&self, _cx: &App) -> (bool, tcode_core::ui::RightTab, bool) {
+        self.active_conversation_ui()
+            .map(|ui| (ui.right_panel_open, ui.right_tab, ui.right_panel_expanded))
+            .unwrap_or((false, RightTab::default(), false))
     }
 
     pub fn preview_active_identity(&self, _cx: &App) -> Option<(String, String)> {
@@ -633,16 +980,13 @@ impl WorkspaceStore {
         self.active_session_id(cx)
     }
 
-    pub fn preview_panel_showing(&self, cx: &App) -> bool {
-        self.app.read(cx).preview_panel_showing()
+    pub fn preview_panel_showing(&self, _cx: &App) -> bool {
+        self.active_conversation_ui()
+            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
     }
 
     pub fn preview_browser_settings(&self, _cx: &App) -> BrowserSettings {
         self.settings_replica.browser.clone()
-    }
-
-    pub fn take_pending_preview_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        self.app.update(cx, |app, _| app.take_pending_preview_url())
     }
 
     pub fn take_preview_requests(
@@ -895,11 +1239,8 @@ impl WorkspaceStore {
     pub fn diff_selected_turn(&self, cx: &App) -> Option<usize> {
         let turns = self.diff_turns(cx);
         let explicit = self
-            .app
-            .read(cx)
-            .active
-            .as_ref()
-            .and_then(|active| active.diff_selected_turn);
+            .active_conversation_ui()
+            .and_then(|ui| ui.diff_selected_turn);
         match explicit {
             Some(turn) if turns.contains(&turn) => Some(turn),
             _ => turns.last().copied(),
@@ -919,67 +1260,85 @@ impl WorkspaceStore {
         .flatten()
     }
 
-    pub(crate) fn pending_diff_focus(&self, cx: &App) -> Option<DiffFocus> {
-        self.app
-            .read(cx)
-            .pending_diff_focus()
-            .map(|request| DiffFocus {
-                session: request.session.clone(),
-                turn: request.turn,
-                path: request.path.clone(),
-            })
+    pub(crate) fn pending_diff_focus(&self, _cx: &App) -> Option<DiffFocus> {
+        self.active_conversation_ui()
+            .and_then(|ui| ui.pending_diff_focus.clone())
     }
 
     pub(crate) fn take_diff_focus(
         &mut self,
         session: &str,
         turn: usize,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Option<DiffFocus> {
-        self.app
-            .update(cx, |app, _| app.take_diff_focus(session, turn))
-            .map(|request| DiffFocus {
-                session: request.session,
-                turn: request.turn,
-                path: request.path,
-            })
+        self.active_conversation_ui_mut()?
+            .take_diff_focus(session, turn)
     }
 
-    pub fn diff_refresh_generation(&self, cx: &App) -> u64 {
-        self.app.read(cx).diff_refresh_generation
+    pub fn diff_refresh_generation(&self, _cx: &App) -> u64 {
+        self.active_conversation_ui()
+            .map(|ui| ui.diff_refresh_generation)
+            .unwrap_or(0)
     }
 
     pub fn diff_word_wrap(&self, _cx: &App) -> bool {
-        self.settings_replica.word_wrap_diffs
+        self.active_conversation_ui()
+            .map(|ui| ui.diff_wrap)
+            .unwrap_or(self.settings_replica.word_wrap_diffs)
+    }
+
+    pub fn diff_split(&self, _cx: &App) -> bool {
+        self.active_conversation_ui()
+            .is_some_and(|ui| ui.diff_split)
+    }
+
+    pub fn set_diff_split(&mut self, split: bool, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.diff_split = split;
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_diff_wrap(&mut self, cx: &mut Context<Self>) {
+        if let Some(ui) = self.active_conversation_ui_mut() {
+            ui.diff_wrap = !ui.diff_wrap;
+            cx.notify();
+        }
     }
 
     pub fn diff_panel_chrome_state(
         &self,
         cx: &App,
     ) -> (bool, bool, tcode_core::ui::RightTab, bool) {
-        let app = self.app.read(cx);
         let plan_tab_active_label = self
             .with_active_timeline(cx, |timeline| timeline.proposed_plan.is_some())
             .unwrap_or(false)
             || self.composer_interaction_mode(cx) == agent::InteractionMode::Plan;
-        (
-            app.diff_panel_open(),
-            app.diff_panel_expanded(),
-            app.right_tab(),
-            plan_tab_active_label,
-        )
+        let (open, expanded, tab) = self
+            .active_conversation_ui()
+            .map(|ui| (ui.right_panel_open, ui.right_panel_expanded, ui.right_tab))
+            .unwrap_or((false, false, RightTab::default()));
+        (open, expanded, tab, plan_tab_active_label)
     }
 
-    pub fn diff_review_comments(&self, cx: &App) -> Vec<ReviewComment> {
-        self.app.read(cx).review_comments().to_vec()
+    pub fn diff_review_comments(&self, _cx: &App) -> Vec<ReviewComment> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.review_comment_drafts.clone())
+            .unwrap_or_default()
     }
 
     pub fn with_diff_review_comments<R>(
         &self,
-        cx: &App,
+        _cx: &App,
         read: impl FnOnce(&[ReviewComment]) -> R,
     ) -> R {
-        read(self.app.read(cx).review_comments())
+        read(
+            self.session_status_replica
+                .as_ref()
+                .map(|status| status.review_comment_drafts.as_slice())
+                .unwrap_or_default(),
+        )
     }
 
     pub fn load_git_diff(
@@ -1079,8 +1438,11 @@ impl WorkspaceStore {
             .map(|active| read(&active.terminal_workspace))
     }
 
-    pub fn composer_review_comments(&self, cx: &App) -> Vec<ReviewComment> {
-        self.app.read(cx).review_comments().to_vec()
+    pub fn composer_review_comments(&self, _cx: &App) -> Vec<ReviewComment> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.review_comment_drafts.clone())
+            .unwrap_or_default()
     }
 
     pub fn composer_relay_confirmation(&self, _cx: &App) -> Option<(String, String)> {
@@ -1365,18 +1727,19 @@ impl WorkspaceStore {
         &self,
         cx: &App,
     ) -> (bool, tcode_core::ui::RightTab, bool, bool, bool, f32) {
-        let app = self.app.read(cx);
-        (
-            app.diff_panel_open(),
-            app.right_tab(),
-            app.plan_panel_showing(),
-            app.preview_panel_showing(),
-            app.terminal_panel_open(),
-            app.active
-                .as_ref()
-                .map(|active| active.terminal_workspace.height)
-                .unwrap_or(240.),
-        )
+        let _ = cx;
+        self.active_conversation_ui()
+            .map(|ui| {
+                (
+                    ui.right_panel_open,
+                    ui.right_tab,
+                    ui.right_panel_open && ui.right_tab == RightTab::Plan,
+                    ui.right_panel_open && ui.right_tab == RightTab::Preview,
+                    ui.terminal_open,
+                    ui.terminal_height,
+                )
+            })
+            .unwrap_or((false, RightTab::default(), false, false, false, 240.))
     }
 
     pub fn chat_git_controls(&self, cx: &App) -> Option<(QuickAction, Vec<MenuItem>)> {
@@ -1462,7 +1825,10 @@ impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 mod tests {
     use agent::{AgentEvent, ItemContent, ProviderKind, ThreadItem, TurnStatus};
     use gpui::{AppContext as _, TestAppContext};
-    use tcode_core::project::{Project, SessionMeta};
+    use tcode_core::{
+        project::{Project, SessionMeta},
+        session::{ReviewComment, ReviewSide},
+    };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
     use tcode_runtime::{app::AppState, event::HostEvent};
     use tcode_services::store::SessionStore;
@@ -1708,6 +2074,23 @@ mod tests {
                 },
                 cx,
             );
+            store.dispatch(
+                Command::AddReviewComment {
+                    comment: ReviewComment::new(
+                        "src/lib.rs".into(),
+                        4,
+                        4,
+                        ReviewSide::New,
+                        "Replicated review draft".into(),
+                        "+changed".into(),
+                        "turn:0".into(),
+                        "Turn 1".into(),
+                        0,
+                        1,
+                    ),
+                },
+                cx,
+            );
         });
 
         let live = app.read_with(cx, |state, _| {
@@ -1726,6 +2109,11 @@ mod tests {
         assert_eq!(replica.queued_messages.len(), 1);
         assert_eq!(replica.queued_messages[0].text, "queued for replication");
         assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
+        assert_eq!(replica.review_comment_drafts.len(), 1);
+        assert_eq!(
+            workspace.read_with(cx, |store, cx| store.composer_review_comments(cx)),
+            replica.review_comment_drafts
+        );
 
         std::fs::remove_dir_all(root).expect("remove test data");
     }

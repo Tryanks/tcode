@@ -38,7 +38,7 @@ use tcode_core::settings::{
     ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProfileSettingsPatch, ProjectSort,
     ProviderProfile, ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
-pub use tcode_core::ui::{RightTab, WorkspaceMode};
+pub use tcode_core::ui::{ConversationDestination, RightTab, WorkspaceMode};
 use tcode_protocol::{
     EventEnvelope, QueuedMessageStatus, ServerEvent, SessionEventRecord, SessionStatus, Topic,
 };
@@ -325,101 +325,6 @@ fn run_store_write(
     }
 }
 
-/// Stable destination for conversation-owned UI. A stored thread uses its
-/// session id; an unsent draft uses its project id because opening the same
-/// project's New thread surface allocates a fresh transient session id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ConversationDestination {
-    Thread(String),
-    ProjectDraft(String),
-}
-
-impl ConversationDestination {
-    /// Backward-compatible key for `terminal-ui.json`: stored threads keep the
-    /// raw session-id keys used by older builds, while drafts get a namespace.
-    fn preference_key(&self) -> String {
-        match self {
-            Self::Thread(id) => id.clone(),
-            Self::ProjectDraft(id) => format!("draft:{id}"),
-        }
-    }
-
-    /// String key shared with UI-side caches such as the native WebView pool.
-    fn ui_key(&self) -> String {
-        match self {
-            Self::Thread(id) => id.clone(),
-            Self::ProjectDraft(id) => format!("draft:{id}"),
-        }
-    }
-}
-
-/// One-shot request from a changed-file row to focus that file in a turn diff.
-/// The diff panel consumes it only after the matching rendered cache is ready.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiffFocusRequest {
-    pub session: String,
-    pub turn: usize,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RightPanelState {
-    open: bool,
-    expanded: bool,
-    selected_turn: Option<usize>,
-    tab: RightTab,
-}
-
-impl RightPanelState {
-    fn capture(active: &ActiveSession) -> Self {
-        Self {
-            open: active.diff_open,
-            expanded: active.diff_expanded,
-            selected_turn: active.diff_selected_turn,
-            tab: active.right_tab,
-        }
-    }
-
-    fn restore_into(self, active: &mut ActiveSession) {
-        active.diff_open = self.open;
-        active.diff_expanded = self.expanded;
-        active.diff_selected_turn = self.selected_turn;
-        active.right_tab = self.tab;
-    }
-
-    fn open_preview(&mut self) -> bool {
-        if self.open && self.tab == RightTab::Preview {
-            return false;
-        }
-        self.open = true;
-        self.tab = RightTab::Preview;
-        true
-    }
-}
-
-/// UI resources that belong to a conversation but outlive the currently
-/// mounted `ActiveSession`. Moving the terminal workspace (rather than merely
-/// persisting its open flag) keeps its PTYs, scrollback, tabs, splits, and
-/// attached context with the conversation while another thread is selected.
-struct ConversationUiState {
-    right_panel: RightPanelState,
-    terminal_workspace: TerminalWorkspace,
-}
-
-impl ConversationUiState {
-    fn take_from(active: &mut ActiveSession) -> Self {
-        Self {
-            right_panel: RightPanelState::capture(active),
-            terminal_workspace: std::mem::take(&mut active.terminal_workspace),
-        }
-    }
-
-    fn restore_into(self, active: &mut ActiveSession) {
-        self.right_panel.restore_into(active);
-        active.terminal_workspace = self.terminal_workspace;
-    }
-}
-
 /// A message waiting for an ordinary turn. Most are user-authored messages sent
 /// while another turn was running; orchestration callbacks also wait here while
 /// an idle provider is starting.
@@ -615,17 +520,7 @@ pub struct ActiveSession {
     /// native providers describe their options through the model catalog
     /// instead, so this stays empty for them. In-memory only.
     provider_options: Vec<OptionDescriptor>,
-    /// Diff panel UI state (per-session, in-memory only). `diff_open` is the
-    /// right-panel open/closed flag; `right_tab` selects which tab it shows.
-    pub diff_open: bool,
-    pub diff_expanded: bool,
-    pub diff_selected_turn: Option<usize>,
-    /// Which tab the right panel shows (Diff or Plan/Tasks).
-    pub right_tab: RightTab,
-    /// Set when the user manually closed the right panel during the current
-    /// turn, so `auto_open_task_panel` doesn't re-open it until the next turn.
-    auto_open_suppressed: bool,
-    /// Bottom terminal drawer state and its lazily-spawned per-session PTYs.
+    /// Lazily-spawned per-session PTYs and provider-bound terminal context.
     pub terminal_workspace: TerminalWorkspace,
     _pump: Option<Task<()>>,
 }
@@ -965,9 +860,9 @@ pub struct AppState {
     /// timer, just "finish what you were given, then rest". (The parked
     /// `timeline` goes stale by design; re-adoption replays the JSONL.)
     background: HashMap<String, ActiveSession>,
-    /// Right/bottom workspace resources parked by conversation destination.
-    /// This mirrors the composer's per-thread/project-draft text cache.
-    conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
+    /// Terminal resources parked by conversation destination. Drawer chrome is
+    /// client-owned; this map retains only PTYs, tabs, splits, and contexts.
+    terminal_workspaces: HashMap<ConversationDestination, TerminalWorkspace>,
     /// Provider-native rewind requested while a session is live or starting.
     /// Kept here (rather than in persisted session metadata) because the
     /// provider response is the only authority that can complete it.
@@ -1022,9 +917,6 @@ pub struct AppState {
     /// timeline. Maintained incrementally from `on_event`; never replayed from
     /// disk, because a persisted approval cannot survive its provider process.
     sessions_awaiting_approval: HashMap<String, Vec<agent::ApprovalRequest>>,
-    /// A URL the preview panel should navigate to on its next render (set by the
-    /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
-    pub pending_preview_url: Option<String>,
     /// Background-computed git state of the active session's cwd, driving the
     /// adaptive header quick-action button (`None` until the first refresh /
     /// with no active session). See [`AppState::refresh_git_status`].
@@ -1049,10 +941,6 @@ pub struct AppState {
     timeline_load_generations: HashMap<String, u64>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
-    /// Invalidates working-tree/branch previews on panel open and turn finish.
-    pub diff_refresh_generation: u64,
-    /// Pending changed-file row navigation, consumed by the diff panel once.
-    pending_diff_focus: Option<DiffFocusRequest>,
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
@@ -1136,7 +1024,7 @@ impl AppState {
             projects,
             active: None,
             background: HashMap::new(),
-            conversation_ui: HashMap::new(),
+            terminal_workspaces: HashMap::new(),
             pending_native_rewinds: HashMap::new(),
             native_rewind_prefills: HashMap::new(),
             settings,
@@ -1165,7 +1053,6 @@ impl AppState {
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
             sessions_awaiting_approval: HashMap::new(),
-            pending_preview_url: None,
             git_status: None,
             git_busy: false,
             next_operation_id: 1,
@@ -1177,8 +1064,6 @@ impl AppState {
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
             review_comment_drafts: HashMap::new(),
-            diff_refresh_generation: 0,
-            pending_diff_focus: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
             pending_relaunch,
@@ -1369,6 +1254,11 @@ impl AppState {
                     text: message.text.clone(),
                 })
                 .collect(),
+            review_comment_drafts: self
+                .review_comment_drafts
+                .get(session_id)
+                .cloned()
+                .unwrap_or_default(),
             delivery_in_flight: session.delivery_in_flight,
             turn_running: session.turn_in_flight,
             working: session.has_work(),
@@ -1430,22 +1320,6 @@ impl AppState {
         let (completion, barrier) = async_channel::bounded(1);
         self.enqueue_store_write(StoreWrite::Flush(completion), cx);
         barrier
-    }
-
-    /// Open the Preview tab and queue an initial navigation (dev/testing entry
-    /// point for `--open-preview <url>`).
-    pub fn open_preview_with_url(&mut self, url: String, cx: &mut Context<Self>) {
-        self.pending_preview_url = Some(url);
-        self.open_preview_panel(cx);
-    }
-
-    /// Take the queued preview URL, if any (consumed by `PreviewPanel`).
-    ///
-    /// Linux has no preview WebView to navigate (see `ui::preview_panel`), so
-    /// nothing consumes this there — the queue is simply never drained.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    pub fn take_pending_preview_url(&mut self) -> Option<String> {
-        self.pending_preview_url.take()
     }
 
     /// Attach the running preview MCP server: its per-session token issuer and
@@ -1535,7 +1409,7 @@ impl AppState {
     ) {
         let (text, attachments) = self.assemble_user_message(text, attachment_paths);
         self.orchestrate_turn_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context();
+        self.clear_consumed_draft_context(cx);
     }
 
     fn orchestrate_turn_assembled(
@@ -3489,37 +3363,6 @@ impl AppState {
 
     // -- diff panel (per-session, in-memory) --------------------------------
 
-    /// Turn indices (ascending) whose timeline contains at least one file
-    /// change, i.e. the turns the diff panel can display.
-    pub fn diff_turns(&self) -> Vec<usize> {
-        let Some(active) = self.active.as_ref() else {
-            return Vec::new();
-        };
-        active
-            .timeline
-            .turns
-            .iter()
-            .enumerate()
-            .filter_map(|(turn, meta)| {
-                meta.changes
-                    .as_ref()
-                    .is_some_and(|changes| !changes.changes.is_empty())
-                    .then_some(turn)
-            })
-            .collect()
-    }
-
-    /// The turn the diff panel currently shows: the explicit selection when it
-    /// still has changes, otherwise the latest turn that does.
-    pub fn diff_selected_turn(&self) -> Option<usize> {
-        let turns = self.diff_turns();
-        let explicit = self.active.as_ref().and_then(|a| a.diff_selected_turn);
-        match explicit {
-            Some(t) if turns.contains(&t) => Some(t),
-            _ => turns.last().copied(),
-        }
-    }
-
     /// Return the provider-attributed net changes for one turn. This never
     /// reads Git or the current working tree: exact provider snapshots and the
     /// structured-operation fallback are folded into the timeline itself.
@@ -3545,140 +3388,36 @@ impl AppState {
             .map(|changes| changes.completeness)
     }
 
-    pub fn diff_panel_open(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.diff_open)
-    }
+    // -- conversation-owned terminal resources -----------------------------
 
-    pub fn diff_panel_expanded(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.diff_expanded)
-    }
-
-    /// Toggle the diff panel open/closed (header button). Opening with no prior
-    /// selection defaults to the latest turn with changes.
-    pub fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            // The header diff button focuses the Diff tab: opening (or switching
-            // tabs while already open) shows diffs; a second click closes.
-            if active.diff_open && active.right_tab == RightTab::Diff {
-                active.diff_open = false;
-                self.pending_diff_focus = None;
-                if active.timeline.turn_running {
-                    active.auto_open_suppressed = true;
-                }
-            } else {
-                active.diff_open = true;
-                active.right_tab = RightTab::Diff;
-                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            }
-            cx.notify();
-        }
-    }
-
-    /// Open the diff panel and select `turn` (a "View diff" card button).
-    pub fn open_diff_for_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_open = true;
-            active.right_tab = RightTab::Diff;
-            active.diff_selected_turn = Some(turn);
-            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    /// Open a turn diff and focus one file after its async render cache lands.
-    pub fn open_diff_for_file(&mut self, turn: usize, path: String, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
-            return;
-        };
-        let session = active.meta.id.clone();
-        active.diff_open = true;
-        active.right_tab = RightTab::Diff;
-        active.diff_selected_turn = Some(turn);
-        self.set_diff_focus(session, turn, path);
-        self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-        cx.notify();
-    }
-
-    /// Select a turn within an already-open diff panel.
-    pub fn select_diff_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_selected_turn = Some(turn);
-            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    pub fn pending_diff_focus(&self) -> Option<&DiffFocusRequest> {
-        self.pending_diff_focus.as_ref()
-    }
-
-    fn set_diff_focus(&mut self, session: String, turn: usize, path: String) {
-        self.pending_diff_focus = Some(DiffFocusRequest {
-            session,
-            turn,
-            path,
-        });
-    }
-
-    /// Consume a request only for the cache it was created for.
-    pub fn take_diff_focus(&mut self, session: &str, turn: usize) -> Option<DiffFocusRequest> {
-        let matches = self
-            .pending_diff_focus
-            .as_ref()
-            .is_some_and(|request| request.session == session && request.turn == turn);
-        matches.then(|| self.pending_diff_focus.take()).flatten()
-    }
-
-    /// Cancel pending file navigation when the user chooses another scope.
-    pub fn discard_diff_focus(&mut self) {
-        self.pending_diff_focus = None;
-    }
-
-    /// Open the diff panel on the latest turn with changes (used by
-    /// `--open-diff` and as a general "just show me the diffs" entry point).
-    pub fn open_diff_panel(&mut self, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_open = true;
-            active.right_tab = RightTab::Diff;
-            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    // -- conversation-owned right/bottom workspace -------------------------
-
-    /// Stable key used by UI-side resources which live outside `AppState`
-    /// (notably native WebViews). Drafts follow their project just like the
-    /// composer's text cache; persisted threads follow their session id.
-    pub fn active_conversation_ui_key(&self) -> Option<String> {
-        self.active
-            .as_ref()
-            .map(conversation_destination)
-            .map(|destination| destination.ui_key())
-    }
-
-    fn restore_conversation_ui(&mut self, active: &mut ActiveSession) -> bool {
+    fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) -> bool {
         let destination = conversation_destination(active);
-        let Some(ui) = self.conversation_ui.remove(&destination) else {
+        let Some(workspace) = self.terminal_workspaces.remove(&destination) else {
             return false;
         };
-        ui.restore_into(active);
+        active.terminal_workspace = workspace;
         true
     }
 
-    fn park_conversation_ui(&mut self, active: &mut ActiveSession) {
+    fn park_terminal_workspace(&mut self, active: &mut ActiveSession) {
         let destination = conversation_destination(active);
-        let ui = ConversationUiState::take_from(active);
-        self.conversation_ui.insert(destination, ui);
+        let workspace = std::mem::take(&mut active.terminal_workspace);
+        self.terminal_workspaces.insert(destination, workspace);
     }
 
     fn terminal_preferences_for(&self, active: &ActiveSession) -> Option<TerminalPreferences> {
         self.terminal_preferences
             .get(&conversation_destination(active).preference_key())
             .copied()
+    }
+
+    /// Persisted drawer preferences seed the client-owned conversation entry.
+    pub fn active_terminal_ui_preferences(&self) -> (bool, f32) {
+        self.active
+            .as_ref()
+            .and_then(|active| self.terminal_preferences_for(active))
+            .map(|preferences| (preferences.open, preferences.height.clamp(120., 600.)))
+            .unwrap_or((false, 240.))
     }
 
     fn write_terminal_preferences(&mut self, cx: &mut Context<Self>) {
@@ -3707,33 +3446,42 @@ impl AppState {
 
     // -- terminal drawer ---------------------------------------------------
 
-    fn persist_terminal_preferences(&mut self, cx: &mut Context<Self>) {
+    fn persist_terminal_resource_count(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_ref() {
-            let workspace = &active.terminal_workspace;
             let key = conversation_destination(active).preference_key();
-            self.terminal_preferences.insert(
-                key,
-                TerminalPreferences {
-                    open: workspace.open,
-                    height: workspace.height,
-                    count: workspace.terminals.len(),
-                },
-            );
+            let count = active.terminal_workspace.terminals.len();
+            self.terminal_preferences
+                .entry(key)
+                .or_insert(TerminalPreferences {
+                    open: false,
+                    height: 240.,
+                    count,
+                })
+                .count = count;
         }
         self.write_terminal_preferences(cx);
     }
 
     pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            active.terminal_workspace.height = height;
-            self.persist_terminal_preferences(cx);
+        if let Some(active) = self.active.as_ref() {
+            let key = conversation_destination(active).preference_key();
+            self.terminal_preferences
+                .entry(key)
+                .or_insert(TerminalPreferences {
+                    open: false,
+                    height,
+                    count: active.terminal_workspace.terminals.len(),
+                })
+                .height = height;
+            self.write_terminal_preferences(cx);
         }
     }
 
     pub fn terminal_panel_open(&self) -> bool {
         self.active
             .as_ref()
-            .is_some_and(|active| active.terminal_workspace.open)
+            .and_then(|active| self.terminal_preferences_for(active))
+            .is_some_and(|preferences| preferences.open)
     }
 
     pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
@@ -3812,7 +3560,6 @@ impl AppState {
                     TerminalSpawnAction::Open { split_after } => {
                         if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
                             let first = workspace.push(terminal);
-                            workspace.open = true;
                             followup_split = split_after.map(|direction| (first, direction));
                             true
                         } else {
@@ -3826,11 +3573,9 @@ impl AppState {
                             .find(|entry| Some(entry.id) == terminal_id)
                         {
                             entry.terminal = terminal;
-                            workspace.open = true;
                             true
                         } else if terminal_id.is_none() && workspace.terminals.is_empty() {
                             workspace.push(terminal);
-                            workspace.open = true;
                             true
                         } else {
                             false
@@ -3839,7 +3584,6 @@ impl AppState {
                     TerminalSpawnAction::New => {
                         if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
                             workspace.push(terminal);
-                            workspace.open = true;
                             true
                         } else {
                             false
@@ -3863,7 +3607,7 @@ impl AppState {
                     }
                 };
                 if applied {
-                    state.persist_terminal_preferences(cx);
+                    state.persist_terminal_resource_count(cx);
                     cx.notify();
                 }
                 if let Some((first, direction)) = followup_split {
@@ -3885,31 +3629,48 @@ impl AppState {
     }
 
     pub fn open_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        if active.terminal_workspace.terminals.is_empty() {
-            let already_pending = self
-                .pending_terminal_spawns
-                .get(&active.meta.id)
-                .is_some_and(|spawns| {
-                    spawns
-                        .values()
-                        .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
-                });
-            if !already_pending {
-                self.schedule_terminal_spawn(
+        let Some((session_id, cwd, destination, count, terminals_empty)) =
+            self.active.as_ref().map(|active| {
+                (
                     active.meta.id.clone(),
                     active.meta.cwd.clone(),
+                    conversation_destination(active),
+                    active.terminal_workspace.terminals.len(),
+                    active.terminal_workspace.terminals.is_empty(),
+                )
+            })
+        else {
+            return;
+        };
+        let key = destination.preference_key();
+        self.terminal_preferences
+            .entry(key)
+            .or_insert(TerminalPreferences {
+                open: true,
+                height: 240.,
+                count,
+            })
+            .open = true;
+        self.write_terminal_preferences(cx);
+        if terminals_empty {
+            let already_pending =
+                self.pending_terminal_spawns
+                    .get(&session_id)
+                    .is_some_and(|spawns| {
+                        spawns
+                            .values()
+                            .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
+                    });
+            if !already_pending {
+                self.schedule_terminal_spawn(
+                    session_id,
+                    cwd,
                     TerminalSpawnAction::Open { split_after: None },
                     cx,
                 );
             }
             return;
         }
-        let active = self.active.as_mut().unwrap();
-        active.terminal_workspace.open = true;
-        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
@@ -3918,9 +3679,18 @@ impl AppState {
         if let Some(session_id) = session_id.as_deref() {
             self.cancel_pending_terminal_spawns(session_id);
         }
-        if let Some(active) = self.active.as_mut() {
-            active.terminal_workspace.open = false;
-            self.persist_terminal_preferences(cx);
+        if let Some(active) = self.active.as_ref() {
+            let key = conversation_destination(active).preference_key();
+            let count = active.terminal_workspace.terminals.len();
+            self.terminal_preferences
+                .entry(key)
+                .or_insert(TerminalPreferences {
+                    open: false,
+                    height: 240.,
+                    count,
+                })
+                .open = false;
+            self.write_terminal_preferences(cx);
             cx.notify();
         }
     }
@@ -3988,10 +3758,11 @@ impl AppState {
         if workspace.active_id == Some(terminal_id) {
             workspace.active_id = workspace.terminals.last().map(|entry| entry.id);
         }
-        if workspace.terminals.is_empty() {
-            workspace.open = false;
+        let empty = workspace.terminals.is_empty();
+        self.persist_terminal_resource_count(cx);
+        if empty {
+            self.close_terminal_panel(cx);
         }
-        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
@@ -4113,18 +3884,6 @@ impl AppState {
         }
     }
 
-    pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_open = false;
-            // Closing during a turn suppresses auto-open for the rest of it.
-            if active.timeline.turn_running {
-                active.auto_open_suppressed = true;
-            }
-            cx.notify();
-        }
-    }
-
     pub fn review_comments(&self) -> &[ReviewComment] {
         let Some(id) = self.active.as_ref().map(|active| active.meta.id.as_str()) else {
             return &[];
@@ -4138,9 +3897,10 @@ impl AppState {
     pub fn add_review_comment(&mut self, comment: ReviewComment, cx: &mut Context<Self>) {
         if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
             self.review_comment_drafts
-                .entry(id)
+                .entry(id.clone())
                 .or_default()
                 .push(comment);
+            self.emit_session_status(&id, cx);
             cx.notify();
         }
     }
@@ -4153,13 +3913,16 @@ impl AppState {
             && index < comments.len()
         {
             comments.remove(index);
+            self.emit_session_status(&id, cx);
             cx.notify();
         }
     }
 
-    fn clear_review_comments(&mut self) {
-        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
-            self.review_comment_drafts.remove(&id);
+    fn clear_review_comments(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone())
+            && self.review_comment_drafts.remove(&id).is_some()
+        {
+            self.emit_session_status(&id, cx);
         }
     }
 
@@ -4198,16 +3961,9 @@ impl AppState {
         (text, attachments)
     }
 
-    fn clear_consumed_draft_context(&mut self) {
+    fn clear_consumed_draft_context(&mut self, cx: &mut Context<Self>) {
         self.clear_terminal_contexts();
-        self.clear_review_comments();
-    }
-
-    pub fn toggle_diff_expanded(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            active.diff_expanded = !active.diff_expanded;
-            cx.notify();
-        }
+        self.clear_review_comments(cx);
     }
 
     /// Sessions grouped by project for the sidebar (archived threads excluded).
@@ -4565,7 +4321,7 @@ impl AppState {
         }
         for id in ids.iter().copied() {
             // An archived conversation must not leave an off-screen PTY running.
-            self.conversation_ui
+            self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.to_string()));
             self.drop_background(id);
             self.revoke_preview_registration(id);
@@ -4735,7 +4491,7 @@ impl AppState {
         }
         // Deleting a thread that is working in the background kills it for real.
         self.drop_background(session_id);
-        self.conversation_ui
+        self.terminal_workspaces
             .remove(&ConversationDestination::Thread(session_id.to_string()));
         if self.terminal_preferences.remove(session_id).is_some() {
             self.write_terminal_preferences(cx);
@@ -4797,7 +4553,7 @@ impl AppState {
             self.shutdown_active(cx);
         }
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
-        self.conversation_ui.remove(&draft_destination);
+        self.terminal_workspaces.remove(&draft_destination);
         if self
             .terminal_preferences
             .remove(&draft_destination.preference_key())
@@ -5083,11 +4839,6 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
@@ -5144,11 +4895,6 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
@@ -5230,16 +4976,13 @@ impl AppState {
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         let terminal_preferences = self.terminal_preferences_for(&draft);
-        let restored_ui = self.restore_conversation_ui(&mut draft);
-        if !restored_ui && let Some(preferences) = terminal_preferences {
-            draft.terminal_workspace.height = preferences.height.clamp(120., 600.);
-        }
+        let restored_terminal = self.restore_terminal_workspace(&mut draft);
         self.active = Some(draft);
         self.emit_active_session_status(cx);
         if let Some(active) = self.active.as_ref() {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
-        if !restored_ui {
+        if !restored_terminal {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
@@ -5431,7 +5174,6 @@ impl AppState {
         if self.active_session_id() == Some(session_id) {
             return;
         }
-        self.pending_diff_focus = None;
         let Some(meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() else {
             return;
         };
@@ -5450,18 +5192,8 @@ impl AppState {
                 parked.queue.len()
             );
             parked.idle_since = None;
-            // Background events may have auto-opened or otherwise changed the
-            // panel after it was parked; that live state wins over the snapshot
-            // captured when the user switched away.
-            let background_right_panel = RightPanelState::capture(&parked);
             let terminal_preferences = self.terminal_preferences_for(&parked);
-            let restored_ui = self.restore_conversation_ui(&mut parked);
-            if restored_ui {
-                background_right_panel.restore_into(&mut parked);
-            }
-            if !restored_ui && let Some(preferences) = terminal_preferences {
-                parked.terminal_workspace.height = preferences.height.clamp(120., 600.);
-            }
+            let restored_terminal = self.restore_terminal_workspace(&mut parked);
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
             self.active = Some(parked);
             self.schedule_timeline_load(
@@ -5472,7 +5204,7 @@ impl AppState {
                 },
                 cx,
             );
-            if !restored_ui {
+            if !restored_terminal {
                 self.reopen_persisted_terminals(terminal_preferences, cx);
             }
             // Anything still queued that can go now, goes now.
@@ -5521,19 +5253,11 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
         let terminal_preferences = self.terminal_preferences_for(&active);
-        let restored_ui = self.restore_conversation_ui(&mut active);
-        if !restored_ui && let Some(preferences) = terminal_preferences {
-            active.terminal_workspace.height = preferences.height.clamp(120., 600.);
-        }
+        let restored_terminal = self.restore_terminal_workspace(&mut active);
         self.active = Some(active);
         self.schedule_timeline_load(
             session_id,
@@ -5543,7 +5267,7 @@ impl AppState {
             },
             cx,
         );
-        if !restored_ui {
+        if !restored_terminal {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
@@ -5569,7 +5293,7 @@ impl AppState {
     ) {
         let (text, attachments) = self.assemble_user_message(text, attachment_paths);
         self.send_turn_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context();
+        self.clear_consumed_draft_context(cx);
     }
 
     /// Deterministic queue mutation for cross-crate replica consistency tests.
@@ -5712,7 +5436,7 @@ impl AppState {
     ) {
         let (text, attachments) = self.assemble_user_message(text, attachment_paths);
         self.confirm_relay_and_send_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context();
+        self.clear_consumed_draft_context(cx);
     }
 
     fn confirm_relay_and_send_assembled(
@@ -6119,7 +5843,7 @@ impl AppState {
     pub fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let (text, attachments) = self.assemble_user_message(text, attachment_paths);
         self.steer_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context();
+        self.clear_consumed_draft_context(cx);
     }
 
     fn steer_assembled(
@@ -6615,11 +6339,6 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
@@ -6734,137 +6453,6 @@ impl AppState {
             .as_ref()
             .and_then(|a| a.timeline.proposed_plan.as_ref())
             .map(|p| p.markdown.clone())
-    }
-
-    // -- right panel tabs ---------------------------------------------------
-
-    pub fn right_tab(&self) -> RightTab {
-        self.active
-            .as_ref()
-            .map(|a| a.right_tab)
-            .unwrap_or_default()
-    }
-
-    /// Whether the right panel should offer a "Plan" tab (a proposed plan
-    /// exists or the session is in Plan mode); otherwise the tab is "Tasks".
-    pub fn plan_tab_active_label(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| {
-            a.timeline.proposed_plan.is_some() || a.meta.interaction_mode == InteractionMode::Plan
-        })
-    }
-
-    /// Switch the right panel's tab without changing its open state.
-    pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            active.right_tab = tab;
-            cx.notify();
-        }
-    }
-
-    /// The header plan/task toggle: open the Plan tab, switch to it if already
-    /// open on another tab, else close it.
-    pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            if active.diff_open && active.right_tab == RightTab::Plan {
-                active.diff_open = false;
-                if active.timeline.turn_running {
-                    active.auto_open_suppressed = true;
-                }
-            } else {
-                active.diff_open = true;
-                active.right_tab = RightTab::Plan;
-            }
-            cx.notify();
-        }
-    }
-
-    /// The header preview toggle: open the Preview tab, switch to it if the
-    /// panel is already open on another tab, else close it.
-    pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            if active.diff_open && active.right_tab == RightTab::Preview {
-                active.diff_open = false;
-                if active.timeline.turn_running {
-                    active.auto_open_suppressed = true;
-                }
-            } else {
-                active.diff_open = true;
-                active.right_tab = RightTab::Preview;
-            }
-            cx.notify();
-        }
-    }
-
-    /// The preview chrome's close button: close the right panel when it is
-    /// showing Preview. The PreviewPanel pairs this with dropping the
-    /// conversation's WebView so the page itself is torn down, not just hidden.
-    pub fn close_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut()
-            && active.diff_open
-            && active.right_tab == RightTab::Preview
-        {
-            active.diff_open = false;
-            if active.timeline.turn_running {
-                active.auto_open_suppressed = true;
-            }
-            cx.notify();
-        }
-    }
-
-    /// Open the right panel on the Preview tab (used when the agent drives the
-    /// preview so the webview surfaces without a manual toggle).
-    pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            let mut panel = RightPanelState::capture(active);
-            if panel.open_preview() {
-                panel.restore_into(active);
-                cx.notify();
-            }
-        }
-    }
-
-    /// Open Preview in the owning conversation's right-panel state without
-    /// changing which conversation the user is viewing.
-    pub fn open_preview_panel_for(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.active_session_id() == Some(session_id) {
-            self.open_preview_panel(cx);
-            return;
-        }
-
-        let mut changed = false;
-        let destination = ConversationDestination::Thread(session_id.to_string());
-        let mut parked_ui = None;
-        if let Some(background) = self.background.get_mut(session_id) {
-            let mut panel = RightPanelState::capture(background);
-            changed |= panel.open_preview();
-            panel.restore_into(background);
-            if !self.conversation_ui.contains_key(&destination) {
-                parked_ui = Some(ConversationUiState::take_from(background));
-            }
-        }
-        if let Some(ui) = parked_ui {
-            self.conversation_ui.insert(destination.clone(), ui);
-        }
-        if let Some(ui) = self.conversation_ui.get_mut(&destination) {
-            changed |= ui.right_panel.open_preview();
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
-    /// Whether the right panel is open on the Preview tab (header button state).
-    pub fn preview_panel_showing(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.diff_open && a.right_tab == RightTab::Preview)
-    }
-
-    /// Whether the right panel is open on the Plan tab (header button state).
-    pub fn plan_panel_showing(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.diff_open && a.right_tab == RightTab::Plan)
     }
 
     // -- git branch picker (checkout row) -----------------------------------
@@ -7578,7 +7166,6 @@ impl AppState {
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
-                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
@@ -7607,7 +7194,6 @@ impl AppState {
                     self.native_rewind_prefills
                         .insert(session_id.to_owned(), prefill.clone());
                 }
-                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
@@ -7647,28 +7233,6 @@ impl AppState {
                 self.deliver_child_approval_callback(session_id, request, cx);
             }
             _ => {}
-        }
-
-        // Plan surfaces: a new turn clears the per-turn auto-open suppression;
-        // the first structured plan update of a turn may auto-open the task
-        // panel. Proposed-plan readiness is entirely folded by Timeline.
-        let auto_open = self.settings.auto_open_task_panel;
-        if let Some(active) = self
-            .active
-            .as_mut()
-            .filter(|active| active.meta.id == session_id)
-        {
-            match &event {
-                AgentEvent::TurnStarted { .. } => active.auto_open_suppressed = false,
-                AgentEvent::PlanUpdated { .. } => {
-                    let already_showing = active.diff_open && active.right_tab == RightTab::Plan;
-                    if auto_open && !active.auto_open_suppressed && !already_showing {
-                        active.diff_open = true;
-                        active.right_tab = RightTab::Plan;
-                    }
-                }
-                _ => {}
-            }
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
@@ -7958,8 +7522,7 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn shutdown_active(&mut self, cx: &mut Context<Self>) {
-        self.persist_terminal_preferences(cx);
+    pub fn shutdown_active(&mut self, _cx: &mut Context<Self>) {
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             self.sessions_awaiting_approval.remove(&session_id);
             self.pending_native_rewinds.remove(&session_id);
@@ -7982,7 +7545,7 @@ impl AppState {
         }
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
-        self.conversation_ui.clear();
+        self.terminal_workspaces.clear();
         self.pending_native_rewinds.clear();
         self.native_rewind_prefills.clear();
     }
@@ -7991,12 +7554,10 @@ impl AppState {
     /// Every "switch away" path goes through here; only destructive paths use
     /// `shutdown_active` directly.
     fn park_active(&mut self, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        self.persist_terminal_preferences(cx);
         let Some(mut active) = self.active.take() else {
             return;
         };
-        self.park_conversation_ui(&mut active);
+        self.park_terminal_workspace(&mut active);
         let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
         let has_work = active.turn_in_flight
             || active.delivery_in_flight.is_some()
@@ -9015,34 +8576,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_file_focus_request_is_consumed_once_and_discarded_on_scope_change() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-diff-focus-test-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut state = AppState::new(store);
-
-        state.set_diff_focus("session-a".into(), 3, "src/second.rs".into());
-        assert_eq!(state.take_diff_focus("session-a", 2), None);
-        assert!(state.pending_diff_focus().is_some());
-        assert_eq!(
-            state.take_diff_focus("session-a", 3),
-            Some(DiffFocusRequest {
-                session: "session-a".into(),
-                turn: 3,
-                path: "src/second.rs".into(),
-            })
-        );
-        assert_eq!(state.take_diff_focus("session-a", 3), None);
-
-        state.set_diff_focus("session-a".into(), 3, "src/second.rs".into());
-        // The diff panel invokes this when its local scope selector changes.
-        state.discard_diff_focus();
-        assert!(state.pending_diff_focus().is_none());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn generated_titles_are_cleaned_and_bounded() {
         assert_eq!(
             sanitize_generated_title("  **Title: Fix sidebar rename.**  ").as_deref(),
@@ -9582,113 +9115,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn right_and_bottom_workspaces_follow_their_thread(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-conversation-ui-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut first = SessionMeta::new(
-            ProviderKind::Codex,
-            PathBuf::from("/tmp/conversation-a"),
-            Some("gpt-5.6-luna".into()),
-        );
-        first.title = "Conversation A".into();
-        let mut second = SessionMeta::new(
-            ProviderKind::ClaudeCode,
-            PathBuf::from("/tmp/conversation-b"),
-            Some("claude-fable-5".into()),
-        );
-        second.title = "Conversation B".into();
-        store.upsert_meta(&first).unwrap();
-        store.upsert_meta(&second).unwrap();
-        let first_id = first.id.clone();
-        let second_id = second.id.clone();
-        let state = cx.new(|_| AppState::new(store));
-
-        state.update(cx, |state, cx| {
-            state.select_session(&first_id, cx);
-            let first = state.active.as_mut().unwrap();
-            first.diff_open = true;
-            first.diff_expanded = true;
-            first.diff_selected_turn = Some(3);
-            first.right_tab = RightTab::Preview;
-            first.terminal_workspace.open = true;
-            first.terminal_workspace.height = 318.;
-
-            state.select_session(&second_id, cx);
-            let second = state.active.as_ref().unwrap();
-            assert!(
-                !second.diff_open,
-                "another thread must start with its own right panel"
-            );
-            assert!(!second.terminal_workspace.open);
-            assert_eq!(second.terminal_workspace.height, 240.);
-
-            let second = state.active.as_mut().unwrap();
-            second.diff_open = true;
-            second.right_tab = RightTab::Plan;
-            second.terminal_workspace.height = 402.;
-
-            state.select_session(&first_id, cx);
-            let first = state.active.as_ref().unwrap();
-            assert!(first.diff_open);
-            assert!(first.diff_expanded);
-            assert_eq!(first.diff_selected_turn, Some(3));
-            assert_eq!(first.right_tab, RightTab::Preview);
-            assert!(first.terminal_workspace.open);
-            assert_eq!(first.terminal_workspace.height, 318.);
-
-            state.select_session(&second_id, cx);
-            let second = state.active.as_ref().unwrap();
-            assert!(second.diff_open);
-            assert_eq!(second.right_tab, RightTab::Plan);
-            assert_eq!(second.terminal_workspace.height, 402.);
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
-    fn preview_open_for_background_thread_does_not_switch_the_active_thread(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-background-preview-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
-        let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-        store.upsert_meta(&first).unwrap();
-        store.upsert_meta(&second).unwrap();
-        let first_id = first.id.clone();
-        let second_id = second.id.clone();
-        let state = cx.new(|_| AppState::new(store));
-
-        state.update(cx, |state, cx| {
-            state.select_session(&first_id, cx);
-            let first = state.active.as_mut().unwrap();
-            first.turn_in_flight = true;
-            first.runtime = Runtime::Starting { generation: 1 };
-            state.select_session(&second_id, cx);
-            assert!(state.background.contains_key(&first_id));
-            state.open_preview_panel_for(&first_id, cx);
-
-            assert_eq!(state.active_session_id(), Some(second_id.as_str()));
-            assert!(!state.preview_panel_showing());
-            let background = state.background.get(&first_id).unwrap();
-            assert!(background.diff_open);
-            assert_eq!(background.right_tab, RightTab::Preview);
-
-            state.select_session(&first_id, cx);
-            assert!(state.preview_panel_showing());
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
     fn updates_on_the_viewed_thread_do_not_mark_it_unread(cx: &mut gpui::TestAppContext) {
         let root =
             std::env::temp_dir().join(format!("tcode-viewed-unread-test-{}", uuid::Uuid::new_v4()));
@@ -9727,59 +9153,6 @@ mod tests {
             parked.updated_at = now_secs() + 20;
             state.persist_meta(&parked, cx);
             assert!(state.session_unread(&first_id));
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
-    fn draft_workspace_uses_the_same_project_key_as_composer_text(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-draft-conversation-ui-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
-
-        state.update(cx, |state, cx| {
-            state.start_draft(
-                "project-stable".into(),
-                PathBuf::from("/tmp/project-stable"),
-                cx,
-            );
-            let first_id = state.active_session_id().unwrap().to_string();
-            assert_eq!(
-                state.active_conversation_ui_key().as_deref(),
-                Some("draft:project-stable")
-            );
-            let draft = state.active.as_mut().unwrap();
-            draft.diff_open = true;
-            draft.right_tab = RightTab::Preview;
-            draft.terminal_workspace.open = true;
-            draft.terminal_workspace.height = 355.;
-
-            // Opening New thread again allocates a new transient session id,
-            // but it represents the same composer/UI destination.
-            state.start_draft(
-                "project-stable".into(),
-                PathBuf::from("/tmp/project-stable"),
-                cx,
-            );
-            let second_id = state.active_session_id().unwrap().to_string();
-            assert_ne!(first_id, second_id);
-            let draft = state.active.as_ref().unwrap();
-            assert!(draft.diff_open);
-            assert_eq!(draft.right_tab, RightTab::Preview);
-            assert!(draft.terminal_workspace.open);
-            assert_eq!(draft.terminal_workspace.height, 355.);
-
-            // Committing keeps the active resources but moves external caches
-            // (such as PreviewPanel's WebView pool) to the real thread key.
-            state.commit_draft(cx).unwrap();
-            assert_eq!(
-                state.active_conversation_ui_key().as_deref(),
-                Some(second_id.as_str())
-            );
         });
 
         let _ = std::fs::remove_dir_all(root);
@@ -11187,11 +10560,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -11237,11 +10605,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
@@ -11280,11 +10643,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -11519,11 +10877,6 @@ mod tests {
             background_task_count: 0,
             idle_since: None,
             provider_commands: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
@@ -11867,11 +11220,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -12328,11 +11676,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -12607,7 +11950,7 @@ mod tests {
         state.read_with(cx, |state, _| {
             let workspace = &state.active.as_ref().unwrap().terminal_workspace;
             assert_eq!(workspace.terminals.len(), 1);
-            assert!(workspace.open);
+            assert!(state.terminal_panel_open());
             assert_eq!(workspace.terminals[0].terminal.cwd(), override_cwd);
         });
         let _ = std::fs::remove_dir_all(root);
