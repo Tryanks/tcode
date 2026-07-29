@@ -3892,6 +3892,13 @@ impl AppState {
         }
     }
 
+    /// Drop the attached terminal contexts once a message consuming them is sent.
+    pub fn clear_terminal_contexts(&mut self) {
+        if let Some(active) = self.active.as_mut() {
+            active.terminal_workspace.contexts.clear();
+        }
+    }
+
     pub fn toggle_diff_expanded(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.diff_expanded = !active.diff_expanded;
