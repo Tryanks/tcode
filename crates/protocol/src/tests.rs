@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{AgentEvent, ProviderKind};
@@ -87,6 +88,7 @@ fn round_trips_top_level_wire_types() {
             session_id: "session-1".into(),
             title: "Replicated status".into(),
             cwd: PathBuf::from("/tmp/project"),
+            attachments_dir: PathBuf::from("/tmp/data/attachments/session-1"),
             provider: ProviderKind::Codex,
             requested_model: Some("gpt-5".into()),
             requested_profile_id: Some("work".into()),
@@ -138,6 +140,68 @@ fn round_trips_top_level_wire_types() {
             options_pending_restart: false,
             approval_pending_restart: false,
             ultrathink_armed: true,
+        }),
+    });
+    round_trip(&EventEnvelope {
+        topic: Topic::Providers,
+        seq: 11,
+        event: ServerEvent::ProvidersReplaced(ProvidersStatus {
+            models_loading: HashMap::from([(ProviderKind::Codex, true)]),
+            provider_versions: HashMap::from([(
+                ProviderKind::Codex,
+                ProviderVersionStatus {
+                    installed: Some("1.2.3".into()),
+                    latest: Some("1.2.4".into()),
+                    update_available: true,
+                    checking: false,
+                    updating: false,
+                    update_command: Some("npm install -g @openai/codex@latest".into()),
+                },
+            )]),
+            provider_snapshots: HashMap::from([(
+                "codex".into(),
+                tcode_core::provider_status::ProviderSnapshot {
+                    installed: true,
+                    checking: false,
+                    ..Default::default()
+                },
+            )]),
+            acp_marketplace_items: vec![AcpMarketplaceItem {
+                id: "agent".into(),
+                name: "Agent".into(),
+                version: "2.0.0".into(),
+                description: "ACP agent".into(),
+                installed: false,
+                installing: true,
+                supported: true,
+            }],
+            acp_registry_loading: false,
+            acp_registry_error: None,
+            acp_installing: HashSet::from(["agent".into()]),
+            providers_checking: true,
+            secret_names: HashMap::from([(
+                "codex".into(),
+                HashSet::from(["OPENAI_API_KEY".into()]),
+            )]),
+            ..Default::default()
+        }),
+    });
+    round_trip(&EventEnvelope {
+        topic: Topic::GitStatus,
+        seq: 12,
+        event: ServerEvent::GitStatusReplaced(GitStatusStatus {
+            status: Some(tcode_core::git::GitStatus {
+                is_repo: true,
+                branch: Some("main".into()),
+                changed_files: vec![tcode_core::git::GitFileEntry {
+                    path: "src/lib.rs".into(),
+                    insertions: 3,
+                    deletions: 1,
+                }],
+                ..Default::default()
+            }),
+            busy: true,
+            generation: 7,
         }),
     });
     round_trip(&ProtocolError {

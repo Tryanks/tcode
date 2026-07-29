@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
 use tcode_core::{
-    git::{GitFileEntry, MenuItem, QuickAction},
+    git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{Project, SessionMeta, WorktreeInfo, group_sessions},
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
@@ -12,10 +12,11 @@ use tcode_core::{
     ui::{ConversationDestination, RightTab},
 };
 use tcode_protocol::{
-    Command, EventEnvelope, QueuedMessageStatus, ServerEvent, SessionStatus, Topic,
+    Command, EventEnvelope, GitStatusStatus, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, ServerEvent, SessionStatus, Topic,
 };
 use tcode_runtime::{
-    app::{AppState, ProjectGroup, ProviderVersionStatus},
+    app::{AppState, ProjectGroup},
     event::{HostEvent, RuntimeEvent},
     terminal::{TerminalContext, TerminalWorkspace},
     ui_facade::{
@@ -41,6 +42,8 @@ pub struct WorkspaceStore {
     settings_replica: Settings,
     session_replica: Option<(String, Timeline)>,
     session_status_replica: Option<SessionStatus>,
+    providers_replica: ProvidersStatus,
+    git_status_replica: GitStatusStatus,
     background_session_flags: HashMap<String, (bool, bool)>,
     active_destination: Option<ConversationDestination>,
     conversation_ui: ConversationUi,
@@ -91,7 +94,14 @@ impl WorkspaceStore {
     }
 
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let (index_replica, settings_replica, session_status_replica, background_session_flags) = {
+        let (
+            index_replica,
+            settings_replica,
+            session_status_replica,
+            background_session_flags,
+            providers_replica,
+            git_status_replica,
+        ) = {
             let state = app.read(cx);
             let active_id = state.active_session_id();
             let statuses = state
@@ -108,6 +118,8 @@ impl WorkspaceStore {
                     .filter(|status| Some(status.session_id.as_str()) != active_id)
                     .map(|status| (status.session_id, (status.working, status.pending_approval)))
                     .collect(),
+                state.providers_status_snapshot(),
+                state.git_status_snapshot(),
             )
         };
         let active_destination = session_status_replica.as_ref().map(Self::destination);
@@ -181,6 +193,8 @@ impl WorkspaceStore {
             settings_replica,
             session_replica: None,
             session_status_replica,
+            providers_replica,
+            git_status_replica,
             background_session_flags,
             active_destination,
             conversation_ui,
@@ -254,6 +268,12 @@ impl WorkspaceStore {
             (Topic::Settings, ServerEvent::SettingsReplaced(settings))
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
                 self.settings_replica = settings.clone();
+            }
+            (Topic::Providers, ServerEvent::ProvidersReplaced(status)) => {
+                self.providers_replica = status.clone();
+            }
+            (Topic::GitStatus, ServerEvent::GitStatusReplaced(status)) => {
+                self.git_status_replica = status.clone();
             }
             (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
                 if status.session_id == *session_id =>
@@ -344,14 +364,18 @@ impl WorkspaceStore {
             .collect()
     }
 
-    fn profile_catalog(&self, profile_id: &str, cx: &App) -> Vec<agent::ModelSpec> {
+    fn profile_catalog(&self, profile_id: &str, _cx: &App) -> Vec<agent::ModelSpec> {
         if Settings::is_builtin_profile_id(profile_id) {
             let kind = self
                 .settings_replica
                 .resolved_profile(profile_id)
                 .map(|profile| profile.kind)
                 .unwrap_or(agent::ProviderKind::ClaudeCode);
-            self.app.read(cx).models_for(kind).to_vec()
+            self.providers_replica
+                .model_catalogs
+                .get(&kind)
+                .cloned()
+                .unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -933,12 +957,12 @@ impl WorkspaceStore {
             .collect()
     }
 
-    pub fn providers_checked_at(&self, cx: &App) -> Option<u64> {
-        self.app.read(cx).providers_checked_at()
+    pub fn providers_checked_at(&self, _cx: &App) -> Option<u64> {
+        self.providers_replica.providers_checked_at
     }
 
-    pub fn providers_checking(&self, cx: &App) -> bool {
-        self.app.read(cx).providers_checking()
+    pub fn providers_checking(&self, _cx: &App) -> bool {
+        self.providers_replica.providers_checking
     }
 
     pub fn window_caption_state(&self, _cx: &App) -> (bool, tcode_core::ui::RightTab) {
@@ -1022,9 +1046,13 @@ impl WorkspaceStore {
     pub fn provider_model_catalog(
         &self,
         provider: agent::ProviderKind,
-        cx: &App,
+        _cx: &App,
     ) -> Vec<agent::ModelSpec> {
-        self.app.read(cx).models_for(provider).to_vec()
+        self.providers_replica
+            .model_catalogs
+            .get(&provider)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn picker_models_for_profile(&self, profile_id: &str, cx: &App) -> Vec<ResolvedModel> {
@@ -1042,17 +1070,23 @@ impl WorkspaceStore {
     pub fn provider_profile_snapshot(
         &self,
         profile_id: &str,
-        cx: &App,
+        _cx: &App,
     ) -> Option<ProviderSnapshot> {
-        self.app.read(cx).profile_snapshot(profile_id).cloned()
+        self.providers_replica
+            .provider_snapshots
+            .get(profile_id)
+            .cloned()
     }
 
     pub fn provider_version_status(
         &self,
         provider: agent::ProviderKind,
-        cx: &App,
+        _cx: &App,
     ) -> Option<ProviderVersionStatus> {
-        self.app.read(cx).provider_version(provider).cloned()
+        self.providers_replica
+            .provider_versions
+            .get(&provider)
+            .cloned()
     }
 
     pub fn provider_profile_accent(&self, profile_id: &str, _cx: &App) -> Option<u32> {
@@ -1070,23 +1104,24 @@ impl WorkspaceStore {
     pub fn provider_update_command(
         &self,
         provider: agent::ProviderKind,
-        cx: &App,
+        _cx: &App,
     ) -> Option<String> {
-        self.app.read(cx).provider_update_command(provider)
+        self.providers_replica
+            .provider_versions
+            .get(&provider)
+            .and_then(|status| status.update_command.clone())
     }
 
     pub fn provider_profile_stored_secret_names(
         &self,
         profile_id: &str,
-        cx: &App,
+        _cx: &App,
     ) -> HashSet<String> {
-        self.app
-            .read(cx)
-            .launch_env_for_profile(profile_id)
-            .env
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect()
+        self.providers_replica
+            .secret_names
+            .get(profile_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn provider_profile_model_catalog(
@@ -1122,24 +1157,24 @@ impl WorkspaceStore {
         self.settings_replica.acp_agent(agent_id).cloned()
     }
 
-    pub fn acp_marketplace_items(&self, cx: &App) -> Vec<AcpMarketplaceItem> {
-        let mut items = self.app.read(cx).acp_marketplace_items();
+    pub fn acp_marketplace_items(&self, _cx: &App) -> Vec<AcpMarketplaceItem> {
+        let mut items = self.providers_replica.acp_marketplace_items.clone();
         for item in &mut items {
             item.installed = self.settings_replica.acp_agents.contains_key(&item.id);
         }
         items
     }
 
-    pub fn acp_registry_loading(&self, cx: &App) -> bool {
-        self.app.read(cx).acp_registry_loading
+    pub fn acp_registry_loading(&self, _cx: &App) -> bool {
+        self.providers_replica.acp_registry_loading
     }
 
-    pub fn acp_registry_error(&self, cx: &App) -> Option<String> {
-        self.app.read(cx).acp_registry_error.clone()
+    pub fn acp_registry_error(&self, _cx: &App) -> Option<String> {
+        self.providers_replica.acp_registry_error.clone()
     }
 
-    pub fn acp_installing(&self, agent_id: &str, cx: &App) -> bool {
-        self.app.read(cx).acp_installing.contains(agent_id)
+    pub fn acp_installing(&self, agent_id: &str, _cx: &App) -> bool {
+        self.providers_replica.acp_installing.contains(agent_id)
     }
 
     pub fn project_ids(&self, _cx: &App) -> Vec<String> {
@@ -1198,14 +1233,21 @@ impl WorkspaceStore {
             .start_external_import(project_id, threads, cx.background_executor())
     }
 
-    pub fn commit_dialog_state(&self, cx: &App) -> (Vec<GitFileEntry>, Option<String>, bool) {
-        let app = self.app.read(cx);
+    pub fn commit_dialog_state(&self, _cx: &App) -> (Vec<GitFileEntry>, Option<String>, bool) {
         (
-            app.git_changed_files(),
-            self.session_status_replica
+            self.git_status_replica
+                .status
                 .as_ref()
-                .and_then(|status| status.git_branch.clone()),
-            app.git_on_default_branch(),
+                .map(|status| status.changed_files.clone())
+                .unwrap_or_default(),
+            self.git_status_replica
+                .status
+                .as_ref()
+                .and_then(|status| status.branch.clone()),
+            self.git_status_replica
+                .status
+                .as_ref()
+                .is_some_and(|status| status.is_default_branch),
         )
     }
 
@@ -1474,9 +1516,10 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
-    pub fn composer_attachments_dir(&self, cx: &App) -> Option<PathBuf> {
-        let session_id = self.session_status_replica.as_ref()?.session_id.as_str();
-        Some(self.app.read(cx).attachments_dir_for(session_id))
+    pub fn composer_attachments_dir(&self, _cx: &App) -> Option<PathBuf> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.attachments_dir.clone())
     }
 
     pub fn save_attachment_to_dir(
@@ -1515,11 +1558,24 @@ impl WorkspaceStore {
         provider: agent::ProviderKind,
         cx: &App,
     ) -> Vec<ResolvedModel> {
-        self.app.read(cx).picker_models(provider)
+        picker_models(
+            &self.provider_model_catalog(provider, cx),
+            &self.settings_replica.provider(provider),
+            &self.settings_replica.favorite_models,
+        )
     }
 
-    pub fn composer_models_loading(&self, provider: agent::ProviderKind, cx: &App) -> bool {
-        self.app.read(cx).models_loading(provider)
+    pub fn composer_models_loading(&self, provider: agent::ProviderKind, _cx: &App) -> bool {
+        self.providers_replica
+            .models_loading
+            .get(&provider)
+            .copied()
+            .unwrap_or(false)
+            && self
+                .providers_replica
+                .model_catalogs
+                .get(&provider)
+                .is_none_or(Vec::is_empty)
     }
 
     pub fn composer_model_pending_restart(&self, _cx: &App) -> bool {
@@ -1528,12 +1584,12 @@ impl WorkspaceStore {
             .is_some_and(|status| status.model_pending_restart)
     }
 
-    pub fn composer_active_model_spec(&self, cx: &App) -> Option<agent::ModelSpec> {
+    pub fn composer_active_model_spec(&self, _cx: &App) -> Option<agent::ModelSpec> {
         let status = self.session_status_replica.as_ref()?;
         let model = status.requested_model.as_deref()?;
-        self.app
-            .read(cx)
-            .models_for(status.provider)
+        self.providers_replica
+            .model_catalogs
+            .get(&status.provider)?
             .iter()
             .find(|spec| spec.id == model)
             .cloned()
@@ -1742,14 +1798,17 @@ impl WorkspaceStore {
             .unwrap_or((false, RightTab::default(), false, false, false, 240.))
     }
 
-    pub fn chat_git_controls(&self, cx: &App) -> Option<(QuickAction, Vec<MenuItem>)> {
-        let app = self.app.read(cx);
-        app.git_quick_action()
-            .map(|quick| (quick, app.git_menu_items()))
+    pub fn chat_git_controls(&self, _cx: &App) -> Option<(QuickAction, Vec<MenuItem>)> {
+        self.git_status_replica.status.as_ref().map(|status| {
+            (
+                quick_action(status, self.git_status_replica.busy),
+                menu_items(status, self.git_status_replica.busy),
+            )
+        })
     }
 
-    pub fn chat_git_status_loaded(&self, cx: &App) -> bool {
-        self.app.read(cx).git_status.is_some()
+    pub fn chat_git_status_loaded(&self, _cx: &App) -> bool {
+        self.git_status_replica.status.is_some()
     }
 
     pub(crate) fn new_composer(
@@ -1826,6 +1885,7 @@ mod tests {
     use agent::{AgentEvent, ItemContent, ProviderKind, ThreadItem, TurnStatus};
     use gpui::{AppContext as _, TestAppContext};
     use tcode_core::{
+        git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
         session::{ReviewComment, ReviewSide},
     };
@@ -2113,6 +2173,81 @@ mod tests {
         assert_eq!(
             workspace.read_with(cx, |store, cx| store.composer_review_comments(cx)),
             replica.review_comment_drafts
+        );
+
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn providers_and_git_replicas_match_live_after_representative_mutations(
+        cx: &mut TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-provider-git-replica-consistency-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let app = cx.new(|_| AppState::new(session_store));
+        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
+
+        app.update(cx, |state, cx| {
+            state.acp_registry = Some(
+                serde_json::from_value(serde_json::json!({
+                    "agents": [{
+                        "id": "replicated-agent",
+                        "name": "Replicated Agent",
+                        "version": "1.0.0",
+                        "description": "registry refresh result",
+                        "distribution": { "npx": { "package": "replicated-agent" } }
+                    }]
+                }))
+                .expect("registry fixture"),
+            );
+            state.acp_registry_loading = false;
+            state.acp_registry_error = None;
+            state
+                .provider_versions
+                .entry(ProviderKind::Codex)
+                .or_default()
+                .checking = true;
+            state.git_status = Some(GitStatus {
+                is_repo: true,
+                branch: Some("feature/replica".into()),
+                has_working_tree_changes: true,
+                changed_files: vec![GitFileEntry {
+                    path: "src/replica.rs".into(),
+                    insertions: 4,
+                    deletions: 2,
+                }],
+                ..Default::default()
+            });
+            state.git_busy = true;
+            state.emit_provider_and_git_replicas_for_test(cx);
+        });
+
+        let (live_providers, live_git) = app.read_with(cx, |state, _| {
+            (
+                state.providers_status_snapshot(),
+                state.git_status_snapshot(),
+            )
+        });
+        let (replica_providers, replica_git) = workspace.read_with(cx, |store, _| {
+            (
+                store.providers_replica.clone(),
+                store.git_status_replica.clone(),
+            )
+        });
+
+        assert_eq!(replica_providers, live_providers);
+        assert_eq!(replica_git, live_git);
+        assert!(replica_providers.providers_checking);
+        assert_eq!(
+            replica_providers.acp_marketplace_items[0].id,
+            "replicated-agent"
+        );
+        assert_eq!(
+            replica_git.status.expect("git replica").changed_files[0].path,
+            "src/replica.rs"
         );
 
         std::fs::remove_dir_all(root).expect("remove test data");
