@@ -30,9 +30,9 @@
 //! state we don't currently track, so overlapping in-webview popovers are a
 //! known limitation (documented, not fixed).
 
-use preview_mcp::PreviewReply;
 #[cfg(any(not(target_os = "linux"), test))]
-use tcode_runtime::app::Route;
+use crate::window_state::Route;
+use preview_mcp::PreviewReply;
 
 #[cfg(any(not(target_os = "linux"), test))]
 fn visible_preview_key(
@@ -95,6 +95,7 @@ mod native {
         ReplyTx, normalize_url, preview_key_for_session, unavailable_message, visible_preview_key,
     };
     use crate::window_caption;
+    use crate::window_state::WindowState;
     use tcode_runtime::app::AppState;
 
     fn wait_timeout_message(pending: &[String]) -> String {
@@ -106,6 +107,7 @@ mod native {
 
     pub struct PreviewPanel {
         app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
         /// One native WebView per session id, created on first use.
         webviews: HashMap<String, Entity<WebView>>,
         /// Sessions whose WebView has begun a navigation. lb-wry queues (and drops
@@ -140,6 +142,7 @@ mod native {
     impl PreviewPanel {
         pub fn new(
             app_state: Entity<AppState>,
+            window_state: Entity<WindowState>,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Self {
@@ -158,6 +161,7 @@ mod native {
             ];
             Self {
                 app_state,
+                window_state,
                 webviews: HashMap::new(),
                 warm: HashSet::new(),
                 urls: HashMap::new(),
@@ -251,10 +255,11 @@ mod native {
             let active = self.active_key(cx);
             let visible = {
                 let state = self.app_state.read(cx);
+                let window_state = self.window_state.read(cx);
                 visible_preview_key(
                     active.as_deref(),
-                    state.route,
-                    state.palette_open,
+                    window_state.route,
+                    window_state.palette_open,
                     state.preview_panel_showing(),
                 )
                 .map(str::to_string)
@@ -833,6 +838,7 @@ mod native {
 
             let visible = {
                 let state = self.app_state.read(cx);
+                let window_state = self.window_state.read(cx);
                 if state.active_session_id() != Some(session_id) {
                     let _ = reply.try_send(Err(
                         "preview is not visible; the user is viewing another conversation".into(),
@@ -841,8 +847,8 @@ mod native {
                 }
                 visible_preview_key(
                     Some(key),
-                    state.route,
-                    state.palette_open,
+                    window_state.route,
+                    window_state.palette_open,
                     state.preview_panel_showing(),
                 ) == Some(key)
             };
@@ -1009,6 +1015,7 @@ mod native {
             // buttons reach the window's true top-right corner.
             let hosts_caption = window_caption::hosts_caption(
                 window_caption::CaptionSurface::Preview,
+                self.window_state.read(cx).route,
                 self.app_state.read(cx),
             );
             h_flex()
@@ -1124,6 +1131,7 @@ mod placeholder {
     use preview_mcp::PreviewOp;
 
     use super::ReplyTx;
+    use crate::window_state::WindowState;
     use tcode_runtime::app::AppState;
 
     pub struct PreviewPanel;
@@ -1131,6 +1139,7 @@ mod placeholder {
     impl PreviewPanel {
         pub fn new(
             _app_state: Entity<AppState>,
+            _window_state: Entity<WindowState>,
             _window: &mut Window,
             _cx: &mut Context<Self>,
         ) -> Self {

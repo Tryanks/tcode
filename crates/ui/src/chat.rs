@@ -40,6 +40,7 @@ use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_millis;
 use crate::window_caption;
 use crate::window_drag_area;
+use crate::window_state::WindowState;
 
 /// Content-column max width (T3 centers the timeline at ~760px). Shared with
 /// the composer, which mirrors this column so the input aligns with the
@@ -653,6 +654,7 @@ impl MdState {
 
 pub struct ChatView {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     composer: Entity<Composer>,
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
@@ -673,8 +675,14 @@ pub struct ChatView {
 }
 
 impl ChatView {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let composer = cx.new(|cx| Composer::new(app_state.clone(), window, cx));
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let composer =
+            cx.new(|cx| Composer::new(app_state.clone(), window_state.clone(), window, cx));
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -696,6 +704,7 @@ impl ChatView {
 
         let mut this = Self {
             app_state,
+            window_state,
             composer,
             terminal_drawer,
             list_state,
@@ -2507,7 +2516,7 @@ impl ChatView {
         // the row's leading content (the sidebar toggle) is inset past them —
         // but only when the platform actually draws them: they are hidden in
         // fullscreen, and other platforms never had them.
-        let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
         let clears_traffic_lights =
             cfg!(target_os = "macos") && collapsed && !window.is_fullscreen();
         // Windows: with no right panel open this header is the window's
@@ -2515,6 +2524,7 @@ impl ChatView {
         // right edge, past the header's usual inset.
         let hosts_caption = window_caption::hosts_caption(
             window_caption::CaptionSurface::Chat,
+            self.window_state.read(cx).route,
             self.app_state.read(cx),
         );
         let base = h_flex()
@@ -2547,8 +2557,10 @@ impl ChatView {
                 tcode_i18n::tr!("sidebar.collapse")
             })
             .on_click(cx.listener(|this, _, _, cx| {
-                this.app_state
-                    .update(cx, |state, cx| state.toggle_sidebar_collapsed(cx));
+                let app_state = this.app_state.clone();
+                this.window_state.update(cx, |state, cx| {
+                    state.toggle_sidebar_collapsed(&app_state, cx)
+                });
             }));
 
         // A draft shows a muted "New thread" label; an open thread its title;
@@ -3017,8 +3029,9 @@ impl Render for ChatView {
         // Screenshot-only: `--debug-git-dialog` opens the commit dialog once the
         // background git status has landed (a header click is not drivable
         // headlessly). Consumed once.
-        let open_commit_dialog = self.app_state.update(cx, |state, _| {
-            let armed = state.debug_open_commit_dialog && state.git_status.is_some();
+        let git_status_loaded = self.app_state.read(cx).git_status.is_some();
+        let open_commit_dialog = self.window_state.update(cx, |state, _| {
+            let armed = state.debug_open_commit_dialog && git_status_loaded;
             if armed {
                 state.debug_open_commit_dialog = false;
             }
@@ -3740,6 +3753,7 @@ mod tests {
         work_log_summary,
     };
     use crate::markdown::MarkdownState;
+    use crate::window_state::WindowState;
     use agent::{FileChange, FileChangeKind, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
     use std::collections::{HashMap, HashSet};
@@ -3876,9 +3890,11 @@ This begins after the hard break."#;
             ];
             state
         });
+        let window_state = cx.new(|_| WindowState::new(false));
 
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(app_state.clone(), window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(app_state.clone(), window_state, window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         cx.run_until_parked();

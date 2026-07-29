@@ -1,6 +1,6 @@
 //! Full-page settings route (V2-M6). Replaces the old settings dialog.
 //!
-//! When [`tcode_runtime::app::Route::Settings`] is active, the whole window shows this
+//! When [`crate::Route::Settings`] is active, the whole window shows this
 //! page: a left nav (same width as the sidebar) listing sections + a pinned
 //! "← Back", and a content column of setting rows (bold title + muted
 //! description on the left, a control on the right), matching reference shots
@@ -38,6 +38,7 @@ use crate::shell::Quit;
 use crate::time::now_secs;
 use crate::window_caption;
 use crate::window_drag_area;
+use crate::window_state::WindowState;
 
 /// Left inset so branding clears the native macOS 26 traffic lights near x=72.
 #[cfg(target_os = "macos")]
@@ -77,6 +78,7 @@ fn apply_toggle_value(settings: &mut Settings, checked: bool, mutate: fn(&mut Se
 
 pub struct SettingsPage {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     /// One card per native profile, keyed by profile id (built-in + user).
     provider_cards: Vec<(String, Entity<ProviderCard>)>,
     /// Long-lived state for the modal ACP marketplace and custom form.
@@ -104,10 +106,10 @@ pub struct SettingsPage {
 
 impl SettingsPage {
     fn take_requested_section(
-        app_state: &Entity<AppState>,
+        window_state: &Entity<WindowState>,
         cx: &mut Context<Self>,
     ) -> Option<Section> {
-        app_state
+        window_state
             .update(cx, |state, _| state.debug_settings_section.take())
             .map(|section| match section.as_str() {
                 "providers" => Section::Providers,
@@ -119,7 +121,12 @@ impl SettingsPage {
             })
     }
 
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let title_generation = app_state.read(cx).settings.title_generation.clone();
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(
@@ -134,10 +141,6 @@ impl SettingsPage {
         });
         let subscriptions = vec![
             cx.observe(&app_state, |this, _, cx| {
-                let app_state = this.app_state.clone();
-                if let Some(section) = Self::take_requested_section(&app_state, cx) {
-                    this.section = section;
-                }
                 let selection = this.app_state.read(cx).settings.title_generation.clone();
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
@@ -147,6 +150,13 @@ impl SettingsPage {
                         cx,
                     );
                 });
+                cx.notify();
+            }),
+            cx.observe(&window_state, |this, _, cx| {
+                let window_state = this.window_state.clone();
+                if let Some(section) = Self::take_requested_section(&window_state, cx) {
+                    this.section = section;
+                }
                 cx.notify();
             }),
             cx.subscribe(&title_model_picker, |this, _, event, cx| {
@@ -164,11 +174,12 @@ impl SettingsPage {
 
         // Consume launch-time screenshot/relaunch requests through the same
         // channel used by in-app Settings links.
-        let section = Self::take_requested_section(&app_state, cx).unwrap_or(Section::General);
-        let acp_panel = cx.new(|cx| AcpPanel::new(app_state.clone(), window, cx));
+        let section = Self::take_requested_section(&window_state, cx).unwrap_or(Section::General);
+        let acp_panel =
+            cx.new(|cx| AcpPanel::new(app_state.clone(), window_state.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(app_state.clone(), window, cx));
-        let debug_acp_dialog_pending = app_state.read(cx).debug_acp_dialog;
+        let debug_acp_dialog_pending = window_state.read(cx).debug_acp_dialog;
         let home_url_value = app_state
             .read(cx)
             .settings
@@ -207,6 +218,7 @@ impl SettingsPage {
         let perm_status = permissions::check();
         let mut page = Self {
             app_state,
+            window_state,
             provider_cards: Vec::new(),
             acp_panel,
             orchestrate_panel,
@@ -514,7 +526,7 @@ impl SettingsPage {
                     )
                     .child(tcode_i18n::tr!("settings.back"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state
+                        this.window_state
                             .update(cx, |state, cx| state.close_settings(cx));
                     })),
                 ),
@@ -533,6 +545,7 @@ impl SettingsPage {
         // therefore end left of the buttons rather than under them.
         let hosts_caption = window_caption::hosts_caption(
             window_caption::CaptionSurface::Settings,
+            self.window_state.read(cx).route,
             self.app_state.read(cx),
         );
         // The 52px strip spans the paper full-width (drag area), but its title

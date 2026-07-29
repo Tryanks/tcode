@@ -24,6 +24,7 @@ use tcode_runtime::app::{AppEvent, AppState, ProjectGroup, RuntimeError};
 use crate::shortcut::format_secondary_shortcut;
 use crate::time::now_secs;
 use crate::window_drag_area;
+use crate::window_state::WindowState;
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
@@ -237,6 +238,7 @@ struct RenameState {
 
 pub struct SessionsSidebar {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     /// Project ids whose thread list is expanded past the collapsed limit.
     expanded_groups: HashSet<String>,
     /// Parent session ids whose direct child rows are folded away.
@@ -253,7 +255,11 @@ pub struct SessionsSidebar {
 }
 
 impl SessionsSidebar {
-    pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
         // Launch sweep: the same auto-archive pass expanding a thread list
         // runs, applied to every project up front so stale threads are gone
@@ -285,6 +291,7 @@ impl SessionsSidebar {
         };
         Self {
             app_state,
+            window_state,
             expanded_groups: HashSet::new(),
             collapsed_parents,
             renaming: None,
@@ -347,10 +354,10 @@ impl SessionsSidebar {
             settings.auto_archive_notice_shown = true;
             state.update_settings(settings, cx);
         });
-        let app_state = self.app_state.clone();
+        let window_state = self.window_state.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let alert = alert.bg(cx.theme().popover);
-            let app_state = app_state.clone();
+            let window_state = window_state.clone();
             alert
                 .title(tcode_i18n::tr!("sidebar.auto_archive_dialog.title"))
                 .description(tcode_i18n::tr!(
@@ -366,7 +373,7 @@ impl SessionsSidebar {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    app_state.update(cx, |state, cx| {
+                    window_state.update(cx, |state, cx| {
                         state.debug_settings_section = Some("archived".into());
                         state.open_settings(cx);
                     });
@@ -787,7 +794,7 @@ impl SessionsSidebar {
             .cursor_pointer()
             .hover(|s| s.bg(cx.theme().sidebar_accent))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.app_state
+                this.window_state
                     .update(cx, |state, cx| state.open_palette(cx));
             }))
             .child(
@@ -1053,7 +1060,7 @@ impl SessionsSidebar {
                     .filter(|(notice_project, _)| notice_project == &project_id)
             {
                 let label = tcode_i18n::tr!("sidebar.auto_archived", count = *count);
-                let app_state = self.app_state.clone();
+                let window_state = self.window_state.clone();
                 container = container.child(
                     crate::material::accessible_clickable(
                         div(),
@@ -1069,7 +1076,7 @@ impl SessionsSidebar {
                     .cursor_pointer()
                     .hover(|s| s.text_color(cx.theme().sidebar_foreground))
                     .on_click(move |_, _, cx| {
-                        app_state.update(cx, |state, cx| {
+                        window_state.update(cx, |state, cx| {
                             state.debug_settings_section = Some("archived".into());
                             state.open_settings(cx);
                         });
@@ -1393,7 +1400,7 @@ impl SessionsSidebar {
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().sidebar_accent))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state
+                    this.window_state
                         .update(cx, |state, cx| state.open_settings(cx));
                 }))
                 .child(
@@ -1639,7 +1646,9 @@ mod tests {
             state.sessions = vec![meta];
         });
 
-        let sidebar = cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let sidebar =
+            cx.new(|cx| SessionsSidebar::new(app_state.clone(), window_state.clone(), cx));
         let (_, cx) = cx.add_window_view(|_, _| WorkingThreadRowProbe);
         let cx: &mut VisualTestContext = cx;
         cx.update(|window, cx| {
@@ -1721,7 +1730,9 @@ mod tests {
             state.sessions = sessions;
         });
 
-        let sidebar = cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let sidebar =
+            cx.new(|cx| SessionsSidebar::new(app_state.clone(), window_state.clone(), cx));
 
         app_state.update(cx, |state, _| {
             let mut archived: Vec<&str> = state

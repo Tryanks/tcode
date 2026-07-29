@@ -31,6 +31,7 @@ use super::model::{
 use super::parse::RowKind;
 use crate::plan_panel::PlanPanel;
 use crate::window_caption;
+use crate::window_state::WindowState;
 use crate::{highlight, material};
 use tcode_core::session::{ReviewComment, ReviewSide};
 use tcode_runtime::app::{AppState, RightTab};
@@ -215,6 +216,7 @@ struct CommentSelection {
 
 pub struct DiffPanel {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     /// The Plan/Tasks tab content (the other tab in this right panel).
     plan: Entity<PlanPanel>,
     /// Soft-wrap toggle for long code lines (the one real toolbar button).
@@ -235,7 +237,11 @@ pub struct DiffPanel {
 }
 
 impl DiffPanel {
-    pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Soft-wrap defaults to the user's "Word wrap in diffs" setting.
         let wrap = app_state.read(cx).settings.word_wrap_diffs;
         let plan = cx.new(|cx| PlanPanel::new(app_state.clone(), cx));
@@ -249,6 +255,7 @@ impl DiffPanel {
         })];
         Self {
             app_state,
+            window_state,
             plan,
             wrap,
             ignore_ws: false,
@@ -488,11 +495,12 @@ impl DiffPanel {
         }
         let debug = {
             let state = self.app_state.read(cx);
+            let window_state = self.window_state.read(cx);
             state.active.as_ref().map(|active| {
                 (
                     active.meta.id.clone(),
-                    state.debug_diff_scope.clone(),
-                    state.debug_diff_split,
+                    window_state.debug_diff_scope.clone(),
+                    window_state.debug_diff_split,
                 )
             })
         };
@@ -610,7 +618,7 @@ impl DiffPanel {
             return false;
         }
         self.apply_pending_file_focus(&session, scope, cx);
-        let debug_comment = self.app_state.read(cx).debug_review_comment
+        let debug_comment = self.window_state.read(cx).debug_review_comment
             && self.app_state.read(cx).review_comments().is_empty();
         if debug_comment
             && let Some((scope, file, row_index, line, side, text)) =
@@ -666,8 +674,10 @@ impl DiffPanel {
                 row_index,
                 row_index,
             );
-            self.app_state.update(cx, |state, cx| {
+            self.window_state.update(cx, |state, _| {
                 state.debug_review_comment = false;
+            });
+            self.app_state.update(cx, |state, cx| {
                 state.add_review_comment(comment, cx);
             });
         }
@@ -684,8 +694,11 @@ impl DiffPanel {
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
         // and a taller strip keeps the tabs aligned with the chat header.
-        let hosts_caption =
-            window_caption::hosts_caption(window_caption::CaptionSurface::RightPanel, state);
+        let hosts_caption = window_caption::hosts_caption(
+            window_caption::CaptionSurface::RightPanel,
+            self.window_state.read(cx).route,
+            state,
+        );
         // The second tab is "Plan" when a plan exists or the session is in Plan
         // mode, else "Tasks" (S1 §6).
         let plan_label = if state.plan_tab_active_label() {
@@ -852,7 +865,7 @@ impl DiffPanel {
         );
 
         let selector = Popover::new("diff-turn-popover")
-            .default_open(state.debug_diff_scope_menu)
+            .default_open(self.window_state.read(cx).debug_diff_scope_menu)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let panel_for = panel.clone();

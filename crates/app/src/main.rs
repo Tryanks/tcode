@@ -12,7 +12,7 @@ use gpui::{
 };
 use tcode_runtime::app::AppState;
 use tcode_services::{shell_env, store::SessionStore};
-use tcode_ui::{AppShell, Quit, TogglePalette};
+use tcode_ui::{AppShell, Quit, TogglePalette, WindowState};
 use tcode_ui::{assets, settings};
 
 use gpui_component::{
@@ -53,8 +53,8 @@ fn flatten_canvas_for_opaque_window(theme_json: &str) -> String {
 }
 const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn finish_quit_prompt(app_state: &Entity<AppState>, epoch: u64, cx: &mut App) -> bool {
-    app_state.update(cx, |state, _| {
+fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut App) -> bool {
+    window_state.update(cx, |state, _| {
         if !state.quit_prompt_open || state.quit_prompt_epoch != epoch {
             return false;
         }
@@ -64,7 +64,12 @@ fn finish_quit_prompt(app_state: &Entity<AppState>, epoch: u64, cx: &mut App) ->
     })
 }
 
-fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
+fn handle_quit(
+    _: &Quit,
+    app_state: &Entity<AppState>,
+    window_state: &Entity<WindowState>,
+    cx: &mut App,
+) {
     let count = app_state.read(cx).working_sessions_count();
     if count == 0 {
         cx.quit();
@@ -79,7 +84,7 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
         return;
     };
 
-    let epoch = app_state.update(cx, |state, _| {
+    let epoch = window_state.update(cx, |state, _| {
         if state.quit_prompt_open {
             return None;
         }
@@ -91,7 +96,7 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
         return;
     };
 
-    let prompt_state = app_state.clone();
+    let prompt_state = window_state.clone();
     if window_handle
         .update(cx, move |_, window, cx| {
             let quit_state = prompt_state.clone();
@@ -144,12 +149,12 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
         })
         .is_err()
     {
-        finish_quit_prompt(app_state, epoch, cx);
+        finish_quit_prompt(window_state, epoch, cx);
         cx.quit();
         return;
     }
 
-    let timeout_state = app_state.clone();
+    let timeout_state = window_state.clone();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(QUIT_PROMPT_TIMEOUT).await;
         cx.update(|cx| {
@@ -328,9 +333,12 @@ fn main() {
             Theme::global_mut(cx).apply_config(&dark);
 
             let app_state = cx.new(|_| AppState::new(store));
+            let sidebar_collapsed = app_state.read(cx).settings.sidebar_collapsed;
+            let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
                 let app_state = app_state.clone();
-                move |action, cx| handle_quit(action, &app_state, cx)
+                let window_state = window_state.clone();
+                move |action, cx| handle_quit(action, &app_state, &window_state, cx)
             });
             // Bring up the in-process preview MCP server and register it with the
             // app so every spawned agent session can drive the embedded browser.
@@ -378,7 +386,7 @@ fn main() {
                 let dsec = debug_settings_section.clone();
                 let dacp = debug_acp_search.clone();
                 let dexp = debug_provider_expanded.clone();
-                app_state.update(cx, |state, _| {
+                window_state.update(cx, |state, _| {
                     state.debug_compose = dc;
                     state.debug_image = di;
                     state.debug_diff_scope = dscope;
@@ -396,7 +404,14 @@ fn main() {
             // relaunch, reopen the recorded session and Settings page. Runs
             // synchronously before the window (and settings page) is built, so
             // the page mounts already on the recorded section. No-op otherwise.
-            app_state.update(cx, |state, cx| state.apply_pending_relaunch(cx));
+            if let Some(section) =
+                app_state.update(cx, |state, cx| state.apply_pending_relaunch(cx))
+            {
+                window_state.update(cx, |state, cx| {
+                    state.debug_settings_section = Some(section);
+                    state.open_settings(cx);
+                });
+            }
             let debug_seed = debug_compose.is_some()
                 || debug_image.is_some()
                 || debug_cwd.is_some()
@@ -479,6 +494,7 @@ fn main() {
                 let window = cx
                     .open_window(window_options, {
                         let app_state = app_state.clone();
+                        let window_state = window_state.clone();
                         move |window, cx| {
                             match app_state.read(cx).settings.theme_mode {
                                 settings::ThemeMode::Light => {
@@ -491,7 +507,8 @@ fn main() {
                                     Theme::sync_system_appearance(Some(window), cx)
                                 }
                             }
-                            let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
+                            let shell =
+                                cx.new(|cx| AppShell::new(app_state, window_state, window, cx));
                             cx.new(|cx| Root::new(shell, window, cx))
                         }
                     })
@@ -552,12 +569,6 @@ fn main() {
                         if terminal_demo {
                             state.open_terminal_demo(cx);
                         }
-                        if open_settings {
-                            state.open_settings(cx);
-                        }
-                        if open_palette {
-                            state.open_palette(cx);
-                        }
                         if let Some(key) = &open_draft
                             && let Some(project) = state
                                 .projects
@@ -575,9 +586,6 @@ fn main() {
                         }
                         if debug_git_genmsg {
                             state.debug_git_generate_message(cx);
-                        }
-                        if debug_git_dialog {
-                            state.debug_open_commit_dialog = true;
                         }
                         if debug_live {
                             state.debug_start_provider(cx);
@@ -608,6 +616,18 @@ fn main() {
                                 })
                                 .detach();
                             }
+                        }
+                    });
+                    window_state.update(cx, |state, cx| {
+                        if open_settings {
+                            state.open_settings(cx);
+                        }
+                        if open_palette {
+                            state.open_palette(cx);
+                        }
+                        if debug_git_dialog {
+                            state.debug_open_commit_dialog = true;
+                            cx.notify();
                         }
                     });
                 }

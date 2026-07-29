@@ -13,7 +13,7 @@ use gpui_component::{
     notification::Notification,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
-use tcode_runtime::app::{AppEvent, AppState, RightTab, Route};
+use tcode_runtime::app::{AppEvent, AppState, RightTab};
 use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
@@ -29,6 +29,7 @@ use crate::runtime_event::{
     present_runtime_toast,
 };
 use crate::toast::{ToastAction, ToastId, ToastKind, ToastSpec};
+use crate::window_state::{Route, WindowState};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -85,6 +86,7 @@ pub(crate) fn window_drag_area(
 
 pub struct AppShell {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     sidebar: Entity<SessionsSidebar>,
     chat: Entity<ChatView>,
     diff: Entity<DiffPanel>,
@@ -154,7 +156,12 @@ fn next_sidebar_overlay_visibility(
 }
 
 impl AppShell {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let toasts = cx.new(|_| ToastCenter::new());
         let window_title = |state: &AppState| -> String {
             match state.active.as_ref() {
@@ -172,7 +179,9 @@ impl AppShell {
             cx.subscribe_in(&app_state, window, |this, _, event: &AppEvent, w, cx| {
                 this.present_app_event(event, w, cx);
             });
-        let preview = cx.new(|cx| PreviewPanel::new(app_state.clone(), window, cx));
+        let window_subscription = cx.observe(&window_state, |_, _, cx| cx.notify());
+        let preview =
+            cx.new(|cx| PreviewPanel::new(app_state.clone(), window_state.clone(), window, cx));
 
         // Pump preview automation requests from the MCP server into the live
         // WebView. The receiver is taken once; requests are resolved on the gpui
@@ -203,15 +212,18 @@ impl AppShell {
         app_state.update(cx, |state, cx| state.pump_orchestrate_requests(cx));
 
         Self {
-            sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx)),
-            chat: cx.new(|cx| ChatView::new(app_state.clone(), window, cx)),
-            diff: cx.new(|cx| DiffPanel::new(app_state.clone(), cx)),
+            sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), window_state.clone(), cx)),
+            chat: cx.new(|cx| ChatView::new(app_state.clone(), window_state.clone(), window, cx)),
+            diff: cx.new(|cx| DiffPanel::new(app_state.clone(), window_state.clone(), cx)),
             preview,
-            settings_page: cx.new(|cx| SettingsPage::new(app_state.clone(), window, cx)),
-            palette: cx.new(|cx| CommandPalette::new(app_state.clone(), window, cx)),
+            settings_page: cx
+                .new(|cx| SettingsPage::new(app_state.clone(), window_state.clone(), window, cx)),
+            palette: cx
+                .new(|cx| CommandPalette::new(app_state.clone(), window_state.clone(), window, cx)),
             toasts,
             operation_toasts: HashMap::new(),
             app_state,
+            window_state,
             palette_was_open: false,
             split: cx.new(|_| ResizableState::default()),
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
@@ -220,7 +232,7 @@ impl AppShell {
             last_viewport_width: None,
             sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
-            _subscriptions: vec![subscription, event_subscription],
+            _subscriptions: vec![subscription, event_subscription, window_subscription],
         }
     }
 
@@ -319,7 +331,7 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.app_state
+        self.window_state
             .update(cx, |state, cx| state.toggle_palette(cx));
     }
 }
@@ -341,15 +353,15 @@ impl Render for AppShell {
         let sheet_layer = Root::render_sheet_layer(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
-        let route = self.app_state.read(cx).route;
-        let palette_open = self.app_state.read(cx).palette_open;
+        let route = self.window_state.read(cx).route;
+        let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
         // Focus the palette's search input on the open transition.
         if palette_open && !self.palette_was_open {
             self.palette.update(cx, |p, cx| p.focus(window, cx));
         }
         self.palette_was_open = palette_open;
-        let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
         // The overlay is workspace-only transient state. Clear it synchronously
         // on route/expanded transitions rather than waiting for pointer input.
         if !collapsed || route != Route::Chat {
@@ -538,7 +550,7 @@ impl Render for AppShell {
                         .occlude()
                         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                             let (collapsed, route) = {
-                                let state = this.app_state.read(cx);
+                                let state = this.window_state.read(cx);
                                 (state.sidebar_collapsed, state.route)
                             };
                             let visible = next_sidebar_overlay_visibility(
@@ -574,7 +586,7 @@ impl Render for AppShell {
                             .occlude()
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                 let (collapsed, route) = {
-                                    let state = this.app_state.read(cx);
+                                    let state = this.window_state.read(cx);
                                     (state.sidebar_collapsed, state.route)
                                 };
                                 let visible = next_sidebar_overlay_visibility(

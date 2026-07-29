@@ -284,14 +284,6 @@ impl ConversationDestination {
     }
 }
 
-/// The top-level window route: the chat workspace or the full-page settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Route {
-    #[default]
-    Chat,
-    Settings,
-}
-
 /// Which tab the right-side panel shows (it hosts the diff view and the
 /// plan/task view). Cached per conversation destination, in memory only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -937,17 +929,6 @@ pub struct AppState {
     native_rewind_prefills: HashMap<String, String>,
     pub settings: Settings,
     pub smoke: Option<SmokeMode>,
-    /// Whether the sidebar is collapsed to an icon strip (ephemeral UI state).
-    pub sidebar_collapsed: bool,
-    /// Current window route (chat vs. settings page).
-    pub route: Route,
-    /// Whether the command palette (⌘K) overlay is showing.
-    pub palette_open: bool,
-    /// Generation of the transient quit confirmation. Timers capture this value
-    /// so an expired prompt cannot dismiss a newer (or unrelated) dialog.
-    pub quit_prompt_epoch: u64,
-    /// Prevents repeated quit signals from stacking confirmation dialogs.
-    pub quit_prompt_open: bool,
     /// Per-provider model catalog (from `agent::list_models`): loaded instantly
     /// from the persisted cache, then refreshed in the background at start and
     /// whenever a binary path changes. Absent entry = never fetched.
@@ -963,29 +944,6 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
-    /// Screenshot-only: seed the composer text on first render (drives `@`/`/`/`$`
-    /// trigger menus headlessly, as `--open-diff` does for the diff panel).
-    pub debug_compose: Option<String>,
-    /// Screenshot-only: inject a pending image attachment on first render (paste
-    /// / drag-drop cannot be driven headlessly).
-    pub debug_image: Option<PathBuf>,
-    /// Screenshot-only diff state seeds.
-    pub debug_diff_scope: Option<String>,
-    pub debug_diff_split: bool,
-    pub debug_diff_scope_menu: bool,
-    pub debug_review_comment: bool,
-    /// Screenshot-only: seed the command palette's query when it opens (so the
-    /// `>`-actions filter and thread result rows can be captured headlessly).
-    pub debug_palette: Option<String>,
-    /// Pending Settings section target, consumed by `SettingsPage`. Used by
-    /// screenshot capture, relaunch continuity, and in-app section links.
-    pub debug_settings_section: Option<String>,
-    /// Screenshot-only: seed the ACP marketplace's search box.
-    pub debug_acp_search: Option<String>,
-    /// Screenshot-only: open the ACP Add agent dialog on the Providers page.
-    pub debug_acp_dialog: bool,
-    /// Screenshot-only: built-in provider-profile id whose card starts expanded.
-    pub debug_provider_expanded: Option<String>,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
     /// failure to show when there is nothing cached to fall back on.
@@ -1036,10 +994,6 @@ pub struct AppState {
     store_append_generation: u64,
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
-    /// Screenshot-only (`--debug-git-dialog`): open the commit dialog once the
-    /// git status has loaded (clicking the header button cannot be driven
-    /// headlessly). Consumed by `ChatView` on its next render.
-    pub debug_open_commit_dialog: bool,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// Invalidates working-tree/branch previews on panel open and turn finish.
@@ -1091,7 +1045,6 @@ impl AppState {
         computer_use_mcp::config::set(computer_use_config(&settings));
         // Consume any restart-continuity marker left by a permission grant.
         let pending_relaunch = tcode_services::relaunch::take(store.root());
-        let settings_collapsed = settings.sidebar_collapsed;
         let terminal_preferences_path = store.root().join("terminal-ui.json");
         let terminal_preferences = std::fs::read(&terminal_preferences_path)
             .ok()
@@ -1131,11 +1084,6 @@ impl AppState {
             native_rewind_prefills: HashMap::new(),
             settings,
             smoke: None,
-            sidebar_collapsed: settings_collapsed,
-            route: Route::Chat,
-            palette_open: false,
-            quit_prompt_epoch: 0,
-            quit_prompt_open: false,
             model_catalogs,
             models_loading: HashMap::new(),
             terminal_preferences_path,
@@ -1144,12 +1092,6 @@ impl AppState {
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
             ai_title_generation_enabled: !cfg!(test),
-            debug_compose: None,
-            debug_image: None,
-            debug_diff_scope: None,
-            debug_diff_split: false,
-            debug_diff_scope_menu: false,
-            debug_review_comment: false,
             acp_registry: None,
             acp_registry_loading: false,
             acp_registry_error: None,
@@ -1173,15 +1115,9 @@ impl AppState {
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
-            debug_open_commit_dialog: false,
             review_comment_drafts: HashMap::new(),
             diff_refresh_generation: 0,
             pending_diff_focus: None,
-            debug_palette: None,
-            debug_settings_section: None,
-            debug_acp_search: None,
-            debug_acp_dialog: false,
-            debug_provider_expanded: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
             pending_relaunch,
@@ -2784,10 +2720,9 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_collapsed = !self.sidebar_collapsed;
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         // Persist so the choice survives a restart (save errors are cosmetic).
-        self.settings.sidebar_collapsed = self.sidebar_collapsed;
+        self.settings.sidebar_collapsed = collapsed;
         let settings = self.settings.clone();
         self.enqueue_settings(&settings, cx);
         cx.notify();
@@ -3277,36 +3212,6 @@ impl AppState {
         active.meta.updated_at = now_secs();
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
-    }
-
-    // -- routing + palette --------------------------------------------------
-
-    /// Switch to the full-page settings route (closes the palette).
-    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        self.route = Route::Settings;
-        cx.notify();
-    }
-
-    /// Return from settings to the chat workspace.
-    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.route = Route::Chat;
-        cx.notify();
-    }
-
-    pub fn open_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = true;
-        cx.notify();
-    }
-
-    pub fn close_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        cx.notify();
-    }
-
-    pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = !self.palette_open;
-        cx.notify();
     }
 
     /// Reset user settings to defaults, preserving the sidebar's per-project
@@ -4240,18 +4145,15 @@ impl AppState {
     /// Settings on the recorded page. The page reruns a permission recheck as it
     /// mounts, so the user immediately sees the post-restart status. No-op when
     /// there is no marker (the normal launch path).
-    pub fn apply_pending_relaunch(&mut self, cx: &mut Context<Self>) {
-        let Some(marker) = self.pending_relaunch.take() else {
-            return;
-        };
+    pub fn apply_pending_relaunch(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let marker = self.pending_relaunch.take()?;
         if let Some(id) = marker.active_session.as_deref()
             && self.sessions.iter().any(|meta| meta.id == id)
         {
             self.select_session(id, cx);
         }
-        self.debug_settings_section = Some(marker.reopen_settings);
-        self.route = Route::Settings;
         cx.notify();
+        Some(marker.reopen_settings)
     }
 
     // -- archive / delete / rename / unread (Group A) -----------------------

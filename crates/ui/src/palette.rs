@@ -3,7 +3,7 @@
 //! shot 27-cmdk.png.
 //!
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
-//! [`tcode_runtime::app::AppState::palette_open`] is set. Sources:
+//! [`crate::WindowState::palette_open`] is set. Sources:
 //! - Threads: fuzzy match over session titles (enter opens the thread).
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
 //!   "Toggle diff panel".
@@ -28,6 +28,7 @@ use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
 use crate::time::now_secs;
+use crate::window_state::WindowState;
 
 /// Score `text` against a fuzzy `query` (case-insensitive subsequence match).
 /// Returns `None` when `query` is not a subsequence of `text`; a higher score
@@ -107,6 +108,7 @@ struct Group {
 
 pub struct CommandPalette {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
@@ -114,7 +116,12 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder(tcode_i18n::tr!("palette.placeholder"))
         });
@@ -139,6 +146,7 @@ impl CommandPalette {
 
         Self {
             app_state,
+            window_state,
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
@@ -150,7 +158,7 @@ impl CommandPalette {
     /// seeds the query so palette states can be screenshotted headlessly.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let seed = self
-            .app_state
+            .window_state
             .read(cx)
             .debug_palette
             .clone()
@@ -163,7 +171,7 @@ impl CommandPalette {
     }
 
     fn close(&self, cx: &mut Context<Self>) {
-        self.app_state
+        self.window_state
             .update(cx, |state, cx| state.close_palette(cx));
     }
 
@@ -305,7 +313,7 @@ impl CommandPalette {
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
-                self.app_state
+                self.window_state
                     .update(cx, |state, cx| state.open_settings(cx));
             }
             Action::ToggleTheme => {
@@ -569,8 +577,9 @@ mod tests {
 
     impl PaletteHarness {
         fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let window_state = cx.new(|_| WindowState::new(false));
             Self {
-                palette: cx.new(|cx| CommandPalette::new(app_state, window, cx)),
+                palette: cx.new(|cx| CommandPalette::new(app_state, window_state, window, cx)),
             }
         }
     }
