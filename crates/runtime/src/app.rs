@@ -2297,24 +2297,15 @@ impl AppState {
         };
         match patch {
             ProfileSettingsPatch::SetEnabled { enabled } => target.enabled = enabled,
-            ProfileSettingsPatch::ReplaceConfiguration {
-                display_name,
-                accent_color,
-                env,
-                binary_path,
-                home_path,
-                launch_args,
-                custom_models,
-                hidden_models,
-            } => {
-                target.display_name = display_name;
-                target.accent_color = accent_color;
-                target.env = env;
-                target.binary_path = binary_path;
-                target.home_path = home_path;
-                target.launch_args = launch_args;
-                target.custom_models = custom_models;
-                target.hidden_models = hidden_models;
+            ProfileSettingsPatch::ReplaceConfiguration(configuration) => {
+                target.display_name = configuration.display_name;
+                target.accent_color = configuration.accent_color;
+                target.env = configuration.env;
+                target.binary_path = configuration.binary_path;
+                target.home_path = configuration.home_path;
+                target.launch_args = configuration.launch_args;
+                target.custom_models = configuration.custom_models;
+                target.hidden_models = configuration.hidden_models;
             }
         }
         self.update_settings(settings, cx);

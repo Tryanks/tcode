@@ -117,19 +117,22 @@ pub struct ProviderSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProfileSettingsPatch {
-    SetEnabled {
-        enabled: bool,
-    },
-    ReplaceConfiguration {
-        display_name: Option<String>,
-        accent_color: Option<String>,
-        env: Vec<EnvVar>,
-        binary_path: Option<PathBuf>,
-        home_path: Option<PathBuf>,
-        launch_args: Option<String>,
-        custom_models: Vec<String>,
-        hidden_models: Vec<String>,
-    },
+    SetEnabled { enabled: bool },
+    ReplaceConfiguration(Box<ProfileConfigurationPatch>),
+}
+
+/// The provider-dialog configuration payload of
+/// [`ProfileSettingsPatch::ReplaceConfiguration`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileConfigurationPatch {
+    pub display_name: Option<String>,
+    pub accent_color: Option<String>,
+    pub env: Vec<EnvVar>,
+    pub binary_path: Option<PathBuf>,
+    pub home_path: Option<PathBuf>,
+    pub launch_args: Option<String>,
+    pub custom_models: Vec<String>,
+    pub hidden_models: Vec<String>,
 }
 
 fn default_true() -> bool {

@@ -244,23 +244,25 @@ impl ProviderDialog {
         self.app_state.update(cx, |state, cx| {
             state.update_profile_settings(
                 &profile_id,
-                tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration {
-                    display_name,
-                    accent_color: accent,
-                    env,
-                    binary_path: binary.map(Into::into),
-                    // OpenCode has no single-home override.
-                    home_path: (provider != ProviderKind::OpenCode)
-                        .then(|| home.map(Into::into))
-                        .flatten(),
-                    // Codex ignores launch arguments (no field is rendered).
-                    launch_args: match provider {
-                        ProviderKind::Codex => None,
-                        _ => launch,
+                tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(Box::new(
+                    tcode_core::settings::ProfileConfigurationPatch {
+                        display_name,
+                        accent_color: accent,
+                        env,
+                        binary_path: binary.map(Into::into),
+                        // OpenCode has no single-home override.
+                        home_path: (provider != ProviderKind::OpenCode)
+                            .then(|| home.map(Into::into))
+                            .flatten(),
+                        // Codex ignores launch arguments (no field is rendered).
+                        launch_args: match provider {
+                            ProviderKind::Codex => None,
+                            _ => launch,
+                        },
+                        custom_models: custom,
+                        hidden_models: hidden,
                     },
-                    custom_models: custom,
-                    hidden_models: hidden,
-                },
+                )),
                 cx,
             );
             for (name, value) in &secret_writes {
