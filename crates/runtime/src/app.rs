@@ -3409,6 +3409,16 @@ impl AppState {
         cx.notify();
     }
 
+    /// Select a turn within an already-open diff panel.
+    pub fn select_diff_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
+        self.pending_diff_focus = None;
+        if let Some(active) = self.active.as_mut() {
+            active.diff_selected_turn = Some(turn);
+            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
     pub fn pending_diff_focus(&self) -> Option<&DiffFocusRequest> {
         self.pending_diff_focus.as_ref()
     }

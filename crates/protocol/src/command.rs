@@ -89,6 +89,9 @@ pub enum Command {
         turn: usize,
         path: String,
     },
+    SelectDiffTurn {
+        turn: usize,
+    },
     DiscardDiffFocus,
     SetTerminalHeight {
         height: f32,

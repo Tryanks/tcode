@@ -123,6 +123,7 @@ fn round_trips_commands_for_serialized_ui_mutation_gaps() {
                 12,
             ),
         },
+        Command::SelectDiffTurn { turn: 3 },
         Command::SetDraftWorkspace {
             mode: WorkspaceMode::NewWorktree {
                 base: "main".into(),

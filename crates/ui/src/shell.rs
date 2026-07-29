@@ -218,14 +218,7 @@ impl AppShell {
                 .new(|cx| SessionsSidebar::new(workspace_store.clone(), window_state.clone(), cx)),
             chat: cx
                 .new(|cx| ChatView::new(workspace_store.clone(), window_state.clone(), window, cx)),
-            diff: cx.new(|cx| {
-                DiffPanel::new(
-                    app_state.clone(),
-                    workspace_store.clone(),
-                    window_state.clone(),
-                    cx,
-                )
-            }),
+            diff: cx.new(|cx| DiffPanel::new(workspace_store.clone(), window_state.clone(), cx)),
             preview,
             settings_page: cx.new(|cx| {
                 SettingsPage::new(workspace_store.clone(), window_state.clone(), window, cx)

@@ -14,7 +14,10 @@ use tcode_protocol::Command;
 use tcode_runtime::{
     app::{AppState, ProjectGroup, ProviderVersionStatus, QueuedMessage},
     terminal::TerminalContext,
-    ui_facade::{AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, PathEntry, RecentDir},
+    ui_facade::{
+        AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, GitDiffResult, GitDiffScope,
+        PathEntry, RecentDir,
+    },
 };
 
 use crate::{composer::Composer, terminal_drawer::TerminalDrawer, window_state::WindowState};
@@ -49,6 +52,19 @@ pub(crate) struct ComposerActiveModel {
     pub model: Option<String>,
     pub acp_agent_id: Option<String>,
     pub profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiffFocus {
+    pub session: String,
+    pub turn: usize,
+    pub path: String,
+}
+
+pub(crate) struct DiffActiveState {
+    pub session: String,
+    pub cwd: PathBuf,
+    pub branches: Vec<String>,
 }
 
 impl WorkspaceStore {
@@ -113,6 +129,7 @@ impl WorkspaceStore {
             Command::ToggleDiffPanel => app.toggle_diff_panel(cx),
             Command::OpenDiffForTurn { turn } => app.open_diff_for_turn(turn, cx),
             Command::OpenDiffForFile { turn, path } => app.open_diff_for_file(turn, path, cx),
+            Command::SelectDiffTurn { turn } => app.select_diff_turn(turn, cx),
             Command::DiscardDiffFocus => app.discard_diff_focus(),
             Command::SetTerminalHeight { height } => app.set_terminal_height(height, cx),
             Command::ToggleTerminalPanel => app.toggle_terminal_panel(cx),
@@ -501,6 +518,116 @@ impl WorkspaceStore {
             app.git_branch_name(),
             app.git_on_default_branch(),
         )
+    }
+
+    pub(crate) fn diff_active_state(&self, cx: &App) -> Option<DiffActiveState> {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| DiffActiveState {
+                session: active.meta.id.clone(),
+                cwd: active.meta.cwd.clone(),
+                branches: active.branches.clone(),
+            })
+    }
+
+    pub fn diff_turns(&self, cx: &App) -> Vec<usize> {
+        self.app.read(cx).diff_turns()
+    }
+
+    pub fn diff_selected_turn(&self, cx: &App) -> Option<usize> {
+        self.app.read(cx).diff_selected_turn()
+    }
+
+    pub fn with_diff_turn_changes<R>(
+        &self,
+        turn: usize,
+        cx: &App,
+        read: impl FnOnce(&[agent::FileChange], agent::ChangeCompleteness) -> R,
+    ) -> Option<R> {
+        let app = self.app.read(cx);
+        let active = app.active.as_ref()?;
+        let changes = active.timeline.turns.get(turn)?.changes.as_ref()?;
+        Some(read(&changes.changes, changes.completeness))
+    }
+
+    pub(crate) fn pending_diff_focus(&self, cx: &App) -> Option<DiffFocus> {
+        self.app
+            .read(cx)
+            .pending_diff_focus()
+            .map(|request| DiffFocus {
+                session: request.session.clone(),
+                turn: request.turn,
+                path: request.path.clone(),
+            })
+    }
+
+    pub(crate) fn take_diff_focus(
+        &mut self,
+        session: &str,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<DiffFocus> {
+        self.app
+            .update(cx, |app, _| app.take_diff_focus(session, turn))
+            .map(|request| DiffFocus {
+                session: request.session,
+                turn: request.turn,
+                path: request.path,
+            })
+    }
+
+    pub fn diff_refresh_generation(&self, cx: &App) -> u64 {
+        self.app.read(cx).diff_refresh_generation
+    }
+
+    pub fn diff_word_wrap(&self, cx: &App) -> bool {
+        self.app.read(cx).settings.word_wrap_diffs
+    }
+
+    pub fn diff_panel_chrome_state(
+        &self,
+        cx: &App,
+    ) -> (bool, bool, tcode_core::ui::RightTab, bool) {
+        let app = self.app.read(cx);
+        (
+            app.diff_panel_open(),
+            app.diff_panel_expanded(),
+            app.right_tab(),
+            app.plan_tab_active_label(),
+        )
+    }
+
+    pub fn diff_review_comments(&self, cx: &App) -> Vec<ReviewComment> {
+        self.app.read(cx).review_comments().to_vec()
+    }
+
+    pub fn with_diff_review_comments<R>(
+        &self,
+        cx: &App,
+        read: impl FnOnce(&[ReviewComment]) -> R,
+    ) -> R {
+        read(self.app.read(cx).review_comments())
+    }
+
+    pub fn load_git_diff(
+        cwd: &std::path::Path,
+        scope: GitDiffScope,
+        base: Option<&str>,
+        ignore_whitespace: bool,
+    ) -> GitDiffResult {
+        tcode_runtime::ui_facade::load_git_diff_opts(cwd, scope, base, ignore_whitespace)
+    }
+
+    pub fn read_diff_working_tree_file(path: &std::path::Path) -> Option<String> {
+        const MAX_BYTES: u64 = 512 * 1024;
+        let metadata = std::fs::metadata(path).ok()?;
+        if metadata.len() > MAX_BYTES {
+            return None;
+        }
+        let text = std::fs::read_to_string(path).ok()?;
+        (text.len() as u64 <= MAX_BYTES).then_some(text)
     }
 
     pub fn with_active_timeline<R>(
