@@ -28,6 +28,7 @@ mod settings_page;
 mod shell;
 mod shortcut;
 mod sidebar;
+pub mod store;
 mod terminal_drawer;
 pub mod time;
 pub(crate) mod toast;

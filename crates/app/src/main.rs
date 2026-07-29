@@ -333,6 +333,8 @@ fn main() {
             Theme::global_mut(cx).apply_config(&dark);
 
             let app_state = cx.new(|_| AppState::new(store));
+            let workspace_store =
+                cx.new(|cx| tcode_ui::store::WorkspaceStore::new(app_state.clone(), cx));
             let sidebar_collapsed = app_state.read(cx).settings.sidebar_collapsed;
             let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
@@ -494,6 +496,7 @@ fn main() {
                 let window = cx
                     .open_window(window_options, {
                         let app_state = app_state.clone();
+                        let workspace_store = workspace_store.clone();
                         let window_state = window_state.clone();
                         move |window, cx| {
                             match app_state.read(cx).settings.theme_mode {
@@ -507,8 +510,9 @@ fn main() {
                                     Theme::sync_system_appearance(Some(window), cx)
                                 }
                             }
-                            let shell =
-                                cx.new(|cx| AppShell::new(app_state, window_state, window, cx));
+                            let shell = cx.new(|cx| {
+                                AppShell::new(app_state, workspace_store, window_state, window, cx)
+                            });
                             cx.new(|cx| Root::new(shell, window, cx))
                         }
                     })

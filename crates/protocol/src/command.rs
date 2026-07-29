@@ -14,7 +14,6 @@ use tcode_core::{
 ///
 /// Variants correspond to serializable `AppState` mutations used by the UI.
 /// UI-only consuming selectors are intentionally absent.
-#[non_exhaustive]
 #[allow(clippy::large_enum_variant)] // Wire DTOs preserve direct, typed payload fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]

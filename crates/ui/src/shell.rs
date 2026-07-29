@@ -22,6 +22,7 @@ use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
 use crate::settings_page::SettingsPage;
 use crate::sidebar::SessionsSidebar;
+use crate::store::WorkspaceStore;
 use crate::toast::ToastCenter;
 
 use crate::runtime_event::{
@@ -158,6 +159,7 @@ fn next_sidebar_overlay_visibility(
 impl AppShell {
     pub fn new(
         app_state: Entity<AppState>,
+        workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -212,7 +214,7 @@ impl AppShell {
         app_state.update(cx, |state, cx| state.pump_orchestrate_requests(cx));
 
         Self {
-            sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), window_state.clone(), cx)),
+            sidebar: cx.new(|cx| SessionsSidebar::new(workspace_store, window_state.clone(), cx)),
             chat: cx.new(|cx| ChatView::new(app_state.clone(), window_state.clone(), window, cx)),
             diff: cx.new(|cx| DiffPanel::new(app_state.clone(), window_state.clone(), cx)),
             preview,
