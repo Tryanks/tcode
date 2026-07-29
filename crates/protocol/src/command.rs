@@ -2,13 +2,18 @@ use std::path::PathBuf;
 
 use agent::{ApprovalDecision, ApprovalMode, InteractionMode, ProviderKind, RewindMode};
 use serde::{Deserialize, Serialize};
-use tcode_core::{git::GitAction, settings::Settings};
+use tcode_core::{
+    acp::AcpAgentPatch,
+    git::GitAction,
+    session::ReviewComment,
+    settings::{ProfileSettingsPatch, Settings},
+    ui::{RightTab, TerminalSplitDirection, WorkspaceMode},
+};
 
 /// A backend mutation requested by a client.
 ///
 /// Variants correspond to serializable `AppState` mutations used by the UI.
-/// UI-only consuming selectors and methods whose signatures contain
-/// non-serializable types are intentionally absent.
+/// UI-only consuming selectors are intentionally absent.
 #[non_exhaustive]
 #[allow(clippy::large_enum_variant)] // Wire DTOs preserve direct, typed payload fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +30,10 @@ pub enum Command {
         profile_id: String,
         name: String,
         value: Option<String>,
+    },
+    UpdateProfileSettings {
+        profile_id: String,
+        patch: ProfileSettingsPatch,
     },
     CreateThirdPartyProfile {
         name: String,
@@ -62,6 +71,10 @@ pub enum Command {
         args: Vec<String>,
         env: Vec<(String, String)>,
     },
+    UpdateAcpAgent {
+        id: String,
+        patch: AcpAgentPatch,
+    },
     SetActiveAcpAgent {
         id: String,
     },
@@ -82,6 +95,9 @@ pub enum Command {
     CloseTerminalPanel,
     RestartTerminal,
     NewTerminal,
+    SplitTerminal {
+        direction: TerminalSplitDirection,
+    },
     ActivateTerminal {
         terminal_id: u64,
     },
@@ -95,6 +111,9 @@ pub enum Command {
         context_id: u64,
     },
     CloseDiffPanel,
+    AddReviewComment {
+        comment: ReviewComment,
+    },
     RemoveReviewComment {
         index: usize,
     },
@@ -141,6 +160,9 @@ pub enum Command {
     StartDraft {
         project_id: String,
         cwd: PathBuf,
+    },
+    SetDraftWorkspace {
+        mode: WorkspaceMode,
     },
     SelectSession {
         session_id: String,
@@ -202,6 +224,9 @@ pub enum Command {
         fallback_title: String,
     },
     TogglePlanPanel,
+    SetRightTab {
+        tab: RightTab,
+    },
     TogglePreviewPanel,
     ClosePreviewPanel,
     OpenPreviewPanel,

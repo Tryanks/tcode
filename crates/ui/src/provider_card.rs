@@ -209,7 +209,9 @@ impl ProviderCard {
                             let profile_id = this.profile_id.clone();
                             state.update_profile_settings(
                                 &profile_id,
-                                move |settings| settings.enabled = checked,
+                                tcode_core::settings::ProfileSettingsPatch::SetEnabled {
+                                    enabled: checked,
+                                },
                                 cx,
                             );
                             state.reload_provider(this.provider, cx);

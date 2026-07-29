@@ -146,7 +146,11 @@ impl AcpAgentCard {
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let (id, checked) = (toggle_id.clone(), *checked);
                         this.app_state.update(cx, |state, cx| {
-                            state.update_acp_agent(&id, |agent| agent.enabled = checked, cx)
+                            state.update_acp_agent(
+                                &id,
+                                tcode_core::acp::AcpAgentPatch::SetEnabled { enabled: checked },
+                                cx,
+                            )
                         });
                     })),
             )
@@ -198,10 +202,10 @@ impl AcpAgentCard {
                                         this.app_state.update(cx, |state, cx| {
                                             state.update_acp_agent(
                                                 &id,
-                                                |agent| {
-                                                    agent.launch_args = (!launch_args.is_empty())
-                                                        .then_some(launch_args);
-                                                    agent.env = parsed_env;
+                                                tcode_core::acp::AcpAgentPatch::SetLaunchOptions {
+                                                    launch_args: (!launch_args.is_empty())
+                                                        .then_some(launch_args),
+                                                    env: parsed_env,
                                                 },
                                                 cx,
                                             )

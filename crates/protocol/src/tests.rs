@@ -3,7 +3,13 @@ use std::path::PathBuf;
 use agent::{AgentEvent, ProviderKind};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
-use tcode_core::{project::Project, settings::Settings};
+use tcode_core::{
+    acp::AcpAgentPatch,
+    project::Project,
+    session::{ReviewComment, ReviewSide},
+    settings::{ProfileSettingsPatch, Settings},
+    ui::{RightTab, TerminalSplitDirection, WorkspaceMode},
+};
 
 use super::*;
 
@@ -84,6 +90,51 @@ fn round_trips_top_level_wire_types() {
         request_id: 44,
         result: Ok(json!({"clicked": true})),
     });
+}
+
+#[test]
+fn round_trips_commands_for_serialized_ui_mutation_gaps() {
+    let commands = [
+        Command::UpdateProfileSettings {
+            profile_id: "codex".into(),
+            patch: ProfileSettingsPatch::SetEnabled { enabled: false },
+        },
+        Command::UpdateAcpAgent {
+            id: "gemini".into(),
+            patch: AcpAgentPatch::SetLaunchOptions {
+                env: vec![("KEY".into(), "value".into())],
+                launch_args: Some("--flag".into()),
+            },
+        },
+        Command::SplitTerminal {
+            direction: TerminalSplitDirection::Vertical,
+        },
+        Command::AddReviewComment {
+            comment: ReviewComment::new(
+                "src/lib.rs".into(),
+                2,
+                4,
+                ReviewSide::New,
+                "Please simplify this.".into(),
+                "+new code".into(),
+                "working-tree".into(),
+                "Working tree".into(),
+                10,
+                12,
+            ),
+        },
+        Command::SetDraftWorkspace {
+            mode: WorkspaceMode::NewWorktree {
+                base: "main".into(),
+            },
+        },
+        Command::SetRightTab {
+            tab: RightTab::Plan,
+        },
+    ];
+    for command in commands {
+        round_trip(&command);
+    }
 }
 
 #[test]
