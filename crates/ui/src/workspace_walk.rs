@@ -1,6 +1,6 @@
 //! Workspace-entry filtering for the `@`-mention popover.
 
-use tcode_runtime::ui_facade::PathEntry;
+use tcode_protocol::PathEntry;
 
 /// A ranked filter over workspace entries (case-insensitive), capped at `limit`.
 /// Basename matches rank above path-only matches; a basename prefix match ranks

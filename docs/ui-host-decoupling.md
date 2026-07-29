@@ -11,10 +11,12 @@ Mac. That future is **explicitly out of scope here** (no listener, no pairing,
 no network transport in this effort); it is what the pipeline enables. §7
 sketches it only so the pipeline is not designed into a corner.
 
-Status: **P0 implemented** (2026-07-29); P1–P3 planned. Coupling inventory that
-grounds this plan was swept 2026-07-29 (all of `crates/ui`, `crates/runtime`).
+Status: **P0–P3 implemented** (2026-07-29). The desktop UI now uses a real
+serialized NDJSON pipe, `WorkspaceStore` contains no `Entity<AppState>`, and
+`tcode-runtime` has no gpui dependency. The four deliberately local handle
+affordances retained for the in-process transport are listed in §§3–4.
 
-## 1. Where we are
+## 1. Starting point (historical)
 
 The layering below `runtime` is already clean and mostly serializable:
 
@@ -26,28 +28,28 @@ The layering below `runtime` is already clean and mostly serializable:
   client folds them locally.
 - `core` is pure serde data; `services` is fs/git/settings/store.
 
-The debt is concentrated at the top:
+The debt was concentrated at the top:
 
-- `runtime/src/app.rs` (~13k lines) holds `AppState`, a gpui `Entity` mixing
+- `runtime/src/app.rs` (~13k lines) held `AppState` as a gpui `Entity`, mixing
   backend authority (stores, provider processes, MCP registries, event pumps)
   with window state (`route`, `palette_open`, `sidebar_collapsed`, right-panel
   tabs, `debug_*` seeds).
-- Production UI reaches **166 distinct `AppState` methods** through
+- Production UI reached **166 distinct `AppState` methods** through
   `Entity<AppState>::read/update` (~550 call sites in 18 files): 95 mutating
   commands, 4 backend I/O queries, 67 pure selectors. It also reads 22 pub
   fields directly, including the whole folded `active.timeline` as shared
   memory, and in a few places *writes* backend fields directly (composer clears
   terminal contexts via `active.as_mut()`).
-- `runtime` cannot compile headless: `Context<AppState>` appears in 147
+- `runtime` could not compile headless: `Context<AppState>` appeared in 147
   production signatures, plus `EventEmitter`, `Task`, `BackgroundExecutor`,
   public `gpui::Rgba`, and one clipboard write (`copy_plan`).
-- Side channels bypass `AppState` entirely: UI holds the live `term::Terminal`
+- Side channels bypassed `AppState` entirely: UI held the live `term::Terminal`
   (shared grid + raw PTY byte input); `PreviewPanel` owns the WebViews and
   answers preview-MCP broker requests; composer assembles the final provider
   prompt (slash commands, terminal selections, review comments) and
   base64-encodes attachments on the UI path; settings page performs
   computer-use TCC prompts directly.
-- `RuntimeEvent` and several boundary DTOs are not serde yet.
+- `RuntimeEvent` and several boundary DTOs were not serde yet.
 
 ## 2. Target architecture
 
@@ -66,15 +68,15 @@ The debt is concentrated at the top:
 └──────────────────────────────────────────────────┘
 ```
 
-New crates:
+Implemented layers:
 
 - **`tcode-protocol`** — the single contract: request/response/event types,
   snapshot DTOs, seq numbering, version + capability negotiation. Depends only
   on `core`/`agent` types (all serde). No gpui anywhere.
-- **`tcode-host`** (evolves from `runtime`) — gpui-free. `AppState` becomes a
-  plain struct owned by one async task (the "host loop") on smol: consumes a
-  command channel, emits an event channel, does blocking work on a thread pool.
-  Multi-client aware from day one.
+- **`tcode-runtime`** (the host; no crate rename was needed) — gpui-free.
+  `AppState` is a plain `Send` struct owned by a dedicated thread running the
+  smol host loop. Decoded client messages and background completions serialize
+  through one mailbox; blocking work is centralized on `smol::unblock`.
 - **client store** (in `ui` or a new `tcode-client`) — replicated projections
   fed by protocol events; gpui views read only this store plus purely local
   window state. The 67 pure selectors move into `core`/`protocol` so both sides
@@ -88,8 +90,8 @@ transport problem, not an architecture problem.
 
 ## 3. Protocol design
 
-Style: bidirectional JSON-RPC 2.0 over newline-delimited JSON — the same idiom
-as ACP, which tcode already speaks downward to providers. Symmetry matters:
+Style: a correlated, tagged bidirectional protocol over newline-delimited JSON
+(not a claim of strict JSON-RPC 2.0 conformance). Symmetry matters:
 client→host for commands/queries/subscriptions, host→client for events and
 reverse requests (preview automation). One serialized code path everywhere,
 including local in-process transport (traffic is UI-scale; honesty beats the
@@ -116,32 +118,54 @@ Three planes:
    - `settings`: whole-document replace (small).
    - `runtime-events`: errors/notices/toasts, made serde; command-triggered
      toasts target the issuing client, state changes broadcast.
-   - `terminal/<id>`: raw output bytes + exit/title events (see §4).
+   - active/session status: terminal ids, split layout, selected contexts,
+     drawer state, and active tab. Raw terminal bytes are deliberately absent
+     from JSON (see §4).
 
-Two design rules paid for now, cashed in later: every subscription carries seq
+Every subscription carries seq
 numbers and can rebuild from snapshot (in-process this is just the resubscribe
-path; remotely it becomes lossless reconnect), and protocol enums are
-forward-tolerant (`#[serde(other)]` / value passthrough) so version skew
-between two tcodes degrades instead of failing. Neither costs meaningful
-complexity today; both are nearly impossible to retrofit.
+path; remotely it becomes lossless reconnect). Tagged protocol enums reject
+unknown command payloads as structured decode errors; selected value enums use
+`#[serde(other)]` where a safe unknown value exists.
+
+The in-process transport has four explicit non-NDJSON handle affordances:
+
+- the preview broker receiver moves once into `HostHandle`; remote replaces it
+  with reverse RPC;
+- the orchestrate broker receiver moves once into the host at construction and
+  never reaches the UI; remote replaces it with correlated RPC;
+- one external-import progress bus is installed at host construction; each
+  serialized command gets a client-local receiver routed by its request id,
+  and remote replaces the bus with progress events;
+- `LocalTerminalRegistry` shares live terminal handles created at construction;
+  remote replaces those with the raw byte streams described below.
+
+Commands, queries, subscriptions, snapshots, deltas, and runtime events have no
+typed shortcut: they all cross serde as NDJSON lines.
+
+Former consuming reads now have explicit ownership: native-rewind prefills are
+one-shot `NativeRewindPrefill` events cached per session by the client until the
+composer consumes them; diff-focus is purely client-owned replica state;
+pending-relaunch consumption is a correlated command result. None reads or
+mutates `AppState` through shared memory.
 
 ## 4. The hard parts, decided
 
-- **Terminal.** PTY stays host-side; the *emulation* moves client-side. Split
-  `term` into pty ownership (host) and alacritty grid (client). The wire
-  carries what SSH carries: output bytes down, input bytes + resize up. No grid
-  diffing protocol, no shared memory.
+- **Terminal.** `term` is split into host `PtyHandle` and client
+  `GridEmulator`. For this in-process phase, the compatibility `Terminal`
+  objects cross only through `LocalTerminalRegistry`; no terminal byte is
+  encoded as JSON. A remote transport will replace that registry with what SSH
+  carries: raw output bytes down and input bytes + resize up.
 - **Preview WebView.** The WebView is native client UI and stays there. The
-  preview-MCP broker stays host-side (providers connect to it on the host);
-  its `BrokerRequest`s — which already cross an async channel with a reply
-  slot — become reverse RPCs over the pipeline to the client owning the panel.
-  In-process this is nearly a rename of the existing flow.
+  preview-MCP URL/token registry stays host-side; its receiver is the explicit
+  local reverse-RPC affordance above and is taken exactly once by the client.
 - **Attachments & images.** Paths in messages are host paths. Client-side
-  pastes/drops upload bytes via protocol; host validates/transcodes/stores
-  (today's composer logic moves host-side) and returns the stored path.
+  pastes/drops validate/transcode locally, then upload bytes through the query
+  plane; the host stores them and returns the stored path.
   Timeline image rendering fetches bytes by path through the query plane with a
   client cache. `save_attachment_to_dir`, `remove_user_file`, `read_file_bytes`
-  and the rest of `ui_facade` become protocol queries; `ui_facade` is deleted.
+  and the other client file operations are protocol queries. The remaining
+  runtime `ui_facade` types are host-internal import-progress DTOs.
 - **Prompt assembly & slash commands.** Composer currently builds the final
   provider prompt (terminal selections, review comments, `/plan`, `/model`,
   `/orchestrate` routing) and mutates backend drafts directly. This is business
@@ -152,9 +176,9 @@ complexity today; both are nearly impossible to retrofit.
   them as opaque strings. The native directory picker stays (client and host
   share a filesystem in this effort), but its *result* enters the backend only
   through a command, and fs listing for `@` completion is a protocol query.
-- **Computer use.** Entirely host-side (screen/AX). The TCC prompt/relaunch
-  flow currently in `settings_page.rs` moves behind commands so the UI only
-  toggles and observes status.
+- **Computer use.** The MCP server and provider registration are host-side.
+  Native TCC presentation remains client UI; settings and the relaunch marker
+  cross serialized commands, and relaunch consumption is correlated.
 - **Colors/clipboard leaks.** `gpui::Rgba` in accent APIs becomes a hex string
   in protocol/core; `copy_plan`'s host-side clipboard write becomes a
   client-side effect event (clipboard is always a client device).
@@ -162,10 +186,9 @@ complexity today; both are nearly impossible to retrofit.
   tab/expansion, terminal drawer height, `debug_*` seeds leave `AppState` and
   live client-side (per-window). Per-conversation UI state that today parks in
   `conversation_ui` stays client-side keyed by conversation destination.
-- **Multi-client.** The protocol never assumes exclusivity: events broadcast,
-  commands serialize through the host loop, command-triggered toasts target
-  the issuing client. In this effort there is exactly one client (the app's
-  own UI), but the contract is written as if there were N.
+- **Multi-client.** This effort intentionally has one client endpoint. Request
+  ids, topic snapshots, and sequence numbers preserve the information a later
+  fan-out transport needs; multi-client arbitration remains remote-phase work.
 
 ## 5. Migration plan — strangler fig, app always shippable
 
@@ -185,13 +208,13 @@ loopback test harness added in P1.
   the composer — it is input UX in the same class as the trigger menus; the
   runtime remains authoritative for everything that reaches a provider.
 
-- **P1 — `tcode-protocol` crate.**
+- **P1 — `tcode-protocol` crate** ✅ done.
   Define Command/Query/Event/Subscription enums covering the inventoried
-  surface (95 commands, 4 queries, per-domain subscriptions), snapshot DTOs,
+  surface (commands, explicit I/O queries, per-domain subscriptions), snapshot DTOs,
   seq numbers, hello/version. Move the 67 pure selectors to shared code.
   Exit: round-trip serde tests for every type; a loopback harness exists.
 
-- **P2 — Client store; UI reads only replicas** (the bulk; view-by-view,
+- **P2 — Client store; UI reads only replicas** ✅ done (the bulk; view-by-view,
   delegatable per file).
   Introduce the client store fed by host events over an in-process channel
   (still unserialized at this step). Migrate the 18 UI files off
@@ -200,13 +223,16 @@ loopback test harness added in P1.
   terminal drawer → panels). Timeline folding moves client-side.
   Exit: `crates/ui` has zero `Entity<AppState>` references.
 
-- **P3 — Host off gpui; serialize the pipe.**
+- **P3 — Host off gpui; serialize the pipe** ✅ done.
   Replace `Context`/`Task`/`BackgroundExecutor` with smol + channels; host loop
-  owns state on its own thread; the in-process transport becomes real NDJSON
-  JSON-RPC. Split `term` (pty host-side, grid client-side; the boundary
-  carries output bytes down, input bytes + resize up). Preview broker requests
-  ride the pipeline as reverse RPCs.
-  Exit — this is the finish line of the whole effort: `tcode-host` compiles
+  owns state on its own thread; the in-process transport becomes real correlated
+  NDJSON. Split `term` into host PTY and client grid halves. The in-process
+  terminal registry and preview broker receiver are the documented local
+  affordances; neither terminal bytes nor ordinary typed messages bypass serde.
+  The local terminal and preview affordances above deliberately stop at the
+  transport boundary required by this phase; their remote byte-stream/reverse
+  RPC replacements remain §7 work.
+  Exit — this is the finish line of the whole effort: `tcode-runtime` compiles
   with no gpui dependency; the desktop app runs fully through the serialized
   in-process pipe; `crates/ui` has zero `Entity<AppState>` references; the
   smoke suite passes end-to-end over the pipeline.
@@ -235,5 +261,6 @@ Kept only as design guardrails, so the pipeline built above needs no rework:
   attachment byte upload, image fetch caching, preview port forwarding (a
   multiplexed TCP proxy stream in the same connection), reconnect via the seq
   numbers §3 already mandates, version-skew handling via the hello exchange.
-- Everything in §§2–5 is deliberately already compatible with N clients and a
-  serialized wire, so none of it should need revisiting.
+- The serialized contract and snapshot/sequence model are reusable for N
+  clients; connection ownership, arbitration, and fan-out still need explicit
+  remote-phase implementation.

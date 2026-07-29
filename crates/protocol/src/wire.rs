@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{Command, EventEnvelope, Hello, HelloAck, Query, QueryResponse, Topic};
+use crate::{
+    Command, CommandResponse, EventEnvelope, Hello, HelloAck, Query, QueryResponse, Topic,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolError {
@@ -43,7 +45,7 @@ pub enum ClientPayload {
 pub enum HostMessage {
     Ack {
         id: u64,
-        result: Result<(), ProtocolError>,
+        result: Result<CommandResponse, ProtocolError>,
     },
     QueryResult {
         id: u64,

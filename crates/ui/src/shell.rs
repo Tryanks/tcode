@@ -209,8 +209,6 @@ impl AppShell {
             .detach();
         }
 
-        workspace_store.update(cx, |store, cx| store.pump_orchestrate_requests(cx));
-
         Self {
             sidebar: cx
                 .new(|cx| SessionsSidebar::new(workspace_store.clone(), window_state.clone(), cx)),
@@ -266,6 +264,7 @@ impl AppShell {
                 return;
             }
             RuntimeEvent::Toast(toast) => toast,
+            _ => return,
         };
 
         let presented = present_runtime_toast(toast);

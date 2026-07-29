@@ -9,9 +9,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agent::ProviderKind;
-use gpui::{App, Entity};
-
-use tcode_runtime::app::{AppState, SmokeMode};
+use tcode_protocol::Command;
+use tcode_runtime::pipe::HostHandle;
 
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -88,48 +87,65 @@ fn usage() -> ! {
 }
 
 /// Arm smoke mode and kick off the scripted flow. Call after the window opens.
-pub fn drive(spec: SmokeSpec, app_state: Entity<AppState>, cx: &mut App) {
+pub fn drive(spec: SmokeSpec, host: HostHandle) {
     std::thread::spawn(|| {
         std::thread::sleep(SMOKE_TIMEOUT);
         log::error!("smoke: timed out after {SMOKE_TIMEOUT:?}");
         std::process::exit(2);
     });
 
-    AppState::update(&app_state, cx, |state, cx| {
-        state.smoke = Some(SmokeMode { auto_approve: true });
-        match spec {
-            SmokeSpec::New {
+    if let Err(error) = host.dispatch(Command::SetSmokeMode { auto_approve: true }) {
+        log::error!("smoke: failed to enable smoke mode: {}", error.message);
+        std::process::exit(1);
+    }
+    match spec {
+        SmokeSpec::New {
+            provider,
+            acp_agent_id,
+            profile_id,
+            cwd,
+            prompt,
+        } => {
+            log::info!(
+                "smoke: creating {} session in {} (profile: {})",
+                acp_agent_id
+                    .clone()
+                    .unwrap_or(provider.display_name().to_string()),
+                cwd.display(),
+                profile_id.as_deref().unwrap_or("built-in"),
+            );
+            if let Err(error) = host.dispatch(Command::CreateSession {
                 provider,
+                cwd,
+                model: None,
+                project_id: None,
                 acp_agent_id,
                 profile_id,
-                cwd,
-                prompt,
-            } => {
-                log::info!(
-                    "smoke: creating {} session in {} (profile: {})",
-                    acp_agent_id
-                        .clone()
-                        .unwrap_or(provider.display_name().to_string()),
-                    cwd.display(),
-                    profile_id.as_deref().unwrap_or("built-in"),
-                );
-                state.create_session(provider, cwd, None, None, acp_agent_id, profile_id, cx);
-                state.send_turn(prompt, Vec::new(), cx);
+            }) {
+                log::error!("smoke: failed to create session: {}", error.message);
+                std::process::exit(1);
             }
-            SmokeSpec::Resume { prompt } => {
-                let Some(meta) = state.sessions.first().cloned() else {
-                    log::error!("smoke: no stored sessions to resume");
-                    std::process::exit(1);
-                };
-                log::info!(
-                    "smoke: resuming most recent session {} ({}, resume cursor present: {})",
-                    meta.id,
-                    meta.provider.display_name(),
-                    meta.resume_cursor.is_some()
-                );
-                state.select_session(&meta.id.clone(), cx);
-                state.send_turn(prompt, Vec::new(), cx);
+            if let Err(error) = host.dispatch(Command::SendTurn {
+                text: prompt,
+                attachment_paths: Vec::new(),
+            }) {
+                log::error!("smoke: failed to send prompt: {}", error.message);
+                std::process::exit(1);
             }
         }
-    });
+        SmokeSpec::Resume { prompt } => {
+            log::info!("smoke: resuming the most recently updated stored session");
+            if let Err(error) = host.dispatch(Command::OpenLatestSession) {
+                log::error!("smoke: failed to open latest session: {}", error.message);
+                std::process::exit(1);
+            }
+            if let Err(error) = host.dispatch(Command::SendTurn {
+                text: prompt,
+                attachment_paths: Vec::new(),
+            }) {
+                log::error!("smoke: failed to send resume prompt: {}", error.message);
+                std::process::exit(1);
+            }
+        }
+    }
 }

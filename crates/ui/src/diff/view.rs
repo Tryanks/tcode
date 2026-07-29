@@ -38,8 +38,8 @@ use tcode_core::{
     session::{ReviewComment, ReviewSide},
     ui::RightTab,
 };
-use tcode_protocol::Command;
-use tcode_runtime::ui_facade::{GitDiffResult, GitDiffScope, GitFileText, relativize_to_workspace};
+use tcode_protocol::{Command, GitDiffResult, GitDiffScope, GitFileText};
+use tcode_runtime::ui_facade::relativize_to_workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DiffScope {
@@ -54,20 +54,26 @@ struct DiffOptions {
     show_invisibles: bool,
 }
 
+struct RenderFileContext<'a> {
+    cwd: &'a Path,
+    options: DiffOptions,
+    theme: &'a HighlightTheme,
+    colors: &'a DiffColors,
+    whitespace_style: &'a HighlightStyle,
+}
+
 fn render_file(
     change: &FileChange,
     texts: Option<&GitFileText>,
-    cwd: &Path,
-    options: DiffOptions,
-    theme: &HighlightTheme,
-    colors: &DiffColors,
-    whitespace_style: &HighlightStyle,
+    fallback_new_text: Option<&str>,
+    context: RenderFileContext<'_>,
 ) -> RenderedFile {
     let needs_reconstruction = texts.is_none_or(|texts| texts.old.is_none() || texts.new.is_none());
     let reconstructed = needs_reconstruction
         .then(|| {
             change.diff.as_deref().and_then(|patch| {
-                WorkspaceStore::read_diff_working_tree_file(Path::new(&change.path))
+                fallback_new_text
+                    .map(str::to_string)
                     .and_then(|text| reconstruct_from_text(text, patch))
             })
         })
@@ -86,14 +92,14 @@ fn render_file(
             old_text,
             new_text,
             patch: change.diff.as_deref(),
-            ignore_whitespace: options.ignore_ws,
-            show_invisibles: options.show_invisibles,
+            ignore_whitespace: context.options.ignore_ws,
+            show_invisibles: context.options.show_invisibles,
         },
-        relativize_to_workspace(&change.path, cwd),
+        relativize_to_workspace(&change.path, context.cwd),
         highlight::language_name_for_path(&change.path),
-        theme,
-        colors,
-        whitespace_style,
+        context.theme,
+        context.colors,
+        context.whitespace_style,
     )
 }
 
@@ -363,16 +369,13 @@ impl DiffPanel {
             return;
         }
         self.loading_key = Some(key.clone());
+        let workspace_store = self.workspace_store.clone();
         cx.spawn(async move |this, cx| {
-            let result = tcode_runtime::blocking::unblock(cx.background_executor(), move || {
-                WorkspaceStore::load_git_diff(
-                    &cwd,
-                    runtime_scope,
-                    base.as_deref(),
-                    options.ignore_ws,
-                )
-            })
-            .await;
+            let result = workspace_store
+                .update(cx, |store, cx| {
+                    store.load_git_diff(&cwd, runtime_scope, base.as_deref(), options.ignore_ws, cx)
+                })
+                .await;
             let _ = this.update(cx, |panel, cx| {
                 if panel.loading_key.as_ref() == Some(&key) {
                     panel.git_preview = Some(GitPreview {
@@ -406,7 +409,32 @@ impl DiffPanel {
         }
         self.cache = None;
         self.render_loading_key = Some(key.clone());
+        let workspace_store = self.workspace_store.clone();
         cx.spawn(async move |this, cx| {
+            let mut fallback_texts = vec![None; changes.len()];
+            for (index, change) in changes.iter().enumerate() {
+                if texts
+                    .get(index)
+                    .is_some_and(|text| text.old.is_some() && text.new.is_some())
+                {
+                    continue;
+                }
+                let path = PathBuf::from(&change.path);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    cwd.join(path)
+                };
+                let task = workspace_store.update(cx, |store, cx| store.read_file_bytes(path, cx));
+                let Ok(bytes) = task.await else {
+                    continue;
+                };
+                if bytes.len() <= 512 * 1024
+                    && let Ok(text) = String::from_utf8(bytes)
+                {
+                    fallback_texts[index] = Some(text);
+                }
+            }
             let (
                 files,
                 unified_visible,
@@ -415,38 +443,43 @@ impl DiffPanel {
                 split_items,
                 unified_content_width,
                 split_content_width,
-            ) = tcode_runtime::blocking::unblock(cx.background_executor(), move || {
-                let files = changes
-                    .iter()
-                    .enumerate()
-                    .map(|(index, change)| {
-                        render_file(
-                            change,
-                            texts.get(index),
-                            &cwd,
-                            DiffOptions {
-                                ignore_ws: key.ignore_ws,
-                                show_invisibles: key.show_invisibles,
-                            },
-                            &appearance.theme,
-                            &appearance.colors,
-                            &appearance.whitespace_style,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let items = build_list_items(&files);
-                let (unified_content_width, split_content_width) = diff_content_widths(&files);
-                (
-                    files,
-                    items.unified_visible,
-                    items.split_visible,
-                    items.unified,
-                    items.split,
-                    unified_content_width,
-                    split_content_width,
-                )
-            })
-            .await;
+            ) = cx
+                .background_executor()
+                .spawn(async move {
+                    let files = changes
+                        .iter()
+                        .enumerate()
+                        .map(|(index, change)| {
+                            render_file(
+                                change,
+                                texts.get(index),
+                                fallback_texts[index].as_deref(),
+                                RenderFileContext {
+                                    cwd: &cwd,
+                                    options: DiffOptions {
+                                        ignore_ws: key.ignore_ws,
+                                        show_invisibles: key.show_invisibles,
+                                    },
+                                    theme: &appearance.theme,
+                                    colors: &appearance.colors,
+                                    whitespace_style: &appearance.whitespace_style,
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let items = build_list_items(&files);
+                    let (unified_content_width, split_content_width) = diff_content_widths(&files);
+                    (
+                        files,
+                        items.unified_visible,
+                        items.split_visible,
+                        items.unified,
+                        items.split,
+                        unified_content_width,
+                        split_content_width,
+                    )
+                })
+                .await;
             let _ = this.update(cx, |panel, cx| {
                 if panel.render_loading_key.as_ref() == Some(&key) {
                     let unified_list =

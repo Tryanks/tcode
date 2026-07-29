@@ -572,7 +572,7 @@ impl Focusable for CommandPalette {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
-    use tcode_runtime::app::AppState;
+    use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 
     struct PaletteHarness {
@@ -658,8 +658,8 @@ mod tests {
             tcode_services::store::now_millis()
         ));
         let store = SessionStore::open_at(root.clone()).expect("open test store");
-        let app_state = cx.new(|_| AppState::new(store));
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(app_state.clone(), cx));
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(host, cx));
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)
@@ -694,7 +694,6 @@ mod tests {
 
         drop(palette);
         drop(workspace_store);
-        drop(app_state);
         let _ = std::fs::remove_dir_all(root);
     }
 }

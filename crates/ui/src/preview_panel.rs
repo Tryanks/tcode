@@ -396,11 +396,10 @@ mod native {
             self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
             let generation = self.port_scan_generation;
             cx.spawn(async move |this, cx| {
-                let ports = tcode_runtime::blocking::unblock(
-                    cx.background_executor(),
-                    ports::scan_listening,
-                )
-                .await;
+                let ports = cx
+                    .background_executor()
+                    .spawn(async { ports::scan_listening() })
+                    .await;
                 let _ = this.update(cx, |panel, cx| {
                     if panel.port_scan_generation == generation {
                         panel.dev_ports = ports;

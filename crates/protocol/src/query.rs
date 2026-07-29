@@ -26,6 +26,12 @@ pub enum Query {
     ReadFileBytes {
         path: PathBuf,
     },
+    SaveAttachment {
+        dir: PathBuf,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+        ext: String,
+    },
     RemoveUserFile {
         path: PathBuf,
     },
@@ -49,6 +55,7 @@ pub enum QueryResponse {
     SecretPresence(bool),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
+    SavedAttachment(PathBuf),
     UserFileRemoved,
     IsDirectory(bool),
     RelativePath(String),
@@ -112,6 +119,19 @@ pub enum SourceTool {
     CodexDesktop,
     #[serde(other)]
     Unknown,
+}
+
+impl SourceTool {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::ClaudeDesktop => "Claude Desktop",
+            Self::T3Code => "T3 Code",
+            Self::CodexCli => "Codex CLI",
+            Self::CodexDesktop => "Codex Desktop",
+            Self::Unknown => "Unknown",
+        }
+    }
 }
 
 /// Protocol mirror of `tcode_services::import::ExternalThread`.

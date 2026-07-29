@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Window};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{Project, SessionMeta, WorktreeInfo, group_sessions},
@@ -11,19 +11,18 @@ use tcode_core::{
     settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
     ui::{ConversationDestination, RightTab},
 };
+use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
 use tcode_protocol::{
-    Command, EventEnvelope, GitStatusStatus, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, ServerEvent, SessionStatus, Topic,
+    Command, EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
+    ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, QueuedMessageStatus, RecentDir,
+    ServerEvent, SessionStatus, Subscription, Topic, decode_host_line,
 };
 use tcode_runtime::{
-    app::{AppState, ProjectGroup},
-    event::{HostEvent, RuntimeEvent},
-    host::HostTask,
-    terminal::{TerminalContext, TerminalWorkspace},
-    ui_facade::{
-        AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, GitDiffResult, GitDiffScope,
-        PathEntry, RecentDir,
-    },
+    app::ProjectGroup,
+    event::RuntimeEvent,
+    pipe::HostHandle,
+    terminal::{LocalTerminalRegistry, TerminalContext, TerminalWorkspace},
+    ui_facade::ExternalImportUpdate,
 };
 
 use crate::{
@@ -38,7 +37,8 @@ use crate::{
 /// Views observe this entity and use its typed accessors instead of retaining
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
-    app: Entity<AppState>,
+    host: HostHandle,
+    terminal_registry: LocalTerminalRegistry,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
     session_replica: Option<(String, Timeline)>,
@@ -47,6 +47,7 @@ pub struct WorkspaceStore {
     git_status_replica: GitStatusStatus,
     background_session_flags: HashMap<String, (bool, bool)>,
     active_destination: Option<ConversationDestination>,
+    native_rewind_prefills: HashMap<String, String>,
     conversation_ui: ConversationUi,
 }
 
@@ -80,6 +81,10 @@ pub(crate) struct DiffActiveState {
     pub branches: Vec<String>,
 }
 
+fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
+
 impl WorkspaceStore {
     fn destination(status: &SessionStatus) -> ConversationDestination {
         if status.draft {
@@ -94,138 +99,184 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let (
-            index_replica,
-            settings_replica,
-            session_status_replica,
-            background_session_flags,
-            providers_replica,
-            git_status_replica,
-        ) = {
-            let state = app.read(cx);
-            let active_id = state.active_session_id();
-            let statuses = state
-                .sessions
-                .iter()
-                .filter_map(|meta| state.session_status_snapshot(&meta.id))
-                .collect::<Vec<_>>();
-            (
-                (state.sessions.clone(), state.projects.clone()),
-                state.settings.clone(),
-                active_id.and_then(|id| state.session_status_snapshot(id)),
-                statuses
-                    .into_iter()
-                    .filter(|status| Some(status.session_id.as_str()) != active_id)
-                    .map(|status| (status.session_id, (status.working, status.pending_approval)))
-                    .collect(),
-                state.providers_status_snapshot(),
-                state.git_status_snapshot(),
-            )
+    pub fn new(host: HostHandle, cx: &mut Context<Self>) -> Self {
+        let terminal_registry = host.terminal_registry();
+        let mut store = Self {
+            host: host.clone(),
+            terminal_registry,
+            index_replica: (Vec::new(), Vec::new()),
+            settings_replica: Settings::default(),
+            session_replica: None,
+            session_status_replica: None,
+            providers_replica: ProvidersStatus::default(),
+            git_status_replica: GitStatusStatus::default(),
+            background_session_flags: HashMap::new(),
+            active_destination: None,
+            native_rewind_prefills: HashMap::new(),
+            conversation_ui: ConversationUi::default(),
         };
-        let active_destination = session_status_replica.as_ref().map(Self::destination);
-        let mut conversation_ui = ConversationUi::default();
-        if let Some(destination) = active_destination.clone() {
-            let (terminal_open, terminal_height) = app.read(cx).active_terminal_ui_preferences();
-            conversation_ui.ensure(
-                destination,
-                settings_replica.word_wrap_diffs,
-                terminal_open,
-                terminal_height,
+
+        // Construction seeding is itself protocol traffic: subscribe, then
+        // deserialize each snapshot event. No live AppState read exists here.
+        if let Err(error) = host.hello(env!("CARGO_PKG_VERSION")) {
+            log::error!("failed to send host hello: {}", error.message);
+        }
+        let seed_topics = [
+            Topic::Index,
+            Topic::Settings,
+            Topic::Providers,
+            Topic::GitStatus,
+            Topic::ActiveSession,
+            Topic::RuntimeEvents,
+        ];
+        for topic in &seed_topics {
+            if let Err(error) = host.subscribe(Subscription {
+                topic: topic.clone(),
+                after_seq: None,
+            }) {
+                log::error!("failed to subscribe to {topic:?}: {}", error.message);
+            }
+        }
+        let events = host.event_receiver();
+        let mut seeded = HashSet::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
+            let Ok(line) = events.try_recv() else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            };
+            match decode_host_line(&line) {
+                Ok(HostMessage::Event(envelope)) => {
+                    match (&envelope.topic, &envelope.event) {
+                        (Topic::Index, ServerEvent::IndexSnapshot(_))
+                        | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
+                        | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
+                        | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
+                        | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_))
+                        | (Topic::RuntimeEvents, ServerEvent::RuntimeSnapshot(_)) => {
+                            seeded.insert(envelope.topic.clone());
+                        }
+                        _ => {}
+                    }
+                    if let ServerEvent::Runtime(event) = &envelope.event {
+                        cx.emit(event.clone());
+                    } else {
+                        store.apply_domain_event(&envelope);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => log::error!("failed to decode seed event: {}", error.message),
+            }
+        }
+        if seeded.len() != seed_topics.len() {
+            log::error!(
+                "host snapshot seeding timed out: received {}/{} domains",
+                seeded.len(),
+                seed_topics.len()
             );
         }
-        cx.observe(&app, |store, app, cx| {
-            let state = app.read(cx);
-            let active = state
-                .active
-                .as_ref()
-                .map(|active| (active.meta.id.as_str(), active.draft));
-            let replica_matches = match (active, store.session_replica.as_ref()) {
-                (Some((active_id, false)), Some((replica_id, _))) => replica_id == active_id,
-                (None, None) => true,
-                _ => false,
-            };
-            if !replica_matches {
-                store.session_replica = None;
-            }
-            let status_matches = match (active, store.session_status_replica.as_ref()) {
-                (Some((active_id, _)), Some(status)) => status.session_id == active_id,
-                (None, None) => true,
-                _ => false,
-            };
-            if !status_matches {
-                store.session_status_replica =
-                    active.and_then(|(id, _)| state.session_status_snapshot(id));
-            }
-            let destination = store.session_status_replica.as_ref().map(Self::destination);
-            if let Some(destination) = destination.clone() {
-                if let Some(previous) = store.active_destination.as_ref()
-                    && previous != &destination
-                    && matches!(previous, ConversationDestination::ProjectDraft(_))
-                    && matches!(destination, ConversationDestination::Thread(_))
-                {
-                    store
-                        .conversation_ui
-                        .move_entry(previous, destination.clone());
+
+        #[cfg(not(test))]
+        {
+            let event_lines = events;
+            cx.spawn(async move |this, cx| {
+                while let Ok(line) = event_lines.recv().await {
+                    let message = match decode_host_line(&line) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            log::error!("failed to decode host event: {}", error.message);
+                            continue;
+                        }
+                    };
+                    let HostMessage::Event(envelope) = message else {
+                        continue;
+                    };
+                    if this
+                        .update(cx, |store, cx| {
+                            if let ServerEvent::Runtime(event) = &envelope.event {
+                                cx.emit(event.clone());
+                            } else {
+                                store.apply_domain_event(&envelope);
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-                let (terminal_open, terminal_height) = state.active_terminal_ui_preferences();
-                store.conversation_ui.ensure(
-                    destination.clone(),
-                    store.settings_replica.word_wrap_diffs,
-                    terminal_open,
-                    terminal_height,
-                );
-            }
-            store.active_destination = destination;
-            cx.notify();
-        })
-        .detach();
-        cx.subscribe(&app, |store, _, event: &HostEvent, cx| {
-            match event {
-                HostEvent::Runtime(event) => cx.emit(event.clone()),
-                HostEvent::Domain(envelope) => store.apply_domain_event(envelope, cx),
-            }
-            cx.notify();
-        })
-        .detach();
-        Self {
-            app,
-            index_replica,
-            settings_replica,
-            session_replica: None,
-            session_status_replica,
-            providers_replica,
-            git_status_replica,
-            background_session_flags,
-            active_destination,
-            conversation_ui,
+            })
+            .detach();
+            let changed = host.changed_receiver();
+            cx.spawn(async move |this, cx| {
+                while changed.recv().await.is_ok() {
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
+
+        store
     }
 
-    pub fn sync_active_conversation_ui(&mut self, cx: &App) {
-        let (status, terminal_open, terminal_height) = {
-            let app = self.app.read(cx);
-            let status = app
-                .active_session_id()
-                .and_then(|id| app.session_status_snapshot(id));
-            let (open, height) = app.active_terminal_ui_preferences();
-            (status, open, height)
-        };
-        self.session_status_replica = status;
+    pub fn sync_active_conversation_ui(&mut self, _cx: &App) {
         let destination = self.session_status_replica.as_ref().map(Self::destination);
-        if let Some(destination) = destination.clone() {
+        if let Some((destination, status)) = destination
+            .clone()
+            .zip(self.session_status_replica.as_ref())
+        {
             self.conversation_ui.ensure(
                 destination,
                 self.settings_replica.word_wrap_diffs,
-                terminal_open,
-                terminal_height,
+                status.terminal_open,
+                status.terminal_height,
             );
         }
         self.active_destination = destination;
     }
 
-    fn apply_domain_event(&mut self, envelope: &EventEnvelope, _cx: &App) {
+    fn apply_domain_event(&mut self, envelope: &EventEnvelope) {
         match (&envelope.topic, &envelope.event) {
+            (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(status)) => {
+                let previous = self.active_destination.clone();
+                let previous_session = self
+                    .session_status_replica
+                    .as_ref()
+                    .map(|status| status.session_id.clone());
+                let mut status = status.clone();
+                if let Some(status) = status.as_mut() {
+                    status.native_rewind_prefill_available =
+                        self.native_rewind_prefills.contains_key(&status.session_id);
+                }
+                self.session_status_replica = status.clone();
+                let destination = status.as_ref().map(Self::destination);
+                if previous_session.as_deref()
+                    != status.as_ref().map(|status| status.session_id.as_str())
+                {
+                    self.session_replica = None;
+                }
+                if let Some((destination, status)) = destination.clone().zip(status.as_ref()) {
+                    if previous.as_ref().is_some_and(|previous| {
+                        previous != &destination
+                            && matches!(previous, ConversationDestination::ProjectDraft(_))
+                            && matches!(destination, ConversationDestination::Thread(_))
+                    }) && let Some(previous) = previous.as_ref()
+                    {
+                        self.conversation_ui
+                            .move_entry(previous, destination.clone());
+                    }
+                    self.conversation_ui.ensure(
+                        destination.clone(),
+                        self.settings_replica.word_wrap_diffs,
+                        status.terminal_open,
+                        status.terminal_height,
+                    );
+                    self.background_session_flags.remove(&status.session_id);
+                }
+                self.active_destination = destination;
+            }
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
                     .index_replica
@@ -253,6 +304,7 @@ impl WorkspaceStore {
             }
             (Topic::Index, ServerEvent::IndexRemoveSession { session_id }) => {
                 self.index_replica.0.retain(|meta| meta.id != *session_id);
+                self.native_rewind_prefills.remove(session_id);
                 self.conversation_ui
                     .remove(&ConversationDestination::Thread(session_id.clone()));
             }
@@ -284,7 +336,10 @@ impl WorkspaceStore {
                     .as_ref()
                     .is_some_and(|active| active.session_id == *session_id)
                 {
-                    self.session_status_replica = Some(status.clone());
+                    let mut status = status.clone();
+                    status.native_rewind_prefill_available =
+                        self.native_rewind_prefills.contains_key(session_id);
+                    self.session_status_replica = Some(status);
                     self.background_session_flags.remove(session_id);
                 } else {
                     self.background_session_flags.insert(
@@ -315,6 +370,23 @@ impl WorkspaceStore {
                     && replica_id == session_id
                 {
                     timeline.apply_at(record.ts, &record.event);
+                }
+            }
+            (
+                Topic::SessionStatus { session_id },
+                ServerEvent::NativeRewindPrefill {
+                    session_id: event_session,
+                    text,
+                },
+            ) if session_id == event_session => {
+                self.native_rewind_prefills
+                    .insert(session_id.clone(), text.clone());
+                if let Some(status) = self
+                    .session_status_replica
+                    .as_mut()
+                    .filter(|status| status.session_id == *session_id)
+                {
+                    status.native_rewind_prefill_available = true;
                 }
             }
             _ => {}
@@ -383,166 +455,68 @@ impl WorkspaceStore {
     }
 
     /// Dispatch a serializable backend mutation.
-    ///
-    /// This match deliberately has no wildcard: extending the protocol must
-    /// also extend this in-process client/host bridge.
-    pub fn dispatch(&mut self, command: Command, cx: &mut Context<Self>) {
-        self.app.update(cx, |app, gpui_cx| {
-            AppState::with_host_cx(app, gpui_cx, |app, cx| match command {
-                Command::OrchestrateTurn {
-                    text,
-                    attachment_paths,
-                } => app.orchestrate_turn(text, attachment_paths, cx),
-                Command::ReloadProvider { provider } => app.reload_provider(provider, cx),
-                Command::SetProfileSecret {
-                    profile_id,
-                    name,
-                    value,
-                } => app.set_profile_secret(&profile_id, &name, value.as_deref(), cx),
-                Command::UpdateProfileSettings { profile_id, patch } => {
-                    app.update_profile_settings(&profile_id, patch, cx)
-                }
-                Command::CreateThirdPartyProfile {
-                    name,
-                    base_url,
-                    model,
-                    api_key,
-                } => {
-                    app.create_third_party_profile(
-                        &name,
-                        &base_url,
-                        model.as_deref(),
-                        &api_key,
-                        cx,
-                    );
-                }
-                Command::DeleteProfile { profile_id } => app.delete_profile(&profile_id, cx),
-                Command::RefreshProviderStatus => app.refresh_provider_status(cx),
-                Command::CheckProviderVersions => app.check_provider_versions(cx),
-                Command::UpdateProvider { provider } => app.update_provider(provider, cx),
-                Command::SetSidebarCollapsed { collapsed } => {
-                    app.set_sidebar_collapsed(collapsed, cx)
-                }
-                Command::RunGitAction {
-                    action,
-                    message,
-                    included,
-                    feature_branch,
-                } => app.run_git_action(action, message, included, feature_branch, cx),
-                Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
-                Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
-                Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
-                Command::AddCustomAcpAgent {
-                    name,
-                    command,
-                    args,
-                    env,
-                } => app.add_custom_acp_agent(name, command, args, env, cx),
-                Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
-                Command::SetActiveAcpAgent { id } => app.set_active_acp_agent(&id, cx),
-                Command::ResetSettings => app.reset_settings(cx),
-                Command::WriteRelaunchMarker { reopen_settings } => {
-                    app.write_relaunch_marker(&reopen_settings)
-                }
-                Command::SetTerminalHeight { height } => app.set_terminal_height(height, cx),
-                Command::ToggleTerminalPanel => app.toggle_terminal_panel(cx),
-                Command::CloseTerminalPanel => app.close_terminal_panel(cx),
-                Command::RestartTerminal => app.restart_terminal(cx),
-                Command::NewTerminal => app.new_terminal(cx),
-                Command::SplitTerminal { direction } => app.split_terminal(direction, cx),
-                Command::ActivateTerminal { terminal_id } => app.activate_terminal(terminal_id, cx),
-                Command::CloseTerminal { terminal_id } => app.close_terminal(terminal_id, cx),
-                Command::CaptureTerminalSelection { terminal_id } => {
-                    app.capture_terminal_selection(terminal_id, cx)
-                }
-                Command::RemoveTerminalContext { context_id } => {
-                    app.remove_terminal_context(context_id, cx)
-                }
-                Command::AddReviewComment { comment } => app.add_review_comment(comment, cx),
-                Command::RemoveReviewComment { index } => app.remove_review_comment(index, cx),
-                Command::CycleProjectSort => app.cycle_project_sort(cx),
-                Command::CreateProject { root } => {
-                    app.create_project(root, cx);
-                }
-                Command::FinishExternalImport { project_id } => {
-                    app.finish_external_import(&project_id, cx)
-                }
-                Command::ToggleProjectCollapsed { project_id } => {
-                    app.toggle_project_collapsed(&project_id, cx)
-                }
-                Command::UpdateSettings { settings } => app.update_settings(settings, cx),
-                Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
-                Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
-                Command::AutoArchiveSweep { project_id } => {
-                    app.auto_archive_sweep(&project_id, cx);
-                }
-                Command::RenameSession { session_id, title } => {
-                    app.rename_session(&session_id, &title, cx)
-                }
-                Command::ForkThread { id } => app.fork_thread(&id, cx),
-                Command::DeleteSession {
-                    session_id,
-                    remove_worktree,
-                } => app.delete_session(&session_id, remove_worktree, cx),
-                Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
-                Command::MarkSessionUnread { session_id } => {
-                    app.mark_session_unread(&session_id, cx)
-                }
-                Command::StartDraft { project_id, cwd } => app.start_draft(project_id, cwd, cx),
-                Command::SetDraftWorkspace { mode } => app.set_draft_workspace(mode, cx),
-                Command::SelectSession { session_id } => app.select_session(&session_id, cx),
-                Command::SendTurn {
-                    text,
-                    attachment_paths,
-                } => app.send_turn(text, attachment_paths, cx),
-                Command::ConfirmRelayAndSend {
-                    text,
-                    attachment_paths,
-                } => app.confirm_relay_and_send(text, attachment_paths, cx),
-                Command::Steer {
-                    text,
-                    attachment_paths,
-                } => app.steer(text, attachment_paths, cx),
-                Command::SteerQueued { id } => app.steer_queued(id, cx),
-                Command::DropQueued { id } => app.drop_queued(id, cx),
-                Command::Interrupt => app.interrupt(cx),
-                Command::RespondApproval {
-                    request_id,
-                    decision,
-                } => app.respond_approval(request_id, decision, cx),
-                Command::RespondUserInput {
-                    request_id,
-                    answers,
-                } => app.respond_user_input(request_id, answers, cx),
-                Command::SetActiveModel {
-                    provider,
-                    model,
-                    profile_id,
-                } => app.set_active_model(provider, model, profile_id, cx),
-                Command::SetActiveOption { id, value } => app.set_active_option(&id, value, cx),
-                Command::SelectUltrathink => app.select_ultrathink(cx),
-                Command::SetInteractionMode { mode } => app.set_interaction_mode(mode, cx),
-                Command::ToggleInteractionMode => app.toggle_interaction_mode(cx),
-                Command::ImplementPlan => app.implement_plan(cx),
-                Command::DismissPlan => app.dismiss_plan(cx),
-                Command::ImplementPlanInNewThread { title } => {
-                    app.implement_plan_in_new_thread(title, cx)
-                }
-                Command::CopyPlan { markdown } => app.copy_plan(markdown, cx),
-                Command::SavePlanToWorkspace { markdown } => {
-                    app.save_plan_to_workspace(markdown, cx)
-                }
-                Command::DownloadPlan {
-                    markdown,
-                    fallback_title,
-                } => app.download_plan(markdown, fallback_title, cx),
-                Command::LoadBranches => app.load_branches(cx),
-                Command::CheckoutBranch { branch } => app.checkout_branch(branch, cx),
-                Command::SetActiveApprovalMode { mode } => app.set_active_approval_mode(mode, cx),
-                Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
-                Command::RewindTurn { turn, mode } => app.rewind_turn(turn, mode, cx),
-            })
-        });
+    pub fn dispatch(&mut self, command: Command, _cx: &mut Context<Self>) {
+        if let Err(error) = self.host.dispatch(command) {
+            log::error!("failed to dispatch host command: {}", error.message);
+        }
+    }
+
+    pub fn command(
+        &self,
+        command: Command,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| host.command(command).await)
+    }
+
+    pub fn command_for(
+        store: &Entity<Self>,
+        command: Command,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>> {
+        let host = store.read(cx).host.clone();
+        #[cfg(test)]
+        {
+            let result = smol::block_on(host.command(command));
+            cx.spawn(async move |_| result)
+        }
+        #[cfg(not(test))]
+        {
+            cx.spawn(async move |_| host.command(command).await)
+        }
+    }
+
+    #[cfg(test)]
+    fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
+        let events = self.host.event_receiver();
+        while let Ok(line) = events.try_recv() {
+            let Ok(HostMessage::Event(envelope)) = decode_host_line(&line) else {
+                continue;
+            };
+            if let ServerEvent::Runtime(event) = &envelope.event {
+                cx.emit(event.clone());
+            } else {
+                self.apply_domain_event(&envelope);
+            }
+            cx.notify();
+        }
+        let changed = self.host.changed_receiver();
+        while changed.try_recv().is_ok() {}
+    }
+
+    pub fn working_sessions_count(&self, _cx: &App) -> usize {
+        let active = usize::from(
+            self.session_status_replica
+                .as_ref()
+                .is_some_and(|status| status.working),
+        );
+        active
+            + self
+                .background_session_flags
+                .values()
+                .filter(|(working, _)| *working)
+                .count()
     }
 
     fn active_conversation_ui(&self) -> Option<&crate::conversation_ui::ConversationUiState> {
@@ -799,11 +773,9 @@ impl WorkspaceStore {
 
     pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
         let closes_drawer = self
-            .app
-            .read(cx)
-            .active
+            .session_status_replica
             .as_ref()
-            .is_some_and(|active| active.terminal_workspace.terminals.len() <= 1);
+            .is_some_and(|status| status.terminals.len() <= 1);
         if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
             ui.terminal_open = false;
         }
@@ -1028,19 +1000,16 @@ impl WorkspaceStore {
         self.settings_replica.browser.clone()
     }
 
+    /// Local-handle crossing: take the preview broker receiver exactly once.
+    ///
+    /// Commands and preview registration metadata remain serialized; this
+    /// receiver carries native WebView reply senders and is the deliberate
+    /// reverse-RPC affordance documented by [`HostHandle::take_preview_requests`].
     pub fn take_preview_requests(
         &mut self,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.app.update(cx, |app, _| app.take_preview_requests())
-    }
-
-    pub fn pump_orchestrate_requests(&mut self, cx: &mut Context<Self>) {
-        self.app.update(cx, |app, gpui_cx| {
-            AppState::with_host_cx(app, gpui_cx, |app, host_cx| {
-                app.pump_orchestrate_requests(host_cx)
-            })
-        });
+        self.host.take_preview_requests()
     }
 
     pub fn enabled_provider_profiles(&self, _cx: &App) -> Vec<ResolvedProfile> {
@@ -1234,24 +1203,39 @@ impl WorkspaceStore {
             .map(|project| project.id.clone())
     }
 
-    pub fn scan_external_history(&self, cx: &mut App) -> HostTask<Vec<RecentDir>> {
-        self.app.update(cx, |app, gpui_cx| {
-            AppState::with_host_cx(app, gpui_cx, |app, host_cx| {
-                app.scan_external_history(host_cx)
-            })
-        })
+    pub fn scan_external_history(&self, cx: &mut App) -> Task<Vec<RecentDir>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ScanExternalHistory).await {
+                Ok(QueryResponse::ExternalHistory(recent)) => recent,
+                Ok(other) => {
+                    log::error!("unexpected external-history response: {other:?}");
+                    Vec::new()
+                }
+                Err(error) => {
+                    log::error!("external-history query failed: {}", error.message);
+                    Vec::new()
+                }
+            },
+        )
     }
 
+    /// Starts the serialized import command, then returns a client-local
+    /// receiver fed by the single construction-time progress bus. See
+    /// [`HostHandle::start_external_import`] for the remote replacement
+    /// (correlated progress events).
     pub fn start_external_import(
         &self,
         project_id: &str,
         threads: Vec<ExternalThread>,
         cx: &mut App,
-    ) -> Option<async_channel::Receiver<ExternalImportUpdate>> {
-        self.app.update(cx, |app, gpui_cx| {
-            AppState::with_host_cx(app, gpui_cx, |app, host_cx| {
-                app.start_external_import(project_id, threads, host_cx)
-            })
+    ) -> Task<Result<Option<async_channel::Receiver<ExternalImportUpdate>>, String>> {
+        let host = self.host.clone();
+        let project_id = project_id.to_string();
+        cx.spawn(async move |_| {
+            host.start_external_import(project_id, threads)
+                .await
+                .map_err(|error| error.message)
         })
     }
 
@@ -1329,6 +1313,8 @@ impl WorkspaceStore {
             .and_then(|ui| ui.pending_diff_focus.clone())
     }
 
+    /// UI-only consuming selector. The underlying diff focus is replica state;
+    /// this does not cross the host boundary.
     pub(crate) fn take_diff_focus(
         &mut self,
         session: &str,
@@ -1406,22 +1392,61 @@ impl WorkspaceStore {
     }
 
     pub fn load_git_diff(
+        &self,
         cwd: &std::path::Path,
         scope: GitDiffScope,
         base: Option<&str>,
         ignore_whitespace: bool,
-    ) -> GitDiffResult {
-        tcode_runtime::ui_facade::load_git_diff_opts(cwd, scope, base, ignore_whitespace)
+        cx: &mut App,
+    ) -> Task<GitDiffResult> {
+        let host = self.host.clone();
+        let query = Query::LoadGitDiff {
+            cwd: cwd.to_path_buf(),
+            scope,
+            base: base.map(str::to_string),
+            ignore_whitespace,
+        };
+        cx.spawn(async move |_| match host.query(query).await {
+            Ok(QueryResponse::GitDiff(diff)) => diff,
+            Ok(other) => GitDiffResult {
+                error: Some(format!("unexpected git-diff response: {other:?}")),
+                ..GitDiffResult::default()
+            },
+            Err(error) => GitDiffResult {
+                error: Some(error.message),
+                ..GitDiffResult::default()
+            },
+        })
     }
 
-    pub fn read_diff_working_tree_file(path: &std::path::Path) -> Option<String> {
-        const MAX_BYTES: u64 = 512 * 1024;
-        let metadata = std::fs::metadata(path).ok()?;
-        if metadata.len() > MAX_BYTES {
-            return None;
-        }
-        let text = std::fs::read_to_string(path).ok()?;
-        (text.len() as u64 <= MAX_BYTES).then_some(text)
+    pub fn read_file_bytes(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ReadFileBytes { path }).await {
+                Ok(QueryResponse::FileBytes(bytes)) => Ok(bytes),
+                Ok(other) => Err(protocol_io_error(format!(
+                    "unexpected file-bytes response: {other:?}"
+                ))),
+                Err(error) => Err(protocol_io_error(error.message)),
+            },
+        )
+    }
+
+    pub fn is_directory(&self, path: PathBuf, cx: &mut App) -> Task<bool> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::IsDirectory { path }).await {
+                Ok(QueryResponse::IsDirectory(is_directory)) => is_directory,
+                Ok(other) => {
+                    log::error!("unexpected is-directory response: {other:?}");
+                    false
+                }
+                Err(error) => {
+                    log::error!("is-directory query failed: {}", error.message);
+                    false
+                }
+            },
+        )
     }
 
     pub fn with_active_timeline<R>(
@@ -1457,49 +1482,51 @@ impl WorkspaceStore {
         self.session_status_replica.is_some()
     }
 
-    pub fn take_native_rewind_prefill(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        if !self
-            .session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.native_rewind_prefill_available)
-        {
-            return None;
-        }
-        let prefill = self
-            .app
-            .update(cx, |app, _| app.take_native_rewind_prefill());
-        if prefill.is_some()
-            && let Some(status) = self.session_status_replica.as_mut()
-        {
+    /// Consumes a prefill already delivered by the serialized
+    /// `NativeRewindPrefill` event; no backend consuming read remains.
+    pub fn take_native_rewind_prefill(&mut self, _cx: &mut Context<Self>) -> Option<String> {
+        let active_id = self.session_status_replica.as_ref()?.session_id.clone();
+        let prefill = self.native_rewind_prefills.remove(&active_id)?;
+        if let Some(status) = self.session_status_replica.as_mut() {
             status.native_rewind_prefill_available = false;
         }
-        prefill
+        Some(prefill)
     }
 
-    pub fn composer_terminal_contexts(&self, cx: &App) -> Vec<TerminalContext> {
-        self.app
-            .read(cx)
-            .active
+    pub fn composer_terminal_contexts(&self, _cx: &App) -> Vec<TerminalContext> {
+        self.session_status_replica
             .as_ref()
-            .map(|active| active.terminal_workspace.contexts.clone())
+            .map(|status| {
+                status
+                    .terminal_contexts
+                    .iter()
+                    .map(|context| TerminalContext {
+                        id: context.id,
+                        terminal_label: context.terminal_label.clone(),
+                        line_start: context.line_start,
+                        line_end: context.line_end,
+                        text: context.text.clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// Borrows the live terminal workspace for terminal emulation and PTY I/O.
     ///
     /// Terminal lifecycle and preference mutations still cross [`Command`];
-    /// the drawer uses this only for operations on the live `term::Terminal`
-    /// objects, whose APIs mutate through shared references.
+    /// layout/context metadata comes from `SessionStatus`. This sole local
+    /// crossing accesses the `PtyHandle`/`GridEmulator`-backed live terminal
+    /// objects and is documented by `LocalTerminalRegistry`; a remote
+    /// transport must substitute raw byte streams, never terminal JSON.
     pub fn with_terminal_workspace<R>(
         &self,
-        cx: &App,
+        _cx: &App,
         read: impl FnOnce(&TerminalWorkspace) -> R,
     ) -> Option<R> {
-        self.app
-            .read(cx)
-            .active
-            .as_ref()
-            .map(|active| read(&active.terminal_workspace))
+        let status = self.session_status_replica.as_ref()?;
+        let workspace = TerminalWorkspace::from_replica(status, &self.terminal_registry);
+        Some(read(&workspace))
     }
 
     pub fn composer_review_comments(&self, _cx: &App) -> Vec<ReviewComment> {
@@ -1521,16 +1548,21 @@ impl WorkspaceStore {
             .map(|status| status.cwd.clone())
     }
 
-    pub fn list_active_workspace(&self, cx: &mut App) -> HostTask<Vec<PathEntry>> {
-        let cwd = self
-            .session_status_replica
-            .as_ref()
-            .map(|status| status.cwd.clone());
-        self.app.update(cx, |app, gpui_cx| {
-            AppState::with_host_cx(app, gpui_cx, |app, host_cx| {
-                app.list_workspace_at(cwd, host_cx)
-            })
-        })
+    pub fn list_active_workspace(&self, cx: &mut App) -> Task<Vec<PathEntry>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ListActiveWorkspace).await {
+                Ok(QueryResponse::ActiveWorkspace(entries)) => entries,
+                Ok(other) => {
+                    log::error!("unexpected active-workspace response: {other:?}");
+                    Vec::new()
+                }
+                Err(error) => {
+                    log::error!("active-workspace query failed: {}", error.message);
+                    Vec::new()
+                }
+            },
+        )
     }
 
     pub fn composer_provider_commands(&self, _cx: &App) -> Vec<agent::ProviderCommand> {
@@ -1547,15 +1579,35 @@ impl WorkspaceStore {
     }
 
     pub fn save_attachment_to_dir(
-        dir: &std::path::Path,
-        bytes: &[u8],
-        ext: &str,
-    ) -> std::io::Result<PathBuf> {
-        AppState::save_attachment_to_dir(dir, bytes, ext)
+        &self,
+        dir: PathBuf,
+        bytes: Vec<u8>,
+        ext: String,
+        cx: &mut App,
+    ) -> Task<std::io::Result<PathBuf>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::SaveAttachment { dir, bytes, ext }).await {
+                Ok(QueryResponse::SavedAttachment(path)) => Ok(path),
+                Ok(other) => Err(protocol_io_error(format!(
+                    "unexpected save-attachment response: {other:?}"
+                ))),
+                Err(error) => Err(protocol_io_error(error.message)),
+            },
+        )
     }
 
-    pub fn remove_user_file(&self, path: &std::path::Path) -> std::io::Result<()> {
-        tcode_runtime::ui_facade::remove_user_file(path)
+    pub fn remove_user_file(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<()>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::RemoveUserFile { path }).await {
+                Ok(QueryResponse::UserFileRemoved) => Ok(()),
+                Ok(other) => Err(protocol_io_error(format!(
+                    "unexpected remove-file response: {other:?}"
+                ))),
+                Err(error) => Err(protocol_io_error(error.message)),
+            },
+        )
     }
 
     pub fn composer_pending_user_input(
@@ -1852,12 +1904,15 @@ impl WorkspaceStore {
         &self,
         included: Option<Vec<String>>,
         cx: &mut App,
-    ) -> HostTask<Result<String, String>> {
-        self.app.update(cx, |app, gpui_cx| {
-            AppState::with_host_cx(app, gpui_cx, |app, host_cx| {
-                app.generate_commit_message(included, host_cx)
-            })
-        })
+    ) -> Task<Result<String, String>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::GenerateCommitMessage { included }).await {
+                Ok(QueryResponse::CommitMessage(message)) => Ok(message),
+                Ok(other) => Err(format!("unexpected commit-message response: {other:?}")),
+                Err(error) => Err(error.message),
+            },
+        )
     }
 
     pub fn plan_panel_state(&self, cx: &App) -> (Option<String>, Vec<agent::PlanStep>) {
@@ -1918,10 +1973,56 @@ mod tests {
         session::{ReviewComment, ReviewSide},
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
-    use tcode_runtime::{app::AppState, event::HostEvent};
+    use tcode_runtime::{
+        app::AppState,
+        event::HostEvent,
+        host::HostCx,
+        pipe::{HostHandle, HostServices, spawn_host},
+    };
     use tcode_services::store::SessionStore;
 
     use super::WorkspaceStore;
+
+    fn test_host(store: SessionStore) -> HostHandle {
+        spawn_host(store, HostServices::default()).expect("spawn test host")
+    }
+
+    fn update_host<R>(
+        host: &HostHandle,
+        update: impl FnOnce(&mut AppState, &mut HostCx) -> R + Send + 'static,
+    ) -> R
+    where
+        R: Send + 'static,
+    {
+        smol::block_on(host.update_state_for_test(update)).expect("update test host")
+    }
+
+    fn command(host: &HostHandle, command: Command) {
+        smol::block_on(host.command(command)).expect("serialized host command");
+    }
+
+    fn shutdown_test_host(host: &HostHandle) {
+        host.shutdown_blocking()
+            .expect("drain test store and stop host");
+    }
+
+    fn wait_until(
+        cx: &mut TestAppContext,
+        workspace: &gpui::Entity<WorkspaceStore>,
+        description: &str,
+        ready: impl Fn(&TestAppContext) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
+            if ready(cx) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("timed out waiting for {description}");
+    }
 
     #[gpui::test]
     fn session_replica_matches_live_timeline_for_synthetic_turn(cx: &mut TestAppContext) {
@@ -1965,17 +2066,22 @@ mod tests {
                 .expect("persist synthetic event");
         }
 
-        let app = cx.new(|_| AppState::new(session_store));
-        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
-        workspace.update(cx, |store, cx| {
-            store.dispatch(
-                Command::SelectSession {
-                    session_id: session_id.clone(),
-                },
-                cx,
-            );
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: session_id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "initial session timeline replica", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_replica
+                    .as_ref()
+                    .is_some_and(|(id, timeline)| id == &session_id && timeline.turns.len() == 1)
+            })
         });
-        cx.run_until_parked();
 
         let live_events = [
             AgentEvent::ItemCompleted(ThreadItem {
@@ -2004,7 +2110,8 @@ mod tests {
             },
         ];
         for (offset, event) in live_events.into_iter().enumerate() {
-            app.update(cx, |state, cx| {
+            let event_session_id = session_id.clone();
+            update_host(&host, move |state, cx| {
                 state
                     .active
                     .as_mut()
@@ -2013,7 +2120,7 @@ mod tests {
                     .apply_at(Some(200 + offset as u64), &event);
                 cx.emit(HostEvent::Domain(EventEnvelope {
                     topic: Topic::SessionEvents {
-                        session_id: session_id.clone(),
+                        session_id: event_session_id,
                     },
                     seq: 10 + offset as u64,
                     event: ServerEvent::SessionEvent(SessionEventRecord {
@@ -2023,8 +2130,21 @@ mod tests {
                 }));
             });
         }
+        wait_until(
+            cx,
+            &workspace,
+            "incremental session timeline replica",
+            |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store
+                        .session_replica
+                        .as_ref()
+                        .is_some_and(|(_, timeline)| timeline.turns.len() == 2)
+                })
+            },
+        );
 
-        let live = app.read_with(cx, |state, _| {
+        let live = update_host(&host, |state, _| {
             let timeline = &state.active.as_ref().expect("active session").timeline;
             (
                 timeline
@@ -2049,6 +2169,7 @@ mod tests {
         });
         assert_eq!(replica, live);
 
+        shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -2059,40 +2180,50 @@ mod tests {
             tcode_services::store::now_millis()
         ));
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let app = cx.new(|_| AppState::new(session_store));
         let seed_project = Project::from_root(root.join("seed"));
         let mut seed_session =
             SessionMeta::new(ProviderKind::Codex, seed_project.root.clone(), None);
         seed_session.project_id = Some(seed_project.id.clone());
         let seed_session_id = seed_session.id.clone();
-        app.update(cx, |state, _| {
-            let AppState {
-                projects, sessions, ..
-            } = state;
-            projects.push(seed_project);
-            sessions.push(seed_session);
-        });
-        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
+        session_store
+            .upsert_project(&seed_project)
+            .expect("persist seed project");
+        session_store
+            .upsert_meta(&seed_session)
+            .expect("persist seed session");
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
-        workspace.update(cx, |store, cx| {
-            store.dispatch(
-                Command::CreateProject {
-                    root: root.join("created"),
-                },
-                cx,
-            );
-            store.dispatch(
-                Command::ArchiveSession {
-                    session_id: seed_session_id,
-                },
-                cx,
-            );
-            let mut settings = store.settings_page_settings(cx);
-            settings.word_wrap_diffs = !settings.word_wrap_diffs;
-            store.dispatch(Command::UpdateSettings { settings }, cx);
+        command(
+            &host,
+            Command::CreateProject {
+                root: root.join("created"),
+            },
+        );
+        command(
+            &host,
+            Command::ArchiveSession {
+                session_id: seed_session_id.clone(),
+            },
+        );
+        let mut settings = workspace.read_with(cx, |store, cx| store.settings_page_settings(cx));
+        settings.word_wrap_diffs = !settings.word_wrap_diffs;
+        let expected_word_wrap = settings.word_wrap_diffs;
+        command(&host, Command::UpdateSettings { settings });
+        wait_until(cx, &workspace, "index and settings replicas", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.index_replica.1.len() == 2
+                    && store
+                        .index_replica
+                        .0
+                        .iter()
+                        .find(|meta| meta.id == seed_session_id)
+                        .is_some_and(|meta| meta.archived_at.is_some())
+                    && store.settings_replica.word_wrap_diffs == expected_word_wrap
+            })
         });
 
-        let live_index = app.read_with(cx, |state, _| {
+        let live_index = update_host(&host, |state, _| {
             let AppState {
                 sessions, projects, ..
             } = state;
@@ -2101,7 +2232,7 @@ mod tests {
                 serde_json::to_value(projects).unwrap(),
             )
         });
-        let live_settings = app.read_with(cx, |state, _| {
+        let live_settings = update_host(&host, |state, _| {
             serde_json::to_value(&state.settings).unwrap()
         });
         let replica_index = workspace.read_with(cx, |store, _| {
@@ -2126,6 +2257,7 @@ mod tests {
             "settings replica diverged from live state"
         );
 
+        shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -2142,46 +2274,59 @@ mod tests {
         let session_id = meta.id.clone();
         session_store.upsert_meta(&meta).expect("persist session");
 
-        let app = cx.new(|_| AppState::new(session_store));
-        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
-        workspace.update(cx, |store, cx| {
-            store.dispatch(
-                Command::SelectSession {
-                    session_id: session_id.clone(),
-                },
-                cx,
-            );
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: session_id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "selected session status", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == session_id)
+            })
         });
-        AppState::update(&app, cx, |state, cx| {
+        update_host(&host, |state, cx| {
             state.queue_message_for_replica_test("queued for replication".into(), cx);
         });
-        workspace.update(cx, |store, cx| {
-            store.dispatch(
-                Command::SetInteractionMode {
-                    mode: agent::InteractionMode::Plan,
-                },
-                cx,
-            );
-            store.dispatch(
-                Command::AddReviewComment {
-                    comment: ReviewComment::new(
-                        "src/lib.rs".into(),
-                        4,
-                        4,
-                        ReviewSide::New,
-                        "Replicated review draft".into(),
-                        "+changed".into(),
-                        "turn:0".into(),
-                        "Turn 1".into(),
-                        0,
-                        1,
-                    ),
-                },
-                cx,
-            );
+        command(
+            &host,
+            Command::SetInteractionMode {
+                mode: agent::InteractionMode::Plan,
+            },
+        );
+        command(
+            &host,
+            Command::AddReviewComment {
+                comment: ReviewComment::new(
+                    "src/lib.rs".into(),
+                    4,
+                    4,
+                    ReviewSide::New,
+                    "Replicated review draft".into(),
+                    "+changed".into(),
+                    "turn:0".into(),
+                    "Turn 1".into(),
+                    0,
+                    1,
+                ),
+            },
+        );
+        wait_until(cx, &workspace, "queued-message and review replicas", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.session_status_replica.as_ref().is_some_and(|status| {
+                    status.queued_messages.len() == 1
+                        && status.interaction_mode == agent::InteractionMode::Plan
+                        && status.review_comment_drafts.len() == 1
+                })
+            })
         });
 
-        let live = app.read_with(cx, |state, _| {
+        let live = update_host(&host, move |state, _| {
             state
                 .session_status_snapshot(&session_id)
                 .expect("live session status")
@@ -2203,6 +2348,85 @@ mod tests {
             replica.review_comment_drafts
         );
 
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn native_rewind_prefill_events_remain_keyed_to_parked_sessions(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-native-rewind-replica-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let first = SessionMeta::new(ProviderKind::ClaudeCode, root.join("first"), None);
+        let second = SessionMeta::new(ProviderKind::ClaudeCode, root.join("second"), None);
+        session_store
+            .upsert_meta(&first)
+            .expect("persist first session");
+        session_store
+            .upsert_meta(&second)
+            .expect("persist second session");
+
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: first.id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "first selected session", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == first.id)
+            })
+        });
+
+        for (seq, session_id, text) in [
+            (1, first.id.clone(), "first parked prefill".to_string()),
+            (2, second.id.clone(), "second parked prefill".to_string()),
+        ] {
+            update_host(&host, move |_state, cx| {
+                cx.emit(HostEvent::Domain(EventEnvelope {
+                    topic: Topic::SessionStatus {
+                        session_id: session_id.clone(),
+                    },
+                    seq,
+                    event: ServerEvent::NativeRewindPrefill { session_id, text },
+                }));
+            });
+        }
+        wait_until(cx, &workspace, "both rewind prefill events", |cx| {
+            workspace.read_with(cx, |store, _| store.native_rewind_prefills.len() == 2)
+        });
+
+        assert_eq!(
+            workspace.update(cx, |store, cx| store.take_native_rewind_prefill(cx)),
+            Some("first parked prefill".into())
+        );
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: second.id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "second selected session", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == second.id)
+            })
+        });
+        assert_eq!(
+            workspace.update(cx, |store, cx| store.take_native_rewind_prefill(cx)),
+            Some("second parked prefill".into())
+        );
+
+        shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 
@@ -2215,10 +2439,10 @@ mod tests {
             tcode_services::store::now_millis()
         ));
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let app = cx.new(|_| AppState::new(session_store));
-        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
-        AppState::update(&app, cx, |state, cx| {
+        update_host(&host, |state, cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
                     "agents": [{
@@ -2252,8 +2476,18 @@ mod tests {
             state.git_busy = true;
             state.emit_provider_and_git_replicas_for_test(cx);
         });
+        wait_until(cx, &workspace, "provider and git replicas", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.providers_replica.providers_checking
+                    && store
+                        .git_status_replica
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.branch.as_deref() == Some("feature/replica"))
+            })
+        });
 
-        let (live_providers, live_git) = app.read_with(cx, |state, _| {
+        let (live_providers, live_git) = update_host(&host, |state, _| {
             (
                 state.providers_status_snapshot(),
                 state.git_status_snapshot(),
@@ -2278,6 +2512,7 @@ mod tests {
             "src/replica.rs"
         );
 
+        shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
     }
 }

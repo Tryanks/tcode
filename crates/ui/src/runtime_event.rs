@@ -27,6 +27,7 @@ pub(super) fn apply_runtime_effect(effect: &RuntimeEffect) {
         RuntimeEffect::CopyToClipboard { .. } => {
             unreachable!("clipboard effects are applied by the app shell")
         }
+        _ => {}
     }
 }
 
@@ -95,6 +96,7 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::PersistSessionIndex { error } => {
                     tcode_i18n::tr!("errors.persist_session_index", error = error).into_owned()
                 }
+                _ => format!("Unknown runtime error: {error:?}"),
             };
             (RuntimeEventSeverity::Error, message)
         }
@@ -131,11 +133,16 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::SwitchedBranch { branch } => {
                     tcode_i18n::tr!("notice.switched_branch", branch = branch).into_owned()
                 }
+                _ => format!("Unknown runtime notice: {notice:?}"),
             };
             (RuntimeEventSeverity::Success, message)
         }
         RuntimeEvent::Toast(_) => unreachable!("rich toasts use present_runtime_toast"),
         RuntimeEvent::Effect(_) => unreachable!("runtime effects are not presentable"),
+        _ => (
+            RuntimeEventSeverity::Error,
+            format!("Unknown runtime event: {event:?}"),
+        ),
     };
 
     PresentedRuntimeEvent { severity, message }
@@ -257,6 +264,13 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
             ToastKind::Error,
             tcode_i18n::tr!("providers.acp.install_failed", name = name).into_owned(),
             Some(detail.clone()),
+            None,
+        ),
+        _ => (
+            RuntimeToastDisposition::Push,
+            ToastKind::Warning,
+            "Unknown runtime notification".to_string(),
+            Some(format!("{toast:?}")),
             None,
         ),
     };
@@ -447,6 +461,7 @@ mod tests {
                         assert_eq!(presented.disposition, RuntimeToastDisposition::Push);
                         assert_eq!(presented.kind, ToastKind::Error);
                     }
+                    _ => {}
                 }
             }
 
