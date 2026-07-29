@@ -4484,9 +4484,9 @@ fn traits_chip_label(
         match descriptor {
             OptionDescriptor::Select {
                 id,
+                label,
                 options,
                 default_value,
-                ..
             } => {
                 // An armed Ultrathink shows in the reasoning segment (it is not
                 // persisted, so it does not resolve as an ordinary selection).
@@ -4497,11 +4497,11 @@ fn traits_chip_label(
                     parts.push(o.label.clone());
                     continue;
                 }
-                if let Some(value) = resolved_select_value(id, options, default_value, selections)
-                    && let Some(o) = options.iter().find(|o| o.value == value)
-                {
-                    parts.push(o.label.clone());
-                }
+                let part = resolved_select_value(id, options, default_value, selections)
+                    .and_then(|value| options.iter().find(|o| o.value == value))
+                    .map(|option| option.label.clone())
+                    .unwrap_or_else(|| label.clone());
+                parts.push(part);
             }
             OptionDescriptor::Boolean {
                 id,
@@ -4980,6 +4980,25 @@ mod tests {
         assert_eq!(
             traits_chip_label(&thinking, &[], false),
             Some("Thinking Off".into())
+        );
+        let unresolved = agent::ModelSpec {
+            id: "u".into(),
+            display_name: "u".into(),
+            is_default: false,
+            options: vec![agent::OptionDescriptor::Select {
+                id: "reasoningEffort".into(),
+                label: "Thinking".into(),
+                options: vec![agent::SelectOption {
+                    value: "high".into(),
+                    label: "High".into(),
+                    description: None,
+                }],
+                default_value: None,
+            }],
+        };
+        assert_eq!(
+            traits_chip_label(&unresolved, &[], false),
+            Some("Thinking".into())
         );
         // A model with no descriptors has no chip.
         let bare = agent::ModelSpec {

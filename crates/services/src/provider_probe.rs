@@ -7,7 +7,7 @@ use tcode_core::provider_status::{
     AuthStatus, ProviderAuth, ProviderProbeDiagnostic, ProviderSnapshot, ProviderStatusKind,
 };
 
-use crate::provider_auth::{parse_claude_auth, parse_codex_auth};
+use crate::provider_auth::{parse_aggregator_auth, parse_claude_auth, parse_codex_auth};
 
 /// The bare command name for a provider (fallback when no path resolves).
 pub fn default_program(provider: ProviderKind) -> String {
@@ -109,10 +109,30 @@ pub async fn probe_provider(
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_codex_auth)
         }
-        // Both CLIs can aggregate credentials for several upstream model
-        // providers. Installation/version are definitive; auth remains
-        // indeterminate until a session/model query succeeds.
-        ProviderKind::Pi | ProviderKind::OpenCode => None,
+        ProviderKind::Pi => {
+            let home = launch_env
+                .home
+                .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")));
+            let path = home.map(|home| home.join("auth.json"));
+            // This is a small local JSON file; keep the direct read used by the
+            // app rather than introducing a thread-pool hop.
+            let json = path.and_then(|path| std::fs::read_to_string(path).ok());
+            json.as_deref().and_then(parse_aggregator_auth)
+        }
+        ProviderKind::OpenCode => {
+            let xdg_data = env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "XDG_DATA_HOME")
+                .map(|(_, value)| PathBuf::from(value))
+                .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+                .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")));
+            let path = xdg_data.map(|home| home.join("opencode/auth.json"));
+            // This is a small local JSON file; keep the direct read used by the
+            // app rather than introducing a thread-pool hop.
+            let json = path.and_then(|path| std::fs::read_to_string(path).ok());
+            json.as_deref().and_then(parse_aggregator_auth)
+        }
         // ACP authentication is surfaced by its session protocol.
         ProviderKind::Acp => None,
     };
