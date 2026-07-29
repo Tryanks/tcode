@@ -20,6 +20,7 @@ use tcode_runtime::app::AppState;
 use tcode_runtime::ui_facade::AcpMarketplaceItem;
 
 use crate::material;
+use crate::window_state::WindowState;
 
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
@@ -295,12 +296,17 @@ pub struct AcpPanel {
 }
 
 impl AcpPanel {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = |placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
         let search = input(&tcode_i18n::tr!("providers.acp.search"), window, cx);
-        if let Some(seed) = app_state.read(cx).debug_acp_search.clone() {
+        if let Some(seed) = window_state.read(cx).debug_acp_search.clone() {
             search.update(cx, |input, cx| input.set_value(seed, window, cx));
         }
         let subscriptions = vec![

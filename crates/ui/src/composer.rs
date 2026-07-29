@@ -41,6 +41,7 @@ use crate::context_meter;
 use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::shortcut::format_secondary_shortcut;
+use crate::window_state::WindowState;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
 use tcode_core::session::append_review_comments_to_prompt;
@@ -474,6 +475,7 @@ fn mime_from_path(path: &std::path::Path) -> String {
 
 pub struct Composer {
     app_state: Entity<AppState>,
+    window_state: Entity<WindowState>,
     input: Entity<InputState>,
     /// Dedicated free-form answer field shown inside an agent question card.
     /// Keeping it separate from the turn composer makes the pending question
@@ -540,7 +542,12 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_state: Entity<AppState>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -612,6 +619,7 @@ impl Composer {
 
         Self {
             app_state,
+            window_state,
             input,
             user_input_custom,
             text_cache: ComposerTextCache::default(),
@@ -690,7 +698,7 @@ impl Composer {
             return;
         }
         let (compose, image) = {
-            let state = self.app_state.read(cx);
+            let state = self.window_state.read(cx);
             (state.debug_compose.clone(), state.debug_image.clone())
         };
         if compose.is_none() && image.is_none() {
