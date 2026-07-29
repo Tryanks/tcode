@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
@@ -10,9 +10,11 @@ use tcode_core::{
     session::{ReviewComment, StoredEvent, Timeline},
     settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
-use tcode_protocol::{Command, EventEnvelope, ServerEvent, Topic};
+use tcode_protocol::{
+    Command, EventEnvelope, QueuedMessageStatus, ServerEvent, SessionStatus, Topic,
+};
 use tcode_runtime::{
-    app::{AppState, ProjectGroup, ProviderVersionStatus, QueuedMessage},
+    app::{AppState, ProjectGroup, ProviderVersionStatus},
     event::{HostEvent, RuntimeEvent},
     terminal::{TerminalContext, TerminalWorkspace},
     ui_facade::{
@@ -32,6 +34,8 @@ pub struct WorkspaceStore {
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
     session_replica: Option<(String, Timeline)>,
+    session_status_replica: Option<SessionStatus>,
+    background_session_flags: HashMap<String, (bool, bool)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,16 +77,28 @@ pub(crate) struct DiffActiveState {
 
 impl WorkspaceStore {
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let (index_replica, settings_replica) = {
+        let (index_replica, settings_replica, session_status_replica, background_session_flags) = {
             let state = app.read(cx);
+            let active_id = state.active_session_id();
+            let statuses = state
+                .sessions
+                .iter()
+                .filter_map(|meta| state.session_status_snapshot(&meta.id))
+                .collect::<Vec<_>>();
             (
                 (state.sessions.clone(), state.projects.clone()),
                 state.settings.clone(),
+                active_id.and_then(|id| state.session_status_snapshot(id)),
+                statuses
+                    .into_iter()
+                    .filter(|status| Some(status.session_id.as_str()) != active_id)
+                    .map(|status| (status.session_id, (status.working, status.pending_approval)))
+                    .collect(),
             )
         };
         cx.observe(&app, |store, app, cx| {
-            let active = app
-                .read(cx)
+            let state = app.read(cx);
+            let active = state
                 .active
                 .as_ref()
                 .map(|active| (active.meta.id.as_str(), active.draft));
@@ -93,6 +109,15 @@ impl WorkspaceStore {
             };
             if !replica_matches {
                 store.session_replica = None;
+            }
+            let status_matches = match (active, store.session_status_replica.as_ref()) {
+                (Some((active_id, _)), Some(status)) => status.session_id == active_id,
+                (None, None) => true,
+                _ => false,
+            };
+            if !status_matches {
+                store.session_status_replica =
+                    active.and_then(|(id, _)| state.session_status_snapshot(id));
             }
             cx.notify();
         })
@@ -110,10 +135,12 @@ impl WorkspaceStore {
             index_replica,
             settings_replica,
             session_replica: None,
+            session_status_replica,
+            background_session_flags,
         }
     }
 
-    fn apply_domain_event(&mut self, envelope: &EventEnvelope, cx: &App) {
+    fn apply_domain_event(&mut self, envelope: &EventEnvelope, _cx: &App) {
         match (&envelope.topic, &envelope.event) {
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
@@ -155,6 +182,23 @@ impl WorkspaceStore {
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
                 self.settings_replica = settings.clone();
             }
+            (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
+                if status.session_id == *session_id =>
+            {
+                if self
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|active| active.session_id == *session_id)
+                {
+                    self.session_status_replica = Some(status.clone());
+                    self.background_session_flags.remove(session_id);
+                } else {
+                    self.background_session_flags.insert(
+                        session_id.clone(),
+                        (status.working, status.pending_approval),
+                    );
+                }
+            }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot(records)) => {
                 let mut timeline =
                     Timeline::fold_events(records.iter().map(|record| StoredEvent {
@@ -162,12 +206,10 @@ impl WorkspaceStore {
                         event: record.event.clone(),
                     }));
                 let live_turn_running = self
-                    .app
-                    .read(cx)
-                    .active
+                    .session_status_replica
                     .as_ref()
-                    .filter(|active| active.meta.id == *session_id)
-                    .is_some_and(|active| active.is_turn_running());
+                    .filter(|status| status.session_id == *session_id)
+                    .is_some_and(|status| status.turn_running);
                 if !live_turn_running {
                     timeline.mark_idle();
                 }
@@ -437,16 +479,31 @@ impl WorkspaceStore {
             .any(|id| id == project_id)
     }
 
-    pub fn active_session_id(&self, cx: &App) -> Option<String> {
-        self.app.read(cx).active_session_id().map(str::to_owned)
+    pub fn active_session_id(&self, _cx: &App) -> Option<String> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.session_id.clone())
     }
 
-    pub fn turn_running_for(&self, session_id: &str, cx: &App) -> bool {
-        self.app.read(cx).turn_running_for(session_id)
+    pub fn turn_running_for(&self, session_id: &str, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .filter(|status| status.session_id == session_id)
+            .map(|status| status.working)
+            .or_else(|| {
+                self.background_session_flags
+                    .get(session_id)
+                    .map(|flags| flags.0)
+            })
+            .unwrap_or(false)
     }
 
-    pub fn session_unread(&self, session_id: &str, cx: &App) -> bool {
-        if self.app.read(cx).active_session_id() == Some(session_id) {
+    pub fn session_unread(&self, session_id: &str, _cx: &App) -> bool {
+        if self
+            .session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.session_id == session_id)
+        {
             return false;
         }
         let Some(meta) = self
@@ -463,12 +520,20 @@ impl WorkspaceStore {
             .is_some_and(|visited| meta.updated_at > *visited)
     }
 
-    pub fn pending_approval_for(&self, session_id: &str, cx: &App) -> bool {
-        self.app.read(cx).pending_approval_for(session_id).is_some()
+    pub fn pending_approval_for(&self, session_id: &str, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .filter(|status| status.session_id == session_id)
+            .map(|status| status.pending_approval)
+            .or_else(|| {
+                self.background_session_flags
+                    .get(session_id)
+                    .map(|flags| flags.1)
+            })
+            .unwrap_or(false)
     }
 
     pub fn fork_availability(&self, session_id: &str, cx: &App) -> ForkAvailability {
-        let app = self.app.read(cx);
         let Some(meta) = self
             .index_replica
             .0
@@ -481,7 +546,7 @@ impl WorkspaceStore {
             ForkAvailability::Unsupported
         } else if meta.resume_cursor.is_none() {
             ForkAvailability::Empty
-        } else if app.turn_running_for(session_id) {
+        } else if self.turn_running_for(session_id, cx) {
             ForkAvailability::Running
         } else {
             ForkAvailability::Available
@@ -533,9 +598,10 @@ impl WorkspaceStore {
     }
 
     pub fn shell_window_title(&self, cx: &App) -> String {
-        match self.app.read(cx).active.as_ref() {
-            Some(active) if active.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
-            Some(active) => active.meta.title.clone(),
+        let _ = cx;
+        match self.session_status_replica.as_ref() {
+            Some(status) if status.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
+            Some(status) => status.title.clone(),
             None => "tcode".to_string(),
         }
     }
@@ -549,16 +615,22 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn preview_active_identity(&self, cx: &App) -> Option<(String, String)> {
-        let app = self.app.read(cx);
-        app.active_session_id().and_then(|session_id| {
-            app.active_conversation_ui_key()
-                .map(|key| (session_id.to_string(), key))
+    pub fn preview_active_identity(&self, _cx: &App) -> Option<(String, String)> {
+        self.session_status_replica.as_ref().map(|status| {
+            let key = if status.draft {
+                format!(
+                    "draft:{}",
+                    status.project_id.as_deref().unwrap_or(&status.session_id)
+                )
+            } else {
+                status.session_id.clone()
+            };
+            (status.session_id.clone(), key)
         })
     }
 
     pub fn preview_active_session_id(&self, cx: &App) -> Option<String> {
-        self.app.read(cx).active_session_id().map(str::to_owned)
+        self.active_session_id(cx)
     }
 
     pub fn preview_panel_showing(&self, cx: &App) -> bool {
@@ -786,20 +858,20 @@ impl WorkspaceStore {
         let app = self.app.read(cx);
         (
             app.git_changed_files(),
-            app.git_branch_name(),
+            self.session_status_replica
+                .as_ref()
+                .and_then(|status| status.git_branch.clone()),
             app.git_on_default_branch(),
         )
     }
 
-    pub(crate) fn diff_active_state(&self, cx: &App) -> Option<DiffActiveState> {
-        self.app
-            .read(cx)
-            .active
+    pub(crate) fn diff_active_state(&self, _cx: &App) -> Option<DiffActiveState> {
+        self.session_status_replica
             .as_ref()
-            .map(|active| DiffActiveState {
-                session: active.meta.id.clone(),
-                cwd: active.meta.cwd.clone(),
-                branches: active.branches.clone(),
+            .map(|status| DiffActiveState {
+                session: status.session_id.clone(),
+                cwd: status.cwd.clone(),
+                branches: status.branches.clone(),
             })
     }
 
@@ -889,7 +961,7 @@ impl WorkspaceStore {
         let plan_tab_active_label = self
             .with_active_timeline(cx, |timeline| timeline.proposed_plan.is_some())
             .unwrap_or(false)
-            || app.active_interaction_mode() == agent::InteractionMode::Plan;
+            || self.composer_interaction_mode(cx) == agent::InteractionMode::Plan;
         (
             app.diff_panel_open(),
             app.diff_panel_expanded(),
@@ -946,25 +1018,39 @@ impl WorkspaceStore {
 
     pub fn with_composer_destination<R>(
         &self,
-        cx: &App,
+        _cx: &App,
         read: impl FnOnce(bool, &str, Option<&str>) -> R,
     ) -> Option<R> {
-        self.app.read(cx).active.as_ref().map(|active| {
+        self.session_status_replica.as_ref().map(|status| {
             read(
-                active.draft,
-                &active.meta.id,
-                active.meta.project_id.as_deref(),
+                status.draft,
+                &status.session_id,
+                status.project_id.as_deref(),
             )
         })
     }
 
-    pub fn composer_has_active_session(&self, cx: &App) -> bool {
-        self.app.read(cx).active.is_some()
+    pub fn composer_has_active_session(&self, _cx: &App) -> bool {
+        self.session_status_replica.is_some()
     }
 
     pub fn take_native_rewind_prefill(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        self.app
-            .update(cx, |app, _| app.take_native_rewind_prefill())
+        if !self
+            .session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.native_rewind_prefill_available)
+        {
+            return None;
+        }
+        let prefill = self
+            .app
+            .update(cx, |app, _| app.take_native_rewind_prefill());
+        if prefill.is_some()
+            && let Some(status) = self.session_status_replica.as_mut()
+        {
+            status.native_rewind_prefill_available = false;
+        }
+        prefill
     }
 
     pub fn composer_terminal_contexts(&self, cx: &App) -> Vec<TerminalContext> {
@@ -997,26 +1083,38 @@ impl WorkspaceStore {
         self.app.read(cx).review_comments().to_vec()
     }
 
-    pub fn composer_relay_confirmation(&self, cx: &App) -> Option<(String, String)> {
-        self.app.read(cx).relay_confirmation()
+    pub fn composer_relay_confirmation(&self, _cx: &App) -> Option<(String, String)> {
+        self.session_status_replica
+            .as_ref()
+            .and_then(|status| status.relay_confirmation.clone())
     }
 
-    pub fn composer_active_cwd(&self, cx: &App) -> Option<PathBuf> {
-        self.app.read(cx).active_cwd()
+    pub fn composer_active_cwd(&self, _cx: &App) -> Option<PathBuf> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.cwd.clone())
     }
 
     pub fn list_active_workspace(&self, cx: &App) -> Task<Vec<PathEntry>> {
+        let cwd = self
+            .session_status_replica
+            .as_ref()
+            .map(|status| status.cwd.clone());
         self.app
             .read(cx)
-            .list_active_workspace(cx.background_executor())
+            .list_workspace_at(cwd, cx.background_executor())
     }
 
-    pub fn composer_provider_commands(&self, cx: &App) -> Vec<agent::ProviderCommand> {
-        self.app.read(cx).active_provider_commands().to_vec()
+    pub fn composer_provider_commands(&self, _cx: &App) -> Vec<agent::ProviderCommand> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.provider_commands.clone())
+            .unwrap_or_default()
     }
 
     pub fn composer_attachments_dir(&self, cx: &App) -> Option<PathBuf> {
-        self.app.read(cx).attachments_dir()
+        let session_id = self.session_status_replica.as_ref()?.session_id.as_str();
+        Some(self.app.read(cx).attachments_dir_for(session_id))
     }
 
     pub fn save_attachment_to_dir(
@@ -1039,16 +1137,14 @@ impl WorkspaceStore {
             .flatten()
     }
 
-    pub(crate) fn composer_active_model(&self, cx: &App) -> Option<ComposerActiveModel> {
-        self.app
-            .read(cx)
-            .active
+    pub(crate) fn composer_active_model(&self, _cx: &App) -> Option<ComposerActiveModel> {
+        self.session_status_replica
             .as_ref()
-            .map(|active| ComposerActiveModel {
-                provider: active.meta.provider,
-                model: active.meta.model.clone(),
-                acp_agent_id: active.meta.acp_agent_id.clone(),
-                profile_id: active.meta.profile_id.clone(),
+            .map(|status| ComposerActiveModel {
+                provider: status.provider,
+                model: status.requested_model.clone(),
+                acp_agent_id: status.acp_agent_id.clone(),
+                profile_id: status.requested_profile_id.clone(),
             })
     }
 
@@ -1064,32 +1160,54 @@ impl WorkspaceStore {
         self.app.read(cx).models_loading(provider)
     }
 
-    pub fn composer_model_pending_restart(&self, cx: &App) -> bool {
-        self.app.read(cx).model_pending_restart()
+    pub fn composer_model_pending_restart(&self, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.model_pending_restart)
     }
 
     pub fn composer_active_model_spec(&self, cx: &App) -> Option<agent::ModelSpec> {
-        self.app.read(cx).active_model_spec()
+        let status = self.session_status_replica.as_ref()?;
+        let model = status.requested_model.as_deref()?;
+        self.app
+            .read(cx)
+            .models_for(status.provider)
+            .iter()
+            .find(|spec| spec.id == model)
+            .cloned()
     }
 
-    pub fn composer_active_option_descriptors(&self, cx: &App) -> Vec<agent::OptionDescriptor> {
-        self.app.read(cx).active_option_descriptors()
+    pub fn composer_active_option_descriptors(&self, _cx: &App) -> Vec<agent::OptionDescriptor> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.provider_option_descriptors.clone())
+            .unwrap_or_default()
     }
 
-    pub fn composer_active_option_selections(&self, cx: &App) -> Vec<agent::OptionSelection> {
-        self.app.read(cx).active_option_selections()
+    pub fn composer_active_option_selections(&self, _cx: &App) -> Vec<agent::OptionSelection> {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.provider_option_selections.clone())
+            .unwrap_or_default()
     }
 
-    pub fn composer_ultrathink_armed(&self, cx: &App) -> bool {
-        self.app.read(cx).ultrathink_armed()
+    pub fn composer_ultrathink_armed(&self, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.ultrathink_armed)
     }
 
-    pub fn composer_options_pending_restart(&self, cx: &App) -> bool {
-        self.app.read(cx).options_pending_restart()
+    pub fn composer_options_pending_restart(&self, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.options_pending_restart)
     }
 
-    pub fn composer_interaction_mode(&self, cx: &App) -> agent::InteractionMode {
-        self.app.read(cx).active_interaction_mode()
+    pub fn composer_interaction_mode(&self, _cx: &App) -> agent::InteractionMode {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.interaction_mode)
+            .unwrap_or_default()
     }
 
     pub fn composer_context(
@@ -1097,11 +1215,9 @@ impl WorkspaceStore {
         cx: &App,
     ) -> (Option<agent::TokenUsage>, Option<agent::ProviderKind>) {
         let provider = self
-            .app
-            .read(cx)
-            .active
+            .session_status_replica
             .as_ref()
-            .map(|active| active.meta.provider);
+            .map(|status| status.provider);
         (
             self.with_active_timeline(cx, |timeline| timeline.usage)
                 .flatten(),
@@ -1109,34 +1225,42 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn composer_approval_mode(&self, cx: &App) -> agent::ApprovalMode {
-        self.app.read(cx).active_approval_mode()
+    pub fn composer_approval_mode(&self, _cx: &App) -> agent::ApprovalMode {
+        self.session_status_replica
+            .as_ref()
+            .map(|status| status.approval_mode)
+            .unwrap_or_default()
     }
 
-    pub fn composer_approval_pending_restart(&self, cx: &App) -> bool {
-        self.app.read(cx).approval_pending_restart()
+    pub fn composer_approval_pending_restart(&self, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.approval_pending_restart)
     }
 
-    pub fn composer_queue(&self, cx: &App) -> Option<(Vec<QueuedMessage>, bool, &'static str)> {
-        self.app.read(cx).active.as_ref().map(|active| {
+    pub fn composer_queue(
+        &self,
+        _cx: &App,
+    ) -> Option<(Vec<QueuedMessageStatus>, bool, &'static str)> {
+        self.session_status_replica.as_ref().map(|status| {
             (
-                active.queued().to_vec(),
-                active.supports_steering(),
-                active.meta.provider.display_name(),
+                status.queued_messages.clone(),
+                status.supports_steering,
+                status.provider.display_name(),
             )
         })
     }
 
-    pub fn composer_supports_steering(&self, cx: &App) -> bool {
-        self.app
-            .read(cx)
-            .active
+    pub fn composer_supports_steering(&self, _cx: &App) -> bool {
+        self.session_status_replica
             .as_ref()
-            .is_some_and(|active| active.supports_steering())
+            .is_some_and(|status| status.supports_steering)
     }
 
-    pub fn composer_preparing_worktree(&self, cx: &App) -> bool {
-        self.app.read(cx).preparing_worktree()
+    pub fn composer_preparing_worktree(&self, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .is_some_and(|status| status.preparing_worktree)
     }
 
     pub fn composer_plan_ready_markdown(&self, cx: &App) -> Option<String> {
@@ -1146,37 +1270,33 @@ impl WorkspaceStore {
         .flatten()
     }
 
-    pub(crate) fn composer_checkout_state(&self, cx: &App) -> Option<ComposerCheckoutState> {
-        let app = self.app.read(cx);
-        let active = app.active.as_ref()?;
-        let branch = active.git_branch.clone().or_else(|| {
-            active
-                .meta
+    pub(crate) fn composer_checkout_state(&self, _cx: &App) -> Option<ComposerCheckoutState> {
+        let status = self.session_status_replica.as_ref()?;
+        let branch = status.git_branch.clone().or_else(|| {
+            status
                 .worktree
                 .as_ref()
                 .map(|worktree| worktree.branch.clone())
         })?;
-        let worktree_base = match app.draft_workspace_mode() {
-            Some(tcode_core::ui::WorkspaceMode::NewWorktree { base }) => Some(base),
+        let worktree_base = match &status.draft_workspace {
+            tcode_core::ui::WorkspaceMode::NewWorktree { base } => Some(base.clone()),
             _ => None,
         };
         Some(ComposerCheckoutState {
             branch,
-            branches: active.branches.clone(),
-            turn_running: active.is_turn_running(),
-            is_draft: active.draft,
+            branches: status.branches.clone(),
+            turn_running: status.turn_running,
+            is_draft: status.draft,
             worktree_base,
-            worktree: active.meta.worktree.clone(),
+            worktree: status.worktree.clone(),
         })
     }
 
     pub fn composer_render_state(&self, cx: &App) -> (bool, Option<agent::ApprovalRequest>, usize) {
         let turn_running = self
-            .app
-            .read(cx)
-            .active
+            .session_status_replica
             .as_ref()
-            .is_some_and(|active| active.is_turn_running());
+            .is_some_and(|status| status.turn_running);
         self.with_active_timeline(cx, |timeline| {
             (
                 turn_running,
@@ -1187,26 +1307,23 @@ impl WorkspaceStore {
         .unwrap_or((turn_running, None, 0))
     }
 
-    pub fn composer_is_favorite_model(&self, model: &str, cx: &App) -> bool {
-        self.app.read(cx).is_favorite_model(model)
+    pub fn composer_is_favorite_model(&self, model: &str, _cx: &App) -> bool {
+        self.settings_replica
+            .favorite_models
+            .iter()
+            .any(|favorite| favorite == model)
     }
 
-    pub fn chat_active_session(&self, cx: &App) -> Option<(String, PathBuf, bool)> {
-        self.app.read(cx).active.as_ref().map(|active| {
-            (
-                active.meta.title.clone(),
-                active.meta.cwd.clone(),
-                active.draft,
-            )
-        })
-    }
-
-    pub fn chat_requested_model(&self, cx: &App) -> Option<String> {
-        self.app
-            .read(cx)
-            .active
+    pub fn chat_active_session(&self, _cx: &App) -> Option<(String, PathBuf, bool)> {
+        self.session_status_replica
             .as_ref()
-            .and_then(|active| active.meta.model.clone())
+            .map(|status| (status.title.clone(), status.cwd.clone(), status.draft))
+    }
+
+    pub fn chat_requested_model(&self, _cx: &App) -> Option<String> {
+        self.session_status_replica
+            .as_ref()
+            .and_then(|status| status.requested_model.clone())
     }
 
     pub fn chat_turn_changes(
@@ -1226,8 +1343,7 @@ impl WorkspaceStore {
     }
 
     pub fn chat_native_rewind_state(&self, turn: usize, cx: &App) -> Option<(bool, bool)> {
-        let app = self.app.read(cx);
-        let active = app.active.as_ref()?;
+        let status = self.session_status_replica.as_ref()?;
         let has_checkpoint = self
             .with_active_timeline(cx, |timeline| {
                 timeline
@@ -1238,8 +1354,10 @@ impl WorkspaceStore {
             })
             .unwrap_or(false);
         Some((
-            active.meta.provider == agent::ProviderKind::ClaudeCode && has_checkpoint,
-            active.is_turn_running() || !active.queued().is_empty() || app.native_rewind_pending(),
+            status.provider == agent::ProviderKind::ClaudeCode && has_checkpoint,
+            status.turn_running
+                || !status.queued_messages.is_empty()
+                || status.native_rewind_pending,
         ))
     }
 
@@ -1553,6 +1671,61 @@ mod tests {
             replica_settings, live_settings,
             "settings replica diverged from live state"
         );
+
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn session_status_replica_matches_live_after_queue_and_interaction_mode_change(
+        cx: &mut TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-session-status-replica-consistency-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
+        let session_id = meta.id.clone();
+        session_store.upsert_meta(&meta).expect("persist session");
+
+        let app = cx.new(|_| AppState::new(session_store));
+        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
+        workspace.update(cx, |store, cx| {
+            store.dispatch(
+                Command::SelectSession {
+                    session_id: session_id.clone(),
+                },
+                cx,
+            );
+        });
+        app.update(cx, |state, cx| {
+            state.queue_message_for_replica_test("queued for replication".into(), cx);
+        });
+        workspace.update(cx, |store, cx| {
+            store.dispatch(
+                Command::SetInteractionMode {
+                    mode: agent::InteractionMode::Plan,
+                },
+                cx,
+            );
+        });
+
+        let live = app.read_with(cx, |state, _| {
+            state
+                .session_status_snapshot(&session_id)
+                .expect("live session status")
+        });
+        let replica = workspace.read_with(cx, |store, _| {
+            store
+                .session_status_replica
+                .clone()
+                .expect("session status replica")
+        });
+
+        assert_eq!(replica, live);
+        assert_eq!(replica.queued_messages.len(), 1);
+        assert_eq!(replica.queued_messages[0].text, "queued for replication");
+        assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
 
         std::fs::remove_dir_all(root).expect("remove test data");
     }

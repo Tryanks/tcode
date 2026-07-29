@@ -1,9 +1,15 @@
-use agent::{AgentEvent, ProviderKind, RewindMode};
+use std::path::PathBuf;
+
+use agent::{
+    AgentEvent, ApprovalMode, InteractionMode, OptionDescriptor, OptionSelection, ProviderCommand,
+    ProviderKind, RewindMode,
+};
 use serde::{Deserialize, Serialize};
 use tcode_core::{
     git::GitAction,
-    project::{Project, SessionMeta},
+    project::{Project, SessionMeta, WorktreeInfo},
     settings::Settings,
+    ui::WorkspaceMode,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +29,7 @@ impl PartialEq for SessionEventRecord {
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
     SessionEvents { session_id: String },
+    SessionStatus { session_id: String },
     Index,
     Settings,
     RuntimeEvents,
@@ -47,6 +54,7 @@ impl PartialEq for EventEnvelope {
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
     SessionEvent(SessionEventRecord),
+    SessionStatusReplaced(SessionStatus),
     IndexUpsertSession(SessionMeta),
     IndexUpsertProject(Project),
     IndexRemoveSession {
@@ -69,6 +77,59 @@ pub enum ServerEvent {
     SettingsSnapshot(Settings),
     RuntimeSnapshot(RuntimeSnapshot),
     TerminalSnapshot(TerminalSnapshot),
+}
+
+/// Full, ephemeral runtime status for one session.
+///
+/// Unlike [`SessionEventRecord`], these values are not derivable by folding the
+/// persisted agent event stream. Hosts replace the whole value whenever one of
+/// its fields changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStatus {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub provider: ProviderKind,
+    pub requested_model: Option<String>,
+    pub requested_profile_id: Option<String>,
+    pub acp_agent_id: Option<String>,
+    pub project_id: Option<String>,
+    pub approval_mode: ApprovalMode,
+    pub interaction_mode: InteractionMode,
+    pub queued_messages: Vec<QueuedMessageStatus>,
+    pub delivery_in_flight: Option<u64>,
+    pub turn_running: bool,
+    pub working: bool,
+    pub pending_approval: bool,
+    pub supports_steering: bool,
+    pub provider_option_descriptors: Vec<OptionDescriptor>,
+    pub provider_option_selections: Vec<OptionSelection>,
+    pub provider_commands: Vec<ProviderCommand>,
+    pub git_branch: Option<String>,
+    pub branches: Vec<String>,
+    pub draft: bool,
+    pub draft_workspace: WorkspaceMode,
+    pub worktree: Option<WorktreeInfo>,
+    pub preparing_worktree: bool,
+    pub relay_confirmation: Option<(String, String)>,
+    pub native_rewind_pending: bool,
+    pub native_rewind_prefill_available: bool,
+    pub model_pending_restart: bool,
+    pub options_pending_restart: bool,
+    pub approval_pending_restart: bool,
+    pub ultrathink_armed: bool,
+}
+
+impl PartialEq for SessionStatus {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessageStatus {
+    pub id: u64,
+    pub text: String,
 }
 
 impl PartialEq for ServerEvent {
