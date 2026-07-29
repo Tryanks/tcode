@@ -12,7 +12,7 @@ use tcode_core::{
     provider_status::ProviderSnapshot,
     session::ReviewComment,
     settings::Settings,
-    ui::WorkspaceMode,
+    ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,14 +31,23 @@ impl PartialEq for SessionEventRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
-    SessionEvents { session_id: String },
-    SessionStatus { session_id: String },
+    SessionEvents {
+        session_id: String,
+    },
+    SessionStatus {
+        session_id: String,
+    },
     Index,
     Settings,
     Providers,
     GitStatus,
     RuntimeEvents,
-    Terminal { terminal_id: u64 },
+    /// The client's currently selected session/draft, including ephemeral
+    /// status and serialized terminal layout metadata.
+    ActiveSession,
+    Terminal {
+        terminal_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,18 +81,17 @@ pub enum ServerEvent {
     },
     SettingsReplaced(Settings),
     Runtime(RuntimeNotification),
-    TerminalOutput {
-        #[serde(with = "crate::wire::base64_bytes")]
-        bytes: Vec<u8>,
-    },
-    TerminalExit {
-        exit_code: Option<i32>,
+    ActiveSessionReplaced(Option<SessionStatus>),
+    /// A provider-native rewind prompt is delivered once over the serialized
+    /// event stream. The client store owns consumption after receipt.
+    NativeRewindPrefill {
+        session_id: String,
+        text: String,
     },
     SessionSnapshot(Vec<SessionEventRecord>),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
     RuntimeSnapshot(RuntimeSnapshot),
-    TerminalSnapshot(TerminalSnapshot),
 }
 
 /// Full provider/settings-page read projection.
@@ -164,6 +172,12 @@ pub struct SessionStatus {
     pub queued_messages: Vec<QueuedMessageStatus>,
     /// Backend-owned drafts used by provider-bound send-path assembly.
     pub review_comment_drafts: Vec<ReviewComment>,
+    pub terminals: Vec<TerminalStatus>,
+    pub active_terminal_id: Option<u64>,
+    pub terminal_splits: Vec<TerminalSplitStatus>,
+    pub terminal_contexts: Vec<TerminalContextStatus>,
+    pub terminal_open: bool,
+    pub terminal_height: f32,
     pub delivery_in_flight: Option<u64>,
     pub turn_running: bool,
     pub working: bool,
@@ -185,6 +199,27 @@ pub struct SessionStatus {
     pub options_pending_restart: bool,
     pub approval_pending_restart: bool,
     pub ultrathink_armed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalStatus {
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSplitStatus {
+    pub first: u64,
+    pub second: u64,
+    pub direction: TerminalSplitDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalContextStatus {
+    pub id: u64,
+    pub terminal_label: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub text: String,
 }
 
 impl PartialEq for SessionStatus {
@@ -220,13 +255,6 @@ impl PartialEq for IndexSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
     pub notifications: Vec<RuntimeNotification>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalSnapshot {
-    #[serde(with = "crate::wire::base64_bytes")]
-    pub bytes: Vec<u8>,
-    pub exit_code: Option<i32>,
 }
 
 /// Protocol-owned mirror of `tcode_runtime::event::RuntimeEvent`.

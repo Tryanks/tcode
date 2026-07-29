@@ -19,8 +19,8 @@ use gpui_component::{
 
 use crate::store::WorkspaceStore;
 use crate::time::now_secs;
-use tcode_protocol::Command;
-use tcode_runtime::ui_facade::{ExternalImportUpdate, ExternalThread, RecentDir, SourceTool};
+use tcode_protocol::{Command, ExternalThread, RecentDir, SourceTool};
+use tcode_runtime::ui_facade::ExternalImportUpdate;
 
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
@@ -115,12 +115,11 @@ impl AddProjectDialog {
             cx.notify();
             return;
         }
+        let is_directory = self
+            .store
+            .update(cx, |store, cx| store.is_directory(path.clone(), cx));
         cx.spawn_in(window, async move |this, cx| {
-            let is_directory = tcode_runtime::blocking::unblock(cx.background_executor(), {
-                let path = path.clone();
-                move || path.is_dir()
-            })
-            .await;
+            let is_directory = is_directory.await;
             let _ = this.update_in(cx, |dialog, window, cx| {
                 if is_directory {
                     dialog.create_draft(path, window, cx);
@@ -134,32 +133,39 @@ impl AddProjectDialog {
     }
 
     fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let created = self.store.update(cx, |store, cx| {
-            store.dispatch(Command::CreateProject { root: path.clone() }, cx);
-            let project_id = store.project_id_for_root(&path, cx)?;
-            store.dispatch(
-                Command::StartDraft {
-                    project_id,
-                    cwd: path,
-                },
-                cx,
-            );
-            Some(())
+        let create = self.store.update(cx, |store, cx| {
+            store.command(Command::CreateProject { root: path.clone() }, cx)
         });
-        if created.is_some() {
-            window.close_dialog(cx);
-        }
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(tcode_protocol::CommandResponse::ProjectId(Some(project_id))) = create.await
+            else {
+                let _ = this.update_in(cx, |dialog, _, cx| {
+                    dialog.path_error = true;
+                    cx.notify();
+                });
+                return;
+            };
+            let _ = this.update_in(cx, |dialog, window, cx| {
+                dialog.store.update(cx, |store, cx| {
+                    store.dispatch(
+                        Command::StartDraft {
+                            project_id,
+                            cwd: path,
+                        },
+                        cx,
+                    );
+                });
+                window.close_dialog(cx);
+            });
+        })
+        .detach();
     }
 
     fn choose_recent(&mut self, recent: RecentDir, window: &mut Window, cx: &mut Context<Self>) {
         let path = recent.path.clone();
-        let project_id = self.store.update(cx, |store, cx| {
-            store.dispatch(Command::CreateProject { root: path.clone() }, cx);
-            store.project_id_for_root(&path, cx)
+        let create = self.store.update(cx, |store, cx| {
+            store.command(Command::CreateProject { root: path }, cx)
         });
-        let Some(project_id) = project_id else {
-            return;
-        };
         let threads = recent.threads;
         let total = threads.len();
         let current_tool = threads
@@ -167,33 +173,42 @@ impl AddProjectDialog {
             .map(|thread| thread.source.display_name().to_string())
             .unwrap_or_default();
         let store = self.store.clone();
-        let Some(receiver) = store.update(cx, |store, cx| {
-            store.start_external_import(&project_id, threads, cx)
-        }) else {
-            return;
-        };
-
-        window.close_dialog(cx);
-        let progress = cx.new(|_| ImportProgress::new(self.store.clone(), project_id));
-        progress.update(cx, |progress, cx| {
-            progress.start(receiver, total, current_tool, cx)
-        });
-        let content = progress.clone();
-        window.open_dialog(cx, move |builder, _, cx| {
-            let progress_content = content.clone();
-            builder
-                .w(px(480.))
-                .rounded(crate::material::radius_overlay())
-                .bg(cx.theme().popover)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_xl()
-                .title(tcode_i18n::tr!("sidebar.importing").into_owned())
-                .close_button(false)
-                .overlay_closable(false)
-                .keyboard(false)
-                .content(move |content_el, _, _| content_el.child(progress_content.clone()))
-        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(tcode_protocol::CommandResponse::ProjectId(Some(project_id))) = create.await
+            else {
+                return;
+            };
+            let import = store.update(cx, |store, cx| {
+                store.start_external_import(&project_id, threads, cx)
+            });
+            let Ok(Some(receiver)) = import.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |dialog, window, cx| {
+                window.close_dialog(cx);
+                let progress = cx.new(|_| ImportProgress::new(dialog.store.clone(), project_id));
+                progress.update(cx, |progress, cx| {
+                    progress.start(receiver, total, current_tool, cx)
+                });
+                let content = progress.clone();
+                window.open_dialog(cx, move |builder, _, cx| {
+                    let progress_content = content.clone();
+                    builder
+                        .w(px(480.))
+                        .rounded(crate::material::radius_overlay())
+                        .bg(cx.theme().popover)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .shadow_xl()
+                        .title(tcode_i18n::tr!("sidebar.importing").into_owned())
+                        .close_button(false)
+                        .overlay_closable(false)
+                        .keyboard(false)
+                        .content(move |content_el, _, _| content_el.child(progress_content.clone()))
+                });
+            });
+        })
+        .detach();
     }
 
     fn render_recent(&self, cx: &mut Context<Self>) -> AnyElement {

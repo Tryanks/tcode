@@ -928,7 +928,10 @@ mod tests {
     use super::*;
 
     fn reconstruct_from_disk(abs_path: &std::path::Path, patch: &str) -> Option<(String, String)> {
-        let new_text = crate::store::WorkspaceStore::read_diff_working_tree_file(abs_path)?;
+        let new_text = std::fs::read_to_string(abs_path).ok()?;
+        if new_text.len() > 512 * 1024 {
+            return None;
+        }
         reconstruct_from_text(new_text, patch)
     }
 

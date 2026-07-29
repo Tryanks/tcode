@@ -16,6 +16,7 @@ icon = ["../../assets/icons/app/tcode.icns"]
 agent = { path = "../agent" }
 tcode-i18n = { path = "../i18n" }
 tcode-services = { path = "../services" }
+tcode-protocol = { path = "../protocol" }
 tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 preview-mcp = { path = "../preview-mcp" }
@@ -26,6 +27,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
 env_logger = "0.11"
 log = "0.4"
+smol = "2"
 
 [features]
 default = ["runtime-shaders"]

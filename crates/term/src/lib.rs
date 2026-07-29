@@ -472,6 +472,27 @@ mod tests {
         assert_eq!(derive_command_label("   "), None);
     }
 
+    #[test]
+    fn local_transport_preserves_terminal_output_and_exit_without_json() {
+        let (sender, receiver) = async_channel::unbounded();
+        let output = vec![0, b'\n', 255];
+        sender
+            .try_send(PtyEvent::Output(output.clone()))
+            .expect("send raw output");
+        sender
+            .try_send(PtyEvent::Exited { exit_code: Some(0) })
+            .expect("send exit status");
+
+        assert_eq!(
+            receiver.try_recv().expect("receive raw output"),
+            PtyEvent::Output(output)
+        );
+        assert_eq!(
+            receiver.try_recv().expect("receive exit status"),
+            PtyEvent::Exited { exit_code: Some(0) }
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn captures_process_output_and_exit() {

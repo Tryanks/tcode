@@ -1,33 +1,6 @@
-//! Blocking work, run off the main thread on **gpui's** executor.
-//!
-//! The tempting alternative, `smol::unblock`, is a trap here. A gpui task is a
-//! *local* task: gpui asserts that its runnable is only ever polled and dropped
-//! by the thread that spawned it. Await a `smol::unblock` future inside one and
-//! the wake — and, if the task is dropped while suspended, the drop — comes from
-//! a thread in smol's global blocking pool. gpui's test scheduler catches that
-//! ("local task dropped by a thread that didn't spawn it") and panics from a
-//! pool thread, which aborts the whole process: it took down the Windows CI run
-//! with a bare `STATUS_STACK_BUFFER_OVERRUN` and no test name attached.
-//!
-//! gpui's background executor is the one its scheduler owns — deterministic
-//! under test, a real thread pool in production — so blocking work goes there.
-
-use gpui::{BackgroundExecutor, Task};
+//! Blocking host work, centralized on smol's blocking pool.
 
 use crate::host::{HostCx, HostTask};
-
-/// Run `f` on gpui's background executor.
-///
-/// ```ignore
-/// let status = blocking::unblock(cx, move || read_status(&cwd)).await;
-/// ```
-pub fn unblock<R, F>(executor: &BackgroundExecutor, f: F) -> Task<R>
-where
-    R: Send + 'static,
-    F: FnOnce() -> R + Send + 'static,
-{
-    executor.spawn(async move { f() })
-}
 
 /// Run blocking work through the runtime-owned host seam.
 pub fn unblock_host<R, F>(cx: &HostCx, f: F) -> HostTask<R>
@@ -35,13 +8,13 @@ where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
-    cx.spawn_background(async move { f() })
+    cx.spawn_background(smol::unblock(f))
 }
 
 #[cfg(test)]
 mod tests {
-    /// Guard: no `smol::unblock` anywhere in the app. See the module docs — from
-    /// inside a gpui task it aborts the process. Use [`super::unblock`].
+    /// Guard: direct blocking-pool use stays centralized here so host work
+    /// cannot accidentally run inline on its single state-owner thread.
     #[test]
     fn no_smol_unblock_outside_this_module() {
         let mut offenders = Vec::new();
@@ -104,8 +77,8 @@ mod tests {
         }
         assert!(
             offenders.is_empty(),
-            "smol::unblock inside a gpui task drops local tasks on a foreign \
-             thread and aborts; use tcode_runtime::blocking::unblock: {offenders:#?}"
+            "call blocking host work through tcode_runtime::blocking::unblock_host: \
+             {offenders:#?}"
         );
     }
 

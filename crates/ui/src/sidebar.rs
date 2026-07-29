@@ -267,21 +267,31 @@ impl SessionsSidebar {
         // Launch sweep: the same auto-archive pass expanding a thread list
         // runs, applied to every project up front so stale threads are gone
         // before the first paint (and before the fold state is seeded below).
-        let archived_before = store.read(cx).archived_session_count(None, cx);
         let project_ids = store.read(cx).project_ids(cx);
+        let mut sweeps = Vec::with_capacity(project_ids.len());
         for project_id in project_ids {
-            store.update(cx, |store, cx| {
-                store.dispatch(Command::AutoArchiveSweep { project_id }, cx);
-            });
+            sweeps.push(WorkspaceStore::command_for(
+                &store,
+                Command::AutoArchiveSweep { project_id },
+                cx,
+            ));
         }
-        let sidebar = cx.weak_entity();
-        cx.defer(move |cx| {
+        cx.spawn(async move |sidebar, cx| {
+            let mut archived = 0;
+            for sweep in sweeps {
+                match sweep.await {
+                    Ok(tcode_protocol::CommandResponse::ArchivedCount(count)) => {
+                        archived += count;
+                    }
+                    Ok(other) => {
+                        log::error!("unexpected auto-archive response: {other:?}");
+                    }
+                    Err(error) => {
+                        log::error!("startup auto-archive sweep failed: {}", error.message);
+                    }
+                }
+            }
             let _ = sidebar.update(cx, |sidebar, cx| {
-                let archived = sidebar
-                    .store
-                    .read(cx)
-                    .archived_session_count(None, cx)
-                    .saturating_sub(archived_before);
                 let settings = sidebar.store.read(cx).sidebar_settings(cx);
                 sidebar.startup_archive_dialog =
                     (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
@@ -293,7 +303,8 @@ impl SessionsSidebar {
                     });
                 cx.notify();
             });
-        });
+        })
+        .detach();
         let collapsed_parents = {
             let sessions = store.read(cx).sidebar_sessions(cx);
             let active_id = store.read(cx).active_session_id(cx);
@@ -337,34 +348,38 @@ impl SessionsSidebar {
                     settings.auto_archive_keep_count.max(1),
                 )
             };
-            let count_before = self
-                .store
-                .read(cx)
-                .archived_session_count(Some(project_id), cx);
-            self.store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::AutoArchiveSweep {
-                        project_id: project_id.to_string(),
-                    },
-                    cx,
-                );
-            });
+            let sweep = WorkspaceStore::command_for(
+                &self.store,
+                Command::AutoArchiveSweep {
+                    project_id: project_id.to_string(),
+                },
+                cx,
+            );
             self.expanded_groups.insert(project_id.to_string());
             let project_id = project_id.to_string();
-            cx.defer_in(window, move |sidebar, window, cx| {
-                let count = sidebar
-                    .store
-                    .read(cx)
-                    .archived_session_count(Some(&project_id), cx)
-                    .saturating_sub(count_before);
-                if count > 0 {
-                    sidebar.auto_archive_notice = Some((project_id, count));
-                    if !notice_shown {
-                        sidebar.show_auto_archive_dialog(count, days, keep, window, cx);
+            cx.spawn_in(window, async move |sidebar, cx| {
+                let count = match sweep.await {
+                    Ok(tcode_protocol::CommandResponse::ArchivedCount(count)) => count,
+                    Ok(other) => {
+                        log::error!("unexpected auto-archive response: {other:?}");
+                        return;
                     }
-                }
-                cx.notify();
-            });
+                    Err(error) => {
+                        log::error!("auto-archive sweep failed: {}", error.message);
+                        return;
+                    }
+                };
+                let _ = sidebar.update_in(cx, |sidebar, window, cx| {
+                    if count > 0 {
+                        sidebar.auto_archive_notice = Some((project_id, count));
+                        if !notice_shown {
+                            sidebar.show_auto_archive_dialog(count, days, keep, window, cx);
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
         }
         cx.notify();
     }
@@ -1591,7 +1606,7 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext, size};
     use std::path::PathBuf;
     use tcode_core::project::Project;
-    use tcode_runtime::app::AppState;
+    use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 
     struct WorkingThreadRowProbe;
@@ -1671,18 +1686,20 @@ mod tests {
             "tcode-sidebar-rename-test-{}",
             tcode_services::store::now_millis()
         ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let app_state = cx.new(|_| AppState::new(store));
+        let session_store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(root.clone());
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.project_id = Some(project.id.clone());
         meta.title = "Original title".into();
         let session_id = meta.id.clone();
-        app_state.update(cx, |state, _| {
+        let host =
+            spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
+        smol::block_on(host.update_state_for_test(move |state, _| {
             state.projects = vec![project];
             state.sessions = vec![meta];
-        });
-        let store = cx.new(|cx| WorkspaceStore::new(app_state.clone(), cx));
+        }))
+        .expect("seed sidebar host");
+        let store = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
@@ -1699,8 +1716,11 @@ mod tests {
 
         cx.update(|_, cx| {
             assert!(sidebar.read(cx).renaming.is_none());
-            assert_eq!(app_state.read(cx).sessions[0].title, "Original title");
         });
+        let title =
+            smol::block_on(host.update_state_for_test(|state, _| state.sessions[0].title.clone()))
+                .expect("read host title");
+        assert_eq!(title, "Original title");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1744,8 +1764,9 @@ mod tests {
             "tcode-sidebar-launch-sweep-test-{}",
             tcode_services::store::now_millis()
         ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let app_state = cx.new(|_| AppState::new(store));
+        let session_store = SessionStore::open_at(root.clone()).unwrap();
+        let host = spawn_host(session_store, HostServices::default())
+            .expect("spawn auto-archive test host");
 
         let project_a = Project::from_root(root.join("a"));
         let project_b = Project::from_root(root.join("b"));
@@ -1760,19 +1781,20 @@ mod tests {
                 sessions.push(meta);
             }
         }
-        app_state.update(cx, |state, _| {
+        smol::block_on(host.update_state_for_test(move |state, _| {
             state.settings.auto_archive_keep_count = 1;
             state.settings.auto_archive_max_idle_days = 1;
             state.projects = vec![project_a, project_b];
             state.sessions = sessions;
-        });
-        let store = cx.new(|cx| WorkspaceStore::new(app_state.clone(), cx));
+        }))
+        .expect("seed auto-archive host");
+        let store = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
         cx.run_until_parked();
 
-        app_state.update(cx, |state, _| {
+        let archived = smol::block_on(host.update_state_for_test(|state, _| {
             let mut archived: Vec<&str> = state
                 .sessions
                 .iter()
@@ -1780,8 +1802,10 @@ mod tests {
                 .map(|meta| meta.id.as_str())
                 .collect();
             archived.sort_unstable();
-            assert_eq!(archived, vec!["a-0", "a-1", "b-0", "b-1"]);
-        });
+            archived.into_iter().map(str::to_string).collect::<Vec<_>>()
+        }))
+        .expect("read archived sessions");
+        assert_eq!(archived, vec!["a-0", "a-1", "b-0", "b-1"]);
         sidebar.update(cx, |sidebar, _| {
             assert_eq!(
                 sidebar.startup_archive_dialog,

@@ -10,6 +10,8 @@ use tcode_core::{
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
+use crate::ExternalThread;
+
 /// A backend mutation requested by a client.
 ///
 /// Variants correspond to serializable `AppState` mutations used by the UI.
@@ -18,6 +20,39 @@ use tcode_core::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Command {
+    /// Enable the smoke harness's automatic approval behavior before creating
+    /// or resuming its session.
+    SetSmokeMode {
+        auto_approve: bool,
+    },
+    /// Create a concrete provider session. This is used by the serialized smoke
+    /// harness as well as future non-desktop clients.
+    CreateSession {
+        provider: ProviderKind,
+        cwd: PathBuf,
+        model: Option<String>,
+        project_id: Option<String>,
+        acp_agent_id: Option<String>,
+        profile_id: Option<String>,
+    },
+    /// Consume and apply the restart-continuity marker, returning the Settings
+    /// section that the client should open.
+    ApplyPendingRelaunch,
+    /// Open the newest stored session without exposing the host's index.
+    OpenLatestSession,
+    OpenTerminalPanel,
+    OpenTerminalDemo,
+    DebugStartProvider,
+    DebugGitCommit {
+        message: String,
+    },
+    DebugGitAction {
+        name: String,
+    },
+    DebugGitGenerateMessage,
+    /// Shut down every live provider and PTY, then acknowledge only after the
+    /// FIFO store-write barrier has drained.
+    ShutdownAllAndFlush,
     OrchestrateTurn {
         text: String,
         attachment_paths: Vec<PathBuf>,
@@ -112,6 +147,13 @@ pub enum Command {
     CycleProjectSort,
     CreateProject {
         root: PathBuf,
+    },
+    /// The command itself is ordinary serialized protocol traffic. Its
+    /// progress is routed by request id over the one local bus installed at
+    /// host construction; a remote transport must replace it with events.
+    StartExternalImport {
+        project_id: String,
+        threads: Vec<ExternalThread>,
     },
     FinishExternalImport {
         project_id: String,
@@ -228,4 +270,20 @@ pub enum Command {
         turn: usize,
         mode: RewindMode,
     },
+}
+
+/// Correlated result of a [`Command`].
+///
+/// Most mutations return [`CommandResponse::Unit`]. Keeping the few
+/// result-bearing operations on the command plane avoids disguising mutations
+/// as queries.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum CommandResponse {
+    Unit,
+    ProjectId(Option<String>),
+    PendingRelaunchSection(Option<String>),
+    ArchivedCount(usize),
+    ExternalImportStarted(bool),
 }

@@ -46,9 +46,8 @@ use crate::window_state::WindowState;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
 use tcode_core::ui::{ConversationDestination, WorkspaceMode};
-use tcode_protocol::Command;
+use tcode_protocol::{Command, PathEntry};
 use tcode_runtime::app::mime_from_path;
-use tcode_runtime::ui_facade::PathEntry;
 
 /// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
 const METER_BLUE: u32 = 0x3B82F6;
@@ -1131,44 +1130,55 @@ impl Composer {
         self.pending_image_loads += 1;
         let generation = self.image_load_generation;
         let result_name = name.clone();
+        let workspace_store = self.workspace_store.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let result = tcode_runtime::blocking::unblock(cx.background_executor(), move || {
-                let bytes = match source {
-                    PendingImageSource::Bytes(bytes) => bytes,
-                    PendingImageSource::Path(path) => {
-                        let size = std::fs::metadata(&path)
-                            .map_err(AddImageError::Persist)?
-                            .len();
-                        validate_attachment(&name, &mime, size, current_count)
-                            .map_err(AddImageError::Attachment)?;
-                        std::fs::read(path).map_err(AddImageError::Persist)?
-                    }
-                };
-                validate_attachment(&name, &mime, bytes.len() as u64, current_count)
-                    .map_err(AddImageError::Attachment)?;
-                let (mime, bytes) = if is_wire_ready_image(&mime) {
-                    (mime, bytes)
-                } else {
-                    let bytes = transcode_image_to_png(&bytes).map_err(|_| {
-                        AddImageError::Attachment(
-                            tcode_core::attachments::AttachError::UnsupportedType {
-                                name: name.clone(),
-                            },
-                        )
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = match source {
+                        PendingImageSource::Bytes(bytes) => bytes,
+                        PendingImageSource::Path(path) => {
+                            let size = std::fs::metadata(&path)
+                                .map_err(AddImageError::Persist)?
+                                .len();
+                            validate_attachment(&name, &mime, size, current_count)
+                                .map_err(AddImageError::Attachment)?;
+                            std::fs::read(path).map_err(AddImageError::Persist)?
+                        }
+                    };
+                    validate_attachment(&name, &mime, bytes.len() as u64, current_count)
+                        .map_err(AddImageError::Attachment)?;
+                    let (mime, bytes) = if is_wire_ready_image(&mime) {
+                        (mime, bytes)
+                    } else {
+                        let bytes = transcode_image_to_png(&bytes).map_err(|_| {
+                            AddImageError::Attachment(
+                                tcode_core::attachments::AttachError::UnsupportedType {
+                                    name: name.clone(),
+                                },
+                            )
+                        })?;
+                        ("image/png".to_string(), bytes)
+                    };
+                    let dir = attachments_dir.ok_or_else(|| {
+                        AddImageError::Persist(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "no active session",
+                        ))
                     })?;
-                    ("image/png".to_string(), bytes)
-                };
-                let dir = attachments_dir.ok_or_else(|| {
-                    AddImageError::Persist(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "no active session",
-                    ))
-                })?;
-                let ext = image_extension(&mime, &name);
-                WorkspaceStore::save_attachment_to_dir(&dir, &bytes, &ext)
-                    .map_err(AddImageError::Persist)
-            })
-            .await;
+                    let ext = image_extension(&mime, &name);
+                    Ok::<_, AddImageError>((dir, bytes, ext))
+                })
+                .await;
+            let result = match prepared {
+                Ok((dir, bytes, ext)) => workspace_store
+                    .update(cx, |store, cx| {
+                        store.save_attachment_to_dir(dir, bytes, ext, cx)
+                    })
+                    .await
+                    .map_err(AddImageError::Persist),
+                Err(error) => Err(error),
+            };
             let _ = this.update_in(cx, |composer, window, cx| {
                 if composer.image_load_generation != generation
                     || composer.images_session != session_id
@@ -1262,10 +1272,9 @@ impl Composer {
     fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.pending_images.len() {
             let removed = self.pending_images.remove(index);
-            let _ = self
-                .workspace_store
-                .read(cx)
-                .remove_user_file(&removed.path);
+            self.workspace_store
+                .update(cx, |store, cx| store.remove_user_file(removed.path, cx))
+                .detach();
             cx.notify();
         }
     }

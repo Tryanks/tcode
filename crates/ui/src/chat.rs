@@ -3728,14 +3728,16 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
     use std::sync::Arc;
-    use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
+    use tcode_core::session::{
+        EntryContent, SteeringStatus, Timeline, TimelineEntry, TurnMeta, TurnTiming,
+    };
 
     #[gpui::test]
     fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
         cx: &mut TestAppContext,
     ) {
         use gpui::{VisualTestContext, point, px, size};
-        use tcode_runtime::app::AppState;
+        use tcode_runtime::pipe::{HostServices, spawn_host};
         use tcode_services::store::SessionStore;
 
         const DEMO_MARKDOWN: &str = r#"# H1
@@ -3835,10 +3837,11 @@ This begins after the hard break."#;
             tcode_services::store::now_millis()
         ));
         let store = SessionStore::open_at(data_root).expect("test session store");
-        let app_state = cx.new(|_| AppState::new(store));
-        AppState::update(&app_state, cx, |state, cx| {
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
             state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
             let active = state.active.as_mut().expect("active draft");
+            active.timeline = Timeline::default();
             active.timeline.turns = vec![TurnMeta::default()];
             active.timeline.entries = vec![
                 entry(
@@ -3858,12 +3861,10 @@ This begins after the hard break."#;
                 ),
             ];
             active.draft = false;
-        });
-        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(app_state.clone(), cx));
-        let (session_id, timeline) = app_state.read_with(cx, |state, _| {
-            let active = state.active.as_ref().expect("active session");
             (active.meta.id.clone(), active.timeline.clone())
-        });
+        }))
+        .expect("seed markdown host");
+        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(host.clone(), cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id, timeline);
         });

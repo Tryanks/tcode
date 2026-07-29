@@ -11,7 +11,6 @@ agent = { path = "../agent" }
 async-channel = "2"
 base64 = "0.23"
 computer-use-mcp = { path = "../computer-use-mcp" }
-gpui = { git = "https://github.com/zed-industries/zed" }
 log = "0.4"
 orchestrate-mcp = { path = "../orchestrate-mcp" }
 preview-mcp = { path = "../preview-mcp" }
@@ -23,6 +22,3 @@ tcode-protocol = { path = "../protocol" }
 tcode-services = { path = "../services" }
 term = { path = "../term" }
 uuid = { version = "1", features = ["v4"] }
-
-[dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
