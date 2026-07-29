@@ -1,9 +1,12 @@
 use std::{
+    fs::File,
     path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd as _;
 #[cfg(unix)]
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -15,7 +18,7 @@ pub(crate) struct ProcessInfo {
 
 pub(crate) struct PtyInfo {
     #[cfg(unix)]
-    fd: std::os::fd::RawFd,
+    file: File,
     #[cfg(unix)]
     fallback_pid: u32,
     last_refresh: Mutex<Option<Instant>>,
@@ -23,9 +26,9 @@ pub(crate) struct PtyInfo {
 
 impl PtyInfo {
     #[cfg(unix)]
-    pub fn new(fd: std::os::fd::RawFd, fallback_pid: u32) -> Self {
+    pub fn new(file: File, fallback_pid: u32) -> Self {
         Self {
-            fd,
+            file,
             fallback_pid,
             last_refresh: Mutex::new(None),
         }
@@ -49,9 +52,7 @@ impl PtyInfo {
 
     #[cfg(unix)]
     pub fn load(&self) -> Option<ProcessInfo> {
-        // SAFETY: `fd` is the PTY master owned by the event loop and remains
-        // open for at least as long as this object is reachable.
-        let foreground = unsafe { libc::tcgetpgrp(self.fd) };
+        let foreground = unsafe { libc::tcgetpgrp(self.file.as_raw_fd()) };
         let pid = if foreground > 0 {
             foreground as u32
         } else {

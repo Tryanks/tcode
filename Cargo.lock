@@ -8743,7 +8743,9 @@ dependencies = [
  "alacritty_terminal",
  "async-channel",
  "libc",
+ "polling",
  "sysinfo 0.39.6",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
