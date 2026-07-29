@@ -8622,6 +8622,7 @@ version = "0.1.0"
 dependencies = [
  "agent",
  "async-channel",
+ "base64 0.23.0",
  "computer-use-mcp",
  "gpui",
  "log",
