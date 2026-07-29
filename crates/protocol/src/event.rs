@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
@@ -6,8 +7,9 @@ use agent::{
 };
 use serde::{Deserialize, Serialize};
 use tcode_core::{
-    git::GitAction,
+    git::{GitAction, GitStatus},
     project::{Project, SessionMeta, WorktreeInfo},
+    provider_status::ProviderSnapshot,
     session::ReviewComment,
     settings::Settings,
     ui::WorkspaceMode,
@@ -33,6 +35,8 @@ pub enum Topic {
     SessionStatus { session_id: String },
     Index,
     Settings,
+    Providers,
+    GitStatus,
     RuntimeEvents,
     Terminal { terminal_id: u64 },
 }
@@ -56,6 +60,8 @@ impl PartialEq for EventEnvelope {
 pub enum ServerEvent {
     SessionEvent(SessionEventRecord),
     SessionStatusReplaced(SessionStatus),
+    ProvidersReplaced(ProvidersStatus),
+    GitStatusReplaced(GitStatusStatus),
     IndexUpsertSession(SessionMeta),
     IndexUpsertProject(Project),
     IndexRemoveSession {
@@ -80,6 +86,63 @@ pub enum ServerEvent {
     TerminalSnapshot(TerminalSnapshot),
 }
 
+/// Full provider/settings-page read projection.
+///
+/// Provider state changes infrequently and its pieces are consumed together,
+/// so hosts replace this single value after any covered mutation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProvidersStatus {
+    pub model_catalogs: HashMap<ProviderKind, Vec<agent::ModelSpec>>,
+    pub models_loading: HashMap<ProviderKind, bool>,
+    pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
+    pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    pub acp_marketplace_items: Vec<AcpMarketplaceItem>,
+    pub acp_registry_loading: bool,
+    pub acp_registry_error: Option<String>,
+    pub acp_installing: HashSet<String>,
+    pub providers_checked_at: Option<u64>,
+    pub providers_checking: bool,
+    /// Environment-variable names present for each profile. Values never cross
+    /// the protocol boundary.
+    pub secret_names: HashMap<String, HashSet<String>>,
+}
+
+impl PartialEq for ProvidersStatus {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProviderVersionStatus {
+    pub installed: Option<String>,
+    pub latest: Option<String>,
+    pub update_available: bool,
+    pub checking: bool,
+    pub updating: bool,
+    pub update_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpMarketplaceItem {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub installed: bool,
+    pub installing: bool,
+    pub supported: bool,
+}
+
+/// Full active-workspace Git projection. `generation` identifies the refresh
+/// whose result is represented and lets replicas preserve the host's ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GitStatusStatus {
+    pub status: Option<GitStatus>,
+    pub busy: bool,
+    pub generation: u64,
+}
+
 /// Full, ephemeral runtime status for one session.
 ///
 /// Unlike [`SessionEventRecord`], these values are not derivable by folding the
@@ -90,6 +153,7 @@ pub struct SessionStatus {
     pub session_id: String,
     pub title: String,
     pub cwd: PathBuf,
+    pub attachments_dir: PathBuf,
     pub provider: ProviderKind,
     pub requested_model: Option<String>,
     pub requested_profile_id: Option<String>,

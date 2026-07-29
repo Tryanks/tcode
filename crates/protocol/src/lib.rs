@@ -11,9 +11,10 @@ mod wire;
 
 pub use command::Command;
 pub use event::{
-    EventEnvelope, GitActionRequest, IndexSnapshot, QueuedMessageStatus, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeSnapshot,
-    RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus, TerminalSnapshot, Topic,
+    AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeSnapshot, RuntimeToast,
+    ServerEvent, SessionEventRecord, SessionStatus, TerminalSnapshot, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,

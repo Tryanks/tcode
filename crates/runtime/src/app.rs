@@ -40,7 +40,8 @@ use tcode_core::settings::{
 };
 pub use tcode_core::ui::{ConversationDestination, RightTab, WorkspaceMode};
 use tcode_protocol::{
-    EventEnvelope, QueuedMessageStatus, ServerEvent, SessionEventRecord, SessionStatus, Topic,
+    EventEnvelope, GitStatusStatus, ProviderVersionStatus as ProtocolProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, ServerEvent, SessionEventRecord, SessionStatus, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -823,7 +824,7 @@ pub struct SmokeMode {
 
 /// The result of a provider version check (Group C / s3 §6).
 #[derive(Debug, Clone, Default)]
-pub struct ProviderVersionStatus {
+pub struct ProviderVersionState {
     /// Installed version (raw string, e.g. `"2.1.206"`); `None` if `--version` failed.
     pub installed: Option<String>,
     /// Latest published version from npm; `None` if the lookup failed.
@@ -931,6 +932,8 @@ pub struct AppState {
     settings_event_seq: u64,
     session_event_seqs: HashMap<String, u64>,
     session_status_event_seqs: HashMap<String, u64>,
+    providers_event_seq: u64,
+    git_status_event_seq: u64,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -943,10 +946,12 @@ pub struct AppState {
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
-    pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
+    pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     /// Per-profile install/auth probe results, driving the Settings → Providers
     /// card status dot + summary line. Absent until the first probe lands.
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    /// Profile environment names visible to the UI. Values remain backend-only.
+    provider_secret_names: HashMap<String, HashSet<String>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
     /// Present only after an app-relaunch triggered by a permission grant; applied
     /// once by [`AppState::apply_pending_relaunch`] and then cleared.
@@ -984,6 +989,7 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
         // the first call, not just after a settings change.
@@ -1060,12 +1066,15 @@ impl AppState {
             settings_event_seq: 0,
             session_event_seqs: HashMap::new(),
             session_status_event_seqs: HashMap::new(),
+            providers_event_seq: 0,
+            git_status_event_seq: 0,
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
             review_comment_drafts: HashMap::new(),
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
+            provider_secret_names,
             pending_relaunch,
         }
     }
@@ -1180,6 +1189,8 @@ impl AppState {
                 .session_status_event_seqs
                 .entry(session_id.clone())
                 .or_default(),
+            Topic::Providers => &mut self.providers_event_seq,
+            Topic::GitStatus => &mut self.git_status_event_seq,
             _ => unreachable!("replication slice does not emit this domain"),
         };
         *seq += 1;
@@ -1188,6 +1199,71 @@ impl AppState {
             seq: *seq,
             event,
         }));
+    }
+
+    /// Build the complete provider read projection. This is the sole
+    /// constructor for the replicated providers domain.
+    pub fn providers_status_snapshot(&self) -> ProvidersStatus {
+        ProvidersStatus {
+            model_catalogs: self.model_catalogs.clone(),
+            models_loading: self.models_loading.clone(),
+            provider_versions: self
+                .provider_versions
+                .iter()
+                .map(|(&provider, status)| {
+                    (
+                        provider,
+                        ProtocolProviderVersionStatus {
+                            installed: status.installed.clone(),
+                            latest: status.latest.clone(),
+                            update_available: status.update_available,
+                            checking: status.checking,
+                            updating: status.updating,
+                            update_command: update_command_string(provider, status.install_source),
+                        },
+                    )
+                })
+                .collect(),
+            provider_snapshots: self.provider_snapshots.clone(),
+            acp_marketplace_items: self.acp_marketplace_items(),
+            acp_registry_loading: self.acp_registry_loading,
+            acp_registry_error: self.acp_registry_error.clone(),
+            acp_installing: self.acp_installing.clone(),
+            providers_checked_at: self.providers_checked_at(),
+            providers_checking: self.providers_checking(),
+            secret_names: self.provider_secret_names.clone(),
+        }
+    }
+
+    fn emit_providers_status(&mut self, cx: &mut Context<Self>) {
+        self.emit_domain(
+            Topic::Providers,
+            ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
+            cx,
+        );
+    }
+
+    /// Build the complete active-workspace Git projection.
+    pub fn git_status_snapshot(&self) -> GitStatusStatus {
+        GitStatusStatus {
+            status: self.git_status.clone(),
+            busy: self.git_busy,
+            generation: self.git_status_generation,
+        }
+    }
+
+    fn emit_git_status(&mut self, cx: &mut Context<Self>) {
+        self.emit_domain(
+            Topic::GitStatus,
+            ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
+            cx,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn emit_provider_and_git_replicas_for_test(&mut self, cx: &mut Context<Self>) {
+        self.emit_providers_status(cx);
+        self.emit_git_status(cx);
     }
 
     /// Build the complete non-event-stream status projection for one resident
@@ -1239,6 +1315,7 @@ impl AppState {
             session_id: session_id.to_string(),
             title: meta.title.clone(),
             cwd: meta.cwd.clone(),
+            attachments_dir: self.attachments_dir_for(session_id),
             provider: meta.provider,
             requested_model: meta.model.clone(),
             requested_profile_id: meta.profile_id.clone(),
@@ -2107,6 +2184,7 @@ impl AppState {
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
             self.models_loading.insert(provider, true);
+            self.emit_providers_status(cx);
             let store = self.store.clone();
             cx.spawn(async move |this, cx| {
                 let profile_id = Settings::builtin_profile_id(provider).to_string();
@@ -2129,6 +2207,7 @@ impl AppState {
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }
                     state.emit_active_session_status(cx);
+                    state.emit_providers_status(cx);
                     cx.notify();
                 });
             })
@@ -2154,7 +2233,7 @@ impl AppState {
     }
 
     /// The last known version-check result for `provider`.
-    pub fn provider_version(&self, provider: ProviderKind) -> Option<&ProviderVersionStatus> {
+    pub fn provider_version(&self, provider: ProviderKind) -> Option<&ProviderVersionState> {
         self.provider_versions.get(&provider)
     }
 
@@ -2373,6 +2452,16 @@ impl AppState {
             },
             cx,
         );
+        let names = self
+            .provider_secret_names
+            .entry(id.to_string())
+            .or_default();
+        if value.is_some() {
+            names.insert(name.to_string());
+        } else {
+            names.remove(name);
+        }
+        self.emit_providers_status(cx);
         cx.notify();
     }
 
@@ -2472,12 +2561,18 @@ impl AppState {
                 state.update_settings(settings, cx);
                 state.enqueue_store_write(
                     StoreWrite::SetProfileSecret {
-                        profile_id: id,
+                        profile_id: id.clone(),
                         key: "ANTHROPIC_API_KEY".to_string(),
                         value: Some(api_key),
                     },
                     cx,
                 );
+                state
+                    .provider_secret_names
+                    .entry(id.clone())
+                    .or_default()
+                    .insert("ANTHROPIC_API_KEY".to_string());
+                state.emit_providers_status(cx);
                 cx.notify();
             });
         })
@@ -2497,6 +2592,7 @@ impl AppState {
             return;
         }
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
+        self.provider_secret_names.remove(id);
         self.update_settings(settings, cx);
         cx.notify();
     }
@@ -2542,6 +2638,7 @@ impl AppState {
                 continue;
             }
             snapshot.checking = true;
+            self.emit_providers_status(cx);
             let binary = self.resolve_profile_binary(&profile_id);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
@@ -2556,6 +2653,7 @@ impl AppState {
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 let _ = this.update(cx, |state, cx| {
                     state.provider_snapshots.insert(profile_id, snapshot);
+                    state.emit_providers_status(cx);
                     cx.notify();
                 });
             })
@@ -2575,6 +2673,7 @@ impl AppState {
                 continue;
             }
             status.checking = true;
+            self.emit_providers_status(cx);
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -2638,6 +2737,7 @@ impl AppState {
                             }),
                         );
                     }
+                    state.emit_providers_status(cx);
                     cx.notify();
                 });
             })
@@ -2663,6 +2763,7 @@ impl AppState {
             return;
         }
         status.updating = true;
+        self.emit_providers_status(cx);
         emit_runtime(
             cx,
             AppEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
@@ -2682,6 +2783,7 @@ impl AppState {
                 } else {
                     state.report_error(RuntimeError::UpdateFailed { provider }, cx);
                 }
+                state.emit_providers_status(cx);
                 cx.notify();
             });
         })
@@ -2861,12 +2963,14 @@ impl AppState {
     pub fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             self.git_status = None;
+            self.emit_git_status(cx);
             cx.notify();
             return;
         };
         let session_id = self.active_session_id().map(str::to_string);
         self.git_status_generation += 1;
         let generation = self.git_status_generation;
+        self.emit_git_status(cx);
         cx.spawn(async move |this, cx| {
             let status = unblock(cx.background_executor(), move || read_status(&cwd)).await;
             let _ = this.update(cx, |state, cx| {
@@ -2874,6 +2978,7 @@ impl AppState {
                     && state.active_session_id().map(str::to_string) == session_id
                 {
                     state.git_status = Some(status);
+                    state.emit_git_status(cx);
                     cx.notify();
                 }
             });
@@ -2993,6 +3098,7 @@ impl AppState {
         };
         let current_branch = self.git_branch_name();
         self.git_busy = true;
+        self.emit_git_status(cx);
         let operation = self.next_operation_id();
         let retry = GitActionRequest {
             action,
@@ -3039,6 +3145,7 @@ impl AppState {
                     active.git_branch = git_branch;
                 }
                 state.emit_active_session_status(cx);
+                state.emit_git_status(cx);
                 state.refresh_git_status(cx);
                 cx.notify();
             });
@@ -3073,6 +3180,7 @@ impl AppState {
             && let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone())
         {
             self.git_status = Some(read_status(&cwd));
+            self.emit_git_status(cx);
         }
         self.run_git_action(action, None, None, None, cx);
     }
@@ -3113,6 +3221,7 @@ impl AppState {
             return;
         }
         self.acp_registry_loading = true;
+        self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
         cx.spawn(async move |this, cx| {
             let cache_dir = data_dir.clone();
@@ -3121,6 +3230,7 @@ impl AppState {
             let _ = this.update(cx, |state, cx| {
                 if state.acp_registry_loading && state.acp_registry.is_none() {
                     state.acp_registry = cached_registry;
+                    state.emit_providers_status(cx);
                     cx.notify();
                 }
             });
@@ -3137,6 +3247,7 @@ impl AppState {
                         state.acp_registry_error = Some(err.to_string());
                     }
                 }
+                state.emit_providers_status(cx);
                 cx.notify();
             });
         })
@@ -3187,6 +3298,7 @@ impl AppState {
         if !self.acp_installing.insert(id.clone()) {
             return;
         }
+        self.emit_providers_status(cx);
         let operation = self.next_operation_id();
         let data_dir = self.store.root().clone();
         let name = agent.name.clone();
@@ -3223,6 +3335,7 @@ impl AppState {
                         }),
                     ),
                 }
+                state.emit_providers_status(cx);
                 cx.notify();
             });
         })
@@ -3235,6 +3348,7 @@ impl AppState {
         self.settings.acp_agents.remove(id);
         let settings = self.settings.clone();
         self.enqueue_settings(&settings, cx);
+        self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
         cx.spawn(async move |_this, cx| {
@@ -4186,6 +4300,7 @@ impl AppState {
         self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
         self.settings = settings;
+        self.provider_secret_names = provider_secret_names(&self.settings, &self.settings_store);
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
         computer_use_mcp::config::set(computer_use_config(&self.settings));
@@ -4193,6 +4308,7 @@ impl AppState {
             cx,
             AppEvent::Effect(RuntimeEffect::ApplyLocale { language }),
         );
+        self.emit_providers_status(cx);
         cx.notify();
     }
 
@@ -8138,6 +8254,30 @@ fn launch_env_for_profile(
     }
 }
 
+fn provider_secret_names(
+    settings: &Settings,
+    settings_store: &SettingsStore,
+) -> HashMap<String, HashSet<String>> {
+    [
+        ProviderKind::Codex,
+        ProviderKind::ClaudeCode,
+        ProviderKind::Pi,
+        ProviderKind::OpenCode,
+    ]
+    .into_iter()
+    .flat_map(|kind| settings.profiles_for_kind(kind))
+    .map(|profile| {
+        let id = profile.id;
+        let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
+            .env
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        (id, names)
+    })
+    .collect()
+}
+
 fn session_launch_env(
     settings: &Settings,
     settings_store: &SettingsStore,
@@ -8781,16 +8921,16 @@ mod tests {
         let mut state = AppState::new(store);
         state.provider_versions.insert(
             ProviderKind::ClaudeCode,
-            ProviderVersionStatus {
+            ProviderVersionState {
                 install_source: InstallSource::Npm,
-                ..ProviderVersionStatus::default()
+                ..ProviderVersionState::default()
             },
         );
         state.provider_versions.insert(
             ProviderKind::Codex,
-            ProviderVersionStatus {
+            ProviderVersionState {
                 install_source: InstallSource::Native,
-                ..ProviderVersionStatus::default()
+                ..ProviderVersionState::default()
             },
         );
 
