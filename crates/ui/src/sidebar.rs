@@ -245,12 +245,40 @@ pub struct SessionsSidebar {
     renaming: Option<RenameState>,
     /// Last expansion sweep result, cleared on collapse or the next sweep.
     auto_archive_notice: Option<(String, usize)>,
+    /// First-run explainer queued by the launch sweep (count, days, keep).
+    /// Opened from the first frame: the dialog needs the window's `Root`,
+    /// which does not exist yet while the sidebar is constructed.
+    startup_archive_dialog: Option<(usize, u32, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SessionsSidebar {
     pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        // Launch sweep: the same auto-archive pass expanding a thread list
+        // runs, applied to every project up front so stale threads are gone
+        // before the first paint (and before the fold state is seeded below).
+        let archived = app_state.update(cx, |state, cx| {
+            let project_ids: Vec<String> = state
+                .projects
+                .iter()
+                .map(|project| project.id.clone())
+                .collect();
+            project_ids
+                .iter()
+                .map(|project_id| state.auto_archive_sweep(project_id, cx))
+                .sum::<usize>()
+        });
+        let startup_archive_dialog = {
+            let settings = &app_state.read(cx).settings;
+            (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
+                (
+                    archived,
+                    settings.auto_archive_max_idle_days.max(1),
+                    settings.auto_archive_keep_count.max(1),
+                )
+            })
+        };
         let collapsed_parents = {
             let state = app_state.read(cx);
             initial_collapsed_parents(&state.sessions, state.active_session_id())
@@ -261,6 +289,7 @@ impl SessionsSidebar {
             collapsed_parents,
             renaming: None,
             auto_archive_notice: None,
+            startup_archive_dialog,
             _subscriptions: subscriptions,
         }
     }
@@ -1434,6 +1463,13 @@ fn proceed_delete(
 
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((count, days, keep)) = self.startup_archive_dialog.take() {
+            // Deferred: opening a dialog walks the window `Root`, which is an
+            // ancestor of this view and still borrowed during render.
+            cx.defer_in(window, move |this, window, cx| {
+                this.show_auto_archive_dialog(count, days, keep, window, cx);
+            });
+        }
         let (groups, active_id) = {
             let state = self.app_state.read(cx);
             let active_id = state.active_session_id().map(str::to_string);
@@ -1654,6 +1690,58 @@ mod tests {
             });
         assert!(!state.is_child);
         assert!(!state.show_unread);
+    }
+
+    #[gpui::test]
+    fn launch_runs_the_auto_archive_sweep_across_every_project(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-launch-sweep-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let app_state = cx.new(|_| AppState::new(store));
+
+        let project_a = Project::from_root(root.join("a"));
+        let project_b = Project::from_root(root.join("b"));
+        let mut sessions = Vec::new();
+        for (project, prefix) in [(&project_a, "a"), (&project_b, "b")] {
+            for i in 0..3u64 {
+                let mut meta = session(&format!("{prefix}-{i}"), None);
+                meta.project_id = Some(project.id.clone());
+                // Ancient timestamps, newest last, so each project keeps
+                // exactly its `keep_count = 1` most recent thread.
+                meta.updated_at = 1 + i;
+                sessions.push(meta);
+            }
+        }
+        app_state.update(cx, |state, _| {
+            state.settings.auto_archive_keep_count = 1;
+            state.settings.auto_archive_max_idle_days = 1;
+            state.projects = vec![project_a, project_b];
+            state.sessions = sessions;
+        });
+
+        let sidebar = cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx));
+
+        app_state.update(cx, |state, _| {
+            let mut archived: Vec<&str> = state
+                .sessions
+                .iter()
+                .filter(|meta| meta.archived_at.is_some())
+                .map(|meta| meta.id.as_str())
+                .collect();
+            archived.sort_unstable();
+            assert_eq!(archived, vec!["a-0", "a-1", "b-0", "b-1"]);
+        });
+        sidebar.update(cx, |sidebar, _| {
+            assert_eq!(
+                sidebar.startup_archive_dialog,
+                Some((4, 1, 1)),
+                "first launch queues the explainer dialog with the total count"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
