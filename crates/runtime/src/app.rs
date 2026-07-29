@@ -562,8 +562,8 @@ impl ActiveSession {
 
     /// Whether a launch-time option (reasoning effort for Claude, context
     /// window, fast mode, thinking, …) changed while the provider is live, so
-    /// the next turn must restart it. Codex's reasoning effort is excluded: it
-    /// is applied per turn via [`TurnOptions`] and needs no restart.
+    /// the next turn must restart it. Codex and OpenCode reasoning effort is
+    /// excluded: it is applied per turn via [`TurnOptions`] and needs no restart.
     fn options_changed_while_live(&self) -> bool {
         if !matches!(self.runtime, Runtime::Live(_)) {
             return false;
@@ -573,7 +573,10 @@ impl ActiveSession {
         if self.meta.provider == ProviderKind::Acp {
             return false;
         }
-        let ignore_effort = self.meta.provider == ProviderKind::Codex;
+        let ignore_effort = matches!(
+            self.meta.provider,
+            ProviderKind::Codex | ProviderKind::OpenCode
+        );
         normalized_selections(&self.meta.option_selections, ignore_effort)
             != normalized_selections(&self.live_option_selections, ignore_effort)
     }
@@ -591,11 +594,14 @@ impl ActiveSession {
             && (self.background_task_count > 0 || self.delivery_in_flight.is_some())
     }
 
-    /// Per-turn overrides derived from the session's persisted state: Codex
-    /// reasoning effort (applied per turn) and the Build/Plan interaction mode.
+    /// Per-turn overrides derived from the session's persisted state: Codex and
+    /// OpenCode reasoning effort, plus the Build/Plan interaction mode.
     fn turn_options(&self) -> TurnOptions {
-        let effort = if self.meta.provider == ProviderKind::Codex {
-            codex_effort_selection(&self.meta.option_selections)
+        let effort = if matches!(
+            self.meta.provider,
+            ProviderKind::Codex | ProviderKind::OpenCode
+        ) {
+            effort_selection(&self.meta.option_selections)
         } else {
             None
         };
@@ -6295,10 +6301,10 @@ impl AppState {
         if id == "reasoningEffort" {
             active.pending_ultrathink = false;
         }
-        // ACP agents apply option changes live: route the choice back to the
-        // agent (`session/set_mode` / `set_model` / `set_config_option`) instead
-        // of waiting for a restart.
-        if active.meta.provider == ProviderKind::Acp
+        // ACP agents apply every option change live; pi applies its thinking
+        // level live. Route those choices back instead of waiting for a restart.
+        if (active.meta.provider == ProviderKind::Acp
+            || (active.meta.provider == ProviderKind::Pi && id == "reasoningEffort"))
             && let Runtime::Live(commands) = &active.runtime
             && let Some(selection) = active.meta.option_selections.iter().find(|s| s.id == id)
         {
@@ -8262,8 +8268,8 @@ fn sanitize_filename(name: &str) -> String {
     out.chars().take(80).collect()
 }
 
-/// The reasoning-effort selection value, if any (Codex applies it per turn).
-fn codex_effort_selection(selections: &[OptionSelection]) -> Option<String> {
+/// The reasoning-effort selection value, if any.
+fn effort_selection(selections: &[OptionSelection]) -> Option<String> {
     selections
         .iter()
         .find(|s| s.id == "reasoningEffort")
@@ -8271,8 +8277,8 @@ fn codex_effort_selection(selections: &[OptionSelection]) -> Option<String> {
 }
 
 /// Selections sorted by id for order-independent comparison, optionally dropping
-/// the reasoning-effort entry (which, for Codex, applies per turn and never
-/// forces a restart).
+/// the reasoning-effort entry (which, for per-turn providers, never forces a
+/// restart).
 fn normalized_selections(
     selections: &[OptionSelection],
     ignore_effort: bool,
@@ -11236,6 +11242,18 @@ mod tests {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
+    }
+
+    #[test]
+    fn opencode_effort_is_applied_per_turn_without_restart() {
+        let mut active = live_session(ProviderKind::OpenCode, async_channel::unbounded().0);
+        active.meta.option_selections.push(OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("high"),
+        });
+
+        assert_eq!(active.turn_options().effort.as_deref(), Some("high"));
+        assert!(!active.options_changed_while_live());
     }
 
     #[test]
