@@ -13,7 +13,7 @@ use tcode_core::{
 use tcode_protocol::Command;
 use tcode_runtime::{
     app::{AppState, ProjectGroup, ProviderVersionStatus, QueuedMessage},
-    terminal::TerminalContext,
+    terminal::{TerminalContext, TerminalWorkspace},
     ui_facade::{
         AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, GitDiffResult, GitDiffScope,
         PathEntry, RecentDir,
@@ -674,6 +674,23 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
+    /// Borrows the live terminal workspace for terminal emulation and PTY I/O.
+    ///
+    /// Terminal lifecycle and preference mutations still cross [`Command`];
+    /// the drawer uses this only for operations on the live `term::Terminal`
+    /// objects, whose APIs mutate through shared references.
+    pub fn with_terminal_workspace<R>(
+        &self,
+        cx: &App,
+        read: impl FnOnce(&TerminalWorkspace) -> R,
+    ) -> Option<R> {
+        self.app
+            .read(cx)
+            .active
+            .as_ref()
+            .map(|active| read(&active.terminal_workspace))
+    }
+
     pub fn composer_review_comments(&self, cx: &App) -> Vec<ReviewComment> {
         self.app.read(cx).review_comments().to_vec()
     }
@@ -946,8 +963,7 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn new_terminal_drawer(store: Entity<Self>, cx: &mut App) -> Entity<TerminalDrawer> {
-        let app = store.read(cx).app.clone();
-        cx.new(|cx| TerminalDrawer::new(app, cx))
+        cx.new(|cx| TerminalDrawer::new(store, cx))
     }
 
     pub fn generate_commit_message(
