@@ -369,10 +369,10 @@ fn main() {
             }
             // Refresh the model catalogs in the background so the picker shows
             // real, up-to-date models (the persisted cache serves until then).
-            app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
+            AppState::update(&app_state, cx, |state, cx| state.refresh_model_catalogs(cx));
             // Check provider CLI versions on launch (unless disabled), toasting
             // when a newer version is available (s3 §6).
-            app_state.update(cx, |state, cx| {
+            AppState::update(&app_state, cx, |state, cx| {
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(cx);
                 }
@@ -407,7 +407,7 @@ fn main() {
             // synchronously before the window (and settings page) is built, so
             // the page mounts already on the recorded section. No-op otherwise.
             if let Some(section) =
-                app_state.update(cx, |state, cx| state.apply_pending_relaunch(cx))
+                AppState::update(&app_state, cx, |state, cx| state.apply_pending_relaunch(cx))
             {
                 window_state.update(cx, |state, cx| {
                     state.debug_settings_section = Some(section);
@@ -443,7 +443,7 @@ fn main() {
             let quit_subscription = cx.on_app_quit({
                 let app_state = app_state.clone();
                 move |cx| {
-                    let barrier = app_state.update(cx, |state, cx| {
+                    let barrier = AppState::update(&app_state, cx, |state, cx| {
                         state.shutdown_all(cx);
                         state.store_write_barrier(cx)
                     });
@@ -538,7 +538,8 @@ fn main() {
                     || debug_git_action.is_some()
                     || debug_git_dialog
                 {
-                    app_state.update(cx, |state, cx| {
+                    let debug_executor = cx.background_executor().clone();
+                    AppState::update(&app_state, cx, |state, cx| {
                         if let Some(cwd) = debug_cwd.clone() {
                             // Deterministic draft rooted at `cwd` for screenshots.
                             if let Some(project_id) = state.create_project(cwd.clone(), cx) {
@@ -599,16 +600,16 @@ fn main() {
                                 .and_then(|a| a.meta.project_id.clone());
                             let cwd = state.active.as_ref().map(|a| a.meta.cwd.clone());
                             if let (Some(project), Some(cwd)) = (project, cwd) {
-                                cx.spawn(async move |state, cx| {
-                                    cx.background_executor()
+                                let host_cx = cx.clone();
+                                cx.spawn_detached(async move {
+                                    debug_executor
                                         .timer(std::time::Duration::from_secs(secs))
                                         .await;
-                                    let _ = state.update(cx, |state, cx| {
+                                    host_cx.enqueue(move |state, host_cx| {
                                         log::info!("debug-park-after: opening a draft now");
-                                        state.start_draft(project, cwd, cx);
+                                        state.start_draft(project, cwd, host_cx);
                                     });
-                                })
-                                .detach();
+                                });
                             }
                         }
                     });

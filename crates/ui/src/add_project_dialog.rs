@@ -73,7 +73,8 @@ impl AddProjectDialog {
     }
 
     fn scan(&mut self, cx: &mut Context<Self>) {
-        let recent = self.store.read(cx).scan_external_history(cx);
+        let store = self.store.clone();
+        let recent = store.update(cx, |store, cx| store.scan_external_history(cx));
         cx.spawn(async move |this, cx| {
             let recent = recent.await;
             let _ = this.update(cx, |dialog, cx| {
@@ -165,11 +166,10 @@ impl AddProjectDialog {
             .first()
             .map(|thread| thread.source.display_name().to_string())
             .unwrap_or_default();
-        let Some(receiver) = self
-            .store
-            .read(cx)
-            .start_external_import(&project_id, threads, cx)
-        else {
+        let store = self.store.clone();
+        let Some(receiver) = store.update(cx, |store, cx| {
+            store.start_external_import(&project_id, threads, cx)
+        }) else {
             return;
         };
 

@@ -3,5 +3,6 @@
 pub mod app;
 pub mod blocking;
 pub mod event;
+pub mod host;
 pub mod terminal;
 pub mod ui_facade;

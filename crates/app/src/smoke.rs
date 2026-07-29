@@ -95,7 +95,7 @@ pub fn drive(spec: SmokeSpec, app_state: Entity<AppState>, cx: &mut App) {
         std::process::exit(2);
     });
 
-    app_state.update(cx, |state, cx| {
+    AppState::update(&app_state, cx, |state, cx| {
         state.smoke = Some(SmokeMode { auto_approve: true });
         match spec {
             SmokeSpec::New {
