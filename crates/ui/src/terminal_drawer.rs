@@ -28,9 +28,11 @@ use term::{
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
 };
 
-use tcode_runtime::app::{AppState, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
+use tcode_core::ui::TerminalSplitDirection;
+use tcode_protocol::Command;
+use tcode_runtime::app::MAX_TERMINALS_PER_SESSION;
 
-use crate::material;
+use crate::{material, store::WorkspaceStore};
 
 const FONT_SIZE: f32 = 13.;
 #[cfg(target_os = "macos")]
@@ -140,7 +142,7 @@ struct GridPaintData {
 }
 
 pub struct TerminalDrawer {
-    app_state: Entity<AppState>,
+    workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
     cell_width: f32,
@@ -161,14 +163,14 @@ pub struct TerminalDrawer {
     last_input: Instant,
     terminal_focused: bool,
     blink_task: Option<Task<()>>,
-    _app_state_subscription: gpui::Subscription,
+    _store_subscription: gpui::Subscription,
 }
 
 impl TerminalDrawer {
-    pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let app_state_subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
+    pub fn new(workspace_store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+        let store_subscription = cx.observe(&workspace_store, |_, _, cx| cx.notify());
         Self {
-            app_state,
+            workspace_store,
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
             cell_width: 7.83,
@@ -189,26 +191,28 @@ impl TerminalDrawer {
             last_input: Instant::now(),
             terminal_focused: false,
             blink_task: None,
-            _app_state_subscription: app_state_subscription,
+            _store_subscription: store_subscription,
         }
     }
 
     pub fn resize(&self, _width: f32, height: f32, cx: &mut Context<Self>) {
-        self.app_state.update(cx, |state, cx| {
-            state.set_terminal_height(height, cx);
-        });
+        self.workspace_store
+            .update(cx, |store, cx| store.set_terminal_height(height, cx));
+    }
+
+    fn dispatch(&self, command: Command, cx: &mut Context<Self>) {
+        self.workspace_store
+            .update(cx, |store, cx| store.dispatch(command, cx));
     }
 
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&term::Terminal)) {
-        if let Some(terminal) = self
-            .app_state
+        self.workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .and_then(|a| a.terminal_workspace.active())
-        {
-            f(&terminal.terminal);
-        }
+            .with_terminal_workspace(cx, |workspace| {
+                if let Some(entry) = workspace.active() {
+                    f(&entry.terminal);
+                }
+            });
     }
 
     fn with_terminal_id(
@@ -217,15 +221,13 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
         f: impl FnOnce(&term::Terminal),
     ) {
-        if let Some(terminal) = self
-            .app_state
+        self.workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-        {
-            f(&terminal.terminal);
-        }
+            .with_terminal_workspace(cx, |workspace| {
+                if let Some(entry) = workspace.terminal(terminal_id) {
+                    f(&entry.terminal);
+                }
+            });
     }
 
     fn paste_to_terminal(&self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
@@ -243,13 +245,15 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         if let Some(text) = self
-            .app_state
+            .workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .and_then(|active| active.terminal_workspace.terminal(action.0))
-            .and_then(|entry| entry.terminal.selected_text())
-            .map(|selection| selection.text)
+            .with_terminal_workspace(cx, |workspace| {
+                workspace
+                    .terminal(action.0)
+                    .and_then(|entry| entry.terminal.selected_text())
+                    .map(|selection| selection.text)
+            })
+            .flatten()
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -290,9 +294,12 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.app_state.update(cx, |state, cx| {
-            state.capture_terminal_selection(action.0, cx)
-        });
+        self.dispatch(
+            Command::CaptureTerminalSelection {
+                terminal_id: action.0,
+            },
+            cx,
+        );
     }
 
     /// Keep one gpui-side drain task per live PTY. Terminal restarts retain the
@@ -300,13 +307,10 @@ impl TerminalDrawer {
     /// an existing subscription is still valid.
     fn sync_event_subscriptions(&mut self, window: &Window, cx: &mut Context<Self>) {
         let streams = self
-            .app_state
+            .workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .map(|active| {
-                active
-                    .terminal_workspace
+            .with_terminal_workspace(cx, |workspace| {
+                workspace
                     .terminals
                     .iter()
                     .map(|entry| (entry.id, entry.terminal.events()))
@@ -410,13 +414,15 @@ impl TerminalDrawer {
             match shortcut {
                 ClipboardShortcut::Copy => {
                     if let Some(text) = self
-                        .app_state
+                        .workspace_store
                         .read(cx)
-                        .active
-                        .as_ref()
-                        .and_then(|a| a.terminal_workspace.active())
-                        .and_then(|entry| entry.terminal.selected_text())
-                        .map(|selection| selection.text)
+                        .with_terminal_workspace(cx, |workspace| {
+                            workspace
+                                .active()
+                                .and_then(|entry| entry.terminal.selected_text())
+                                .map(|selection| selection.text)
+                        })
+                        .flatten()
                     {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
@@ -424,11 +430,10 @@ impl TerminalDrawer {
                 ClipboardShortcut::Paste => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
                         && let Some(terminal_id) = self
-                            .app_state
+                            .workspace_store
                             .read(cx)
-                            .active
-                            .as_ref()
-                            .and_then(|active| active.terminal_workspace.active_id)
+                            .with_terminal_workspace(cx, |workspace| workspace.active_id)
+                            .flatten()
                     {
                         self.paste_to_terminal(terminal_id, &text, cx);
                     }
@@ -462,11 +467,10 @@ impl TerminalDrawer {
         self.last_input = Instant::now();
         self.cursor_phase = true;
         if let Some(id) = self
-            .app_state
+            .workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .and_then(|active| active.terminal_workspace.active_id)
+            .with_terminal_workspace(cx, |workspace| workspace.active_id)
+            .flatten()
         {
             self.bell_tabs.remove(&id);
         }
@@ -486,36 +490,34 @@ impl TerminalDrawer {
         let lines = (total / self.cell_height).trunc() as i32;
         *remainder = total - lines as f32 * self.cell_height;
         if lines != 0 {
-            if let Some(entry) = self
-                .app_state
+            self.workspace_store
                 .read(cx)
-                .active
-                .as_ref()
-                .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-            {
-                let snapshot = entry.terminal.snapshot();
-                let point = self
-                    .grid_point_and_side(terminal_id, event.position)
-                    .map(|((row, column), _)| GridPoint { row, column })
-                    .unwrap_or(GridPoint { row: 0, column: 0 });
-                if snapshot.mode.routes_mouse(event.modifiers.shift) {
-                    if let Some(bytes) = mappings::scroll_report(
-                        point,
-                        lines,
-                        term_modifiers(event.modifiers),
-                        snapshot.mode,
-                    ) {
-                        entry.terminal.write_raw(bytes);
+                .with_terminal_workspace(cx, |workspace| {
+                    if let Some(entry) = workspace.terminal(terminal_id) {
+                        let snapshot = entry.terminal.snapshot();
+                        let point = self
+                            .grid_point_and_side(terminal_id, event.position)
+                            .map(|((row, column), _)| GridPoint { row, column })
+                            .unwrap_or(GridPoint { row: 0, column: 0 });
+                        if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                            if let Some(bytes) = mappings::scroll_report(
+                                point,
+                                lines,
+                                term_modifiers(event.modifiers),
+                                snapshot.mode,
+                            ) {
+                                entry.terminal.write_raw(bytes);
+                            }
+                        } else if snapshot.mode.alt_screen
+                            && snapshot.mode.alternate_scroll
+                            && !event.modifiers.shift
+                        {
+                            entry.terminal.write_raw(mappings::alt_scroll(lines));
+                        } else {
+                            entry.terminal.scroll(lines);
+                        }
                     }
-                } else if snapshot.mode.alt_screen
-                    && snapshot.mode.alternate_scroll
-                    && !event.modifiers.shift
-                {
-                    entry.terminal.write_raw(mappings::alt_scroll(lines));
-                } else {
-                    entry.terminal.scroll(lines);
-                }
-            }
+                });
             cx.stop_propagation();
             cx.notify();
         }
@@ -770,81 +772,88 @@ impl TerminalDrawer {
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
-        self.app_state.update(cx, |state, cx| {
-            state.activate_terminal(terminal_id, cx);
-            if let Some(entry) = state
-                .active
-                .as_ref()
-                .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-            {
-                let snapshot = entry.terminal.snapshot();
-                if snapshot.mode.routes_mouse(event.modifiers.shift) {
-                    if let Some(button) = term_mouse_button(event.button)
-                        && let Some(bytes) = mappings::mouse_button_report(
-                            GridPoint {
-                                row: point.0,
-                                column: point.1,
-                            },
-                            button,
-                            term_modifiers(event.modifiers),
-                            true,
-                            snapshot.mode,
-                        )
-                    {
-                        entry.terminal.write_raw(bytes);
+        self.dispatch(Command::ActivateTerminal { terminal_id }, cx);
+        let workspace_store = self.workspace_store.clone();
+        let mut stop_propagation = false;
+        #[cfg(target_os = "linux")]
+        let primary_text = (event.button == MouseButton::Middle)
+            .then(|| cx.read_from_primary().and_then(|item| item.text()))
+            .flatten();
+        workspace_store
+            .read(cx)
+            .with_terminal_workspace(cx, |workspace| {
+                if let Some(entry) = workspace.terminal(terminal_id) {
+                    let snapshot = entry.terminal.snapshot();
+                    if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                        if let Some(button) = term_mouse_button(event.button)
+                            && let Some(bytes) = mappings::mouse_button_report(
+                                GridPoint {
+                                    row: point.0,
+                                    column: point.1,
+                                },
+                                button,
+                                term_modifiers(event.modifiers),
+                                true,
+                                snapshot.mode,
+                            )
+                        {
+                            entry.terminal.write_raw(bytes);
+                        }
+                        if event.button == MouseButton::Right {
+                            stop_propagation = true;
+                        }
+                        return;
                     }
                     if event.button == MouseButton::Right {
-                        cx.stop_propagation();
+                        if entry.terminal.selected_text().is_none() {
+                            entry
+                                .terminal
+                                .start_selection(SelectionKind::Semantic, point, side);
+                        }
+                        return;
                     }
-                    return;
-                }
-                if event.button == MouseButton::Right {
-                    if entry.terminal.selected_text().is_none() {
-                        entry
-                            .terminal
-                            .start_selection(SelectionKind::Semantic, point, side);
+                    #[cfg(target_os = "linux")]
+                    if event.button == MouseButton::Middle {
+                        if let Some(text) = primary_text {
+                            let text = prepare_terminal_paste(&text, snapshot.mode.bracketed_paste);
+                            entry.terminal.write_input(text.into_bytes());
+                        }
+                        stop_propagation = true;
+                        return;
                     }
-                    return;
-                }
-                #[cfg(target_os = "linux")]
-                if event.button == MouseButton::Middle {
-                    if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
-                        let text = prepare_terminal_paste(&text, snapshot.mode.bracketed_paste);
-                        entry.terminal.write_input(text.into_bytes());
+                    if event.button != MouseButton::Left {
+                        return;
                     }
-                    cx.stop_propagation();
-                    return;
+                    if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos"))
+                        && let Some(link) = entry.terminal.hyperlink_at(point.0, point.1)
+                    {
+                        self.pressed_link = Some((terminal_id, link.url));
+                        return;
+                    }
+                    self.mouse_down_position = Some((terminal_id, event.position));
+                    self.selecting = None;
+                    self.pending_simple_selection = None;
+                    let kind = match event.click_count {
+                        1 => SelectionKind::Simple,
+                        2 => SelectionKind::Semantic,
+                        3 => SelectionKind::Lines,
+                        _ => return,
+                    };
+                    if kind == SelectionKind::Simple && event.modifiers.shift {
+                        entry.terminal.update_selection(point, side);
+                        return;
+                    }
+                    if kind == SelectionKind::Simple {
+                        entry.terminal.clear_selection();
+                        self.pending_simple_selection = Some((terminal_id, point, side));
+                        return;
+                    }
+                    entry.terminal.start_selection(kind, point, side);
                 }
-                if event.button != MouseButton::Left {
-                    return;
-                }
-                if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos"))
-                    && let Some(link) = entry.terminal.hyperlink_at(point.0, point.1)
-                {
-                    self.pressed_link = Some((terminal_id, link.url));
-                    return;
-                }
-                self.mouse_down_position = Some((terminal_id, event.position));
-                self.selecting = None;
-                self.pending_simple_selection = None;
-                let kind = match event.click_count {
-                    1 => SelectionKind::Simple,
-                    2 => SelectionKind::Semantic,
-                    3 => SelectionKind::Lines,
-                    _ => return,
-                };
-                if kind == SelectionKind::Simple && event.modifiers.shift {
-                    entry.terminal.update_selection(point, side);
-                    return;
-                }
-                if kind == SelectionKind::Simple {
-                    entry.terminal.clear_selection();
-                    self.pending_simple_selection = Some((terminal_id, point, side));
-                    return;
-                }
-                entry.terminal.start_selection(kind, point, side);
-            }
-        });
+            });
+        if stop_propagation {
+            cx.stop_propagation();
+        }
         cx.notify();
     }
 
@@ -859,85 +868,85 @@ impl TerminalDrawer {
             self.hovered_link = None;
             return;
         };
-        if let Some(entry) = self
-            .app_state
+        let workspace_store = self.workspace_store.clone();
+        workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-        {
-            let snapshot = entry.terminal.snapshot();
-            if snapshot.mode.routes_mouse(event.modifiers.shift) {
-                if self.last_mouse_point.get(&terminal_id) != Some(&point) {
-                    self.last_mouse_point.insert(terminal_id, point);
-                    if let Some(bytes) = mappings::mouse_move_report(
-                        GridPoint {
-                            row: point.0,
-                            column: point.1,
-                        },
-                        event.pressed_button.and_then(term_mouse_button),
-                        term_modifiers(event.modifiers),
-                        snapshot.mode,
-                    ) {
-                        entry.terminal.write_raw(bytes);
-                    }
-                }
-                return;
-            }
-            if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos")) {
-                if self
-                    .last_link_hover
-                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(16))
-                {
-                    self.last_link_hover = Some(Instant::now());
-                    self.hovered_link = entry
-                        .terminal
-                        .hyperlink_at(point.0, point.1)
-                        .map(|link| (terminal_id, link));
-                }
-            } else {
-                self.hovered_link = None;
-                if event.pressed_button == Some(MouseButton::Left)
-                    && self
-                        .mouse_down_position
-                        .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
-                {
-                    if self.selecting != Some(terminal_id)
-                        && let Some((_, mouse_down_position)) = self.mouse_down_position
-                    {
-                        let dx = f32::from(event.position.x - mouse_down_position.x);
-                        let dy = f32::from(event.position.y - mouse_down_position.y);
-                        if !selection_drag_started(dx, dy) {
-                            return;
+            .with_terminal_workspace(cx, |workspace| {
+                let Some(entry) = workspace.terminal(terminal_id) else {
+                    return;
+                };
+                let snapshot = entry.terminal.snapshot();
+                if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                    if self.last_mouse_point.get(&terminal_id) != Some(&point) {
+                        self.last_mouse_point.insert(terminal_id, point);
+                        if let Some(bytes) = mappings::mouse_move_report(
+                            GridPoint {
+                                row: point.0,
+                                column: point.1,
+                            },
+                            event.pressed_button.and_then(term_mouse_button),
+                            term_modifiers(event.modifiers),
+                            snapshot.mode,
+                        ) {
+                            entry.terminal.write_raw(bytes);
                         }
-                        if self
-                            .pending_simple_selection
-                            .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
-                            && let Some((_, anchor, anchor_side)) =
-                                self.pending_simple_selection.take()
+                    }
+                    return;
+                }
+                if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos")) {
+                    if self
+                        .last_link_hover
+                        .is_none_or(|last| last.elapsed() >= Duration::from_millis(16))
+                    {
+                        self.last_link_hover = Some(Instant::now());
+                        self.hovered_link = entry
+                            .terminal
+                            .hyperlink_at(point.0, point.1)
+                            .map(|link| (terminal_id, link));
+                    }
+                } else {
+                    self.hovered_link = None;
+                    if event.pressed_button == Some(MouseButton::Left)
+                        && self
+                            .mouse_down_position
+                            .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
+                    {
+                        if self.selecting != Some(terminal_id)
+                            && let Some((_, mouse_down_position)) = self.mouse_down_position
                         {
-                            entry.terminal.start_selection(
-                                SelectionKind::Simple,
-                                anchor,
-                                anchor_side,
-                            );
+                            let dx = f32::from(event.position.x - mouse_down_position.x);
+                            let dy = f32::from(event.position.y - mouse_down_position.y);
+                            if !selection_drag_started(dx, dy) {
+                                return;
+                            }
+                            if self
+                                .pending_simple_selection
+                                .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
+                                && let Some((_, anchor, anchor_side)) =
+                                    self.pending_simple_selection.take()
+                            {
+                                entry.terminal.start_selection(
+                                    SelectionKind::Simple,
+                                    anchor,
+                                    anchor_side,
+                                );
+                            }
+                        }
+                        self.selecting = Some(terminal_id);
+                        entry.terminal.update_selection(point, side);
+                        if !snapshot.mode.alt_screen
+                            && snapshot.history_size > 0
+                            && let Some(lines) = drag_scroll_lines(
+                                event.position.y,
+                                self.grid_bounds.borrow().get(&terminal_id).copied(),
+                                self.cell_height,
+                            )
+                        {
+                            entry.terminal.scroll(lines);
                         }
                     }
-                    self.selecting = Some(terminal_id);
-                    entry.terminal.update_selection(point, side);
-                    if !snapshot.mode.alt_screen
-                        && snapshot.history_size > 0
-                        && let Some(lines) = drag_scroll_lines(
-                            event.position.y,
-                            self.grid_bounds.borrow().get(&terminal_id).copied(),
-                            self.cell_height,
-                        )
-                    {
-                        entry.terminal.scroll(lines);
-                    }
                 }
-            }
-        }
+            });
         cx.notify();
     }
 
@@ -948,57 +957,64 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some((point, _side)) = self.grid_point_and_side(terminal_id, event.position)
-            && let Some(entry) = self
-                .app_state
-                .read(cx)
-                .active
-                .as_ref()
-                .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-        {
-            let snapshot = entry.terminal.snapshot();
-            if snapshot.mode.routes_mouse(event.modifiers.shift) {
-                if let Some(button) = term_mouse_button(event.button)
-                    && let Some(bytes) = mappings::mouse_button_report(
-                        GridPoint {
-                            row: point.0,
-                            column: point.1,
-                        },
-                        button,
-                        term_modifiers(event.modifiers),
-                        false,
-                        snapshot.mode,
-                    )
-                {
-                    entry.terminal.write_raw(bytes);
-                }
-            } else if event.button == MouseButton::Left
-                && terminal_link_modifier(event.modifiers, cfg!(target_os = "macos"))
-            {
-                let released = entry
-                    .terminal
-                    .hyperlink_at(point.0, point.1)
-                    .map(|link| link.url);
-                if let (Some((pressed_id, pressed)), Some(released)) =
-                    (self.pressed_link.take(), released)
-                    && pressed_id == terminal_id
-                    && pressed == released
-                {
-                    cx.open_url(&released);
-                }
-            }
+        let released_url = self
+            .grid_point_and_side(terminal_id, event.position)
+            .and_then(|(point, _side)| {
+                self.workspace_store
+                    .read(cx)
+                    .with_terminal_workspace(cx, |workspace| {
+                        let entry = workspace.terminal(terminal_id)?;
+                        let snapshot = entry.terminal.snapshot();
+                        if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                            if let Some(button) = term_mouse_button(event.button)
+                                && let Some(bytes) = mappings::mouse_button_report(
+                                    GridPoint {
+                                        row: point.0,
+                                        column: point.1,
+                                    },
+                                    button,
+                                    term_modifiers(event.modifiers),
+                                    false,
+                                    snapshot.mode,
+                                )
+                            {
+                                entry.terminal.write_raw(bytes);
+                            }
+                        } else if event.button == MouseButton::Left
+                            && terminal_link_modifier(event.modifiers, cfg!(target_os = "macos"))
+                        {
+                            let released = entry
+                                .terminal
+                                .hyperlink_at(point.0, point.1)
+                                .map(|link| link.url);
+                            if let (Some((pressed_id, pressed)), Some(released)) =
+                                (self.pressed_link.take(), released)
+                                && pressed_id == terminal_id
+                                && pressed == released
+                            {
+                                return Some(released);
+                            }
+                        }
+                        None
+                    })
+                    .flatten()
+            });
+        if let Some(released_url) = released_url {
+            cx.open_url(&released_url);
         }
         if self.selecting == Some(terminal_id) {
             self.selecting = None;
             #[cfg(target_os = "linux")]
             if let Some(text) = self
-                .app_state
+                .workspace_store
                 .read(cx)
-                .active
-                .as_ref()
-                .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-                .and_then(|entry| entry.terminal.selected_text())
-                .map(|selection| selection.text)
+                .with_terminal_workspace(cx, |workspace| {
+                    workspace
+                        .terminal(terminal_id)
+                        .and_then(|entry| entry.terminal.selected_text())
+                        .map(|selection| selection.text)
+                })
+                .flatten()
             {
                 cx.write_to_primary(ClipboardItem::new_string(text));
             }
@@ -1021,19 +1037,19 @@ impl TerminalDrawer {
     }
 
     fn render_terminal(&self, terminal_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        let Some((snapshot, label, register_input)) =
-            self.app_state.read(cx).active.as_ref().and_then(|active| {
-                active
-                    .terminal_workspace
-                    .terminal(terminal_id)
-                    .map(|entry| {
-                        (
-                            entry.terminal.snapshot(),
-                            entry.terminal.label(),
-                            active.terminal_workspace.active_id == Some(terminal_id),
-                        )
-                    })
+        let Some((snapshot, label, register_input)) = self
+            .workspace_store
+            .read(cx)
+            .with_terminal_workspace(cx, |workspace| {
+                workspace.terminal(terminal_id).map(|entry| {
+                    (
+                        entry.terminal.snapshot(),
+                        entry.terminal.label(),
+                        workspace.active_id == Some(terminal_id),
+                    )
+                })
             })
+            .flatten()
         else {
             return div().into_any_element();
         };
@@ -1056,7 +1072,7 @@ impl TerminalDrawer {
         // grid's geometry. Reserving space for it while a selection exists
         // resized the PTY mid-drag — rows jumped and blank lines appeared.
         let has_selection = snapshot.cells.iter().any(|cell| cell.selected);
-        let app_state = self.app_state.clone();
+        let workspace_store = self.workspace_store.clone();
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
         let link_hovered = self
@@ -1078,14 +1094,13 @@ impl TerminalDrawer {
                 let content_height = f32::from(bounds.size.height) - 2. * PANE_PADDING;
                 let cols = (content_width / cell_width).floor().max(2.) as usize;
                 let rows = (content_height / cell_height).floor().max(2.) as usize;
-                if let Some(entry) = app_state
+                workspace_store
                     .read(cx)
-                    .active
-                    .as_ref()
-                    .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-                {
-                    entry.terminal.resize(cols, rows);
-                }
+                    .with_terminal_workspace(cx, |workspace| {
+                        if let Some(entry) = workspace.terminal(terminal_id) {
+                            entry.terminal.resize(cols, rows);
+                        }
+                    });
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -1158,22 +1173,22 @@ impl TerminalDrawer {
                         ))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.app_state.update(cx, |state, cx| {
-                                state.capture_terminal_selection(terminal_id, cx)
-                            });
+                            this.dispatch(Command::CaptureTerminalSelection { terminal_id }, cx);
                         })),
                 )
             })
             .context_menu({
-                let app_state = self.app_state.clone();
+                let workspace_store = self.workspace_store.clone();
                 move |menu, _window, cx| {
-                    let has_selection = app_state
+                    let has_selection = workspace_store
                         .read(cx)
-                        .active
-                        .as_ref()
-                        .and_then(|active| active.terminal_workspace.terminal(terminal_id))
-                        .and_then(|entry| entry.terminal.selected_text())
-                        .is_some();
+                        .with_terminal_workspace(cx, |workspace| {
+                            workspace
+                                .terminal(terminal_id)
+                                .and_then(|entry| entry.terminal.selected_text())
+                                .is_some()
+                        })
+                        .unwrap_or(false);
                     menu.menu_with_enable(
                         tcode_i18n::tr!("terminal.copy").into_owned(),
                         Box::new(TerminalCopy(terminal_id)),
@@ -1230,29 +1245,29 @@ impl Render for TerminalDrawer {
         }
         self.sync_event_subscriptions(window, cx);
         if self.focus_subscriptions.is_empty() {
-            let app_state = self.app_state.clone();
+            let workspace_store = self.workspace_store.clone();
             let focus_in = window.on_focus_in(&self.focus_handle, cx, move |_, cx| {
-                if let Some(entry) = app_state
+                workspace_store
                     .read(cx)
-                    .active
-                    .as_ref()
-                    .and_then(|active| active.terminal_workspace.active())
-                    && entry.terminal.snapshot().mode.focus_in_out
-                {
-                    entry.terminal.write_raw(b"\x1b[I".to_vec());
-                }
+                    .with_terminal_workspace(cx, |workspace| {
+                        if let Some(entry) = workspace.active()
+                            && entry.terminal.snapshot().mode.focus_in_out
+                        {
+                            entry.terminal.write_raw(b"\x1b[I".to_vec());
+                        }
+                    });
             });
-            let app_state = self.app_state.clone();
+            let workspace_store = self.workspace_store.clone();
             let focus_out = window.on_focus_out(&self.focus_handle, cx, move |_, _, cx| {
-                if let Some(entry) = app_state
+                workspace_store
                     .read(cx)
-                    .active
-                    .as_ref()
-                    .and_then(|active| active.terminal_workspace.active())
-                    && entry.terminal.snapshot().mode.focus_in_out
-                {
-                    entry.terminal.write_raw(b"\x1b[O".to_vec());
-                }
+                    .with_terminal_workspace(cx, |workspace| {
+                        if let Some(entry) = workspace.active()
+                            && entry.terminal.snapshot().mode.focus_in_out
+                        {
+                            entry.terminal.write_raw(b"\x1b[O".to_vec());
+                        }
+                    });
             });
             self.focus_subscriptions.extend([focus_in, focus_out]);
         }
@@ -1277,12 +1292,9 @@ impl Render for TerminalDrawer {
             .ceil()
             .max(FONT_SIZE + 2.);
         let (tabs, active_id, active_split) = self
-            .app_state
+            .workspace_store
             .read(cx)
-            .active
-            .as_ref()
-            .map(|active| {
-                let workspace = &active.terminal_workspace;
+            .with_terminal_workspace(cx, |workspace| {
                 (
                     workspace
                         .terminals
@@ -1342,8 +1354,7 @@ impl Render for TerminalDrawer {
                     cx.theme().background.opacity(0.)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.app_state
-                        .update(cx, |state, cx| state.activate_terminal(id, cx));
+                    this.dispatch(Command::ActivateTerminal { terminal_id: id }, cx);
                 }))
                 .child(
                     div()
@@ -1374,8 +1385,8 @@ impl Render for TerminalDrawer {
                         .icon(IconName::Close)
                         .tooltip(tcode_i18n::tr!("terminal.close_tab"))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.app_state
-                                .update(cx, |state, cx| state.close_terminal(close_id, cx));
+                            this.workspace_store
+                                .update(cx, |store, cx| store.close_terminal(close_id, cx));
                         })),
                 ),
             );
@@ -1401,8 +1412,7 @@ impl Render for TerminalDrawer {
                         .small()
                         .label(tcode_i18n::tr!("terminal.restart"))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.app_state
-                                .update(cx, |state, cx| state.restart_terminal(cx))
+                            this.dispatch(Command::RestartTerminal, cx);
                         })),
                 )
             })
@@ -1416,17 +1426,22 @@ impl Render for TerminalDrawer {
                     .tooltip(tcode_i18n::tr!("terminal.split_horizontal"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cwd = this
-                            .app_state
+                            .workspace_store
                             .read(cx)
-                            .active
-                            .as_ref()
-                            .and_then(|active| active.terminal_workspace.active())
-                            .map(|entry| entry.terminal.working_directory());
+                            .with_terminal_workspace(cx, |workspace| {
+                                workspace
+                                    .active()
+                                    .map(|entry| entry.terminal.working_directory())
+                            })
+                            .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.app_state.update(cx, |state, cx| {
-                                    state.split_terminal(TerminalSplitDirection::Horizontal, cx)
-                                })
+                                this.dispatch(
+                                    Command::SplitTerminal {
+                                        direction: TerminalSplitDirection::Horizontal,
+                                    },
+                                    cx,
+                                );
                             });
                         }
                     })),
@@ -1441,17 +1456,22 @@ impl Render for TerminalDrawer {
                     .tooltip(tcode_i18n::tr!("terminal.split_vertical"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cwd = this
-                            .app_state
+                            .workspace_store
                             .read(cx)
-                            .active
-                            .as_ref()
-                            .and_then(|active| active.terminal_workspace.active())
-                            .map(|entry| entry.terminal.working_directory());
+                            .with_terminal_workspace(cx, |workspace| {
+                                workspace
+                                    .active()
+                                    .map(|entry| entry.terminal.working_directory())
+                            })
+                            .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.app_state.update(cx, |state, cx| {
-                                    state.split_terminal(TerminalSplitDirection::Vertical, cx)
-                                })
+                                this.dispatch(
+                                    Command::SplitTerminal {
+                                        direction: TerminalSplitDirection::Vertical,
+                                    },
+                                    cx,
+                                );
                             });
                         }
                     })),
@@ -1470,16 +1490,17 @@ impl Render for TerminalDrawer {
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cwd = this
-                            .app_state
+                            .workspace_store
                             .read(cx)
-                            .active
-                            .as_ref()
-                            .and_then(|active| active.terminal_workspace.active())
-                            .map(|entry| entry.terminal.working_directory());
+                            .with_terminal_workspace(cx, |workspace| {
+                                workspace
+                                    .active()
+                                    .map(|entry| entry.terminal.working_directory())
+                            })
+                            .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.app_state
-                                    .update(cx, |state, cx| state.new_terminal(cx))
+                                this.dispatch(Command::NewTerminal, cx);
                             });
                         }
                     })),
@@ -1492,8 +1513,8 @@ impl Render for TerminalDrawer {
                     .icon(IconName::Close)
                     .tooltip(tcode_i18n::tr!("terminal.close"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.app_state
-                            .update(cx, |state, cx| state.close_terminal_panel(cx))
+                        this.workspace_store
+                            .update(cx, |store, cx| store.close_terminal_panel(cx));
                     })),
             );
 

@@ -20,10 +20,12 @@ use gpui_component::{
 };
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
+
+use crate::store::WorkspaceStore;
 
 pub struct CommitDialog {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     message: Entity<InputState>,
     files: Vec<GitFileEntry>,
     /// User-*excluded* (unchecked) paths — kept out of the commit via pathspec.
@@ -40,19 +42,12 @@ pub struct CommitDialog {
 
 impl CommitDialog {
     pub fn new(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         action: GitAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (files, branch, on_default_branch) = {
-            let state = app_state.read(cx);
-            (
-                state.git_changed_files(),
-                state.git_branch_name(),
-                state.git_on_default_branch(),
-            )
-        };
+        let (files, branch, on_default_branch) = store.read(cx).commit_dialog_state(cx);
         let message = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -60,7 +55,7 @@ impl CommitDialog {
                 .placeholder(tcode_i18n::tr!("git.commit.message_placeholder"))
         });
         let mut this = Self {
-            app_state,
+            store,
             message,
             files,
             excluded: HashSet::new(),
@@ -98,10 +93,8 @@ impl CommitDialog {
         }
         self.generating = true;
         let included = self.included();
-        let task = self
-            .app_state
-            .read(cx)
-            .generate_commit_message(included, cx);
+        let store = self.store.clone();
+        let task = store.update(cx, |store, cx| store.generate_commit_message(included, cx));
         let message = self.message.clone();
         self._gen_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -136,8 +129,16 @@ impl CommitDialog {
             None
         };
         let action = self.action;
-        self.app_state.update(cx, |state, cx| {
-            state.run_git_action(action, Some(message), included, feature_branch, cx);
+        self.store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::RunGitAction {
+                    action,
+                    message: Some(message),
+                    included,
+                    feature_branch,
+                },
+                cx,
+            );
         });
         true
     }

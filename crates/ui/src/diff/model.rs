@@ -1,5 +1,4 @@
 use std::ops::Range;
-use std::path::Path;
 
 use agent::FileChangeKind;
 use gpui::{HighlightStyle, Hsla};
@@ -8,8 +7,6 @@ use gpui_component::highlighter::HighlightTheme;
 use super::algorithm::{line_diff, word_diff_ranges};
 use super::parse::{RowKind, parse_hunk_header, parse_unified_diff};
 use crate::highlight;
-
-const MAX_RECONSTRUCT_FILE_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct DiffColors {
@@ -120,16 +117,7 @@ fn text_lines(text: &str) -> Vec<TextLine<'_>> {
         .collect()
 }
 
-pub fn reconstruct_from_disk(abs_path: &Path, patch: &str) -> Option<(String, String)> {
-    let metadata = std::fs::metadata(abs_path).ok()?;
-    if metadata.len() > MAX_RECONSTRUCT_FILE_BYTES {
-        return None;
-    }
-    let new_text = std::fs::read_to_string(abs_path).ok()?;
-    if new_text.len() as u64 > MAX_RECONSTRUCT_FILE_BYTES {
-        return None;
-    }
-
+pub fn reconstruct_from_text(new_text: String, patch: &str) -> Option<(String, String)> {
     let old_text = if patch.lines().any(|line| line.starts_with("@@")) {
         reconstruct_unified(&new_text, patch)?
     } else {
@@ -938,6 +926,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+
+    fn reconstruct_from_disk(abs_path: &std::path::Path, patch: &str) -> Option<(String, String)> {
+        let new_text = std::fs::read_to_string(abs_path).ok()?;
+        if new_text.len() > 512 * 1024 {
+            return None;
+        }
+        reconstruct_from_text(new_text, patch)
+    }
 
     static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 

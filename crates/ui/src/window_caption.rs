@@ -23,7 +23,9 @@ use gpui::{
     Styled as _, Window, WindowControlArea, div, px,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
-use tcode_runtime::app::{AppState, RightTab, Route};
+use tcode_runtime::app::RightTab;
+
+use crate::window_state::Route;
 
 /// Height of a caption strip. Matches the shell's 52px top rows so the cluster
 /// sits flush with the window top on every host surface.
@@ -71,13 +73,13 @@ fn caption_host(
 }
 
 /// Whether `surface` must render the caption cluster this frame.
-pub(crate) fn hosts_caption(surface: CaptionSurface, state: &AppState) -> bool {
-    caption_host(
-        CLIENT_DECORATED,
-        state.route,
-        state.diff_panel_open(),
-        state.right_tab(),
-    ) == Some(surface)
+pub(crate) fn hosts_caption_for_state(
+    surface: CaptionSurface,
+    route: Route,
+    right_panel_open: bool,
+    right_tab: RightTab,
+) -> bool {
+    caption_host(CLIENT_DECORATED, route, right_panel_open, right_tab) == Some(surface)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

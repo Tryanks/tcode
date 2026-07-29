@@ -16,14 +16,16 @@ use gpui_component::{
 };
 
 use tcode_core::acp::InstalledAcpAgent;
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 use tcode_runtime::ui_facade::AcpMarketplaceItem;
 
 use crate::material;
+use crate::store::WorkspaceStore;
+use crate::window_state::WindowState;
 
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     agent_id: String,
     expanded: bool,
     args: Entity<InputState>,
@@ -33,7 +35,7 @@ pub struct AcpAgentCard {
 
 impl AcpAgentCard {
     pub fn new(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         agent: &InstalledAcpAgent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -50,9 +52,9 @@ impl AcpAgentCard {
             input.set_value(format_env(&agent.env), window, cx);
             input
         });
-        let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        let subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
         Self {
-            app_state,
+            store,
             agent_id: agent.id.clone(),
             expanded: false,
             args,
@@ -144,8 +146,16 @@ impl AcpAgentCard {
                     .tooltip(tcode_i18n::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let (id, checked) = (toggle_id.clone(), *checked);
-                        this.app_state.update(cx, |state, cx| {
-                            state.update_acp_agent(&id, |agent| agent.enabled = checked, cx)
+                        this.store.update(cx, |store, cx| {
+                            store.dispatch(
+                                Command::UpdateAcpAgent {
+                                    id,
+                                    patch: tcode_core::acp::AcpAgentPatch::SetEnabled {
+                                        enabled: checked,
+                                    },
+                                },
+                                cx,
+                            );
                         });
                     })),
             )
@@ -194,16 +204,18 @@ impl AcpAgentCard {
                                         let launch_args = args.read(cx).value().trim().to_string();
                                         let parsed_env = parse_env(&env.read(cx).value());
                                         let id = save_id.clone();
-                                        this.app_state.update(cx, |state, cx| {
-                                            state.update_acp_agent(
-                                                &id,
-                                                |agent| {
-                                                    agent.launch_args = (!launch_args.is_empty())
-                                                        .then_some(launch_args);
-                                                    agent.env = parsed_env;
+                                        this.store.update(cx, |store, cx| {
+                                            store.dispatch(
+                                                Command::UpdateAcpAgent {
+                                                    id,
+                                                    patch: tcode_core::acp::AcpAgentPatch::SetLaunchOptions {
+                                                    launch_args: (!launch_args.is_empty())
+                                                        .then_some(launch_args),
+                                                    env: parsed_env,
+                                                },
                                                 },
                                                 cx,
-                                            )
+                                            );
                                         });
                                     },
                                 )),
@@ -222,8 +234,9 @@ impl AcpAgentCard {
                         .label(tcode_i18n::tr!("providers.acp.remove").into_owned())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let id = remove_id.clone();
-                            this.app_state
-                                .update(cx, |state, cx| state.remove_acp_agent(&id, cx));
+                            this.store.update(cx, |store, cx| {
+                                store.dispatch(Command::RemoveAcpAgent { id }, cx);
+                            });
                         })),
                 ),
             )
@@ -233,12 +246,7 @@ impl AcpAgentCard {
 
 impl Render for AcpAgentCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let agent = self
-            .app_state
-            .read(cx)
-            .settings
-            .acp_agent(&self.agent_id)
-            .cloned();
+        let agent = self.store.read(cx).installed_acp_agent(&self.agent_id, cx);
         v_flex()
             .w_full()
             .rounded(material::radius_card())
@@ -278,7 +286,7 @@ enum TpPreset {
 
 /// Long-lived state for the Add agent dialog.
 pub struct AcpPanel {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     view: PanelView,
     search: Entity<InputState>,
     custom_name: Entity<InputState>,
@@ -295,20 +303,25 @@ pub struct AcpPanel {
 }
 
 impl AcpPanel {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = |placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
         let search = input(&tcode_i18n::tr!("providers.acp.search"), window, cx);
-        if let Some(seed) = app_state.read(cx).debug_acp_search.clone() {
+        if let Some(seed) = window_state.read(cx).debug_acp_search.clone() {
             search.update(cx, |input, cx| input.set_value(seed, window, cx));
         }
         let subscriptions = vec![
-            cx.observe(&app_state, |_, _, cx| cx.notify()),
+            cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&search, |_, _, cx| cx.notify()),
         ];
         let panel = Self {
-            app_state,
+            store,
             view: PanelView::Home,
             search,
             custom_name: input("My agent", window, cx),
@@ -326,9 +339,9 @@ impl AcpPanel {
             ),
             _subscriptions: subscriptions,
         };
-        panel
-            .app_state
-            .update(cx, |state, cx| state.refresh_acp_registry(cx));
+        panel.store.update(cx, |store, cx| {
+            store.dispatch(Command::RefreshAcpRegistry, cx)
+        });
         panel
     }
 
@@ -428,8 +441,9 @@ impl AcpPanel {
                 .label(tcode_i18n::tr!("providers.acp.install").into_owned())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = id.clone();
-                    this.app_state
-                        .update(cx, |state, cx| state.install_acp_agent(id, cx));
+                    this.store.update(cx, |store, cx| {
+                        store.dispatch(Command::InstallAcpAgent { id }, cx);
+                    });
                 }))
                 .into_any_element()
             })
@@ -437,10 +451,11 @@ impl AcpPanel {
     }
 
     fn render_marketplace(&self, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.app_state.read(cx);
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let market: Vec<AcpMarketplaceItem> = state
-            .acp_marketplace_items()
+        let market: Vec<AcpMarketplaceItem> = self
+            .store
+            .read(cx)
+            .acp_marketplace_items(cx)
             .into_iter()
             .filter(|agent| {
                 query.is_empty()
@@ -449,8 +464,8 @@ impl AcpPanel {
                     || agent.description.to_lowercase().contains(&query)
             })
             .collect();
-        let error = state.acp_registry_error.clone();
-        let loading = state.acp_registry_loading;
+        let error = self.store.read(cx).acp_registry_error(cx);
+        let loading = self.store.read(cx).acp_registry_loading(cx);
         let empty = market.is_empty();
         let mut rows = v_flex().w_full();
         if let Some(error) = error.filter(|_| empty) {
@@ -727,12 +742,14 @@ impl AcpPanel {
                                 if base_url.trim().is_empty() || key.trim().is_empty() {
                                     return;
                                 }
-                                this.app_state.update(cx, |state, cx| {
-                                    state.create_third_party_profile(
-                                        &name,
-                                        &base_url,
-                                        Some(&model),
-                                        &key,
+                                this.store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::CreateThirdPartyProfile {
+                                            name,
+                                            base_url,
+                                            model: Some(model),
+                                            api_key: key,
+                                        },
                                         cx,
                                     );
                                 });
@@ -812,8 +829,16 @@ impl AcpPanel {
                                     .map(str::to_string)
                                     .collect();
                                 let env = parse_env(&env.read(cx).value());
-                                this.app_state.update(cx, |state, cx| {
-                                    state.add_custom_acp_agent(name, command, args, env, cx)
+                                this.store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::AddCustomAcpAgent {
+                                            name,
+                                            command,
+                                            args,
+                                            env,
+                                        },
+                                        cx,
+                                    );
                                 });
                                 this.view = PanelView::Home;
                                 window.close_dialog(cx);

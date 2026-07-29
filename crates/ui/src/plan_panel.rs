@@ -19,13 +19,14 @@ use gpui_component::{
 };
 
 use tcode_core::session::plan_title;
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 
 use crate::markdown::{MarkdownState, MarkdownView};
 use crate::material;
+use crate::store::WorkspaceStore;
 
 pub struct PlanPanel {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     /// Cached markdown state for the proposed-plan body (rebuilt when the text
     /// changes) so streaming/replay reparses cheaply.
     md: Option<(String, Entity<MarkdownState>)>,
@@ -37,10 +38,10 @@ pub struct PlanPanel {
 }
 
 impl PlanPanel {
-    pub fn new(app_state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+    pub fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
         Self {
-            app_state,
+            store,
             md: None,
             copied: false,
             _copied_task: None,
@@ -137,7 +138,9 @@ impl PlanPanel {
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
-                                this.app_state.update(cx, |s, cx| s.copy_plan(md, cx));
+                                this.store.update(cx, |store, cx| {
+                                    store.dispatch(Command::CopyPlan { markdown: md }, cx);
+                                });
                                 this.mark_copied(cx);
                             })),
                     )
@@ -150,8 +153,15 @@ impl PlanPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_download.clone();
                                 let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
-                                this.app_state
-                                    .update(cx, |s, cx| s.download_plan(md, fallback, cx));
+                                this.store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::DownloadPlan {
+                                            markdown: md,
+                                            fallback_title: fallback,
+                                        },
+                                        cx,
+                                    );
+                                });
                             })),
                     )
                     .child(
@@ -162,8 +172,12 @@ impl PlanPanel {
                             .label(tcode_i18n::tr!("plan.save_workspace"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_save.clone();
-                                this.app_state
-                                    .update(cx, |s, cx| s.save_plan_to_workspace(md, cx));
+                                this.store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::SavePlanToWorkspace { markdown: md },
+                                        cx,
+                                    );
+                                });
                             })),
                     ),
             )
@@ -281,8 +295,7 @@ impl PlanPanel {
 
 impl Render for PlanPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let markdown = self.app_state.read(cx).proposed_plan_markdown();
-        let steps = self.app_state.read(cx).plan_steps();
+        let (markdown, steps) = self.store.read(cx).plan_panel_state(cx);
 
         if markdown.is_none() && steps.is_empty() {
             return v_flex().size_full().child(self.render_empty(cx));

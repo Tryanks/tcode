@@ -1,0 +1,129 @@
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+use crate::{
+    Command, CommandResponse, EventEnvelope, Hello, HelloAck, Query, QueryResponse, Topic,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolError {
+    pub code: String,
+    pub message: String,
+}
+
+impl ProtocolError {
+    pub fn decode(message: impl Into<String>) -> Self {
+        Self {
+            code: "decode_error".to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientMessage {
+    pub id: u64,
+    pub payload: ClientPayload,
+}
+
+#[non_exhaustive]
+#[allow(clippy::large_enum_variant)] // Boxing would complicate the public contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ClientPayload {
+    Command(Command),
+    Query(Query),
+    Subscribe(Subscription),
+    Unsubscribe(Subscription),
+    Hello(Hello),
+    ReverseResponse(ReverseResponse),
+}
+
+#[non_exhaustive]
+#[allow(clippy::large_enum_variant)] // Wire messages favor a direct typed API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum HostMessage {
+    Ack {
+        id: u64,
+        result: Result<CommandResponse, ProtocolError>,
+    },
+    QueryResult {
+        id: u64,
+        result: Result<QueryResponse, ProtocolError>,
+    },
+    Event(EventEnvelope),
+    ReverseRequest {
+        id: u64,
+        request: ReverseRequest,
+    },
+    HelloAck(HelloAck),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subscription {
+    pub topic: Topic,
+    pub after_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReverseRequest {
+    pub method: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReverseResponse {
+    pub request_id: u64,
+    pub result: Result<serde_json::Value, ProtocolError>,
+}
+
+/// Encode one NDJSON record, including its trailing newline.
+pub fn encode_line<T: Serialize>(value: &T) -> Result<String, ProtocolError> {
+    serde_json::to_string(value)
+        .map(|mut line| {
+            line.push('\n');
+            line
+        })
+        .map_err(|error| ProtocolError {
+            code: "encode_error".to_string(),
+            message: error.to_string(),
+        })
+}
+
+/// Decode one client NDJSON record.
+///
+/// Unknown variants of data-carrying enums become a structured error here
+/// rather than escaping as a panic.
+pub fn decode_client_line(line: &str) -> Result<ClientMessage, ProtocolError> {
+    decode_line(line)
+}
+
+/// Decode one host NDJSON record.
+pub fn decode_host_line(line: &str) -> Result<HostMessage, ProtocolError> {
+    decode_line(line)
+}
+
+fn decode_line<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
+    serde_json::from_str(line.trim_end()).map_err(|error| ProtocolError::decode(error.to_string()))
+}
+
+pub(crate) mod base64_bytes {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        STANDARD.decode(&value).map_err(D::Error::custom)
+    }
+}

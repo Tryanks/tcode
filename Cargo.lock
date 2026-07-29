@@ -8591,7 +8591,9 @@ dependencies = [
  "log",
  "orchestrate-mcp",
  "preview-mcp",
+ "smol",
  "tcode-i18n",
+ "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
  "tcode-ui",
@@ -8617,13 +8619,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcode-protocol"
+version = "0.1.0"
+dependencies = [
+ "agent",
+ "base64 0.23.0",
+ "serde",
+ "serde_json",
+ "tcode-core",
+]
+
+[[package]]
 name = "tcode-runtime"
 version = "0.1.0"
 dependencies = [
  "agent",
  "async-channel",
+ "base64 0.23.0",
  "computer-use-mcp",
- "gpui",
  "log",
  "orchestrate-mcp",
  "preview-mcp",
@@ -8631,6 +8644,7 @@ dependencies = [
  "serde_json",
  "smol",
  "tcode-core",
+ "tcode-protocol",
  "tcode-services",
  "term",
  "uuid",
@@ -8693,6 +8707,7 @@ dependencies = [
  "syntect",
  "tcode-core",
  "tcode-i18n",
+ "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
  "term",
@@ -8729,7 +8744,9 @@ dependencies = [
  "alacritty_terminal",
  "async-channel",
  "libc",
+ "polling",
  "sysinfo 0.39.6",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

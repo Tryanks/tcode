@@ -42,7 +42,7 @@ pub fn merge_file_changes_by_path<'a>(
 
 /// One changed file in the working tree (staged and/or unstaged), with its
 /// combined line delta (0/0 for untracked files with no numstat).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFileEntry {
     pub path: String,
     pub insertions: u32,
@@ -51,7 +51,7 @@ pub struct GitFileEntry {
 
 /// A snapshot of a repository's state, driving the adaptive quick-action
 /// button. Mirrors the subset of T3's `VcsStatusResult` we act on.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GitStatus {
     /// `cwd` is inside a git working tree.
     pub is_repo: bool,
@@ -90,7 +90,7 @@ impl GitStatus {
 // ---------------------------------------------------------------------------
 
 /// An executable git operation behind the quick-action button / dropdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GitAction {
     /// Open the commit dialog, then `git commit` the selected files.
     Commit,

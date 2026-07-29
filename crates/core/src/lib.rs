@@ -9,3 +9,4 @@ pub mod provider_status;
 pub mod relay;
 pub mod session;
 pub mod settings;
+pub mod ui;
