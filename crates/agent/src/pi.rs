@@ -97,6 +97,7 @@ fn list_models_blocking(
     )?;
 
     let mut current = None;
+    let mut thinking_level = None;
     let mut catalog = None;
     let mut reader = BufReader::new(stdout);
     while current.is_none() || catalog.is_none() {
@@ -109,6 +110,10 @@ fn list_models_blocking(
             Some("state") => {
                 ensure_success(&message)?;
                 current = Some(model_wire_id(message.pointer("/data/model")));
+                thinking_level = message
+                    .pointer("/data/thinkingLevel")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
             Some("models") => {
                 ensure_success(&message)?;
@@ -129,11 +134,15 @@ fn list_models_blocking(
     Ok(catalog
         .unwrap_or_default()
         .iter()
-        .filter_map(|model| map_model(model, current.as_deref()))
+        .filter_map(|model| map_model(model, current.as_deref(), thinking_level.as_deref()))
         .collect())
 }
 
-fn map_model(model: &Value, current: Option<&str>) -> Option<ModelSpec> {
+fn map_model(
+    model: &Value,
+    current: Option<&str>,
+    thinking_level: Option<&str>,
+) -> Option<ModelSpec> {
     let id = model.get("id")?.as_str()?;
     let provider = model.get("provider")?.as_str()?;
     let wire_id = format!("{provider}/{id}");
@@ -151,6 +160,9 @@ fn map_model(model: &Value, current: Option<&str>) -> Option<ModelSpec> {
         {
             levels.push("max");
         }
+        let default_value = thinking_level
+            .filter(|level| levels.contains(level))
+            .map(str::to_owned);
         options.push(OptionDescriptor::Select {
             id: "reasoningEffort".into(),
             label: "Thinking".into(),
@@ -162,7 +174,7 @@ fn map_model(model: &Value, current: Option<&str>) -> Option<ModelSpec> {
                     description: None,
                 })
                 .collect(),
-            default_value: None,
+            default_value,
         });
     }
     Some(ModelSpec {
@@ -1476,6 +1488,32 @@ fn spawn_stderr_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_model_uses_supported_state_thinking_level_as_default() {
+        let model = json!({
+            "id": "gpt-test",
+            "provider": "openai",
+            "reasoning": true
+        });
+        let mapped = map_model(&model, None, Some("xhigh")).unwrap();
+        assert!(matches!(
+            mapped.options.as_slice(),
+            [OptionDescriptor::Select {
+                default_value: Some(level),
+                ..
+            }] if level == "xhigh"
+        ));
+
+        let mapped = map_model(&model, None, Some("unsupported")).unwrap();
+        assert!(matches!(
+            mapped.options.as_slice(),
+            [OptionDescriptor::Select {
+                default_value: None,
+                ..
+            }]
+        ));
+    }
 
     #[test]
     fn maps_recorded_rpc_fixture() {

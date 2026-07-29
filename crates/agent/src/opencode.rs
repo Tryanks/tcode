@@ -1107,10 +1107,22 @@ fn map_models(catalog: &Value) -> Vec<ModelSpec> {
                 && !variants.is_empty()
             {
                 let mut variants: Vec<_> = variants.keys().cloned().collect();
-                variants.sort();
+                const EFFORT_ORDER: &[&str] =
+                    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+                variants.sort_by(|left, right| {
+                    let left_order = EFFORT_ORDER
+                        .iter()
+                        .position(|effort| effort == left)
+                        .unwrap_or(usize::MAX);
+                    let right_order = EFFORT_ORDER
+                        .iter()
+                        .position(|effort| effort == right)
+                        .unwrap_or(usize::MAX);
+                    left_order.cmp(&right_order).then_with(|| left.cmp(right))
+                });
                 options.push(OptionDescriptor::Select {
-                    id: "variant".into(),
-                    label: "Variant".into(),
+                    id: "reasoningEffort".into(),
+                    label: "Thinking".into(),
                     options: variants
                         .into_iter()
                         .map(|variant| SelectOption {
@@ -1843,13 +1855,34 @@ mod tests {
         let models = map_models(&json!({
             "default":{"openai":"gpt-test"},
             "providers":[{"id":"openai","models":{"gpt-test":{
-                "name":"GPT Test","status":"active","variants":{"high":{}}
+                "name":"GPT Test","status":"active","variants":{
+                    "alpha":{},"high":{},"low":{},"max":{},"medium":{},
+                    "minimal":{},"none":{},"xhigh":{},"zeta":{}
+                }
             }}}]
         }));
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "openai/gpt-test");
         assert!(models[0].is_default);
-        assert_eq!(models[0].options.len(), 1);
+        let [
+            OptionDescriptor::Select {
+                id, label, options, ..
+            },
+        ] = models[0].options.as_slice()
+        else {
+            panic!("expected one select descriptor");
+        };
+        assert_eq!(id, "reasoningEffort");
+        assert_eq!(label, "Thinking");
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "alpha", "zeta"
+            ]
+        );
     }
 
     #[test]
