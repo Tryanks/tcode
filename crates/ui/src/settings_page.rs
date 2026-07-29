@@ -25,7 +25,7 @@ use gpui_component::{
 use computer_use_mcp::permissions::{
     self, PermissionKind, PermissionStatus, open_settings_pane, relaunch_app, request,
 };
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
@@ -35,6 +35,7 @@ use crate::settings::{
     ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode,
 };
 use crate::shell::Quit;
+use crate::store::WorkspaceStore;
 use crate::time::now_secs;
 use crate::window_caption;
 use crate::window_drag_area;
@@ -77,7 +78,7 @@ fn apply_toggle_value(settings: &mut Settings, checked: bool, mutate: fn(&mut Se
 }
 
 pub struct SettingsPage {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     /// One card per native profile, keyed by profile id (built-in + user).
     provider_cards: Vec<(String, Entity<ProviderCard>)>,
@@ -122,15 +123,15 @@ impl SettingsPage {
     }
 
     pub fn new(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let title_generation = app_state.read(cx).settings.title_generation.clone();
+        let title_generation = store.read(cx).settings_page_settings(cx).title_generation;
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(
-                app_state.clone(),
+                store.clone(),
                 "title-model-popover",
                 "title-model-dropdown",
                 title_generation.provider,
@@ -140,8 +141,12 @@ impl SettingsPage {
             )
         });
         let subscriptions = vec![
-            cx.observe(&app_state, |this, _, cx| {
-                let selection = this.app_state.read(cx).settings.title_generation.clone();
+            cx.observe(&store, |this, _, cx| {
+                let selection = this
+                    .store
+                    .read(cx)
+                    .settings_page_settings(cx)
+                    .title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
@@ -175,49 +180,31 @@ impl SettingsPage {
         // Consume launch-time screenshot/relaunch requests through the same
         // channel used by in-app Settings links.
         let section = Self::take_requested_section(&window_state, cx).unwrap_or(Section::General);
-        let acp_panel =
-            cx.new(|cx| AcpPanel::new(app_state.clone(), window_state.clone(), window, cx));
+        let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window_state.clone(), window, cx));
         let orchestrate_panel =
-            cx.new(|cx| OrchestrateSettingsPanel::new(app_state.clone(), window, cx));
+            cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
         let debug_acp_dialog_pending = window_state.read(cx).debug_acp_dialog;
-        let home_url_value = app_state
-            .read(cx)
-            .settings
-            .browser
-            .home_url
-            .clone()
-            .unwrap_or_default();
+        let settings = store.read(cx).settings_page_settings(cx);
+        let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(tcode_i18n::tr!("browser.home_url.placeholder"))
                 .default_value(home_url_value)
         });
         let auto_archive_idle_input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(
-                app_state
-                    .read(cx)
-                    .settings
-                    .auto_archive_max_idle_days
-                    .max(1)
-                    .to_string(),
-            )
+            InputState::new(window, cx)
+                .default_value(settings.auto_archive_max_idle_days.max(1).to_string())
         });
         let auto_archive_keep_input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(
-                app_state
-                    .read(cx)
-                    .settings
-                    .auto_archive_keep_count
-                    .max(1)
-                    .to_string(),
-            )
+            InputState::new(window, cx)
+                .default_value(settings.auto_archive_keep_count.max(1).to_string())
         });
         // Refresh the TCC snapshot once as the page mounts. When the page is
         // opened by a post-grant relaunch this is the "automatic recheck" that
         // surfaces the new status immediately.
         let perm_status = permissions::check();
         let mut page = Self {
-            app_state,
+            store,
             window_state,
             provider_cards: Vec::new(),
             acp_panel,
@@ -302,14 +289,14 @@ impl SettingsPage {
     /// (Re)build the provider cards from current settings — also used after
     /// "Restore defaults", which invalidates the cards' cached settings.
     fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
-        let profiles = self.app_state.read(cx).all_profiles();
+        let profiles = self.store.read(cx).settings_provider_profiles(cx);
         self.provider_cards = profiles
             .into_iter()
             .map(|profile| {
-                let app_state = self.app_state.clone();
+                let store = self.store.clone();
                 let kind = profile.kind;
                 let id = profile.id.clone();
-                let card = cx.new(|cx| ProviderCard::new(app_state, kind, id, cx));
+                let card = cx.new(|cx| ProviderCard::new(store, kind, id, cx));
                 (profile.id, card)
             })
             .collect();
@@ -318,14 +305,7 @@ impl SettingsPage {
     /// Reconcile card entities by installed id, preserving editors for agents
     /// that were not installed or removed since the previous render.
     fn sync_acp_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let installed: Vec<_> = self
-            .app_state
-            .read(cx)
-            .settings
-            .installed_acp_agents()
-            .into_iter()
-            .cloned()
-            .collect();
+        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents(cx);
         let mut old = std::mem::take(&mut self.acp_cards);
         self.acp_cards = installed
             .into_iter()
@@ -335,8 +315,8 @@ impl SettingsPage {
                     .position(|(id, _)| id == &agent.id)
                     .map(|index| old.swap_remove(index).1)
                     .unwrap_or_else(|| {
-                        let app_state = self.app_state.clone();
-                        cx.new(|cx| AcpAgentCard::new(app_state, &agent, window, cx))
+                        let store = self.store.clone();
+                        cx.new(|cx| AcpAgentCard::new(store, &agent, window, cx))
                     });
                 (agent.id, card)
             })
@@ -361,10 +341,10 @@ impl SettingsPage {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        self.app_state.update(cx, |state, cx| {
-            let mut settings = state.settings.clone();
-            mutate(&mut settings);
-            state.update_settings(settings, cx);
+        let mut settings = self.store.read(cx).settings_page_settings(cx);
+        mutate(&mut settings);
+        self.store.update(cx, |store, cx| {
+            store.dispatch(Command::UpdateSettings { settings }, cx)
         });
     }
 
@@ -543,10 +523,12 @@ impl SettingsPage {
         // below), so the cluster is placed out of flow at the strip's right edge
         // and the column reserves matching trailing room for it — its actions
         // therefore end left of the buttons rather than under them.
-        let hosts_caption = window_caption::hosts_caption(
+        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state(cx);
+        let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
             self.window_state.read(cx).route,
-            self.app_state.read(cx),
+            right_panel_open,
+            right_tab,
         );
         // The 52px strip spans the paper full-width (drag area), but its title
         // and actions ride the same centered 768px column as the content below,
@@ -606,11 +588,11 @@ impl SettingsPage {
     }
 
     fn confirm_restore(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let app_state = self.app_state.clone();
+        let store = self.store.clone();
         let page = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let alert = alert.bg(cx.theme().popover);
-            let app_state = app_state.clone();
+            let store = store.clone();
             let page = page.clone();
             alert
                 .title(tcode_i18n::tr!("settings.restore_title"))
@@ -623,18 +605,20 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
-                    app_state.update(cx, |state, cx| state.reset_settings(cx));
+                    store.update(cx, |store, cx| {
+                        store.dispatch(Command::ResetSettings, cx);
+                    });
                     // The profile set may have changed; rebuild the rows.
                     page.update(cx, |page, cx| page.build_provider_cards(cx));
                     page.update(cx, |page, cx| {
-                        let app_state = page.app_state.clone();
+                        let store = page.store.clone();
                         page.orchestrate_panel =
-                            cx.new(|cx| OrchestrateSettingsPanel::new(app_state, window, cx));
+                            cx.new(|cx| OrchestrateSettingsPanel::new(store, window, cx));
                         // The Home URL input now holds a stale override.
                         let home_url = page
-                            .app_state
+                            .store
                             .read(cx)
-                            .settings
+                            .settings_page_settings(cx)
                             .browser
                             .home_url
                             .clone()
@@ -681,7 +665,7 @@ impl SettingsPage {
     }
 
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.app_state.read(cx).settings.clone();
+        let settings = self.store.read(cx).settings_page_settings(cx);
         // One mega-group on empty paper reads generic. Split the rows into three
         // semantic groups (System-Settings rhythm): 20-24px between groups, each
         // under an 11px caption.
@@ -765,9 +749,9 @@ impl SettingsPage {
         // deleting a profile changes it, and the card list must follow (else a
         // deleted profile's card lingers and its Delete looks like a no-op).
         let current_ids: Vec<String> = self
-            .app_state
+            .store
             .read(cx)
-            .all_profiles()
+            .settings_provider_profiles(cx)
             .into_iter()
             .map(|profile| profile.id)
             .collect();
@@ -779,9 +763,8 @@ impl SettingsPage {
         if current_ids != card_ids {
             self.build_provider_cards(cx);
         }
-        let state = self.app_state.read(cx);
-        let checked_at = state.providers_checked_at();
-        let checking = state.providers_checking();
+        let checked_at = self.store.read(cx).providers_checked_at(cx);
+        let checking = self.store.read(cx).providers_checking(cx);
         let muted = cx.theme().muted_foreground;
 
         let mut header = gpui_component::h_flex()
@@ -824,9 +807,9 @@ impl SettingsPage {
                 .icon(Icon::empty().path("icons/rotate-ccw.svg"))
                 .tooltip(tcode_i18n::tr!("providers.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.app_state.update(cx, |state, cx| {
-                        state.refresh_provider_status(cx);
-                        state.check_provider_versions(cx);
+                    this.store.update(cx, |store, cx| {
+                        store.dispatch(Command::RefreshProviderStatus, cx);
+                        store.dispatch(Command::CheckProviderVersions, cx);
                     });
                 })),
         );
@@ -855,10 +838,8 @@ impl SettingsPage {
     /// Archived Threads: archived sessions grouped by project, each with
     /// Unarchive + Delete-permanently controls (Group A).
     fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let (groups, settings) = {
-            let state = self.app_state.read(cx);
-            (state.archived_groups(), state.settings.clone())
-        };
+        let groups = self.store.read(cx).archived_groups(cx);
+        let settings = self.store.read(cx).settings_page_settings(cx);
         let days = settings.auto_archive_max_idle_days.max(1);
         let keep = settings.auto_archive_keep_count.max(1);
         let controls = v_flex()
@@ -966,8 +947,11 @@ impl SettingsPage {
                                         .label(tcode_i18n::tr!("settings.unarchive"))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let id = id_unarchive.clone();
-                                            this.app_state.update(cx, |state, cx| {
-                                                state.unarchive_session(&id, cx);
+                                            this.store.update(cx, |store, cx| {
+                                                store.dispatch(
+                                                    Command::UnarchiveSession { session_id: id },
+                                                    cx,
+                                                );
                                             });
                                         })),
                                 )
@@ -1003,12 +987,12 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let app_state = self.app_state.clone();
+        let store = self.store.clone();
         let session_id = session_id.to_string();
         let title = title.to_string();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let alert = alert.bg(cx.theme().popover);
-            let app_state = app_state.clone();
+            let store = store.clone();
             let session_id = session_id.clone();
             alert
                 .title(tcode_i18n::tr!(
@@ -1024,8 +1008,14 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    app_state.update(cx, |state, cx| {
-                        state.delete_session(&session_id, false, cx);
+                    store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::DeleteSession {
+                                session_id: session_id.clone(),
+                                remove_worktree: false,
+                            },
+                            cx,
+                        );
                     });
                     true
                 })
@@ -1035,7 +1025,7 @@ impl SettingsPage {
     // -- Computer Use & Browser pages --------------------------------------
 
     fn render_computer_use(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.app_state.read(cx).settings.clone();
+        let settings = self.store.read(cx).settings_page_settings(cx);
         let rows = vec![
             self.toggle_row(
                 "cu-enabled",
@@ -1072,7 +1062,7 @@ impl SettingsPage {
     }
 
     fn render_browser(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.app_state.read(cx).settings.clone();
+        let settings = self.store.read(cx).settings_page_settings(cx);
         let rows = vec![
             self.toggle_row(
                 "browser-enabled",
@@ -1354,9 +1344,14 @@ impl SettingsPage {
     /// the matching System Settings pane. The marker must be written *first*:
     /// macOS may quit tcode from its own "Quit & Reopen" dialog.
     fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        self.app_state
-            .read(cx)
-            .write_relaunch_marker("computer_use");
+        self.store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::WriteRelaunchMarker {
+                    reopen_settings: "computer_use".into(),
+                },
+                cx,
+            );
+        });
         let _ = request(kind);
         open_settings_pane(kind);
         if kind == PermissionKind::ScreenRecording {
@@ -1378,9 +1373,14 @@ impl SettingsPage {
     }
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.app_state
-            .read(cx)
-            .write_relaunch_marker("computer_use");
+        self.store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::WriteRelaunchMarker {
+                    reopen_settings: "computer_use".into(),
+                },
+                cx,
+            );
+        });
         if let Err(err) = relaunch_app() {
             log::warn!("failed to relaunch tcode: {err}");
             return;

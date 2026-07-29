@@ -74,12 +74,16 @@ fn caption_host(
 
 /// Whether `surface` must render the caption cluster this frame.
 pub(crate) fn hosts_caption(surface: CaptionSurface, route: Route, state: &AppState) -> bool {
-    caption_host(
-        CLIENT_DECORATED,
-        route,
-        state.diff_panel_open(),
-        state.right_tab(),
-    ) == Some(surface)
+    hosts_caption_for_state(surface, route, state.diff_panel_open(), state.right_tab())
+}
+
+pub(crate) fn hosts_caption_for_state(
+    surface: CaptionSurface,
+    route: Route,
+    right_panel_open: bool,
+    right_tab: RightTab,
+) -> bool {
+    caption_host(CLIENT_DECORATED, route, right_panel_open, right_tab) == Some(surface)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

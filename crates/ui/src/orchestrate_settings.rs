@@ -17,7 +17,7 @@ use gpui_component::{
 };
 
 use agent::ProviderKind;
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
@@ -25,6 +25,7 @@ use crate::settings::{
     ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings,
     provider_label,
 };
+use crate::store::WorkspaceStore;
 
 struct IdentityRowState {
     provider: ProviderKind,
@@ -41,7 +42,7 @@ struct ChildRowState {
 }
 
 pub struct OrchestrateSettingsPanel {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     generic_identity: Entity<InputState>,
     identity_rows: Vec<IdentityRowState>,
     child_rows: Vec<ChildRowState>,
@@ -52,10 +53,10 @@ pub struct OrchestrateSettingsPanel {
 }
 
 impl OrchestrateSettingsPanel {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let generic_value = app_state
+    pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let generic_value = store
             .read(cx)
-            .settings
+            .orchestrate_editor_settings(cx)
             .orchestrate
             .generic_identity
             .clone();
@@ -68,7 +69,7 @@ impl OrchestrateSettingsPanel {
         });
         let identity_model_picker = cx.new(|cx| {
             ProviderModelPicker::add(
-                app_state.clone(),
+                store.clone(),
                 "orchestrate-add-identity-popover",
                 "orchestrate-add-identity",
                 tcode_i18n::tr!("orchestrate.model_identity.add"),
@@ -77,7 +78,7 @@ impl OrchestrateSettingsPanel {
         });
         let child_model_picker = cx.new(|cx| {
             ProviderModelPicker::add(
-                app_state.clone(),
+                store.clone(),
                 "orchestrate-add-child-popover",
                 "orchestrate-add-child",
                 tcode_i18n::tr!("orchestrate.children.add"),
@@ -85,7 +86,7 @@ impl OrchestrateSettingsPanel {
             )
         });
         let subscriptions = vec![
-            cx.observe(&app_state, |_, _, cx| cx.notify()),
+            cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &identity_model_picker,
                 window,
@@ -98,7 +99,7 @@ impl OrchestrateSettingsPanel {
             }),
         ];
         let mut panel = Self {
-            app_state,
+            store,
             generic_identity,
             identity_rows: Vec::new(),
             child_rows: Vec::new(),
@@ -120,10 +121,10 @@ impl OrchestrateSettingsPanel {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        self.app_state.update(cx, |state, cx| {
-            let mut settings = state.settings.clone();
-            mutate(&mut settings);
-            state.update_settings(settings, cx);
+        let mut settings = self.store.read(cx).orchestrate_editor_settings(cx);
+        mutate(&mut settings);
+        self.store.update(cx, |store, cx| {
+            store.dispatch(Command::UpdateSettings { settings }, cx)
         });
     }
 
@@ -140,7 +141,11 @@ impl OrchestrateSettingsPanel {
         self.input_subscriptions.truncate(1);
         self.identity_rows.clear();
         self.child_rows.clear();
-        let orchestrate = self.app_state.read(cx).settings.orchestrate.clone();
+        let orchestrate = self
+            .store
+            .read(cx)
+            .orchestrate_editor_settings(cx)
+            .orchestrate;
 
         for entry in orchestrate.model_identities {
             let identity = cx.new(|cx| {
@@ -286,9 +291,9 @@ impl OrchestrateSettingsPanel {
         let provider = option.provider;
         let model = option.id.clone();
         let identity = self
-            .app_state
+            .store
             .read(cx)
-            .settings
+            .orchestrate_editor_settings(cx)
             .orchestrate
             .generic_identity
             .clone();
@@ -438,14 +443,8 @@ impl OrchestrateSettingsPanel {
     }
 
     fn reset_child_definition(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self
-            .app_state
-            .read(cx)
-            .settings
-            .orchestrate
-            .child_models
-            .get(index)
-        else {
+        let settings = self.store.read(cx).orchestrate_editor_settings(cx);
+        let Some(entry) = settings.orchestrate.child_models.get(index) else {
             return;
         };
         let provider = entry.provider;
@@ -552,7 +551,12 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.app_state.read(cx).settings.orchestrate.child_approval;
+        let selected = self
+            .store
+            .read(cx)
+            .orchestrate_editor_settings(cx)
+            .orchestrate
+            .child_approval;
         let selected_label = match selected {
             ChildApprovalMode::Orchestrator => {
                 tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
@@ -887,7 +891,11 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
-        let settings = self.app_state.read(cx).settings.orchestrate.clone();
+        let settings = self
+            .store
+            .read(cx)
+            .orchestrate_editor_settings(cx)
+            .orchestrate;
         let mut section = v_flex().w_full().gap_3().child(self.section_heading(
             tcode_i18n::tr!("orchestrate.children.title"),
             tcode_i18n::tr!("orchestrate.children.description"),
@@ -924,7 +932,7 @@ impl OrchestrateSettingsPanel {
                 tcode_i18n::tr!("orchestrate.children.effort_default").into_owned()
             });
             let subtitle = if let Some(id) = row.profile_id.as_deref() {
-                let profile_settings = self.app_state.read(cx).profile_settings(id);
+                let profile_settings = self.store.read(cx).provider_profile_settings(id, cx);
                 let profile_name = profile_settings
                     .display_name
                     .as_deref()

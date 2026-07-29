@@ -78,6 +78,9 @@ pub enum Command {
         id: String,
     },
     ResetSettings,
+    WriteRelaunchMarker {
+        reopen_settings: String,
+    },
     ToggleDiffPanel,
     OpenDiffForTurn {
         turn: usize,

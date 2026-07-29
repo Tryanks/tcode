@@ -214,12 +214,14 @@ impl AppShell {
         app_state.update(cx, |state, cx| state.pump_orchestrate_requests(cx));
 
         Self {
-            sidebar: cx.new(|cx| SessionsSidebar::new(workspace_store, window_state.clone(), cx)),
+            sidebar: cx
+                .new(|cx| SessionsSidebar::new(workspace_store.clone(), window_state.clone(), cx)),
             chat: cx.new(|cx| ChatView::new(app_state.clone(), window_state.clone(), window, cx)),
             diff: cx.new(|cx| DiffPanel::new(app_state.clone(), window_state.clone(), cx)),
             preview,
-            settings_page: cx
-                .new(|cx| SettingsPage::new(app_state.clone(), window_state.clone(), window, cx)),
+            settings_page: cx.new(|cx| {
+                SettingsPage::new(workspace_store.clone(), window_state.clone(), window, cx)
+            }),
             palette: cx
                 .new(|cx| CommandPalette::new(app_state.clone(), window_state.clone(), window, cx)),
             toasts,
