@@ -881,9 +881,7 @@ impl Composer {
         self.image_load_generation = self.image_load_generation.wrapping_add(1);
         self.pending_image_loads = 0;
         self.app_state.update(cx, |state, cx| {
-            if let Some(active) = state.active.as_mut() {
-                active.terminal_workspace.contexts.clear();
-            }
+            state.clear_terminal_contexts();
             state.clear_review_comments();
             if relay {
                 state.confirm_relay_and_send(sent_text, attachments, cx)
