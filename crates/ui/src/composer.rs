@@ -156,7 +156,7 @@ fn provider_short(provider: ProviderKind) -> &'static str {
 fn tinted_provider_glyph(provider: ProviderKind, app_state: &AppState) -> Icon {
     let glyph = provider_glyph(provider);
     match app_state.provider_accent(provider) {
-        Some(accent) => glyph.text_color(accent),
+        Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,
     }
 }
@@ -166,7 +166,7 @@ fn tinted_provider_glyph(provider: ProviderKind, app_state: &AppState) -> Icon {
 fn tinted_profile_glyph(profile_id: &str, app_state: &AppState) -> Icon {
     let glyph = provider_glyph(app_state.profile_kind(profile_id));
     match app_state.profile_accent(profile_id) {
-        Some(accent) => glyph.text_color(accent),
+        Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,
     }
 }

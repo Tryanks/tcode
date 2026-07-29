@@ -24,6 +24,9 @@ pub(super) fn apply_runtime_effect(effect: &RuntimeEffect) {
         RuntimeEffect::ApplyLocale { language } => {
             crate::settings::apply_locale(language.as_deref());
         }
+        RuntimeEffect::CopyToClipboard { .. } => {
+            unreachable!("clipboard effects are applied by the app shell")
+        }
     }
 }
 

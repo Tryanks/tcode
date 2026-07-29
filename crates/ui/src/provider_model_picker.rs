@@ -8,7 +8,7 @@
 use gpui::{
     App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -398,7 +398,7 @@ fn tinted_glyph(state: &AppState, provider: ProviderKind, profile_id: Option<&st
         None => state.provider_accent(provider),
     };
     match accent {
-        Some(accent) => glyph.text_color(accent),
+        Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,
     }
 }

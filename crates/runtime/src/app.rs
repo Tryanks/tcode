@@ -2219,7 +2219,7 @@ impl AppState {
 
     /// The provider's accent color (`#rrggbb`), when one is configured. Tints
     /// the provider glyph in the composer + model picker.
-    pub fn provider_accent(&self, provider: ProviderKind) -> Option<gpui::Rgba> {
+    pub fn provider_accent(&self, provider: ProviderKind) -> Option<u32> {
         let raw = self.settings.provider(provider).accent_color?;
         parse_hex_color(&raw)
     }
@@ -2283,7 +2283,7 @@ impl AppState {
     }
 
     /// A profile's accent color, when configured.
-    pub fn profile_accent(&self, id: &str) -> Option<gpui::Rgba> {
+    pub fn profile_accent(&self, id: &str) -> Option<u32> {
         parse_hex_color(&self.profile_settings(id).accent_color?)
     }
 
@@ -6311,7 +6311,9 @@ impl AppState {
 
     /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
     pub fn copy_plan(&mut self, markdown: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown));
+        cx.emit(AppEvent::Effect(RuntimeEffect::CopyToClipboard {
+            text: markdown,
+        }));
     }
 
     /// Write the plan markdown to `PLAN-<n>.md` in the session cwd, choosing the
@@ -8102,14 +8104,13 @@ fn assemble_callback_text(
     format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
 }
 
-/// Parse a `#rrggbb` accent color into a gpui color; `None` when malformed.
-fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
+/// Parse a `#rrggbb` accent color; `None` when malformed.
+fn parse_hex_color(raw: &str) -> Option<u32> {
     let hex = raw.trim().trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    let value = u32::from_str_radix(hex, 16).ok()?;
-    Some(gpui::rgb(value))
+    u32::from_str_radix(hex, 16).ok()
 }
 
 /// A stable settings key for a user-defined ACP agent, derived from its name.

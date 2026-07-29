@@ -117,7 +117,7 @@ impl ProviderCard {
 
         let provider_icon = provider_glyph(provider).small();
         let provider_icon = match accent {
-            Some(accent) => provider_icon.text_color(accent),
+            Some(accent) => provider_icon.text_color(rgb(accent)),
             None => provider_icon,
         };
         let glyph = div()

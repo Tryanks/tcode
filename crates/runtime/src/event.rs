@@ -3,7 +3,7 @@
 use agent::{ProviderKind, RewindMode};
 use tcode_core::git::GitAction;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeEvent {
     Error(RuntimeError),
     Notice(RuntimeNotice),
@@ -11,16 +11,21 @@ pub enum RuntimeEvent {
     Effect(RuntimeEffect),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeEffect {
     /// Apply the persisted language override at the localization-aware UI boundary.
-    ApplyLocale { language: Option<String> },
+    ApplyLocale {
+        language: Option<String>,
+    },
+    CopyToClipboard {
+        text: String,
+    },
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeOperationId(pub u64);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitActionRequest {
     pub action: GitAction,
     pub message: Option<String>,
@@ -28,7 +33,7 @@ pub struct GitActionRequest {
     pub feature_branch: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeToast {
     GitBusy,
     GitStarted {
@@ -65,7 +70,7 @@ pub enum RuntimeToast {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeError {
     External(String),
     PersistSettings { error: String },
@@ -90,7 +95,7 @@ pub enum RuntimeError {
     ProviderMessage(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeNotice {
     ProviderMessage(String),
     UpdateAvailable {
