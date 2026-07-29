@@ -3868,9 +3868,17 @@ This begins after the hard break."#;
                     },
                 ),
             ];
+            active.draft = false;
             state
         });
         let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(app_state.clone(), cx));
+        let (session_id, timeline) = app_state.read_with(cx, |state, _| {
+            let active = state.active.as_ref().expect("active session");
+            (active.meta.id.clone(), active.timeline.clone())
+        });
+        workspace_store.update(cx, |store, _| {
+            store.set_session_replica_for_test(session_id, timeline);
+        });
         let window_state = cx.new(|_| WindowState::new(false));
 
         let (view, cx) = cx.add_window_view(|window, cx| {

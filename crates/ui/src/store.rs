@@ -7,7 +7,7 @@ use tcode_core::{
     project::{Project, SessionMeta, WorktreeInfo, group_sessions},
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
-    session::{ReviewComment, Timeline},
+    session::{ReviewComment, StoredEvent, Timeline},
     settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
 };
 use tcode_protocol::{Command, EventEnvelope, ServerEvent, Topic};
@@ -31,6 +31,7 @@ pub struct WorkspaceStore {
     app: Entity<AppState>,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
+    session_replica: Option<(String, Timeline)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,11 +80,27 @@ impl WorkspaceStore {
                 state.settings.clone(),
             )
         };
-        cx.observe(&app, |_, _, cx| cx.notify()).detach();
+        cx.observe(&app, |store, app, cx| {
+            let active = app
+                .read(cx)
+                .active
+                .as_ref()
+                .map(|active| (active.meta.id.as_str(), active.draft));
+            let replica_matches = match (active, store.session_replica.as_ref()) {
+                (Some((active_id, false)), Some((replica_id, _))) => replica_id == active_id,
+                (None, None) => true,
+                _ => false,
+            };
+            if !replica_matches {
+                store.session_replica = None;
+            }
+            cx.notify();
+        })
+        .detach();
         cx.subscribe(&app, |store, _, event: &HostEvent, cx| {
             match event {
                 HostEvent::Runtime(event) => cx.emit(event.clone()),
-                HostEvent::Domain(envelope) => store.apply_domain_event(envelope),
+                HostEvent::Domain(envelope) => store.apply_domain_event(envelope, cx),
             }
             cx.notify();
         })
@@ -92,10 +109,11 @@ impl WorkspaceStore {
             app,
             index_replica,
             settings_replica,
+            session_replica: None,
         }
     }
 
-    fn apply_domain_event(&mut self, envelope: &EventEnvelope) {
+    fn apply_domain_event(&mut self, envelope: &EventEnvelope, cx: &App) {
         match (&envelope.topic, &envelope.event) {
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
@@ -136,6 +154,31 @@ impl WorkspaceStore {
             (Topic::Settings, ServerEvent::SettingsReplaced(settings))
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
                 self.settings_replica = settings.clone();
+            }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot(records)) => {
+                let mut timeline =
+                    Timeline::fold_events(records.iter().map(|record| StoredEvent {
+                        ts: record.ts,
+                        event: record.event.clone(),
+                    }));
+                let live_turn_running = self
+                    .app
+                    .read(cx)
+                    .active
+                    .as_ref()
+                    .filter(|active| active.meta.id == *session_id)
+                    .is_some_and(|active| active.is_turn_running());
+                if !live_turn_running {
+                    timeline.mark_idle();
+                }
+                self.session_replica = Some((session_id.clone(), timeline));
+            }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                if let Some((replica_id, timeline)) = self.session_replica.as_mut()
+                    && replica_id == session_id
+                {
+                    timeline.apply_at(record.ts, &record.event);
+                }
             }
             _ => {}
         }
@@ -761,11 +804,34 @@ impl WorkspaceStore {
     }
 
     pub fn diff_turns(&self, cx: &App) -> Vec<usize> {
-        self.app.read(cx).diff_turns()
+        self.with_active_timeline(cx, |timeline| {
+            timeline
+                .turns
+                .iter()
+                .enumerate()
+                .filter_map(|(turn, meta)| {
+                    meta.changes
+                        .as_ref()
+                        .is_some_and(|changes| !changes.changes.is_empty())
+                        .then_some(turn)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     pub fn diff_selected_turn(&self, cx: &App) -> Option<usize> {
-        self.app.read(cx).diff_selected_turn()
+        let turns = self.diff_turns(cx);
+        let explicit = self
+            .app
+            .read(cx)
+            .active
+            .as_ref()
+            .and_then(|active| active.diff_selected_turn);
+        match explicit {
+            Some(turn) if turns.contains(&turn) => Some(turn),
+            _ => turns.last().copied(),
+        }
     }
 
     pub fn with_diff_turn_changes<R>(
@@ -774,10 +840,11 @@ impl WorkspaceStore {
         cx: &App,
         read: impl FnOnce(&[agent::FileChange], agent::ChangeCompleteness) -> R,
     ) -> Option<R> {
-        let app = self.app.read(cx);
-        let active = app.active.as_ref()?;
-        let changes = active.timeline.turns.get(turn)?.changes.as_ref()?;
-        Some(read(&changes.changes, changes.completeness))
+        self.with_active_timeline(cx, |timeline| {
+            let changes = timeline.turns.get(turn)?.changes.as_ref()?;
+            Some(read(&changes.changes, changes.completeness))
+        })
+        .flatten()
     }
 
     pub(crate) fn pending_diff_focus(&self, cx: &App) -> Option<DiffFocus> {
@@ -819,11 +886,15 @@ impl WorkspaceStore {
         cx: &App,
     ) -> (bool, bool, tcode_core::ui::RightTab, bool) {
         let app = self.app.read(cx);
+        let plan_tab_active_label = self
+            .with_active_timeline(cx, |timeline| timeline.proposed_plan.is_some())
+            .unwrap_or(false)
+            || app.active_interaction_mode() == agent::InteractionMode::Plan;
         (
             app.diff_panel_open(),
             app.diff_panel_expanded(),
             app.right_tab(),
-            app.plan_tab_active_label(),
+            plan_tab_active_label,
         )
     }
 
@@ -860,14 +931,17 @@ impl WorkspaceStore {
 
     pub fn with_active_timeline<R>(
         &self,
-        cx: &App,
+        _cx: &App,
         read: impl FnOnce(&Timeline) -> R,
     ) -> Option<R> {
-        self.app
-            .read(cx)
-            .active
+        self.session_replica
             .as_ref()
-            .map(|active| read(&active.timeline))
+            .map(|(_, timeline)| read(timeline))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_replica_for_test(&mut self, session_id: String, timeline: Timeline) {
+        self.session_replica = Some((session_id, timeline));
     }
 
     pub fn with_composer_destination<R>(
@@ -1022,13 +1096,17 @@ impl WorkspaceStore {
         &self,
         cx: &App,
     ) -> (Option<agent::TokenUsage>, Option<agent::ProviderKind>) {
-        self.app
+        let provider = self
+            .app
             .read(cx)
             .active
             .as_ref()
-            .map_or((None, None), |active| {
-                (active.timeline.usage, Some(active.meta.provider))
-            })
+            .map(|active| active.meta.provider);
+        (
+            self.with_active_timeline(cx, |timeline| timeline.usage)
+                .flatten(),
+            provider,
+        )
     }
 
     pub fn composer_approval_mode(&self, cx: &App) -> agent::ApprovalMode {
@@ -1062,7 +1140,10 @@ impl WorkspaceStore {
     }
 
     pub fn composer_plan_ready_markdown(&self, cx: &App) -> Option<String> {
-        self.app.read(cx).plan_ready_markdown()
+        self.with_active_timeline(cx, |timeline| {
+            timeline.plan_ready().map(|plan| plan.markdown.clone())
+        })
+        .flatten()
     }
 
     pub(crate) fn composer_checkout_state(&self, cx: &App) -> Option<ComposerCheckoutState> {
@@ -1082,7 +1163,7 @@ impl WorkspaceStore {
         Some(ComposerCheckoutState {
             branch,
             branches: active.branches.clone(),
-            turn_running: active.timeline.turn_running,
+            turn_running: active.is_turn_running(),
             is_draft: active.draft,
             worktree_base,
             worktree: active.meta.worktree.clone(),
@@ -1090,14 +1171,20 @@ impl WorkspaceStore {
     }
 
     pub fn composer_render_state(&self, cx: &App) -> (bool, Option<agent::ApprovalRequest>, usize) {
+        let turn_running = self
+            .app
+            .read(cx)
+            .active
+            .as_ref()
+            .is_some_and(|active| active.is_turn_running());
         self.with_active_timeline(cx, |timeline| {
             (
-                timeline.turn_running,
+                turn_running,
                 timeline.pending_approvals.first().cloned(),
                 timeline.pending_approvals.len(),
             )
         })
-        .unwrap_or((false, None, 0))
+        .unwrap_or((turn_running, None, 0))
     }
 
     pub fn composer_is_favorite_model(&self, model: &str, cx: &App) -> bool {
@@ -1127,29 +1214,32 @@ impl WorkspaceStore {
         turn: usize,
         cx: &App,
     ) -> (Vec<agent::FileChange>, agent::ChangeCompleteness) {
-        let app = self.app.read(cx);
-        (
-            app.turn_file_changes(turn).unwrap_or_default(),
-            app.turn_change_completeness(turn)
-                .unwrap_or(agent::ChangeCompleteness::Partial),
-        )
+        self.with_active_timeline(cx, |timeline| {
+            timeline
+                .turns
+                .get(turn)
+                .and_then(|turn| turn.changes.as_ref())
+                .map(|changes| (changes.changes.clone(), changes.completeness))
+        })
+        .flatten()
+        .unwrap_or((Vec::new(), agent::ChangeCompleteness::Partial))
     }
 
     pub fn chat_native_rewind_state(&self, turn: usize, cx: &App) -> Option<(bool, bool)> {
         let app = self.app.read(cx);
         let active = app.active.as_ref()?;
-        Some((
-            active.meta.provider == agent::ProviderKind::ClaudeCode
-                && active
-                    .timeline
+        let has_checkpoint = self
+            .with_active_timeline(cx, |timeline| {
+                timeline
                     .turns
                     .get(turn)
                     .and_then(|turn| turn.provider_checkpoint_id.as_ref())
-                    .is_some(),
-            active.is_turn_running()
-                || active.timeline.turn_running
-                || !active.queued().is_empty()
-                || app.native_rewind_pending(),
+                    .is_some()
+            })
+            .unwrap_or(false);
+        Some((
+            active.meta.provider == agent::ProviderKind::ClaudeCode && has_checkpoint,
+            active.is_turn_running() || !active.queued().is_empty() || app.native_rewind_pending(),
         ))
     }
 
@@ -1203,8 +1293,16 @@ impl WorkspaceStore {
     }
 
     pub fn plan_panel_state(&self, cx: &App) -> (Option<String>, Vec<agent::PlanStep>) {
-        let app = self.app.read(cx);
-        (app.proposed_plan_markdown(), app.plan_steps())
+        self.with_active_timeline(cx, |timeline| {
+            (
+                timeline
+                    .proposed_plan
+                    .as_ref()
+                    .map(|plan| plan.markdown.clone()),
+                timeline.plan_steps.clone(),
+            )
+        })
+        .unwrap_or_default()
     }
 
     pub fn archived_session_count(&self, project_id: Option<&str>, _cx: &App) -> usize {
@@ -1244,14 +1342,143 @@ impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 
 #[cfg(test)]
 mod tests {
-    use agent::ProviderKind;
+    use agent::{AgentEvent, ItemContent, ProviderKind, ThreadItem, TurnStatus};
     use gpui::{AppContext as _, TestAppContext};
     use tcode_core::project::{Project, SessionMeta};
-    use tcode_protocol::Command;
-    use tcode_runtime::app::AppState;
+    use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
+    use tcode_runtime::{app::AppState, event::HostEvent};
     use tcode_services::store::SessionStore;
 
     use super::WorkspaceStore;
+
+    #[gpui::test]
+    fn session_replica_matches_live_timeline_for_synthetic_turn(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-session-replica-consistency-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
+        let session_id = meta.id.clone();
+        session_store.upsert_meta(&meta).expect("persist session");
+        let events = [
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "user-1".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "replicate this turn".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "assistant-1".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "replicated".into(),
+                },
+            }),
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        for (offset, event) in events.iter().enumerate() {
+            session_store
+                .append_event(&session_id, 100 + offset as u64, event)
+                .expect("persist synthetic event");
+        }
+
+        let app = cx.new(|_| AppState::new(session_store));
+        let workspace = cx.new(|cx| WorkspaceStore::new(app.clone(), cx));
+        workspace.update(cx, |store, cx| {
+            store.dispatch(
+                Command::SelectSession {
+                    session_id: session_id.clone(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let live_events = [
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "user-2".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "apply incrementally".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::TurnStarted {
+                turn_id: "turn-2".into(),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "assistant-2".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "incremental replica".into(),
+                },
+            }),
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-2".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        for (offset, event) in live_events.into_iter().enumerate() {
+            app.update(cx, |state, cx| {
+                state
+                    .active
+                    .as_mut()
+                    .expect("active session")
+                    .timeline
+                    .apply_at(Some(200 + offset as u64), &event);
+                cx.emit(HostEvent::Domain(EventEnvelope {
+                    topic: Topic::SessionEvents {
+                        session_id: session_id.clone(),
+                    },
+                    seq: 10 + offset as u64,
+                    event: ServerEvent::SessionEvent(SessionEventRecord {
+                        ts: Some(200 + offset as u64),
+                        event,
+                    }),
+                }));
+            });
+        }
+
+        let live = app.read_with(cx, |state, _| {
+            let timeline = &state.active.as_ref().expect("active session").timeline;
+            (
+                timeline
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.turn, format!("{:?}", entry.content)))
+                    .collect::<Vec<_>>(),
+                timeline.turns.len(),
+            )
+        });
+        let replica = workspace.read_with(cx, |store, _| {
+            let (id, timeline) = store.session_replica.as_ref().expect("session replica");
+            assert_eq!(id, &session_id);
+            (
+                timeline
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.turn, format!("{:?}", entry.content)))
+                    .collect::<Vec<_>>(),
+                timeline.turns.len(),
+            )
+        });
+        assert_eq!(replica, live);
+
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
 
     #[gpui::test]
     fn index_and_settings_replicas_follow_representative_commands(cx: &mut TestAppContext) {

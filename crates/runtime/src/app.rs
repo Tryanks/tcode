@@ -39,7 +39,7 @@ use tcode_core::settings::{
     ProviderProfile, ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
 pub use tcode_core::ui::{RightTab, WorkspaceMode};
-use tcode_protocol::{EventEnvelope, ServerEvent, Topic};
+use tcode_protocol::{EventEnvelope, ServerEvent, SessionEventRecord, Topic};
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
@@ -1035,6 +1035,7 @@ pub struct AppState {
     /// Per-topic sequence numbers for replicated protocol domains.
     index_event_seq: u64,
     settings_event_seq: u64,
+    session_event_seqs: HashMap<String, u64>,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -1167,6 +1168,7 @@ impl AppState {
             next_operation_id: 1,
             index_event_seq: 0,
             settings_event_seq: 0,
+            session_event_seqs: HashMap::new(),
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
@@ -1278,10 +1280,14 @@ impl AppState {
     }
 
     fn emit_domain(&mut self, topic: Topic, event: ServerEvent, cx: &mut Context<Self>) {
-        let seq = match topic {
+        let seq = match &topic {
             Topic::Index => &mut self.index_event_seq,
             Topic::Settings => &mut self.settings_event_seq,
-            _ => unreachable!("replication slice only emits index and settings domains"),
+            Topic::SessionEvents { session_id } => self
+                .session_event_seqs
+                .entry(session_id.clone())
+                .or_default(),
+            _ => unreachable!("replication slice does not emit this domain"),
         };
         *seq += 1;
         cx.emit(HostEvent::Domain(EventEnvelope {
@@ -4961,6 +4967,13 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.emit_domain(
+            Topic::SessionEvents {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionSnapshot(Vec::new()),
+            cx,
+        );
         self.refresh_session_git_branch(session_id, cwd, cx);
         self.ensure_started(cx);
         self.refresh_git_status(cx);
@@ -5128,6 +5141,13 @@ impl AppState {
         {
             active.draft = false;
             let meta = active.meta.clone();
+            self.emit_domain(
+                Topic::SessionEvents {
+                    session_id: meta.id.clone(),
+                },
+                ServerEvent::SessionSnapshot(Vec::new()),
+                cx,
+            );
             self.enqueue_store_write(
                 StoreWrite::UpsertMeta {
                     meta: Box::new(meta.clone()),
@@ -5192,8 +5212,16 @@ impl AppState {
         let store = self.store.clone();
         cx.spawn(async move |this, cx| {
             let read_id = session_id.clone();
-            let (timeline, git_branch) = unblock(cx.background_executor(), move || {
-                let mut timeline = Timeline::fold_events(store.read_events(&read_id));
+            let (timeline, records, git_branch) = unblock(cx.background_executor(), move || {
+                let stored = store.read_events(&read_id);
+                let mut timeline = Timeline::fold_events(stored.iter().cloned());
+                let records = stored
+                    .into_iter()
+                    .map(|stored| SessionEventRecord {
+                        ts: stored.ts,
+                        event: stored.event,
+                    })
+                    .collect();
                 let (mark_idle, load_branch) = match target {
                     TimelineLoadTarget::Active {
                         mark_idle,
@@ -5205,7 +5233,7 @@ impl AppState {
                     timeline.mark_idle();
                 }
                 let git_branch = load_branch.then(|| read_git_branch(&cwd));
-                (timeline, git_branch)
+                (timeline, records, git_branch)
             })
             .await;
             let _ = this.update(cx, |state, cx| {
@@ -5249,6 +5277,13 @@ impl AppState {
                                 active.git_branch = git_branch;
                             }
                         }
+                        state.emit_domain(
+                            Topic::SessionEvents {
+                                session_id: session_id.clone(),
+                            },
+                            ServerEvent::SessionSnapshot(records),
+                            cx,
+                        );
                     }
                     TimelineLoadTarget::Background { .. } => {
                         if let Some(background) = state.background.get_mut(&session_id) {
@@ -6426,6 +6461,13 @@ impl AppState {
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.emit_domain(
+            Topic::SessionEvents {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionSnapshot(Vec::new()),
+            cx,
+        );
         self.refresh_session_git_branch(session_id, cwd, cx);
         self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
         cx.notify();
@@ -7584,6 +7626,16 @@ impl AppState {
     fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
         self.store_append_generation += 1;
         let ts = now_millis();
+        self.emit_domain(
+            Topic::SessionEvents {
+                session_id: session_id.to_string(),
+            },
+            ServerEvent::SessionEvent(SessionEventRecord {
+                ts: Some(ts),
+                event: event.clone(),
+            }),
+            cx,
+        );
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
