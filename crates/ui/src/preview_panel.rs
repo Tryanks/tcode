@@ -1013,11 +1013,15 @@ mod native {
             // tall as its controls — pin it to the shell's 52px top strip and
             // drop the trailing/vertical padding on the caption side so the
             // buttons reach the window's true top-right corner.
-            let hosts_caption = window_caption::hosts_caption(
-                window_caption::CaptionSurface::Preview,
-                self.window_state.read(cx).route,
-                self.app_state.read(cx),
-            );
+            let hosts_caption = {
+                let state = self.app_state.read(cx);
+                window_caption::hosts_caption_for_state(
+                    window_caption::CaptionSurface::Preview,
+                    self.window_state.read(cx).route,
+                    state.diff_panel_open(),
+                    state.right_tab(),
+                )
+            };
             h_flex()
                 .flex_none()
                 .w_full()

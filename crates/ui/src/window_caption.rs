@@ -23,7 +23,7 @@ use gpui::{
     Styled as _, Window, WindowControlArea, div, px,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _};
-use tcode_runtime::app::{AppState, RightTab};
+use tcode_runtime::app::RightTab;
 
 use crate::window_state::Route;
 
@@ -73,10 +73,6 @@ fn caption_host(
 }
 
 /// Whether `surface` must render the caption cluster this frame.
-pub(crate) fn hosts_caption(surface: CaptionSurface, route: Route, state: &AppState) -> bool {
-    hosts_caption_for_state(surface, route, state.diff_panel_open(), state.right_tab())
-}
-
 pub(crate) fn hosts_caption_for_state(
     surface: CaptionSurface,
     route: Route,
