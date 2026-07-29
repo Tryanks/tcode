@@ -176,6 +176,41 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Parse the shared `auth.json` shape used by pi and OpenCode. Each top-level
+/// key names an upstream provider whose object carries a non-empty `type`.
+///
+/// An empty or unreadable credential set remains indeterminate because either
+/// CLI may also authenticate through environment variables.
+pub fn parse_aggregator_auth(json: &str) -> Option<ProviderAuth> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let object = value.as_object()?;
+    let mut providers: Vec<_> = object
+        .iter()
+        .filter_map(|(provider, credential)| {
+            credential
+                .as_object()?
+                .get("type")
+                .and_then(|value| value.as_str())
+                .filter(|kind| !kind.trim().is_empty())
+                .map(|_| provider.as_str())
+        })
+        .collect();
+    if providers.is_empty() {
+        return None;
+    }
+    providers.sort_unstable();
+    let overflow = providers.len().saturating_sub(3);
+    let mut label = providers.into_iter().take(3).collect::<Vec<_>>().join(", ");
+    if overflow > 0 {
+        label.push_str(&format!(" +{overflow}"));
+    }
+    Some(ProviderAuth {
+        status: AuthStatus::Authenticated,
+        label: Some(label),
+        email: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +307,29 @@ mod tests {
         }
         // An unknown plan degrades to the generic label rather than inventing one.
         assert_eq!(normalize_chatgpt_plan("mystery"), None);
+    }
+
+    #[test]
+    fn parses_aggregator_auth_json() {
+        let auth =
+            parse_aggregator_auth(r#"{"zai":{"type":"oauth"},"anthropic":{"type":"oauth"}}"#)
+                .unwrap();
+        assert_eq!(auth.status, AuthStatus::Authenticated);
+        assert_eq!(auth.label.as_deref(), Some("anthropic, zai"));
+        assert_eq!(auth.email, None);
+
+        let auth = parse_aggregator_auth(r#"{"openai":{"type":"api","key":"sk-x"}}"#).unwrap();
+        assert_eq!(auth.status, AuthStatus::Authenticated);
+        assert_eq!(auth.label.as_deref(), Some("openai"));
+
+        assert!(parse_aggregator_auth("{}").is_none());
+        assert!(parse_aggregator_auth("not json").is_none());
+
+        let auth = parse_aggregator_auth(
+            r#"{"zeta":{"type":"api"},"beta":{"type":"oauth"},"delta":{"type":"api"},
+                "alpha":{"type":"oauth"},"gamma":{"type":"oauth"}}"#,
+        )
+        .unwrap();
+        assert_eq!(auth.label.as_deref(), Some("alpha, beta, delta +2"));
     }
 }
