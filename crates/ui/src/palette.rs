@@ -333,19 +333,17 @@ impl CommandPalette {
             }
             Action::ToggleDiff => {
                 self.store
-                    .update(cx, |store, cx| store.dispatch(Command::ToggleDiffPanel, cx));
+                    .update(cx, |store, cx| store.toggle_diff_panel(cx));
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::ToggleTerminalPanel, cx)
-                });
+                self.store
+                    .update(cx, |store, cx| store.toggle_terminal_panel(cx));
                 self.close(cx);
             }
             Action::OpenPreview => {
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::OpenPreviewPanel, cx)
-                });
+                self.store
+                    .update(cx, |store, cx| store.open_preview_panel(cx));
                 self.close(cx);
             }
             Action::CheckUpdates => {

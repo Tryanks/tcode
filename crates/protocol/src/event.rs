@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tcode_core::{
     git::GitAction,
     project::{Project, SessionMeta, WorktreeInfo},
+    session::ReviewComment,
     settings::Settings,
     ui::WorkspaceMode,
 };
@@ -97,6 +98,8 @@ pub struct SessionStatus {
     pub approval_mode: ApprovalMode,
     pub interaction_mode: InteractionMode,
     pub queued_messages: Vec<QueuedMessageStatus>,
+    /// Backend-owned drafts used by provider-bound send-path assembly.
+    pub review_comment_drafts: Vec<ReviewComment>,
     pub delivery_in_flight: Option<u64>,
     pub turn_running: bool,
     pub working: bool,

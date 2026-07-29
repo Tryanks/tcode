@@ -8,7 +8,7 @@ use tcode_core::{
     project::Project,
     session::{ReviewComment, ReviewSide},
     settings::{ProfileSettingsPatch, Settings},
-    ui::{RightTab, TerminalSplitDirection, WorkspaceMode},
+    ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
 use super::*;
@@ -98,6 +98,18 @@ fn round_trips_top_level_wire_types() {
                 id: 4,
                 text: "next".into(),
             }],
+            review_comment_drafts: vec![ReviewComment::new(
+                "src/lib.rs".into(),
+                2,
+                2,
+                ReviewSide::New,
+                "Please revise this.".into(),
+                "+new".into(),
+                "turn:3".into(),
+                "Turn 4".into(),
+                1,
+                2,
+            )],
             delivery_in_flight: Some(4),
             turn_running: true,
             working: true,
@@ -173,14 +185,10 @@ fn round_trips_commands_for_serialized_ui_mutation_gaps() {
                 12,
             ),
         },
-        Command::SelectDiffTurn { turn: 3 },
         Command::SetDraftWorkspace {
             mode: WorkspaceMode::NewWorktree {
                 base: "main".into(),
             },
-        },
-        Command::SetRightTab {
-            tab: RightTab::Plan,
         },
         Command::WriteRelaunchMarker {
             reopen_settings: "computer_use".into(),

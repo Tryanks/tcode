@@ -7,6 +7,7 @@ mod commit_dialog;
 mod composer;
 mod composer_trigger;
 mod context_meter;
+mod conversation_ui;
 pub mod diff;
 pub mod git;
 mod highlight;

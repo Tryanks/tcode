@@ -196,7 +196,8 @@ impl TerminalDrawer {
     }
 
     pub fn resize(&self, _width: f32, height: f32, cx: &mut Context<Self>) {
-        self.dispatch(Command::SetTerminalHeight { height }, cx);
+        self.workspace_store
+            .update(cx, |store, cx| store.set_terminal_height(height, cx));
     }
 
     fn dispatch(&self, command: Command, cx: &mut Context<Self>) {
@@ -1384,12 +1385,8 @@ impl Render for TerminalDrawer {
                         .icon(IconName::Close)
                         .tooltip(tcode_i18n::tr!("terminal.close_tab"))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.dispatch(
-                                Command::CloseTerminal {
-                                    terminal_id: close_id,
-                                },
-                                cx,
-                            );
+                            this.workspace_store
+                                .update(cx, |store, cx| store.close_terminal(close_id, cx));
                         })),
                 ),
             );
@@ -1516,7 +1513,8 @@ impl Render for TerminalDrawer {
                     .icon(IconName::Close)
                     .tooltip(tcode_i18n::tr!("terminal.close"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.dispatch(Command::CloseTerminalPanel, cx);
+                        this.workspace_store
+                            .update(cx, |store, cx| store.close_terminal_panel(cx));
                     })),
             );
 

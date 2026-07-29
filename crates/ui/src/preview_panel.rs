@@ -97,7 +97,6 @@ mod native {
     use crate::store::WorkspaceStore;
     use crate::window_caption;
     use crate::window_state::WindowState;
-    use tcode_protocol::Command;
 
     fn wait_timeout_message(pending: &[String]) -> String {
         format!(
@@ -116,10 +115,6 @@ mod native {
         /// navigation starts flushing its pending-scripts buffer, so value-returning
         /// ops must wait until a session is "warm".
         warm: HashSet<String>,
-        /// Last URL loaded per session (drives the address bar + reload).
-        urls: HashMap<String, String>,
-        /// Fixed WebView canvas dimensions per stable conversation key.
-        canvases: HashMap<String, (u32, u32)>,
         /// The shared address-bar input (reflects the active session's URL).
         url_input: Entity<InputState>,
         /// Session id whose URL is currently mirrored into `url_input`.
@@ -165,8 +160,6 @@ mod native {
                 window_state,
                 webviews: HashMap::new(),
                 warm: HashSet::new(),
-                urls: HashMap::new(),
-                canvases: HashMap::new(),
                 url_input,
                 mirrored: None,
                 active_identity: None,
@@ -194,16 +187,6 @@ mod native {
                     } else {
                         self.webviews.insert(key.clone(), view);
                     }
-                }
-                if let Some(url) = self.urls.remove(old_key)
-                    && !self.urls.contains_key(key)
-                {
-                    self.urls.insert(key.clone(), url);
-                }
-                if let Some(canvas) = self.canvases.remove(old_key)
-                    && !self.canvases.contains_key(key)
-                {
-                    self.canvases.insert(key.clone(), canvas);
                 }
                 if self.warm.remove(old_key) {
                     self.warm.insert(key.clone());
@@ -326,7 +309,8 @@ mod native {
             // A navigation flushes lb-wry's pending-scripts buffer, so subsequent
             // evaluate callbacks will fire.
             self.warm.insert(key.to_string());
-            self.urls.insert(key.to_string(), url);
+            self.store
+                .update(cx, |store, cx| store.set_preview_url(key, url, cx));
             self.sync_visibility(cx);
             cx.notify();
         }
@@ -383,9 +367,9 @@ mod native {
         /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`).
         fn open_in_system_browser(&mut self, cx: &Context<Self>) {
             if let Some(id) = self.active_key(cx)
-                && let Some(url) = self.urls.get(&id)
+                && let Some(url) = self.store.read(cx).preview_url(&id)
             {
-                cx.open_url(url);
+                cx.open_url(&url);
             }
         }
 
@@ -396,15 +380,15 @@ mod native {
         fn close_panel(&mut self, cx: &mut Context<Self>) {
             if let Some(key) = self.active_key(cx) {
                 self.webviews.remove(&key);
-                self.urls.remove(&key);
                 self.warm.remove(&key);
+                self.store
+                    .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
             }
             // Un-mirror so a later reopen refreshes the address bar from the
             // (now empty) URL map instead of showing the stale address.
             self.mirrored = None;
-            self.store.update(cx, |store, cx| {
-                store.dispatch(Command::ClosePreviewPanel, cx);
-            });
+            self.store
+                .update(cx, |store, cx| store.close_preview_panel(cx));
             cx.notify();
         }
 
@@ -460,12 +444,7 @@ mod native {
             match op {
                 PreviewOp::Open { url } => {
                     self.store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::OpenPreviewPanelFor {
-                                session_id: session_id.clone(),
-                            },
-                            cx,
-                        );
+                        store.open_preview_panel_for(&session_id, cx);
                     });
                     if let Some(url) = url.as_deref() {
                         self.navigate(&key, url, window, cx);
@@ -487,19 +466,14 @@ mod native {
                     }
                     let payload = serde_json::json!({
                         "ok": true,
-                        "url": self.urls.get(&key),
+                        "url": self.store.read(cx).preview_url(&key),
                         "note": "call preview_status for live page state once loaded",
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
                 PreviewOp::Navigate { url } => {
                     self.store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::OpenPreviewPanelFor {
-                                session_id: session_id.clone(),
-                            },
-                            cx,
-                        );
+                        store.open_preview_panel_for(&session_id, cx);
                     });
                     self.navigate(&key, &url, window, cx);
                     if let Some(err) = &self.webview_error {
@@ -508,7 +482,7 @@ mod native {
                     }
                     let payload = serde_json::json!({
                         "ok": true,
-                        "url": self.urls.get(&key),
+                        "url": self.store.read(cx).preview_url(&key),
                         "note": "page is loading; call preview_status for live state",
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
@@ -526,16 +500,13 @@ mod native {
                 }
                 PreviewOp::Resize { width, height } => {
                     self.store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::OpenPreviewPanelFor {
-                                session_id: session_id.clone(),
-                            },
-                            cx,
-                        );
+                        store.open_preview_panel_for(&session_id, cx);
                     });
                     let payload = match (width, height) {
                         (Some(width), Some(height)) => {
-                            self.canvases.insert(key, (width, height));
+                            self.store.update(cx, |store, cx| {
+                                store.set_preview_canvas(&key, Some((width, height)), cx);
+                            });
                             serde_json::json!({
                                 "ok": true,
                                 "mode": "fixed",
@@ -545,7 +516,9 @@ mod native {
                             })
                         }
                         _ => {
-                            self.canvases.remove(&key);
+                            self.store.update(cx, |store, cx| {
+                                store.set_preview_canvas(&key, None, cx);
+                            });
                             serde_json::json!({
                                 "ok": true,
                                 "mode": "fill",
@@ -603,8 +576,9 @@ mod native {
             cx: &mut Context<Self>,
         ) {
             let canvas = self
-                .canvases
-                .get(key)
+                .store
+                .read(cx)
+                .preview_canvas(key)
                 .map(|(width, height)| {
                     serde_json::json!({
                         "mode": "fixed",
@@ -932,8 +906,8 @@ mod native {
             // Honor a queued `--open-preview <url>` navigation once a session exists.
             if active.is_some()
                 && let Some(url) = self
-                    .store
-                    .update(cx, |store, cx| store.take_pending_preview_url(cx))
+                    .window_state
+                    .update(cx, |state, _| state.pending_preview_url.take())
             {
                 self.navigate(active.as_deref().unwrap(), &url, window, cx);
             }
@@ -942,8 +916,7 @@ mod native {
             if active != self.mirrored {
                 let value = active
                     .as_ref()
-                    .and_then(|id| self.urls.get(id))
-                    .cloned()
+                    .and_then(|id| self.store.read(cx).preview_url(id))
                     .unwrap_or_default();
                 self.url_input
                     .update(cx, |state, cx| state.set_value(&value, window, cx));
@@ -953,7 +926,7 @@ mod native {
             let body: AnyElement = match &active {
                 Some(id) => match self.ensure_webview(id, window, cx) {
                     Some(view) => {
-                        if let Some((width, height)) = self.canvases.get(id).copied() {
+                        if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
                             div()
                                 .flex()
                                 .flex_1()

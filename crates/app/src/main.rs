@@ -557,15 +557,6 @@ fn main() {
                         {
                             state.open_latest_session(cx);
                         }
-                        if let Some(url) = &open_preview {
-                            state.open_preview_with_url(url.clone(), cx);
-                        }
-                        if open_diff {
-                            state.open_diff_panel(cx);
-                        }
-                        if open_plan {
-                            state.toggle_plan_panel(cx);
-                        }
                         if open_terminal {
                             state.open_terminal_panel(cx);
                         }
@@ -621,7 +612,23 @@ fn main() {
                             }
                         }
                     });
+                    workspace_store.update(cx, |store, cx| {
+                        store.sync_active_conversation_ui(cx);
+                        if open_diff {
+                            store.toggle_diff_panel(cx);
+                        }
+                        if open_plan {
+                            store.toggle_plan_panel(cx);
+                        }
+                        if open_preview.is_some() {
+                            store.open_preview_panel(cx);
+                        }
+                        if open_terminal || terminal_demo {
+                            store.show_terminal_panel(cx);
+                        }
+                    });
                     window_state.update(cx, |state, cx| {
+                        state.pending_preview_url = open_preview.clone();
                         if open_settings {
                             state.open_settings(cx);
                         }

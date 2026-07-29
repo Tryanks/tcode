@@ -7,7 +7,7 @@ use tcode_core::{
     git::GitAction,
     session::ReviewComment,
     settings::{ProfileSettingsPatch, Settings},
-    ui::{RightTab, TerminalSplitDirection, WorkspaceMode},
+    ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
 /// A backend mutation requested by a client.
@@ -81,18 +81,6 @@ pub enum Command {
     WriteRelaunchMarker {
         reopen_settings: String,
     },
-    ToggleDiffPanel,
-    OpenDiffForTurn {
-        turn: usize,
-    },
-    OpenDiffForFile {
-        turn: usize,
-        path: String,
-    },
-    SelectDiffTurn {
-        turn: usize,
-    },
-    DiscardDiffFocus,
     SetTerminalHeight {
         height: f32,
     },
@@ -115,14 +103,12 @@ pub enum Command {
     RemoveTerminalContext {
         context_id: u64,
     },
-    CloseDiffPanel,
     AddReviewComment {
         comment: ReviewComment,
     },
     RemoveReviewComment {
         index: usize,
     },
-    ToggleDiffExpanded,
     CycleProjectSort,
     CreateProject {
         root: PathBuf,
@@ -227,16 +213,6 @@ pub enum Command {
     DownloadPlan {
         markdown: String,
         fallback_title: String,
-    },
-    TogglePlanPanel,
-    SetRightTab {
-        tab: RightTab,
-    },
-    TogglePreviewPanel,
-    ClosePreviewPanel,
-    OpenPreviewPanel,
-    OpenPreviewPanelFor {
-        session_id: String,
     },
     LoadBranches,
     CheckoutBranch {
