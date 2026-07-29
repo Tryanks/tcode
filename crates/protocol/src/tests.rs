@@ -78,6 +78,56 @@ fn round_trips_top_level_wire_types() {
     };
     round_trip(&event);
     round_trip(&HostMessage::Event(event));
+    round_trip(&EventEnvelope {
+        topic: Topic::SessionStatus {
+            session_id: "session-1".into(),
+        },
+        seq: 10,
+        event: ServerEvent::SessionStatusReplaced(SessionStatus {
+            session_id: "session-1".into(),
+            title: "Replicated status".into(),
+            cwd: PathBuf::from("/tmp/project"),
+            provider: ProviderKind::Codex,
+            requested_model: Some("gpt-5".into()),
+            requested_profile_id: Some("work".into()),
+            acp_agent_id: None,
+            project_id: Some("project-1".into()),
+            approval_mode: agent::ApprovalMode::Supervised,
+            interaction_mode: agent::InteractionMode::Plan,
+            queued_messages: vec![QueuedMessageStatus {
+                id: 4,
+                text: "next".into(),
+            }],
+            delivery_in_flight: Some(4),
+            turn_running: true,
+            working: true,
+            pending_approval: false,
+            supports_steering: true,
+            provider_option_descriptors: Vec::new(),
+            provider_option_selections: vec![agent::OptionSelection {
+                id: "reasoningEffort".into(),
+                value: json!("high"),
+            }],
+            provider_commands: vec![agent::ProviderCommand {
+                name: "review".into(),
+                description: Some("Review changes".into()),
+                kind: agent::ProviderCommandKind::Command,
+            }],
+            git_branch: Some("main".into()),
+            branches: vec!["main".into(), "feature".into()],
+            draft: false,
+            draft_workspace: WorkspaceMode::LocalCheckout,
+            worktree: None,
+            preparing_worktree: false,
+            relay_confirmation: Some(("Claude".into(), "Codex".into())),
+            native_rewind_pending: true,
+            native_rewind_prefill_available: true,
+            model_pending_restart: true,
+            options_pending_restart: false,
+            approval_pending_restart: false,
+            ultrathink_armed: true,
+        }),
+    });
     round_trip(&ProtocolError {
         code: "not_found".into(),
         message: "missing".into(),

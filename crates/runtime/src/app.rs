@@ -39,7 +39,9 @@ use tcode_core::settings::{
     ProviderProfile, ProviderSettings, ResolvedProfile, Settings, provider_label,
 };
 pub use tcode_core::ui::{RightTab, WorkspaceMode};
-use tcode_protocol::{EventEnvelope, ServerEvent, SessionEventRecord, Topic};
+use tcode_protocol::{
+    EventEnvelope, QueuedMessageStatus, ServerEvent, SessionEventRecord, SessionStatus, Topic,
+};
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
@@ -1036,6 +1038,7 @@ pub struct AppState {
     index_event_seq: u64,
     settings_event_seq: u64,
     session_event_seqs: HashMap<String, u64>,
+    session_status_event_seqs: HashMap<String, u64>,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -1169,6 +1172,7 @@ impl AppState {
             index_event_seq: 0,
             settings_event_seq: 0,
             session_event_seqs: HashMap::new(),
+            session_status_event_seqs: HashMap::new(),
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
@@ -1287,6 +1291,10 @@ impl AppState {
                 .session_event_seqs
                 .entry(session_id.clone())
                 .or_default(),
+            Topic::SessionStatus { session_id } => self
+                .session_status_event_seqs
+                .entry(session_id.clone())
+                .or_default(),
             _ => unreachable!("replication slice does not emit this domain"),
         };
         *seq += 1;
@@ -1295,6 +1303,112 @@ impl AppState {
             seq: *seq,
             event,
         }));
+    }
+
+    /// Build the complete non-event-stream status projection for one resident
+    /// session. This is the sole constructor for the replicated status domain.
+    pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
+        let session = self
+            .active
+            .as_ref()
+            .filter(|session| session.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))?;
+        let meta = &session.meta;
+        let provider_option_descriptors = if meta.provider == ProviderKind::Acp {
+            session.provider_options.clone()
+        } else {
+            meta.model
+                .as_deref()
+                .and_then(|model| {
+                    self.models_for(meta.provider)
+                        .iter()
+                        .find(|spec| spec.id == model)
+                })
+                .map(|spec| spec.options.clone())
+                .unwrap_or_default()
+        };
+        let relay_confirmation = session.pending_relay.as_ref().and_then(|pending| {
+            has_meaningful_history(&session.timeline).then(|| {
+                let label = |provider: ProviderKind, profile: Option<&str>| match profile {
+                    Some(id) => self.settings.profile_display_name(id),
+                    None => provider.display_name().to_string(),
+                };
+                (
+                    label(pending.from_provider, pending.from_profile.as_deref()),
+                    label(meta.provider, meta.profile_id.as_deref()),
+                )
+            })
+        });
+        let pending_approval = if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.id == session_id)
+        {
+            !session.timeline.pending_approvals.is_empty()
+        } else {
+            self.sessions_awaiting_approval
+                .get(session_id)
+                .is_some_and(|requests| !requests.is_empty())
+        };
+        Some(SessionStatus {
+            session_id: session_id.to_string(),
+            title: meta.title.clone(),
+            cwd: meta.cwd.clone(),
+            provider: meta.provider,
+            requested_model: meta.model.clone(),
+            requested_profile_id: meta.profile_id.clone(),
+            acp_agent_id: meta.acp_agent_id.clone(),
+            project_id: meta.project_id.clone(),
+            approval_mode: meta.approval_mode,
+            interaction_mode: meta.interaction_mode,
+            queued_messages: session
+                .queue
+                .iter()
+                .map(|message| QueuedMessageStatus {
+                    id: message.id,
+                    text: message.text.clone(),
+                })
+                .collect(),
+            delivery_in_flight: session.delivery_in_flight,
+            turn_running: session.turn_in_flight,
+            working: session.has_work(),
+            pending_approval,
+            supports_steering: session.supports_steering(),
+            provider_option_descriptors,
+            provider_option_selections: meta.option_selections.clone(),
+            provider_commands: session.provider_commands.clone(),
+            git_branch: session.git_branch.clone(),
+            branches: session.branches.clone(),
+            draft: session.draft,
+            draft_workspace: session.draft_workspace.clone(),
+            worktree: meta.worktree.clone(),
+            preparing_worktree: session.preparing_worktree,
+            relay_confirmation,
+            native_rewind_pending: self.pending_native_rewinds.contains_key(session_id),
+            native_rewind_prefill_available: self.native_rewind_prefills.contains_key(session_id),
+            model_pending_restart: session.model_changed_while_live(),
+            options_pending_restart: session.options_changed_while_live(),
+            approval_pending_restart: session.approval_mode_changed_while_live(),
+            ultrathink_armed: session.pending_ultrathink,
+        })
+    }
+
+    fn emit_session_status(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if let Some(status) = self.session_status_snapshot(session_id) {
+            self.emit_domain(
+                Topic::SessionStatus {
+                    session_id: session_id.to_string(),
+                },
+                ServerEvent::SessionStatusReplaced(status),
+                cx,
+            );
+        }
+    }
+
+    fn emit_active_session_status(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.active_session_id().map(str::to_owned) {
+            self.emit_session_status(&session_id, cx);
+        }
     }
 
     fn upsert_session_in_memory(&mut self, meta: SessionMeta) {
@@ -1573,6 +1687,7 @@ impl AppState {
         child.push_queued(brief, Vec::new());
         self.background.insert(id.clone(), child);
         self.ensure_session_started(&id, cx);
+        self.emit_session_status(&id, cx);
         cx.notify();
         Ok(id)
     }
@@ -1772,6 +1887,7 @@ impl AppState {
                     if idle {
                         self.ensure_started(cx);
                     }
+                    self.emit_session_status(&thread_id, cx);
                     return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                 }
                 self.ensure_child_loaded(&thread_id, cx)?;
@@ -1784,6 +1900,7 @@ impl AppState {
                 if idle {
                     self.ensure_session_started(&thread_id, cx);
                 }
+                self.emit_session_status(&thread_id, cx);
                 Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
             }
             OrchestrateOp::Result {
@@ -1917,6 +2034,7 @@ impl AppState {
         child.meta = meta;
         child.draft = false;
         self.background.insert(thread_id.clone(), child);
+        self.emit_session_status(&thread_id, cx);
         self.schedule_timeline_load(
             thread_id,
             TimelineLoadTarget::Background { mark_idle: true },
@@ -2136,6 +2254,7 @@ impl AppState {
                         Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }
+                    state.emit_active_session_status(cx);
                     cx.notify();
                 });
             })
@@ -2904,6 +3023,7 @@ impl AppState {
                     .or_else(|| state.background.get_mut(&session_id))
                 {
                     session.git_branch = branch;
+                    state.emit_session_status(&session_id, cx);
                     cx.notify();
                 }
             });
@@ -3044,6 +3164,7 @@ impl AppState {
                 if let Some(active) = state.active.as_mut() {
                     active.git_branch = git_branch;
                 }
+                state.emit_active_session_status(cx);
                 state.refresh_git_status(cx);
                 cx.notify();
             });
@@ -3340,10 +3461,12 @@ impl AppState {
         active.provider_commands = provider_commands;
         active.pending_ultrathink = false;
         if active.draft {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
         if active.pending_relay.is_some() {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -4218,12 +4341,12 @@ impl AppState {
         Some(receiver)
     }
 
-    /// List the active session's workspace on the background executor.
-    pub fn list_active_workspace(
+    /// List one replicated session cwd on the background executor.
+    pub fn list_workspace_at(
         &self,
+        cwd: Option<PathBuf>,
         executor: &gpui::BackgroundExecutor,
     ) -> Task<Vec<PathEntry>> {
-        let cwd = self.active.as_ref().map(|active| active.meta.cwd.clone());
         unblock(executor, move || {
             cwd.map(|cwd| list_workspace(&cwd)).unwrap_or_default()
         })
@@ -4278,11 +4401,9 @@ impl AppState {
         self.active.as_ref().map(|a| a.meta.cwd.clone())
     }
 
-    /// Directory where the active session's image attachments are persisted
-    /// (`<store root>/attachments/<session id>/`). `None` with no active session.
-    pub fn attachments_dir(&self) -> Option<PathBuf> {
-        let id = self.active_session_id()?;
-        Some(user_files::attachment_dir(self.store.root(), id))
+    /// Directory where one session's image attachments are persisted.
+    pub fn attachments_dir_for(&self, session_id: &str) -> PathBuf {
+        user_files::attachment_dir(self.store.root(), session_id)
     }
 
     /// Persist attachment `bytes` under the active session's attachments dir with
@@ -4815,6 +4936,7 @@ impl AppState {
     pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut().filter(|a| a.draft) {
             active.draft_workspace = mode;
+            self.emit_active_session_status(cx);
             cx.notify();
         }
     }
@@ -4834,6 +4956,7 @@ impl AppState {
         active.preparing_worktree = true;
         let session_id = active.meta.id.clone();
         let root = active.meta.cwd.clone();
+        self.emit_session_status(&session_id, cx);
         cx.notify();
 
         let path = worktree_path_for(&session_id);
@@ -4888,6 +5011,7 @@ impl AppState {
                         );
                     }
                 }
+                state.emit_session_status(&session_id, cx);
             });
         })
         .detach();
@@ -4974,6 +5098,7 @@ impl AppState {
             ServerEvent::SessionSnapshot(Vec::new()),
             cx,
         );
+        self.emit_session_status(&session_id, cx);
         self.refresh_session_git_branch(session_id, cwd, cx);
         self.ensure_started(cx);
         self.refresh_git_status(cx);
@@ -5110,6 +5235,7 @@ impl AppState {
             draft.terminal_workspace.height = preferences.height.clamp(120., 600.);
         }
         self.active = Some(draft);
+        self.emit_active_session_status(cx);
         if let Some(active) = self.active.as_ref() {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
@@ -5156,6 +5282,7 @@ impl AppState {
                 cx,
             );
             self.upsert_session_in_memory(meta);
+            self.emit_active_session_status(cx);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
@@ -5284,6 +5411,7 @@ impl AppState {
                             ServerEvent::SessionSnapshot(records),
                             cx,
                         );
+                        state.emit_session_status(&session_id, cx);
                     }
                     TimelineLoadTarget::Background { .. } => {
                         if let Some(background) = state.background.get_mut(&session_id) {
@@ -5357,6 +5485,7 @@ impl AppState {
                 self.ensure_started(cx);
             }
             self.refresh_git_status(cx);
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -5418,6 +5547,7 @@ impl AppState {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
@@ -5440,6 +5570,20 @@ impl AppState {
         let (text, attachments) = self.assemble_user_message(text, attachment_paths);
         self.send_turn_assembled(text, attachments, cx);
         self.clear_consumed_draft_context();
+    }
+
+    /// Deterministic queue mutation for cross-crate replica consistency tests.
+    /// It deliberately skips provider dispatch so GPUI's test scheduler never
+    /// observes a real adapter thread.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn queue_message_for_replica_test(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.push_queued(text, Vec::new());
+        self.emit_active_session_status(cx);
+        cx.notify();
     }
 
     fn send_turn_assembled(
@@ -5532,6 +5676,7 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
@@ -5619,6 +5764,7 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
@@ -5664,6 +5810,7 @@ impl AppState {
         if is_active {
             self.maybe_generate_title(&message.text, &message.attachments, cx);
         }
+        self.emit_session_status(session_id, cx);
         cx.notify();
     }
 
@@ -5680,11 +5827,13 @@ impl AppState {
                     "parked session {session_id}: deferring settings restart for {} background task(s)",
                     parked.background_task_count
                 );
+                self.emit_session_status(session_id, cx);
                 cx.notify();
                 return;
             }
             parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -5694,10 +5843,12 @@ impl AppState {
                     "retaining parked session {session_id} for {} background task(s)",
                     parked.background_task_count
                 );
+                self.emit_session_status(session_id, cx);
                 cx.notify();
                 return;
             }
             self.mark_resident_idle(session_id, cx);
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -5715,6 +5866,7 @@ impl AppState {
                 log::warn!("parked session {session_id}: dispatch failed (process gone)");
             }
         }
+        self.emit_session_status(session_id, cx);
         cx.notify();
     }
 
@@ -5881,6 +6033,7 @@ impl AppState {
             if should_start {
                 self.ensure_started(cx);
             }
+            self.emit_session_status(parent_id, cx);
             cx.notify();
             return;
         }
@@ -5904,6 +6057,7 @@ impl AppState {
             if idle_runtime {
                 self.ensure_session_started(parent_id, cx);
             }
+            self.emit_session_status(parent_id, cx);
             cx.notify();
         }
     }
@@ -6021,6 +6175,7 @@ impl AppState {
                 {
                     self.report_error(RuntimeError::ProcessGone, cx);
                 }
+                self.emit_session_status(&session_id, cx);
                 cx.notify();
             }
         }
@@ -6048,6 +6203,7 @@ impl AppState {
         if let Some(active) = self.active.as_mut() {
             let _ = active.take_queued(id);
         }
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
@@ -6143,6 +6299,7 @@ impl AppState {
             active.meta.option_selections.clear();
             active.provider_commands = store.load_commands(active.meta.provider, None);
             active.pending_ultrathink = false;
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6175,6 +6332,7 @@ impl AppState {
             active.provider_options.clear();
             active.pending_ultrathink = false;
             if active.pending_relay.is_some() {
+                self.emit_active_session_status(cx);
                 cx.notify();
                 return;
             }
@@ -6190,6 +6348,7 @@ impl AppState {
         active.meta.option_selections.clear();
         active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6238,6 +6397,7 @@ impl AppState {
             active.live_option_selections = active.meta.option_selections.clone();
         }
         if active.draft {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6252,6 +6412,7 @@ impl AppState {
     pub fn select_ultrathink(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active.as_mut() {
             active.pending_ultrathink = true;
+            self.emit_active_session_status(cx);
             cx.notify();
         }
     }
@@ -6294,6 +6455,7 @@ impl AppState {
             let _ = commands.try_send(SessionCommand::SetInteractionMode(mode));
         }
         if active.draft {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6722,6 +6884,7 @@ impl AppState {
                     && active.meta.id == session_id
                 {
                     active.branches = branches;
+                    state.emit_session_status(&session_id, cx);
                     cx.notify();
                 }
             });
@@ -6901,6 +7064,7 @@ impl AppState {
         } else {
             self.ensure_started(cx);
         }
+        self.emit_session_status(&session_id, cx);
         cx.notify();
     }
 
@@ -6960,6 +7124,7 @@ impl AppState {
         active.live_option_selections = active.meta.option_selections.clone();
 
         let meta = active.meta.clone();
+        self.emit_session_status(session_id, cx);
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
         let preview_registration = self.preview_registration_for(&meta);
@@ -7072,6 +7237,7 @@ impl AppState {
                                 state.on_background_turn_completed(&session_id, cx);
                             }
                         }
+                        state.emit_session_status(&session_id, cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -7113,6 +7279,7 @@ impl AppState {
                                 },
                                 cx,
                             );
+                            state.emit_session_status(&session_id, cx);
                             cx.notify();
                         }
                     }
@@ -7177,6 +7344,7 @@ impl AppState {
 
         if let AgentEvent::RewindFailed { error, .. } = &event {
             self.pending_native_rewinds.remove(session_id);
+            self.emit_session_status(session_id, cx);
             self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
             cx.notify();
             return;
@@ -7207,6 +7375,7 @@ impl AppState {
                     self.mark_resident_idle(session_id, cx);
                 }
             }
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -7232,6 +7401,7 @@ impl AppState {
                     } else {
                         false
                     };
+                    self.emit_session_status(session_id, cx);
                     let is_child = self
                         .sessions
                         .iter()
@@ -7270,6 +7440,7 @@ impl AppState {
                 },
                 cx,
             );
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -7303,6 +7474,7 @@ impl AppState {
                     cx,
                 );
             }
+            self.emit_session_status(session_id, cx);
             return;
         }
 
@@ -7362,6 +7534,7 @@ impl AppState {
             if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
                 self.persist_meta(&meta, cx);
             }
+            self.emit_session_status(session_id, cx);
             return;
         }
 
@@ -7539,6 +7712,18 @@ impl AppState {
             && self.active_session_id() != Some(session_id)
         {
             self.on_background_turn_completed(session_id, cx);
+        }
+
+        if matches!(
+            event,
+            AgentEvent::TurnStarted { .. }
+                | AgentEvent::SessionStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::RewindCompleted { .. }
+                | AgentEvent::ApprovalRequested(_)
+                | AgentEvent::ApprovalResolved { .. }
+        ) {
+            self.emit_session_status(session_id, cx);
         }
 
         // Smoke-mode automation.
@@ -7769,6 +7954,7 @@ impl AppState {
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
+        self.emit_session_status(&meta.id, cx);
         cx.notify();
     }
 
@@ -7834,6 +8020,7 @@ impl AppState {
             if !has_work {
                 self.mark_resident_idle(&session_id, cx);
             }
+            self.emit_session_status(&session_id, cx);
         }
     }
 
@@ -7852,6 +8039,7 @@ impl AppState {
 
         let idle_since = Instant::now();
         self.background.get_mut(session_id).unwrap().idle_since = Some(idle_since);
+        self.emit_session_status(session_id, cx);
 
         let oldest = {
             let mut residents: Vec<_> = self
