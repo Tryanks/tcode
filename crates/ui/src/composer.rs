@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 
 use agent::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest, Attachment,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest,
     FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommand,
     ProviderCommandKind, ProviderKind, TokenUsage, UserInputQuestion,
 };
@@ -44,8 +44,7 @@ use crate::shortcut::format_secondary_shortcut;
 use crate::window_state::WindowState;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
-use tcode_core::session::append_review_comments_to_prompt;
-use tcode_runtime::app::{AppState, TerminalContext, WorkspaceMode};
+use tcode_runtime::app::{AppState, WorkspaceMode, mime_from_path};
 use tcode_runtime::ui_facade::PathEntry;
 
 /// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
@@ -60,50 +59,6 @@ const PICKER_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::Pi,
     ProviderKind::OpenCode,
 ];
-
-fn normalize_terminal_context_text(text: &str) -> String {
-    text.replace("\r\n", "\n").trim_matches('\n').to_string()
-}
-
-pub(crate) fn append_terminal_contexts_to_prompt(
-    prompt: &str,
-    contexts: &[TerminalContext],
-) -> String {
-    let prompt = prompt.trim();
-    let mut lines = Vec::new();
-    for context in contexts {
-        let text = normalize_terminal_context_text(&context.text);
-        if text.is_empty() || context.terminal_label.trim().is_empty() {
-            continue;
-        }
-        let range = if context.line_start == context.line_end {
-            format!("line {}", context.line_start)
-        } else {
-            format!("lines {}-{}", context.line_start, context.line_end)
-        };
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(format!("- {} {}:", context.terminal_label.trim(), range));
-        lines.extend(
-            text.lines()
-                .enumerate()
-                .map(|(index, line)| format!("  {} | {}", context.line_start + index, line)),
-        );
-    }
-    if lines.is_empty() {
-        return prompt.to_string();
-    }
-    let block = format!(
-        "<terminal_context>\n{}\n</terminal_context>",
-        lines.join("\n")
-    );
-    if prompt.is_empty() {
-        block
-    } else {
-        format!("{prompt}\n\n{block}")
-    }
-}
 
 /// T3's circular stop button red-orange.
 const STOP_TINT: u32 = 0xF4562E;
@@ -453,26 +408,6 @@ fn transcode_image_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
     Ok(png.into_inner())
 }
 
-/// Best-effort MIME type from a file extension (for drag/drop of image files).
-fn mime_from_path(path: &std::path::Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
-
 pub struct Composer {
     app_state: Entity<AppState>,
     window_state: Entity<WindowState>,
@@ -768,7 +703,6 @@ impl Composer {
             .as_ref()
             .map(|active| active.terminal_workspace.contexts.clone())
             .unwrap_or_default();
-        let review_comments = self.app_state.read(cx).review_comments().to_vec();
         if !self.has_sendable_content(cx) {
             return;
         }
@@ -802,15 +736,12 @@ impl Composer {
         }
         let orchestrate_text = strip_orchestrate_prefix(&text).map(str::to_string);
         let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
-        let text = append_terminal_contexts_to_prompt(prompt_text, &terminal_contexts);
-        let text = append_review_comments_to_prompt(&text, &review_comments);
-        // Attachments are persisted on disk (see `add_image_*`); read +
-        // base64-encode each one so the provider receives real image content
-        // blocks. An image-only message keeps its empty text here — the runtime
-        // substitutes T3's synthetic placeholder on the wire only, so the
-        // transcript bubble renders as just the thumbnails.
-        let sent_text = text;
-        let attachments = self.collect_attachments();
+        let sent_text = prompt_text.to_string();
+        let attachment_paths = self
+            .pending_images
+            .iter()
+            .map(|image| image.path.clone())
+            .collect::<Vec<_>>();
         if let Some((from, to)) = self.app_state.read(cx).relay_confirmation() {
             let composer = cx.entity();
             let input = input.clone();
@@ -819,7 +750,7 @@ impl Composer {
                 let composer = composer.clone();
                 let input = input.clone();
                 let sent_text = sent_text.clone();
-                let attachments = attachments.clone();
+                let attachment_paths = attachment_paths.clone();
                 alert
                     .title(tcode_i18n::tr!("composer.relay_title"))
                     .description(tcode_i18n::tr!(
@@ -838,7 +769,7 @@ impl Composer {
                             composer.finish_submit(
                                 &input,
                                 sent_text.clone(),
-                                attachments.clone(),
+                                attachment_paths.clone(),
                                 false,
                                 false,
                                 true,
@@ -854,7 +785,7 @@ impl Composer {
         self.finish_submit(
             input,
             sent_text,
-            attachments,
+            attachment_paths,
             orchestrate_text.is_some(),
             steer,
             false,
@@ -868,7 +799,7 @@ impl Composer {
         &mut self,
         input: &Entity<InputState>,
         sent_text: String,
-        attachments: Vec<Attachment>,
+        attachment_paths: Vec<PathBuf>,
         orchestrate: bool,
         steer: bool,
         relay: bool,
@@ -881,16 +812,14 @@ impl Composer {
         self.image_load_generation = self.image_load_generation.wrapping_add(1);
         self.pending_image_loads = 0;
         self.app_state.update(cx, |state, cx| {
-            state.clear_terminal_contexts();
-            state.clear_review_comments();
             if relay {
-                state.confirm_relay_and_send(sent_text, attachments, cx)
+                state.confirm_relay_and_send(sent_text, attachment_paths, cx)
             } else if orchestrate {
-                state.orchestrate_turn(sent_text, attachments, cx)
+                state.orchestrate_turn(sent_text, attachment_paths, cx)
             } else if steer {
-                state.steer(sent_text, attachments, cx)
+                state.steer(sent_text, attachment_paths, cx)
             } else {
-                state.send_turn(sent_text, attachments, cx)
+                state.send_turn(sent_text, attachment_paths, cx)
             }
         });
         cx.emit(ComposerEvent::Submitted);
@@ -1306,23 +1235,6 @@ impl Composer {
         if !accepted_image && let Some((mime, bytes)) = crate::pasteboard::read_pasteboard_image() {
             self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
         }
-    }
-
-    /// Read each pending image off disk and base64-encode it into a wire
-    /// [`Attachment`]. Unreadable files are skipped (they were validated on add).
-    fn collect_attachments(&self) -> Vec<Attachment> {
-        use base64::Engine as _;
-        self.pending_images
-            .iter()
-            .filter_map(|image| {
-                let bytes = tcode_runtime::ui_facade::read_file_bytes(&image.path).ok()?;
-                Some(Attachment {
-                    media_type: mime_from_path(&image.path),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                    source_path: Some(image.path.to_string_lossy().into_owned()),
-                })
-            })
-            .collect()
     }
 
     fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -4854,21 +4766,6 @@ mod tests {
         assert_eq!(fuzzy[0].name, "deep-review");
         assert!(
             filter_provider_commands(&commands, ProviderCommandKind::Command, "dprv").is_empty()
-        );
-    }
-
-    #[test]
-    fn serializes_terminal_context_like_t3() {
-        let contexts = vec![TerminalContext {
-            id: 1,
-            terminal_label: "zsh".into(),
-            line_start: 12,
-            line_end: 13,
-            text: "cargo test\nok".into(),
-        }];
-        assert_eq!(
-            append_terminal_contexts_to_prompt("Explain this", &contexts),
-            "Explain this\n\n<terminal_context>\n- zsh lines 12-13:\n  12 | cargo test\n  13 | ok\n</terminal_context>"
         );
     }
 

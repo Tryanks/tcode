@@ -11,6 +11,7 @@ use agent::{
     PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions,
     ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
 };
+use base64::Engine as _;
 use gpui::{BackgroundExecutor, Context, EventEmitter, Task};
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +30,10 @@ use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
     RelayTranscriptOptions, assemble_relay_prompt, has_meaningful_history, render_relay_transcript,
 };
-use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
+use tcode_core::session::{
+    EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt, implement_prompt,
+    plan_title,
+};
 use tcode_core::settings::{
     ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProjectSort, ProviderProfile,
     ProviderSettings, ResolvedProfile, Settings, provider_label,
@@ -89,6 +93,67 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::Pi,
     ProviderKind::OpenCode,
 ];
+
+/// Best-effort MIME type from a file extension.
+pub fn mime_from_path(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn normalize_terminal_context_text(text: &str) -> String {
+    text.replace("\r\n", "\n").trim_matches('\n').to_string()
+}
+
+fn append_terminal_contexts_to_prompt(prompt: &str, contexts: &[TerminalContext]) -> String {
+    let prompt = prompt.trim();
+    let mut lines = Vec::new();
+    for context in contexts {
+        let text = normalize_terminal_context_text(&context.text);
+        if text.is_empty() || context.terminal_label.trim().is_empty() {
+            continue;
+        }
+        let range = if context.line_start == context.line_end {
+            format!("line {}", context.line_start)
+        } else {
+            format!("lines {}-{}", context.line_start, context.line_end)
+        };
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("- {} {}:", context.terminal_label.trim(), range));
+        lines.extend(
+            text.lines()
+                .enumerate()
+                .map(|(index, line)| format!("  {} | {}", context.line_start + index, line)),
+        );
+    }
+    if lines.is_empty() {
+        return prompt.to_string();
+    }
+    let block = format!(
+        "<terminal_context>\n{}\n</terminal_context>",
+        lines.join("\n")
+    );
+    if prompt.is_empty() {
+        block
+    } else {
+        format!("{prompt}\n\n{block}")
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum TimelineLoadTarget {
@@ -1318,6 +1383,17 @@ impl AppState {
     pub fn orchestrate_turn(
         &mut self,
         text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.orchestrate_turn_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context();
+    }
+
+    fn orchestrate_turn_assembled(
+        &mut self,
+        text: String,
         attachments: Vec<Attachment>,
         cx: &mut Context<Self>,
     ) {
@@ -1363,7 +1439,7 @@ impl AppState {
         // `steer` sends ordinarily when idle and injects into a live turn. On
         // first enable the restart above intentionally makes this an ordinary
         // queued send for the resumed, MCP-enabled process.
-        self.steer(text, attachments, cx);
+        self.steer_assembled(text, attachments, cx);
     }
 
     fn orchestrate_registration_for(
@@ -3886,17 +3962,50 @@ impl AppState {
         }
     }
 
-    pub fn clear_review_comments(&mut self) {
+    fn clear_review_comments(&mut self) {
         if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
             self.review_comment_drafts.remove(&id);
         }
     }
 
     /// Drop the attached terminal contexts once a message consuming them is sent.
-    pub fn clear_terminal_contexts(&mut self) {
+    fn clear_terminal_contexts(&mut self) {
         if let Some(active) = self.active.as_mut() {
             active.terminal_workspace.contexts.clear();
         }
+    }
+
+    /// Assemble the provider-bound message at the runtime boundary. Unreadable
+    /// attachment files are skipped, matching the composer's previous behavior.
+    fn assemble_user_message(
+        &self,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) -> (String, Vec<Attachment>) {
+        let terminal_contexts = self
+            .active
+            .as_ref()
+            .map(|active| active.terminal_workspace.contexts.as_slice())
+            .unwrap_or_default();
+        let text = append_terminal_contexts_to_prompt(&text, terminal_contexts);
+        let text = append_review_comments_to_prompt(&text, self.review_comments());
+        let attachments = attachment_paths
+            .into_iter()
+            .filter_map(|path| {
+                let bytes = fs::read(&path).ok()?;
+                Some(Attachment {
+                    media_type: mime_from_path(&path),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    source_path: Some(path.to_string_lossy().into_owned()),
+                })
+            })
+            .collect();
+        (text, attachments)
+    }
+
+    fn clear_consumed_draft_context(&mut self) {
+        self.clear_terminal_contexts();
+        self.clear_review_comments();
     }
 
     pub fn toggle_diff_expanded(&mut self, cx: &mut Context<Self>) {
@@ -4692,7 +4801,7 @@ impl AppState {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
                         active.git_branch = git_branch;
                         // Now that the worktree exists, run the deferred send.
-                        state.send_turn(text, attachments, cx);
+                        state.send_turn_assembled(text, attachments, cx);
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
@@ -5221,6 +5330,17 @@ impl AppState {
     pub fn send_turn(
         &mut self,
         text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.send_turn_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context();
+    }
+
+    fn send_turn_assembled(
+        &mut self,
+        text: String,
         attachments: Vec<Attachment>,
         cx: &mut Context<Self>,
     ) {
@@ -5338,6 +5458,17 @@ impl AppState {
     pub fn confirm_relay_and_send(
         &mut self,
         text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.confirm_relay_and_send_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context();
+    }
+
+    fn confirm_relay_and_send_assembled(
+        &mut self,
+        text: String,
         attachments: Vec<Attachment>,
         cx: &mut Context<Self>,
     ) {
@@ -5345,7 +5476,7 @@ impl AppState {
             return;
         };
         let Some(pending) = active.pending_relay.take() else {
-            self.send_turn(text, attachments, cx);
+            self.send_turn_assembled(text, attachments, cx);
             return;
         };
         let transcript = render_relay_transcript(
@@ -5727,17 +5858,30 @@ impl AppState {
     ///
     /// A steered message IS part of the conversation, so it is recorded to the
     /// session JSONL as a user message (unlike a merely queued one).
-    pub fn steer(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut Context<Self>) {
+    pub fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.steer_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context();
+    }
+
+    fn steer_assembled(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
         match active.route(true) {
             // Nothing is running, so there is nothing to steer into: an ordinary
             // send is exactly the right thing.
-            SendRouting::Send | SendRouting::Queue => self.send_turn(text, attachments, cx),
+            SendRouting::Send | SendRouting::Queue => {
+                self.send_turn_assembled(text, attachments, cx)
+            }
             SendRouting::QueueUnsupported => {
                 let agent = active.meta.provider.display_name();
-                self.send_turn(text, attachments, cx);
+                self.send_turn_assembled(text, attachments, cx);
                 self.report_error(
                     RuntimeError::SteerUnsupported {
                         agent: agent.to_string(),
@@ -5790,7 +5934,7 @@ impl AppState {
         // `steer` consumes the session's armed Ultrathink flag, but this
         // message captured its own at queue time — re-arm so it rides along.
         active.pending_ultrathink = message.ultrathink;
-        self.steer(message.text, message.attachments, cx);
+        self.steer_assembled(message.text, message.attachments, cx);
     }
 
     /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
@@ -6104,7 +6248,7 @@ impl AppState {
             cx,
         );
         self.set_interaction_mode(InteractionMode::Build, cx);
-        self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
+        self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
     }
 
     /// Leave the plan captured in history while removing its actionable
@@ -6214,7 +6358,7 @@ impl AppState {
             _pump: None,
         });
         self.refresh_session_git_branch(session_id, cwd, cx);
-        self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
+        self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
         cx.notify();
     }
 
@@ -8850,6 +8994,79 @@ mod tests {
         );
         assert!(acp.starts_with(GENERIC_ORCHESTRATE_GUIDANCE.trim()));
         assert!(acp.contains("Generic lead"));
+    }
+
+    #[gpui::test]
+    fn send_turn_assembles_draft_context_and_attachment_paths(cx: &mut gpui::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("tcode-send-assembly-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let attachment_path = root.join("sample.png");
+        std::fs::write(&attachment_path, [1, 2, 3]).unwrap();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "assembled".into();
+            active.terminal_workspace.contexts.push(TerminalContext {
+                id: 1,
+                terminal_label: "zsh".into(),
+                line_start: 12,
+                line_end: 13,
+                text: "cargo test\nok".into(),
+            });
+            state.active = Some(active);
+            state.add_review_comment(
+                ReviewComment::new(
+                    "src/lib.rs".into(),
+                    7,
+                    7,
+                    tcode_core::session::ReviewSide::New,
+                    "Please fix".into(),
+                    "let bad = true;".into(),
+                    "section".into(),
+                    "Changes".into(),
+                    3,
+                    4,
+                ),
+                cx,
+            );
+
+            state.send_turn("Explain this".into(), vec![attachment_path.clone()], cx);
+
+            let SessionCommand::SendTurn {
+                text, attachments, ..
+            } = receiver.try_recv().expect("assembled send command")
+            else {
+                panic!("expected SendTurn")
+            };
+            assert_eq!(
+                text,
+                "Explain this\n\n<terminal_context>\n- zsh lines 12-13:\n  12 | cargo test\n  13 | ok\n</terminal_context>\n\n<review_comment sectionId=\"section\" sectionTitle=\"Changes\" filePath=\"src/lib.rs\" startIndex=\"3\" endIndex=\"4\" rangeLabel=\"+7\">\nPlease fix\n```diff\nlet bad = true;\n```\n</review_comment>"
+            );
+            assert_eq!(
+                attachments,
+                vec![Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    source_path: Some(attachment_path.to_string_lossy().into_owned()),
+                }]
+            );
+            assert!(
+                state
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .terminal_workspace
+                    .contexts
+                    .is_empty()
+            );
+            assert!(state.review_comments().is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
