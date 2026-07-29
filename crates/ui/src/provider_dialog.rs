@@ -24,12 +24,13 @@ use gpui_component::{
 };
 
 use agent::ProviderKind;
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 
 use crate::provider_models::{
     ResolvedModel, model_capability_label, slug_error_message, validate_slug,
 };
 use crate::settings::{ACCENT_PRESETS, EnvVar, provider_label};
+use crate::store::WorkspaceStore;
 
 /// One environment-variable row's live inputs and its draft flags.
 struct EnvRow {
@@ -51,7 +52,7 @@ struct EnvSeed {
 }
 
 pub struct ProviderDialog {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     provider: ProviderKind,
     profile_id: String,
     display_name: Entity<InputState>,
@@ -73,22 +74,18 @@ pub struct ProviderDialog {
 
 impl ProviderDialog {
     pub fn new(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         provider: ProviderKind,
         profile_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let settings = app_state.read(cx).profile_settings(&profile_id);
+        let settings = store.read(cx).provider_profile_settings(&profile_id, cx);
         // Which of this profile's names resolve to a value at launch: a sensitive
         // row present here has its secret saved (see `launch_env_for_profile`).
-        let stored: HashSet<String> = app_state
+        let stored: HashSet<String> = store
             .read(cx)
-            .launch_env_for_profile(&profile_id)
-            .env
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect();
+            .provider_profile_stored_secret_names(&profile_id, cx);
 
         let text_input =
             |placeholder: String, value: String, window: &mut Window, cx: &mut Context<Self>| {
@@ -130,7 +127,7 @@ impl ProviderDialog {
             cx,
         );
 
-        let mut subscriptions = vec![cx.observe(&app_state, |_, _, cx| cx.notify())];
+        let mut subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
         subscriptions.push(
             cx.subscribe_in(&custom_model, window, |this, _, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
@@ -162,7 +159,7 @@ impl ProviderDialog {
             .collect();
 
         let mut dialog = Self {
-            app_state,
+            store,
             provider,
             profile_id,
             display_name,
@@ -241,35 +238,53 @@ impl ProviderDialog {
         let provider = self.provider;
         let profile_id = self.profile_id.clone();
 
-        self.app_state.update(cx, |state, cx| {
-            state.update_profile_settings(
-                &profile_id,
-                move |settings| {
-                    settings.display_name = display_name;
-                    settings.accent_color = accent;
-                    settings.env = env;
-                    settings.binary_path = binary.map(Into::into);
-                    // OpenCode has no single-home override.
-                    settings.home_path = (provider != ProviderKind::OpenCode)
-                        .then(|| home.map(Into::into))
-                        .flatten();
-                    // Codex ignores launch arguments (no field is rendered).
-                    settings.launch_args = match provider {
-                        ProviderKind::Codex => None,
-                        _ => launch,
-                    };
-                    settings.custom_models = custom;
-                    settings.hidden_models = hidden;
+        self.store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::UpdateProfileSettings {
+                    profile_id: profile_id.clone(),
+                    patch: tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(
+                        Box::new(tcode_core::settings::ProfileConfigurationPatch {
+                            display_name,
+                            accent_color: accent,
+                            env,
+                            binary_path: binary.map(Into::into),
+                            // OpenCode has no single-home override.
+                            home_path: (provider != ProviderKind::OpenCode)
+                                .then(|| home.map(Into::into))
+                                .flatten(),
+                            // Codex ignores launch arguments (no field is rendered).
+                            launch_args: match provider {
+                                ProviderKind::Codex => None,
+                                _ => launch,
+                            },
+                            custom_models: custom,
+                            hidden_models: hidden,
+                        }),
+                    ),
                 },
                 cx,
             );
-            for (name, value) in &secret_writes {
-                state.set_profile_secret(&profile_id, name, Some(value), cx);
+            for (name, value) in secret_writes {
+                store.dispatch(
+                    Command::SetProfileSecret {
+                        profile_id: profile_id.clone(),
+                        name,
+                        value: Some(value),
+                    },
+                    cx,
+                );
             }
-            for name in &clears {
-                state.set_profile_secret(&profile_id, name, None, cx);
+            for name in clears {
+                store.dispatch(
+                    Command::SetProfileSecret {
+                        profile_id: profile_id.clone(),
+                        name,
+                        value: None,
+                    },
+                    cx,
+                );
             }
-            state.reload_provider(provider, cx);
+            store.dispatch(Command::ReloadProvider { provider }, cx);
         });
     }
 
@@ -360,8 +375,14 @@ impl ProviderDialog {
 
     fn add_custom_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.custom_model.read(cx).value().to_string();
-        let catalog = self.app_state.read(cx).profile_catalog(&self.profile_id);
-        let mut draft = self.app_state.read(cx).profile_settings(&self.profile_id);
+        let catalog = self
+            .store
+            .read(cx)
+            .provider_profile_model_catalog(&self.profile_id, cx);
+        let mut draft = self
+            .store
+            .read(cx)
+            .provider_profile_settings(&self.profile_id, cx);
         draft.custom_models = self.custom_models.clone();
         match validate_slug(&raw, &catalog, &draft) {
             Ok(slug) => {
@@ -643,10 +664,11 @@ impl ProviderDialog {
     }
 
     fn render_models(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self.app_state.read(cx).draft_models_for_profile(
+        let rows = self.store.read(cx).provider_dialog_models(
             &self.profile_id,
             &self.custom_models,
             &self.hidden_models,
+            cx,
         );
         let muted = cx.theme().muted_foreground;
 
@@ -741,7 +763,7 @@ impl ProviderDialog {
 
         let fav_id = row.id.clone();
         let is_fav = row.favorite;
-        let app_state = self.app_state.clone();
+        let store = self.store.clone();
         let hide_id = row.id.clone();
         let remove_id = row.id.clone();
         let custom = row.custom;
@@ -793,7 +815,14 @@ impl ProviderDialog {
                         tcode_i18n::tr!("providers.models.favorite")
                     })
                     .on_click(move |_, _, cx| {
-                        app_state.update(cx, |state, cx| state.toggle_favorite_model(&fav_id, cx));
+                        store.update(cx, |store, cx| {
+                            store.dispatch(
+                                Command::ToggleFavoriteModel {
+                                    model: fav_id.clone(),
+                                },
+                                cx,
+                            );
+                        });
                     }),
             )
             .child(
@@ -854,20 +883,16 @@ pub fn render_footer(
     _window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let (is_user, profile_id, app_state) = {
+    let (is_user, profile_id, store) = {
         let d = dialog.read(cx);
-        (
-            d.is_user_profile(),
-            d.profile_id.clone(),
-            d.app_state.clone(),
-        )
+        (d.is_user_profile(), d.profile_id.clone(), d.store.clone())
     };
     let save_dialog = dialog.clone();
 
     let mut left = div().flex_1();
     if is_user {
         let delete_id = profile_id.clone();
-        let delete_state = app_state.clone();
+        let delete_store = store.clone();
         left = left.child(
             Button::new("delete-profile")
                 .danger()
@@ -875,11 +900,11 @@ pub fn render_footer(
                 .label(tcode_i18n::tr!("providers.delete_profile").into_owned())
                 .on_click(move |_, window, cx| {
                     let delete_id = delete_id.clone();
-                    let delete_state = delete_state.clone();
+                    let delete_store = delete_store.clone();
                     window.open_alert_dialog(cx, move |alert, _, cx| {
                         let alert = alert.bg(cx.theme().popover);
                         let delete_id = delete_id.clone();
-                        let delete_state = delete_state.clone();
+                        let delete_store = delete_store.clone();
                         alert
                             .title(tcode_i18n::tr!("providers.delete_confirm_title"))
                             .description(tcode_i18n::tr!("providers.delete_confirm_body"))
@@ -891,8 +916,14 @@ pub fn render_footer(
                                     .show_cancel(true),
                             )
                             .on_ok(move |_, window, cx| {
-                                delete_state
-                                    .update(cx, |state, cx| state.delete_profile(&delete_id, cx));
+                                delete_store.update(cx, |store, cx| {
+                                    store.dispatch(
+                                        Command::DeleteProfile {
+                                            profile_id: delete_id.clone(),
+                                        },
+                                        cx,
+                                    );
+                                });
                                 // Close the confirm and the underlying settings dialog.
                                 window.close_all_dialogs(cx);
                                 true

@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
+    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -13,8 +13,9 @@ use gpui_component::{
     notification::Notification,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
-use tcode_runtime::app::{AppEvent, AppState, RightTab, Route};
-use tcode_runtime::event::{RuntimeEvent, RuntimeOperationId};
+use tcode_core::ui::RightTab;
+use tcode_protocol::Command;
+use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
 use crate::diff::DiffPanel;
@@ -22,6 +23,7 @@ use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
 use crate::settings_page::SettingsPage;
 use crate::sidebar::SessionsSidebar;
+use crate::store::WorkspaceStore;
 use crate::toast::ToastCenter;
 
 use crate::runtime_event::{
@@ -29,6 +31,7 @@ use crate::runtime_event::{
     present_runtime_toast,
 };
 use crate::toast::{ToastAction, ToastId, ToastKind, ToastSpec};
+use crate::window_state::{Route, WindowState};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -84,7 +87,8 @@ pub(crate) fn window_drag_area(
 }
 
 pub struct AppShell {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
+    window_state: Entity<WindowState>,
     sidebar: Entity<SessionsSidebar>,
     chat: Entity<ChatView>,
     diff: Entity<DiffPanel>,
@@ -154,30 +158,35 @@ fn next_sidebar_overlay_visibility(
 }
 
 impl AppShell {
-    pub fn new(app_state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace_store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let toasts = cx.new(|_| ToastCenter::new());
-        let window_title = |state: &AppState| -> String {
-            match state.active.as_ref() {
-                Some(active) if active.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
-                Some(active) => active.meta.title.clone(),
-                None => "tcode".to_string(),
-            }
-        };
-        window.set_window_title(&window_title(app_state.read(cx)));
-        let subscription = cx.observe_in(&app_state, window, move |_, state, window, cx| {
-            window.set_window_title(&window_title(state.read(cx)));
+        window.set_window_title(&workspace_store.read(cx).shell_window_title(cx));
+        let subscription = cx.observe_in(&workspace_store, window, move |_, store, window, cx| {
+            window.set_window_title(&store.read(cx).shell_window_title(cx));
             cx.notify();
         });
-        let event_subscription =
-            cx.subscribe_in(&app_state, window, |this, _, event: &AppEvent, w, cx| {
+        let event_subscription = cx.subscribe_in(
+            &workspace_store,
+            window,
+            |this, _, event: &RuntimeEvent, w, cx| {
                 this.present_app_event(event, w, cx);
-            });
-        let preview = cx.new(|cx| PreviewPanel::new(app_state.clone(), window, cx));
+            },
+        );
+        let window_subscription = cx.observe(&window_state, |_, _, cx| {
+            cx.notify();
+        });
+        let preview = cx
+            .new(|cx| PreviewPanel::new(workspace_store.clone(), window_state.clone(), window, cx));
 
         // Pump preview automation requests from the MCP server into the live
         // WebView. The receiver is taken once; requests are resolved on the gpui
         // main thread (WKWebView `evaluate_script` must run there).
-        let requests = app_state.update(cx, |state, _| state.take_preview_requests());
+        let requests = workspace_store.update(cx, |store, cx| store.take_preview_requests(cx));
         if let Some(requests) = requests {
             let preview = preview.clone();
             cx.spawn_in(window, async move |_, cx| {
@@ -200,18 +209,23 @@ impl AppShell {
             .detach();
         }
 
-        app_state.update(cx, |state, cx| state.pump_orchestrate_requests(cx));
-
         Self {
-            sidebar: cx.new(|cx| SessionsSidebar::new(app_state.clone(), cx)),
-            chat: cx.new(|cx| ChatView::new(app_state.clone(), window, cx)),
-            diff: cx.new(|cx| DiffPanel::new(app_state.clone(), cx)),
+            sidebar: cx
+                .new(|cx| SessionsSidebar::new(workspace_store.clone(), window_state.clone(), cx)),
+            chat: cx
+                .new(|cx| ChatView::new(workspace_store.clone(), window_state.clone(), window, cx)),
+            diff: cx.new(|cx| DiffPanel::new(workspace_store.clone(), window_state.clone(), cx)),
             preview,
-            settings_page: cx.new(|cx| SettingsPage::new(app_state.clone(), window, cx)),
-            palette: cx.new(|cx| CommandPalette::new(app_state.clone(), window, cx)),
+            settings_page: cx.new(|cx| {
+                SettingsPage::new(workspace_store.clone(), window_state.clone(), window, cx)
+            }),
+            palette: cx.new(|cx| {
+                CommandPalette::new(workspace_store.clone(), window_state.clone(), window, cx)
+            }),
             toasts,
             operation_toasts: HashMap::new(),
-            app_state,
+            store: workspace_store,
+            window_state,
             palette_was_open: false,
             split: cx.new(|_| ResizableState::default()),
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
@@ -220,15 +234,24 @@ impl AppShell {
             last_viewport_width: None,
             sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
-            _subscriptions: vec![subscription, event_subscription],
+            _subscriptions: vec![subscription, event_subscription, window_subscription],
         }
     }
 
-    fn present_app_event(&mut self, event: &AppEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn present_app_event(
+        &mut self,
+        event: &RuntimeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let toast = match event {
-            RuntimeEvent::Effect(effect) => {
+            RuntimeEvent::Effect(effect @ RuntimeEffect::ApplyLocale { .. }) => {
                 apply_runtime_effect(effect);
                 cx.notify();
+                return;
+            }
+            RuntimeEvent::Effect(RuntimeEffect::CopyToClipboard { text }) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
                 return;
             }
             RuntimeEvent::Error(_) | RuntimeEvent::Notice(_) => {
@@ -241,6 +264,7 @@ impl AppShell {
                 return;
             }
             RuntimeEvent::Toast(toast) => toast,
+            _ => return,
         };
 
         let presented = present_runtime_toast(toast);
@@ -286,18 +310,20 @@ impl AppShell {
 
         if let Some(request) = presented.retry {
             let toasts = self.toasts.clone();
-            let app_state = self.app_state.clone();
+            let store = self.store.clone();
             let retry = ToastAction::new(
                 tcode_i18n::tr!("git.toast.retry").into_owned(),
                 move |_window, cx| {
                     toasts.update(cx, |center, cx| center.dismiss(toast_id, cx));
                     let request = request.clone();
-                    app_state.update(cx, |state, cx| {
-                        state.run_git_action(
-                            request.action,
-                            request.message,
-                            request.included,
-                            request.feature_branch,
+                    store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::RunGitAction {
+                                action: request.action,
+                                message: request.message,
+                                included: request.included,
+                                feature_branch: request.feature_branch,
+                            },
                             cx,
                         );
                     });
@@ -315,7 +341,7 @@ impl AppShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.app_state
+        self.window_state
             .update(cx, |state, cx| state.toggle_palette(cx));
     }
 }
@@ -337,26 +363,24 @@ impl Render for AppShell {
         let sheet_layer = Root::render_sheet_layer(window, cx);
         let dialog_layer = Root::render_dialog_layer(window, cx);
         let notification_layer = Root::render_notification_layer(window, cx);
-        let route = self.app_state.read(cx).route;
-        let palette_open = self.app_state.read(cx).palette_open;
+        let route = self.window_state.read(cx).route;
+        let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
         // Focus the palette's search input on the open transition.
         if palette_open && !self.palette_was_open {
             self.palette.update(cx, |p, cx| p.focus(window, cx));
         }
         self.palette_was_open = palette_open;
-        let collapsed = self.app_state.read(cx).sidebar_collapsed;
+        let collapsed = self.window_state.read(cx).sidebar_collapsed;
         // The overlay is workspace-only transient state. Clear it synchronously
         // on route/expanded transitions rather than waiting for pointer input.
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let diff_open = self.app_state.read(cx).diff_panel_open();
-        let right_tab = self.app_state.read(cx).right_tab();
+        let (diff_open, right_tab, diff_expanded) = self.store.read(cx).shell_panel_state(cx);
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
-        let diff_expanded =
-            self.app_state.read(cx).diff_panel_expanded() && right_tab != RightTab::Preview;
+        let diff_expanded = diff_expanded && right_tab != RightTab::Preview;
 
         // A native WebView is not composited into GPUI and survives removal of
         // its layout node. Synchronize it before the settings early-return or a
@@ -534,7 +558,7 @@ impl Render for AppShell {
                         .occlude()
                         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                             let (collapsed, route) = {
-                                let state = this.app_state.read(cx);
+                                let state = this.window_state.read(cx);
                                 (state.sidebar_collapsed, state.route)
                             };
                             let visible = next_sidebar_overlay_visibility(
@@ -570,7 +594,7 @@ impl Render for AppShell {
                             .occlude()
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                 let (collapsed, route) = {
-                                    let state = this.app_state.read(cx);
+                                    let state = this.window_state.read(cx);
                                     (state.sidebar_collapsed, state.route)
                                 };
                                 let visible = next_sidebar_overlay_visibility(

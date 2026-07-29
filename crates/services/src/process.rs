@@ -134,6 +134,7 @@ mod tests {
             "i18n",
             "orchestrate-mcp",
             "preview-mcp",
+            "protocol",
             "runtime",
             "services",
             "term",

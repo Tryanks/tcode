@@ -11,11 +11,12 @@ use agent::{
     PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionOptions,
     ThreadItem, TurnOptions, TurnStatus, list_models, start_session,
 };
-use gpui::{BackgroundExecutor, Context, EventEmitter, Task};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::blocking::unblock;
-use tcode_core::acp::InstalledAcpAgent as InstalledAgent;
+use crate::blocking::unblock_host as unblock;
+use crate::host::{HostCx, HostTask};
+use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::git::{
     GitAction, GitFileEntry, GitStatus, MenuItem, QuickAction, build_commit_prompt, menu_items,
     quick_action, sanitize_commit_message,
@@ -29,10 +30,19 @@ use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
     RelayTranscriptOptions, assemble_relay_prompt, has_meaningful_history, render_relay_transcript,
 };
-use tcode_core::session::{EntryContent, ReviewComment, Timeline, implement_prompt, plan_title};
+use tcode_core::session::{
+    EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt, implement_prompt,
+    plan_title,
+};
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProjectSort, ProviderProfile,
-    ProviderSettings, ResolvedProfile, Settings, provider_label,
+    ChildApprovalMode, EnvVar, ImageMode, OrchestrateSettings, ProfileSettingsPatch, ProjectSort,
+    ProviderProfile, ProviderSettings, ResolvedProfile, Settings, provider_label,
+};
+pub use tcode_core::ui::{ConversationDestination, RightTab, WorkspaceMode};
+use tcode_protocol::{
+    EventEnvelope, GitStatusStatus, ProviderVersionStatus as ProtocolProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, ServerEvent, SessionEventRecord, SessionStatus,
+    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -65,12 +75,12 @@ use crate::ui_facade::{
 #[rustfmt::skip]
 pub use tcode_core::project::{group_sessions, ProjectGroup};
 pub use crate::event::{
-    GitActionRequest, RuntimeEffect, RuntimeError, RuntimeEvent as AppEvent, RuntimeNotice,
-    RuntimeOperationId, RuntimeToast,
+    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent as AppEvent,
+    RuntimeNotice, RuntimeOperationId, RuntimeToast,
 };
 pub use crate::terminal::{
-    MAX_TERMINALS_PER_SESSION, TerminalContext, TerminalEntry, TerminalSplit,
-    TerminalSplitDirection, TerminalWorkspace,
+    LocalTerminalRegistry, MAX_TERMINALS_PER_SESSION, TerminalContext, TerminalEntry,
+    TerminalSplit, TerminalSplitDirection, TerminalWorkspace,
 };
 
 const TITLE_MAX_CHARS: usize = 40;
@@ -89,6 +99,67 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::Pi,
     ProviderKind::OpenCode,
 ];
+
+/// Best-effort MIME type from a file extension.
+pub fn mime_from_path(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn normalize_terminal_context_text(text: &str) -> String {
+    text.replace("\r\n", "\n").trim_matches('\n').to_string()
+}
+
+fn append_terminal_contexts_to_prompt(prompt: &str, contexts: &[TerminalContext]) -> String {
+    let prompt = prompt.trim();
+    let mut lines = Vec::new();
+    for context in contexts {
+        let text = normalize_terminal_context_text(&context.text);
+        if text.is_empty() || context.terminal_label.trim().is_empty() {
+            continue;
+        }
+        let range = if context.line_start == context.line_end {
+            format!("line {}", context.line_start)
+        } else {
+            format!("lines {}-{}", context.line_start, context.line_end)
+        };
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("- {} {}:", context.terminal_label.trim(), range));
+        lines.extend(
+            text.lines()
+                .enumerate()
+                .map(|(index, line)| format!("  {} | {}", context.line_start + index, line)),
+        );
+    }
+    if lines.is_empty() {
+        return prompt.to_string();
+    }
+    let block = format!(
+        "<terminal_context>\n{}\n</terminal_context>",
+        lines.join("\n")
+    );
+    if prompt.is_empty() {
+        block
+    } else {
+        format!("{prompt}\n\n{block}")
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum TimelineLoadTarget {
@@ -253,119 +324,6 @@ fn run_store_write(
             let _ = completion.try_send(());
             None
         }
-    }
-}
-
-/// Stable destination for conversation-owned UI. A stored thread uses its
-/// session id; an unsent draft uses its project id because opening the same
-/// project's New thread surface allocates a fresh transient session id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ConversationDestination {
-    Thread(String),
-    ProjectDraft(String),
-}
-
-impl ConversationDestination {
-    /// Backward-compatible key for `terminal-ui.json`: stored threads keep the
-    /// raw session-id keys used by older builds, while drafts get a namespace.
-    fn preference_key(&self) -> String {
-        match self {
-            Self::Thread(id) => id.clone(),
-            Self::ProjectDraft(id) => format!("draft:{id}"),
-        }
-    }
-
-    /// String key shared with UI-side caches such as the native WebView pool.
-    fn ui_key(&self) -> String {
-        match self {
-            Self::Thread(id) => id.clone(),
-            Self::ProjectDraft(id) => format!("draft:{id}"),
-        }
-    }
-}
-
-/// The top-level window route: the chat workspace or the full-page settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Route {
-    #[default]
-    Chat,
-    Settings,
-}
-
-/// Which tab the right-side panel shows (it hosts the diff view and the
-/// plan/task view). Cached per conversation destination, in memory only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RightTab {
-    #[default]
-    Diff,
-    Plan,
-    Preview,
-}
-
-/// One-shot request from a changed-file row to focus that file in a turn diff.
-/// The diff panel consumes it only after the matching rendered cache is ready.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiffFocusRequest {
-    pub session: String,
-    pub turn: usize,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RightPanelState {
-    open: bool,
-    expanded: bool,
-    selected_turn: Option<usize>,
-    tab: RightTab,
-}
-
-impl RightPanelState {
-    fn capture(active: &ActiveSession) -> Self {
-        Self {
-            open: active.diff_open,
-            expanded: active.diff_expanded,
-            selected_turn: active.diff_selected_turn,
-            tab: active.right_tab,
-        }
-    }
-
-    fn restore_into(self, active: &mut ActiveSession) {
-        active.diff_open = self.open;
-        active.diff_expanded = self.expanded;
-        active.diff_selected_turn = self.selected_turn;
-        active.right_tab = self.tab;
-    }
-
-    fn open_preview(&mut self) -> bool {
-        if self.open && self.tab == RightTab::Preview {
-            return false;
-        }
-        self.open = true;
-        self.tab = RightTab::Preview;
-        true
-    }
-}
-
-/// UI resources that belong to a conversation but outlive the currently
-/// mounted `ActiveSession`. Moving the terminal workspace (rather than merely
-/// persisting its open flag) keeps its PTYs, scrollback, tabs, splits, and
-/// attached context with the conversation while another thread is selected.
-struct ConversationUiState {
-    right_panel: RightPanelState,
-    terminal_workspace: TerminalWorkspace,
-}
-
-impl ConversationUiState {
-    fn take_from(active: &mut ActiveSession) -> Self {
-        Self {
-            right_panel: RightPanelState::capture(active),
-            terminal_workspace: std::mem::take(&mut active.terminal_workspace),
-        }
-    }
-
-    fn restore_into(self, active: &mut ActiveSession) {
-        self.right_panel.restore_into(active);
-        active.terminal_workspace = self.terminal_workspace;
     }
 }
 
@@ -564,19 +522,9 @@ pub struct ActiveSession {
     /// native providers describe their options through the model catalog
     /// instead, so this stays empty for them. In-memory only.
     provider_options: Vec<OptionDescriptor>,
-    /// Diff panel UI state (per-session, in-memory only). `diff_open` is the
-    /// right-panel open/closed flag; `right_tab` selects which tab it shows.
-    pub diff_open: bool,
-    pub diff_expanded: bool,
-    pub diff_selected_turn: Option<usize>,
-    /// Which tab the right panel shows (Diff or Plan/Tasks).
-    pub right_tab: RightTab,
-    /// Set when the user manually closed the right panel during the current
-    /// turn, so `auto_open_task_panel` doesn't re-open it until the next turn.
-    auto_open_suppressed: bool,
-    /// Bottom terminal drawer state and its lazily-spawned per-session PTYs.
+    /// Lazily-spawned per-session PTYs and provider-bound terminal context.
     pub terminal_workspace: TerminalWorkspace,
-    _pump: Option<Task<()>>,
+    _pump: Option<HostTask<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -877,7 +825,7 @@ pub struct SmokeMode {
 
 /// The result of a provider version check (Group C / s3 §6).
 #[derive(Debug, Clone, Default)]
-pub struct ProviderVersionStatus {
+pub struct ProviderVersionState {
     /// Installed version (raw string, e.g. `"2.1.206"`); `None` if `--version` failed.
     pub installed: Option<String>,
     /// Latest published version from npm; `None` if the lookup failed.
@@ -890,17 +838,6 @@ pub struct ProviderVersionStatus {
     pub updating: bool,
     /// How the binary was installed (drives the update command).
     pub install_source: InstallSource,
-}
-
-/// The workspace a draft thread will run in (Group C): the project checkout, or
-/// a new dedicated git worktree branched from `base`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum WorkspaceMode {
-    #[default]
-    LocalCheckout,
-    NewWorktree {
-        base: String,
-    },
 }
 
 pub struct AppState {
@@ -925,29 +862,18 @@ pub struct AppState {
     /// timer, just "finish what you were given, then rest". (The parked
     /// `timeline` goes stale by design; re-adoption replays the JSONL.)
     background: HashMap<String, ActiveSession>,
-    /// Right/bottom workspace resources parked by conversation destination.
-    /// This mirrors the composer's per-thread/project-draft text cache.
-    conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
+    /// Terminal resources parked by conversation destination. Drawer chrome is
+    /// client-owned; this map retains only PTYs, tabs, splits, and contexts.
+    terminal_workspaces: HashMap<ConversationDestination, TerminalWorkspace>,
+    /// Construction-time local transport registry for opaque live terminal
+    /// objects. All serializable terminal metadata remains in SessionStatus.
+    terminal_registry: LocalTerminalRegistry,
     /// Provider-native rewind requested while a session is live or starting.
     /// Kept here (rather than in persisted session metadata) because the
     /// provider response is the only authority that can complete it.
     pending_native_rewinds: HashMap<String, (String, RewindMode)>,
-    /// One-shot prompt returned by a provider conversation rewind. The composer
-    /// consumes it as an ordinary draft without tcode rewriting history itself.
-    native_rewind_prefills: HashMap<String, String>,
     pub settings: Settings,
     pub smoke: Option<SmokeMode>,
-    /// Whether the sidebar is collapsed to an icon strip (ephemeral UI state).
-    pub sidebar_collapsed: bool,
-    /// Current window route (chat vs. settings page).
-    pub route: Route,
-    /// Whether the command palette (⌘K) overlay is showing.
-    pub palette_open: bool,
-    /// Generation of the transient quit confirmation. Timers capture this value
-    /// so an expired prompt cannot dismiss a newer (or unrelated) dialog.
-    pub quit_prompt_epoch: u64,
-    /// Prevents repeated quit signals from stacking confirmation dialogs.
-    pub quit_prompt_open: bool,
     /// Per-provider model catalog (from `agent::list_models`): loaded instantly
     /// from the persisted cache, then refreshed in the background at start and
     /// whenever a binary path changes. Absent entry = never fetched.
@@ -963,29 +889,6 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
-    /// Screenshot-only: seed the composer text on first render (drives `@`/`/`/`$`
-    /// trigger menus headlessly, as `--open-diff` does for the diff panel).
-    pub debug_compose: Option<String>,
-    /// Screenshot-only: inject a pending image attachment on first render (paste
-    /// / drag-drop cannot be driven headlessly).
-    pub debug_image: Option<PathBuf>,
-    /// Screenshot-only diff state seeds.
-    pub debug_diff_scope: Option<String>,
-    pub debug_diff_split: bool,
-    pub debug_diff_scope_menu: bool,
-    pub debug_review_comment: bool,
-    /// Screenshot-only: seed the command palette's query when it opens (so the
-    /// `>`-actions filter and thread result rows can be captured headlessly).
-    pub debug_palette: Option<String>,
-    /// Pending Settings section target, consumed by `SettingsPage`. Used by
-    /// screenshot capture, relaunch continuity, and in-app section links.
-    pub debug_settings_section: Option<String>,
-    /// Screenshot-only: seed the ACP marketplace's search box.
-    pub debug_acp_search: Option<String>,
-    /// Screenshot-only: open the ACP Add agent dialog on the Providers page.
-    pub debug_acp_dialog: bool,
-    /// Screenshot-only: built-in provider-profile id whose card starts expanded.
-    pub debug_provider_expanded: Option<String>,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
     /// failure to show when there is nothing cached to fall back on.
@@ -998,14 +901,11 @@ pub struct AppState {
     preview_url: Option<String>,
     preview_tokens: Option<preview_mcp::TokenRegistry>,
     preview_registrations: HashMap<String, agent::McpRegistration>,
-    /// Automation-request receiver from the preview MCP server. `AppShell` takes
-    /// this once to pump requests into the live `PreviewPanel` WebView.
-    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     /// App-wide orchestrator endpoint and its per-parent bearer-token issuer.
     orchestrate_url: Option<String>,
     orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
     orchestrate_registrations: HashMap<String, agent::McpRegistration>,
-    /// Requests from the orchestrate MCP runtime, pumped on the gpui thread.
+    /// Requests from the orchestrate MCP runtime, pumped by the host executor.
     pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
     /// Process-wide computer-use MCP registration, supplied only to sessions
     /// while the global computer-use setting is enabled.
@@ -1016,9 +916,6 @@ pub struct AppState {
     /// timeline. Maintained incrementally from `on_event`; never replayed from
     /// disk, because a persisted approval cannot survive its provider process.
     sessions_awaiting_approval: HashMap<String, Vec<agent::ApprovalRequest>>,
-    /// A URL the preview panel should navigate to on its next render (set by the
-    /// `--open-preview <url>` dev flag for headless screenshots). Consumed once.
-    pub pending_preview_url: Option<String>,
     /// Background-computed git state of the active session's cwd, driving the
     /// adaptive header quick-action button (`None` until the first refresh /
     /// with no active session). See [`AppState::refresh_git_status`].
@@ -1028,6 +925,13 @@ pub struct AppState {
     pub git_busy: bool,
     /// Source of ids used to correlate semantic operation lifecycle events.
     next_operation_id: u64,
+    /// Per-topic sequence numbers for replicated protocol domains.
+    index_event_seq: u64,
+    settings_event_seq: u64,
+    session_event_seqs: HashMap<String, u64>,
+    session_status_event_seqs: HashMap<String, u64>,
+    providers_event_seq: u64,
+    git_status_event_seq: u64,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -1036,22 +940,16 @@ pub struct AppState {
     store_append_generation: u64,
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
-    /// Screenshot-only (`--debug-git-dialog`): open the commit dialog once the
-    /// git status has loaded (clicking the header button cannot be driven
-    /// headlessly). Consumed by `ChatView` on its next render.
-    pub debug_open_commit_dialog: bool,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
-    /// Invalidates working-tree/branch previews on panel open and turn finish.
-    pub diff_refresh_generation: u64,
-    /// Pending changed-file row navigation, consumed by the diff panel once.
-    pending_diff_focus: Option<DiffFocusRequest>,
     /// Per-provider version-check results (Group C). Populated on launch (when
     /// the toggle is on) and by Settings → "Check now".
-    pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
+    pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     /// Per-profile install/auth probe results, driving the Settings → Providers
     /// card status dot + summary line. Absent until the first probe lands.
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    /// Profile environment names visible to the UI. Values remain backend-only.
+    provider_secret_names: HashMap<String, HashSet<String>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
     /// Present only after an app-relaunch triggered by a permission grant; applied
     /// once by [`AppState::apply_pending_relaunch`] and then cleared.
@@ -1071,10 +969,19 @@ fn computer_use_config(settings: &Settings) -> computer_use_mcp::config::Compute
     }
 }
 
-impl EventEmitter<AppEvent> for AppState {}
+fn emit_runtime(cx: &mut HostCx, event: AppEvent) {
+    cx.emit(HostEvent::Runtime(event));
+}
 
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
+        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default())
+    }
+
+    pub(crate) fn new_with_terminal_registry(
+        store: SessionStore,
+        terminal_registry: LocalTerminalRegistry,
+    ) -> Self {
         // Load + migrate once and persist so derived project ids stay stable.
         let file = store.read_file();
         if let Err(err) = store.persist_index(&file) {
@@ -1085,13 +992,13 @@ impl AppState {
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
         let settings = settings_store.load();
+        let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from
         // the first call, not just after a settings change.
         computer_use_mcp::config::set(computer_use_config(&settings));
         // Consume any restart-continuity marker left by a permission grant.
         let pending_relaunch = tcode_services::relaunch::take(store.root());
-        let settings_collapsed = settings.sidebar_collapsed;
         let terminal_preferences_path = store.root().join("terminal-ui.json");
         let terminal_preferences = std::fs::read(&terminal_preferences_path)
             .ok()
@@ -1126,16 +1033,11 @@ impl AppState {
             projects,
             active: None,
             background: HashMap::new(),
-            conversation_ui: HashMap::new(),
+            terminal_workspaces: HashMap::new(),
+            terminal_registry,
             pending_native_rewinds: HashMap::new(),
-            native_rewind_prefills: HashMap::new(),
             settings,
             smoke: None,
-            sidebar_collapsed: settings_collapsed,
-            route: Route::Chat,
-            palette_open: false,
-            quit_prompt_epoch: 0,
-            quit_prompt_open: false,
             model_catalogs,
             models_loading: HashMap::new(),
             terminal_preferences_path,
@@ -1143,13 +1045,7 @@ impl AppState {
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
-            ai_title_generation_enabled: !cfg!(test),
-            debug_compose: None,
-            debug_image: None,
-            debug_diff_scope: None,
-            debug_diff_split: false,
-            debug_diff_scope_menu: false,
-            debug_review_comment: false,
+            ai_title_generation_enabled: !cfg!(any(test, feature = "test-support")),
             acp_registry: None,
             acp_registry_loading: false,
             acp_registry_error: None,
@@ -1157,7 +1053,6 @@ impl AppState {
             preview_url: None,
             preview_tokens: None,
             preview_registrations: HashMap::new(),
-            preview_requests: None,
             orchestrate_url: None,
             orchestrate_tokens: None,
             orchestrate_registrations: HashMap::new(),
@@ -1166,53 +1061,47 @@ impl AppState {
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
             sessions_awaiting_approval: HashMap::new(),
-            pending_preview_url: None,
             git_status: None,
             git_busy: false,
             next_operation_id: 1,
+            index_event_seq: 0,
+            settings_event_seq: 0,
+            session_event_seqs: HashMap::new(),
+            session_status_event_seqs: HashMap::new(),
+            providers_event_seq: 0,
+            git_status_event_seq: 0,
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
-            debug_open_commit_dialog: false,
             review_comment_drafts: HashMap::new(),
-            diff_refresh_generation: 0,
-            pending_diff_focus: None,
-            debug_palette: None,
-            debug_settings_section: None,
-            debug_acp_search: None,
-            debug_acp_dialog: false,
-            debug_provider_expanded: None,
             provider_versions: HashMap::new(),
             provider_snapshots: HashMap::new(),
+            provider_secret_names,
             pending_relaunch,
         }
     }
 
-    fn start_store_writer(&mut self, cx: &mut Context<Self>) {
+    fn start_store_writer(&mut self, cx: &mut HostCx) {
         if let Some(writes) = self.store_write_receiver.take() {
             let store = self.store.clone();
             let settings_store = self.settings_store.clone();
             let terminal_preferences_path = self.terminal_preferences_path.clone();
             let failures = self.store_write_failures.clone();
-            cx.background_executor()
-                .spawn(async move {
-                    while let Ok(write) = writes.recv().await {
-                        if let Some(failure) = run_store_write(
-                            &store,
-                            &settings_store,
-                            &terminal_preferences_path,
-                            write,
-                        ) {
-                            let _ = failures.send(failure).await;
-                        }
+            HostCx::spawn_detached(cx, async move {
+                while let Ok(write) = writes.recv().await {
+                    if let Some(failure) =
+                        run_store_write(&store, &settings_store, &terminal_preferences_path, write)
+                    {
+                        let _ = failures.send(failure).await;
                     }
-                })
-                .detach();
+                }
+            });
         }
         if let Some(failures) = self.store_write_failure_receiver.take() {
-            cx.spawn(async move |this, cx| {
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
                 while let Ok(failure) = failures.recv().await {
-                    let Ok(()) = this.update(cx, |state, cx| match failure {
+                    host_cx.enqueue(move |state, cx| match failure {
                         StoreWriteFailure::PersistEvent(error) => {
                             state.report_error(RuntimeError::PersistEvent { error }, cx);
                         }
@@ -1235,23 +1124,43 @@ impl AppState {
                             state.report_error(RuntimeError::PersistSettings { error }, cx);
                         }
                         StoreWriteFailure::Log(message) => log::warn!("{message}"),
-                    }) else {
-                        break;
-                    };
+                    });
                 }
-            })
-            .detach();
+            });
         }
     }
 
-    fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut Context<Self>) {
+    fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut HostCx) {
+        let index_event = match &write {
+            StoreWrite::UpsertMeta { meta, .. } => {
+                Some(ServerEvent::IndexUpsertSession((**meta).clone()))
+            }
+            StoreWrite::UpsertProject(project) => {
+                Some(ServerEvent::IndexUpsertProject(project.clone()))
+            }
+            StoreWrite::RemoveSession(session_id) => Some(ServerEvent::IndexRemoveSession {
+                session_id: session_id.clone(),
+            }),
+            StoreWrite::RemoveProject(project_id) => Some(ServerEvent::IndexRemoveProject {
+                project_id: project_id.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(event) = index_event {
+            self.emit_domain(Topic::Index, event, cx);
+        }
         self.start_store_writer(cx);
         if self.store_writes.try_send(write).is_err() {
             log::error!("session store writer stopped before accepting a write");
         }
     }
 
-    fn enqueue_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
+    fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
+        self.emit_domain(
+            Topic::Settings,
+            ServerEvent::SettingsReplaced(settings.clone()),
+            cx,
+        );
         match serde_json::to_vec_pretty(settings) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
             Err(err) => self.report_error(
@@ -1260,6 +1169,338 @@ impl AppState {
                 },
                 cx,
             ),
+        }
+    }
+
+    fn emit_domain(&mut self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
+        let seq = match &topic {
+            Topic::Index => &mut self.index_event_seq,
+            Topic::Settings => &mut self.settings_event_seq,
+            Topic::SessionEvents { session_id } => self
+                .session_event_seqs
+                .entry(session_id.clone())
+                .or_default(),
+            Topic::SessionStatus { session_id } => self
+                .session_status_event_seqs
+                .entry(session_id.clone())
+                .or_default(),
+            Topic::Providers => &mut self.providers_event_seq,
+            Topic::GitStatus => &mut self.git_status_event_seq,
+            _ => unreachable!("replication slice does not emit this domain"),
+        };
+        *seq += 1;
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            topic,
+            seq: *seq,
+            event,
+        }));
+    }
+
+    /// Build the complete provider read projection. This is the sole
+    /// constructor for the replicated providers domain.
+    pub fn providers_status_snapshot(&self) -> ProvidersStatus {
+        ProvidersStatus {
+            model_catalogs: self.model_catalogs.clone(),
+            models_loading: self.models_loading.clone(),
+            provider_versions: self
+                .provider_versions
+                .iter()
+                .map(|(&provider, status)| {
+                    (
+                        provider,
+                        ProtocolProviderVersionStatus {
+                            installed: status.installed.clone(),
+                            latest: status.latest.clone(),
+                            update_available: status.update_available,
+                            checking: status.checking,
+                            updating: status.updating,
+                            update_command: update_command_string(provider, status.install_source),
+                        },
+                    )
+                })
+                .collect(),
+            provider_snapshots: self.provider_snapshots.clone(),
+            acp_marketplace_items: self.acp_marketplace_items(),
+            acp_registry_loading: self.acp_registry_loading,
+            acp_registry_error: self.acp_registry_error.clone(),
+            acp_installing: self.acp_installing.clone(),
+            providers_checked_at: self.providers_checked_at(),
+            providers_checking: self.providers_checking(),
+            secret_names: self.provider_secret_names.clone(),
+        }
+    }
+
+    pub(crate) fn profile_secret_present(&self, profile_id: &str, name: &str) -> bool {
+        self.provider_secret_names
+            .get(profile_id)
+            .is_some_and(|names| names.contains(name))
+    }
+
+    fn emit_providers_status(&mut self, cx: &mut HostCx) {
+        self.emit_domain(
+            Topic::Providers,
+            ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
+            cx,
+        );
+    }
+
+    /// Build the complete active-workspace Git projection.
+    pub fn git_status_snapshot(&self) -> GitStatusStatus {
+        GitStatusStatus {
+            status: self.git_status.clone(),
+            busy: self.git_busy,
+            generation: self.git_status_generation,
+        }
+    }
+
+    /// Reconcile the deliberate local live-terminal handle registry after one
+    /// host mailbox turn. Only opaque `Arc<Terminal>` values cross this path;
+    /// layout and context data are emitted in `SessionStatus`.
+    pub(crate) fn sync_terminal_handles(&self) {
+        self.terminal_registry.replace_from(
+            self.active
+                .iter()
+                .map(|session| &session.terminal_workspace)
+                .chain(
+                    self.background
+                        .values()
+                        .map(|session| &session.terminal_workspace),
+                )
+                .chain(self.terminal_workspaces.values()),
+        );
+    }
+
+    /// Build the serialized snapshot associated with one subscription.
+    pub(crate) fn subscription_snapshot(&self, topic: &Topic) -> Option<EventEnvelope> {
+        let (seq, event) = match topic {
+            Topic::Index => (
+                self.index_event_seq,
+                ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    sessions: self.sessions.clone(),
+                    projects: self.projects.clone(),
+                }),
+            ),
+            Topic::Settings => (
+                self.settings_event_seq,
+                ServerEvent::SettingsSnapshot(self.settings.clone()),
+            ),
+            Topic::Providers => (
+                self.providers_event_seq,
+                ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
+            ),
+            Topic::GitStatus => (
+                self.git_status_event_seq,
+                ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
+            ),
+            Topic::ActiveSession => (
+                0,
+                ServerEvent::ActiveSessionReplaced(
+                    self.active_session_id()
+                        .and_then(|id| self.session_status_snapshot(id)),
+                ),
+            ),
+            Topic::SessionStatus { session_id } => (
+                self.session_status_event_seqs
+                    .get(session_id)
+                    .copied()
+                    .unwrap_or_default(),
+                ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?),
+            ),
+            Topic::SessionEvents { session_id } => (
+                self.session_event_seqs
+                    .get(session_id)
+                    .copied()
+                    .unwrap_or_default(),
+                ServerEvent::SessionSnapshot(
+                    self.store
+                        .read_events(session_id)
+                        .into_iter()
+                        .map(|stored| SessionEventRecord {
+                            ts: stored.ts,
+                            event: stored.event,
+                        })
+                        .collect(),
+                ),
+            ),
+            Topic::RuntimeEvents => (
+                0,
+                ServerEvent::RuntimeSnapshot(tcode_protocol::RuntimeSnapshot {
+                    notifications: Vec::new(),
+                }),
+            ),
+            // Raw terminal bytes never travel through JSON in the local
+            // transport. The construction-time handle registry carries the
+            // split term channels instead.
+            Topic::Terminal { .. } => return None,
+            _ => return None,
+        };
+        Some(EventEnvelope {
+            topic: topic.clone(),
+            seq,
+            event,
+        })
+    }
+
+    fn emit_git_status(&mut self, cx: &mut HostCx) {
+        self.emit_domain(
+            Topic::GitStatus,
+            ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
+            cx,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn emit_provider_and_git_replicas_for_test(&mut self, cx: &mut HostCx) {
+        self.emit_providers_status(cx);
+        self.emit_git_status(cx);
+    }
+
+    /// Build the complete non-event-stream status projection for one resident
+    /// session. This is the sole constructor for the replicated status domain.
+    pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
+        let session = self
+            .active
+            .as_ref()
+            .filter(|session| session.meta.id == session_id)
+            .or_else(|| self.background.get(session_id))?;
+        let meta = &session.meta;
+        let provider_option_descriptors = if meta.provider == ProviderKind::Acp {
+            session.provider_options.clone()
+        } else {
+            meta.model
+                .as_deref()
+                .and_then(|model| {
+                    self.models_for(meta.provider)
+                        .iter()
+                        .find(|spec| spec.id == model)
+                })
+                .map(|spec| spec.options.clone())
+                .unwrap_or_default()
+        };
+        let relay_confirmation = session.pending_relay.as_ref().and_then(|pending| {
+            has_meaningful_history(&session.timeline).then(|| {
+                let label = |provider: ProviderKind, profile: Option<&str>| match profile {
+                    Some(id) => self.settings.profile_display_name(id),
+                    None => provider.display_name().to_string(),
+                };
+                (
+                    label(pending.from_provider, pending.from_profile.as_deref()),
+                    label(meta.provider, meta.profile_id.as_deref()),
+                )
+            })
+        });
+        let pending_approval = if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.id == session_id)
+        {
+            !session.timeline.pending_approvals.is_empty()
+        } else {
+            self.sessions_awaiting_approval
+                .get(session_id)
+                .is_some_and(|requests| !requests.is_empty())
+        };
+        let terminal_preferences = self.terminal_preferences_for(session);
+        Some(SessionStatus {
+            session_id: session_id.to_string(),
+            title: meta.title.clone(),
+            cwd: meta.cwd.clone(),
+            attachments_dir: self.attachments_dir_for(session_id),
+            provider: meta.provider,
+            requested_model: meta.model.clone(),
+            requested_profile_id: meta.profile_id.clone(),
+            acp_agent_id: meta.acp_agent_id.clone(),
+            project_id: meta.project_id.clone(),
+            approval_mode: meta.approval_mode,
+            interaction_mode: meta.interaction_mode,
+            queued_messages: session
+                .queue
+                .iter()
+                .map(|message| QueuedMessageStatus {
+                    id: message.id,
+                    text: message.text.clone(),
+                })
+                .collect(),
+            review_comment_drafts: self
+                .review_comment_drafts
+                .get(session_id)
+                .cloned()
+                .unwrap_or_default(),
+            terminals: session
+                .terminal_workspace
+                .terminals
+                .iter()
+                .map(|terminal| TerminalStatus { id: terminal.id })
+                .collect(),
+            active_terminal_id: session.terminal_workspace.active_id,
+            terminal_splits: session
+                .terminal_workspace
+                .splits
+                .iter()
+                .map(|split| TerminalSplitStatus {
+                    first: split.first,
+                    second: split.second,
+                    direction: split.direction,
+                })
+                .collect(),
+            terminal_contexts: session
+                .terminal_workspace
+                .contexts
+                .iter()
+                .map(|context| TerminalContextStatus {
+                    id: context.id,
+                    terminal_label: context.terminal_label.clone(),
+                    line_start: context.line_start,
+                    line_end: context.line_end,
+                    text: context.text.clone(),
+                })
+                .collect(),
+            terminal_open: terminal_preferences.is_some_and(|preferences| preferences.open),
+            terminal_height: terminal_preferences
+                .map(|preferences| preferences.height.clamp(120., 600.))
+                .unwrap_or(240.),
+            delivery_in_flight: session.delivery_in_flight,
+            turn_running: session.turn_in_flight,
+            working: session.has_work(),
+            pending_approval,
+            supports_steering: session.supports_steering(),
+            provider_option_descriptors,
+            provider_option_selections: meta.option_selections.clone(),
+            provider_commands: session.provider_commands.clone(),
+            git_branch: session.git_branch.clone(),
+            branches: session.branches.clone(),
+            draft: session.draft,
+            draft_workspace: session.draft_workspace.clone(),
+            worktree: meta.worktree.clone(),
+            preparing_worktree: session.preparing_worktree,
+            relay_confirmation,
+            native_rewind_pending: self.pending_native_rewinds.contains_key(session_id),
+            // The one-shot value is transferred to the client as a dedicated
+            // serialized event; availability is client-replica state after
+            // that point, not a host-side consuming read.
+            native_rewind_prefill_available: false,
+            model_pending_restart: session.model_changed_while_live(),
+            options_pending_restart: session.options_changed_while_live(),
+            approval_pending_restart: session.approval_mode_changed_while_live(),
+            ultrathink_armed: session.pending_ultrathink,
+        })
+    }
+
+    fn emit_session_status(&mut self, session_id: &str, cx: &mut HostCx) {
+        if let Some(status) = self.session_status_snapshot(session_id) {
+            self.emit_domain(
+                Topic::SessionStatus {
+                    session_id: session_id.to_string(),
+                },
+                ServerEvent::SessionStatusReplaced(status),
+                cx,
+            );
+        }
+    }
+
+    fn emit_active_session_status(&mut self, cx: &mut HostCx) {
+        if let Some(session_id) = self.active_session_id().map(str::to_owned) {
+            self.emit_session_status(&session_id, cx);
         }
     }
 
@@ -1278,41 +1519,18 @@ impl AppState {
 
     /// Enqueue a FIFO barrier used by the application quit hook. The returned
     /// receiver resolves only after every earlier store write has completed.
-    pub fn store_write_barrier(&mut self, cx: &mut Context<Self>) -> async_channel::Receiver<()> {
+    pub fn store_write_barrier(&mut self, cx: &mut HostCx) -> async_channel::Receiver<()> {
         let (completion, barrier) = async_channel::bounded(1);
         self.enqueue_store_write(StoreWrite::Flush(completion), cx);
         barrier
     }
 
-    /// Open the Preview tab and queue an initial navigation (dev/testing entry
-    /// point for `--open-preview <url>`).
-    pub fn open_preview_with_url(&mut self, url: String, cx: &mut Context<Self>) {
-        self.pending_preview_url = Some(url);
-        self.open_preview_panel(cx);
-    }
-
-    /// Take the queued preview URL, if any (consumed by `PreviewPanel`).
-    ///
-    /// Linux has no preview WebView to navigate (see `ui::preview_panel`), so
-    /// nothing consumes this there — the queue is simply never drained.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    pub fn take_pending_preview_url(&mut self) -> Option<String> {
-        self.pending_preview_url.take()
-    }
-
-    /// Attach the running preview MCP server: its per-session token issuer and
-    /// the request receiver (taken by `AppShell`).
-    pub fn attach_preview_mcp(&mut self, server: preview_mcp::PreviewMcpServer) {
-        self.preview_url = Some(server.url);
-        self.preview_tokens = Some(server.tokens);
-        self.preview_requests = Some(server.requests);
-    }
-
-    /// Take the preview request stream once so its UI-side broker can own it.
-    pub fn take_preview_requests(
-        &mut self,
-    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.preview_requests.take()
+    /// Attach the serializable registration half of the preview MCP server.
+    /// Its non-serializable broker receiver is moved exactly once into the
+    /// client handle by `pipe::spawn_host`.
+    pub fn attach_preview_mcp(&mut self, url: String, tokens: preview_mcp::TokenRegistry) {
+        self.preview_url = Some(url);
+        self.preview_tokens = Some(tokens);
     }
 
     pub fn attach_orchestrate_mcp(&mut self, server: orchestrate_mcp::OrchestrateMcpServer) {
@@ -1329,34 +1547,26 @@ impl AppState {
         });
     }
 
-    /// Pump orchestrator requests through the runtime on the gpui thread.
+    /// Pump orchestrator requests through the runtime on the host executor.
     ///
     /// Taking the receiver makes repeated calls harmless: exactly one pump can
     /// own the request stream.
-    pub fn pump_orchestrate_requests(&mut self, cx: &mut Context<Self>) {
+    pub fn pump_orchestrate_requests(&mut self, cx: &mut HostCx) {
         let Some(requests) = self.orchestrate_requests.take() else {
             return;
         };
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             while let Ok(request) = requests.recv().await {
                 let orchestrate_mcp::BrokerRequest { op, reply } = request;
-                let Ok(()) =
-                    this.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx))
-                else {
-                    break;
-                };
+                host_cx.enqueue(move |state, cx| state.handle_orchestrate_op(op, reply, cx));
             }
-        })
-        .detach();
+        });
     }
 
     /// Persistently opt a session into native orchestration. Callers restart a
     /// currently-live provider so its next spawn receives the MCP registration.
-    pub fn enable_orchestrate(
-        &mut self,
-        session_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    pub fn enable_orchestrate(&mut self, session_id: &str, cx: &mut HostCx) -> Result<(), String> {
         let Some(mut meta) = self
             .sessions
             .iter()
@@ -1382,8 +1592,19 @@ impl AppState {
     pub fn orchestrate_turn(
         &mut self,
         text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut HostCx,
+    ) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.orchestrate_turn_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context(cx);
+    }
+
+    fn orchestrate_turn_assembled(
+        &mut self,
+        text: String,
         attachments: Vec<Attachment>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let Some(active) = self.active.as_ref() else {
             return;
@@ -1427,7 +1648,7 @@ impl AppState {
         // `steer` sends ordinarily when idle and injects into a live turn. On
         // first enable the restart above intentionally makes this an ordinary
         // queued send for the resumed, MCP-enabled process.
-        self.steer(text, attachments, cx);
+        self.steer_assembled(text, attachments, cx);
     }
 
     fn orchestrate_registration_for(
@@ -1478,7 +1699,7 @@ impl AppState {
         title: String,
         cwd: Option<PathBuf>,
         brief: String,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) -> Result<String, String> {
         let parent = self
             .sessions
@@ -1528,16 +1749,17 @@ impl AppState {
         child.push_queued(brief, Vec::new());
         self.background.insert(id.clone(), child);
         self.ensure_session_started(&id, cx);
+        self.emit_session_status(&id, cx);
         cx.notify();
         Ok(id)
     }
 
-    /// Resolve one MCP operation on the gpui thread.
+    /// Resolve one MCP operation on the host owner thread.
     pub fn handle_orchestrate_op(
         &mut self,
         op: orchestrate_mcp::OrchestrateOp,
         reply: async_channel::Sender<Result<serde_json::Value, String>>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         match op {
             orchestrate_mcp::OrchestrateOp::Status {
@@ -1626,8 +1848,9 @@ impl AppState {
                 } else {
                     parent_cwd.join(path)
                 };
-                cx.spawn(async move |this, cx| {
-                    let resolved_cwd = unblock(cx.background_executor(), move || {
+                let host_cx = cx.clone();
+                HostCx::spawn_detached(cx, async move {
+                    let resolved_cwd = unblock(&host_cx, move || {
                         let canonical = path
                             .canonicalize()
                             .map_err(|_| format!("invalid cwd: {}", path.display()))?;
@@ -1638,8 +1861,8 @@ impl AppState {
                     })
                     .await;
                     let result = match resolved_cwd {
-                        Ok(cwd) => this
-                            .update(cx, |state, cx| {
+                        Ok(cwd) => host_cx
+                            .enqueue_and_wait(move |state, cx| {
                                 state.create_child_session(
                                     &parent_id,
                                     provider,
@@ -1653,13 +1876,13 @@ impl AppState {
                                     cx,
                                 )
                             })
+                            .await
                             .unwrap_or_else(|_| Err("application closed".to_string()))
                             .map(|id| serde_json::json!({ "thread_id": id })),
                         Err(err) => Err(err),
                     };
                     let _ = reply.try_send(result);
-                })
-                .detach();
+                });
             }
             op => {
                 let result = self.handle_orchestrate_sync_op(op, cx);
@@ -1671,7 +1894,7 @@ impl AppState {
     fn handle_orchestrate_sync_op(
         &mut self,
         op: orchestrate_mcp::OrchestrateOp,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         use orchestrate_mcp::OrchestrateOp;
         match op {
@@ -1727,6 +1950,7 @@ impl AppState {
                     if idle {
                         self.ensure_started(cx);
                     }
+                    self.emit_session_status(&thread_id, cx);
                     return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                 }
                 self.ensure_child_loaded(&thread_id, cx)?;
@@ -1739,6 +1963,7 @@ impl AppState {
                 if idle {
                     self.ensure_session_started(&thread_id, cx);
                 }
+                self.emit_session_status(&thread_id, cx);
                 Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
             }
             OrchestrateOp::Result {
@@ -1837,11 +2062,7 @@ impl AppState {
             .map_err(|err| format!("failed to respond to approval: {err}"))
     }
 
-    fn ensure_child_loaded(
-        &mut self,
-        thread_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    fn ensure_child_loaded(&mut self, thread_id: &str, cx: &mut HostCx) -> Result<(), String> {
         if self.background.contains_key(thread_id) {
             return Ok(());
         }
@@ -1858,7 +2079,7 @@ impl AppState {
         Ok(())
     }
 
-    fn load_background_session(&mut self, meta: SessionMeta, cx: &mut Context<Self>) {
+    fn load_background_session(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         let thread_id = meta.id.clone();
         let commands = self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
         let mut child = Self::build_draft_session(
@@ -1872,6 +2093,7 @@ impl AppState {
         child.meta = meta;
         child.draft = false;
         self.background.insert(thread_id.clone(), child);
+        self.emit_session_status(&thread_id, cx);
         self.schedule_timeline_load(
             thread_id,
             TimelineLoadTarget::Background { mark_idle: true },
@@ -1884,7 +2106,7 @@ impl AppState {
         parent_id: String,
         thread_id: Option<String>,
         reply: async_channel::Sender<Result<serde_json::Value, String>>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let children: Vec<_> = self
             .sessions
@@ -1908,8 +2130,9 @@ impl AppState {
             return;
         }
         let store = self.store.clone();
-        cx.spawn(async move |this, cx| {
-            let timelines = unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let timelines = unblock(&host_cx, move || {
                 unloaded
                     .into_iter()
                     .map(|id| {
@@ -1919,14 +2142,14 @@ impl AppState {
                     .collect::<HashMap<_, _>>()
             })
             .await;
-            let result = this
-                .update(cx, |state, _| {
+            let result = host_cx
+                .enqueue_and_wait(move |state, _| {
                     state.orchestrate_status_json(&children, &timelines)
                 })
+                .await
                 .map_err(|_| "tcode orchestrator is not available".to_string());
             let _ = reply.send(result).await;
-        })
-        .detach();
+        });
     }
 
     fn handle_orchestrate_result(
@@ -1934,7 +2157,7 @@ impl AppState {
         parent_id: String,
         thread_id: String,
         reply: async_channel::Sender<Result<serde_json::Value, String>>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let meta = match self.require_child(&parent_id, &thread_id) {
             Ok(meta) => meta.clone(),
@@ -1949,21 +2172,22 @@ impl AppState {
             return;
         }
         let store = self.store.clone();
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let read_id = thread_id.clone();
-            let timeline = unblock(cx.background_executor(), move || {
+            let timeline = unblock(&host_cx, move || {
                 Timeline::fold_events(store.read_events(&read_id))
             })
             .await;
-            let result = this
-                .update(cx, |state, _| {
+            let result = host_cx
+                .enqueue_and_wait(move |state, _| {
                     let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
                     state.orchestrate_result_json(&meta, timeline)
                 })
+                .await
                 .unwrap_or_else(|_| Err("tcode orchestrator is not available".to_string()));
             let _ = reply.send(result).await;
-        })
-        .detach();
+        });
     }
 
     fn loaded_child_timeline(&self, session_id: &str) -> Option<&Timeline> {
@@ -2064,22 +2288,24 @@ impl AppState {
     /// Kick off a background refresh of every provider's model catalog (called
     /// at app start and after a binary-path change). Results update
     /// `model_catalogs` and are persisted so the next launch is instant.
-    pub fn refresh_model_catalogs(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_model_catalogs(&mut self, cx: &mut HostCx) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.settings.provider(provider).binary_path;
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
             self.models_loading.insert(provider, true);
+            self.emit_providers_status(cx);
             let store = self.store.clone();
-            cx.spawn(async move |this, cx| {
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
                 let profile_id = Settings::builtin_profile_id(provider).to_string();
-                let launch_env = unblock(cx.background_executor(), move || {
+                let launch_env = unblock(&host_cx, move || {
                     let secrets = settings_store.profile_secrets(&profile_id);
                     launch_env_for_profile(&settings, &profile_id, secrets)
                 })
                 .await;
                 let result = list_models(provider, binary, launch_env).await;
-                let _ = this.update(cx, |state, cx| {
+                host_cx.enqueue(move |state, cx| {
                     state.models_loading.insert(provider, false);
                     match result {
                         Ok(models) if !models.is_empty() => {
@@ -2091,10 +2317,11 @@ impl AppState {
                         Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }
+                    state.emit_active_session_status(cx);
+                    state.emit_providers_status(cx);
                     cx.notify();
                 });
-            })
-            .detach();
+            });
         }
         cx.notify();
     }
@@ -2102,7 +2329,7 @@ impl AppState {
     /// Screenshot/dev only (`--debug-live`): start the active (non-draft)
     /// session's provider process without sending a turn, so provider-supplied
     /// state (the `/` + `$` command feed) is reachable headlessly.
-    pub fn debug_start_provider(&mut self, cx: &mut Context<Self>) {
+    pub fn debug_start_provider(&mut self, cx: &mut HostCx) {
         if self.active.as_ref().is_some_and(|a| !a.draft) {
             self.ensure_started(cx);
         }
@@ -2116,7 +2343,7 @@ impl AppState {
     }
 
     /// The last known version-check result for `provider`.
-    pub fn provider_version(&self, provider: ProviderKind) -> Option<&ProviderVersionStatus> {
+    pub fn provider_version(&self, provider: ProviderKind) -> Option<&ProviderVersionState> {
         self.provider_versions.get(&provider)
     }
 
@@ -2183,7 +2410,7 @@ impl AppState {
         &mut self,
         provider: ProviderKind,
         mutate: impl FnOnce(&mut ProviderSettings),
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let mut settings = self.settings.clone();
         mutate(settings.provider_mut(provider));
@@ -2192,7 +2419,7 @@ impl AppState {
 
     /// Re-run everything that depends on *how* a provider's CLI is launched
     /// (binary path, home, environment): its model catalog and its status probe.
-    pub fn reload_provider(&mut self, _provider: ProviderKind, cx: &mut Context<Self>) {
+    pub fn reload_provider(&mut self, _provider: ProviderKind, cx: &mut HostCx) {
         self.refresh_model_catalogs(cx);
         self.refresh_provider_status(cx);
     }
@@ -2203,7 +2430,7 @@ impl AppState {
         provider: ProviderKind,
         name: &str,
         value: Option<&str>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         if let Err(err) = self.settings_store.set_secret(provider, name, value) {
             self.report_error(
@@ -2219,7 +2446,7 @@ impl AppState {
 
     /// The provider's accent color (`#rrggbb`), when one is configured. Tints
     /// the provider glyph in the composer + model picker.
-    pub fn provider_accent(&self, provider: ProviderKind) -> Option<gpui::Rgba> {
+    pub fn provider_accent(&self, provider: ProviderKind) -> Option<u32> {
         let raw = self.settings.provider(provider).accent_color?;
         parse_hex_color(&raw)
     }
@@ -2283,25 +2510,38 @@ impl AppState {
     }
 
     /// A profile's accent color, when configured.
-    pub fn profile_accent(&self, id: &str) -> Option<gpui::Rgba> {
+    pub fn profile_accent(&self, id: &str) -> Option<u32> {
         parse_hex_color(&self.profile_settings(id).accent_color?)
     }
 
-    /// Persist a mutation to one profile's card settings, routing built-in ids to
-    /// their `providers` card and user ids to the `profiles` map.
+    /// Apply a serializable edit to one profile's card settings, routing built-in
+    /// ids to their `providers` card and user ids to the `profiles` map.
     pub fn update_profile_settings(
         &mut self,
         id: &str,
-        mutate: impl FnOnce(&mut ProviderSettings),
-        cx: &mut Context<Self>,
+        patch: ProfileSettingsPatch,
+        cx: &mut HostCx,
     ) {
         let mut settings = self.settings.clone();
-        if let Some(kind) = Settings::builtin_kind_from_id(id) {
-            mutate(settings.provider_mut(kind));
+        let target = if let Some(kind) = Settings::builtin_kind_from_id(id) {
+            settings.provider_mut(kind)
         } else if let Some(profile) = settings.profiles.get_mut(id) {
-            mutate(&mut profile.settings);
+            &mut profile.settings
         } else {
             return;
+        };
+        match patch {
+            ProfileSettingsPatch::SetEnabled { enabled } => target.enabled = enabled,
+            ProfileSettingsPatch::ReplaceConfiguration(configuration) => {
+                target.display_name = configuration.display_name;
+                target.accent_color = configuration.accent_color;
+                target.env = configuration.env;
+                target.binary_path = configuration.binary_path;
+                target.home_path = configuration.home_path;
+                target.launch_args = configuration.launch_args;
+                target.custom_models = configuration.custom_models;
+                target.hidden_models = configuration.hidden_models;
+            }
         }
         self.update_settings(settings, cx);
     }
@@ -2312,7 +2552,7 @@ impl AppState {
         id: &str,
         name: &str,
         value: Option<&str>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         self.enqueue_store_write(
             StoreWrite::SetProfileSecret {
@@ -2322,12 +2562,22 @@ impl AppState {
             },
             cx,
         );
+        let names = self
+            .provider_secret_names
+            .entry(id.to_string())
+            .or_default();
+        if value.is_some() {
+            names.insert(name.to_string());
+        } else {
+            names.remove(name);
+        }
+        self.emit_providers_status(cx);
         cx.notify();
     }
 
     /// Create a new user profile driving `kind`, seeded with a default name.
     /// Returns the new profile's stable id.
-    pub fn create_profile(&mut self, kind: ProviderKind, cx: &mut Context<Self>) -> String {
+    pub fn create_profile(&mut self, kind: ProviderKind, cx: &mut HostCx) -> String {
         let mut settings = self.settings.clone();
         let base_name = format!("New {} profile", provider_label(kind));
         let id = settings.allocate_profile_id(&base_name);
@@ -2357,7 +2607,7 @@ impl AppState {
         base_url: &str,
         model: Option<&str>,
         api_key: &str,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) -> String {
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
@@ -2403,8 +2653,9 @@ impl AppState {
         };
         let result_id = id.clone();
         let api_key = api_key.trim().to_string();
-        cx.spawn(async move |this, cx| {
-            unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            unblock(&host_cx, move || {
                 let _ = std::fs::create_dir_all(&home);
                 let _ = std::fs::write(
                     home.join(".claude.json"),
@@ -2412,7 +2663,7 @@ impl AppState {
                 );
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 if state.settings.profiles.contains_key(&id) {
                     return;
                 }
@@ -2421,23 +2672,28 @@ impl AppState {
                 state.update_settings(settings, cx);
                 state.enqueue_store_write(
                     StoreWrite::SetProfileSecret {
-                        profile_id: id,
+                        profile_id: id.clone(),
                         key: "ANTHROPIC_API_KEY".to_string(),
                         value: Some(api_key),
                     },
                     cx,
                 );
+                state
+                    .provider_secret_names
+                    .entry(id.clone())
+                    .or_default()
+                    .insert("ANTHROPIC_API_KEY".to_string());
+                state.emit_providers_status(cx);
                 cx.notify();
             });
-        })
-        .detach();
+        });
         result_id
     }
 
     /// Delete a user profile: remove its card, its secrets, and detach any
     /// sessions still pointing at it (they fall back to the built-in profile).
     /// Built-in ids are ignored.
-    pub fn delete_profile(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn delete_profile(&mut self, id: &str, cx: &mut HostCx) {
         if Settings::is_builtin_profile_id(id) {
             return;
         }
@@ -2446,6 +2702,7 @@ impl AppState {
             return;
         }
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
+        self.provider_secret_names.remove(id);
         self.update_settings(settings, cx);
         cx.notify();
     }
@@ -2479,7 +2736,7 @@ impl AppState {
     /// provider's own auth surface where one is unambiguous (`claude auth
     /// status --json`; Codex's `auth.json`). Multi-provider CLIs report an
     /// indeterminate auth state until their model/session requests run.
-    pub fn refresh_provider_status(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_provider_status(&mut self, cx: &mut HostCx) {
         for profile in self.all_profiles() {
             let profile_id = profile.id;
             let provider = profile.kind;
@@ -2491,24 +2748,26 @@ impl AppState {
                 continue;
             }
             snapshot.checking = true;
+            self.emit_providers_status(cx);
             let binary = self.resolve_profile_binary(&profile_id);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
-            cx.spawn(async move |this, cx| {
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
                 let env_profile_id = profile_id.clone();
-                let launch_env = unblock(cx.background_executor(), move || {
+                let launch_env = unblock(&host_cx, move || {
                     let secrets = settings_store.profile_secrets(&env_profile_id);
                     launch_env_for_profile(&settings, &env_profile_id, secrets)
                 })
                 .await;
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
-                let _ = this.update(cx, |state, cx| {
+                host_cx.enqueue(move |state, cx| {
                     state.provider_snapshots.insert(profile_id, snapshot);
+                    state.emit_providers_status(cx);
                     cx.notify();
                 });
-            })
-            .detach();
+            });
         }
         cx.notify();
     }
@@ -2516,7 +2775,7 @@ impl AppState {
     /// Check every provider's installed vs. latest version in the background,
     /// storing results in `provider_versions` and toasting once per provider
     /// that has an update available.
-    pub fn check_provider_versions(&mut self, cx: &mut Context<Self>) {
+    pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.resolve_provider_binary(provider);
             let status = self.provider_versions.entry(provider).or_default();
@@ -2524,6 +2783,7 @@ impl AppState {
                 continue;
             }
             status.checking = true;
+            self.emit_providers_status(cx);
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -2531,14 +2791,15 @@ impl AppState {
             let package = npm_package(provider);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
-            cx.spawn(async move |this, cx| {
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
                 let profile_id = Settings::builtin_profile_id(provider).to_string();
-                let env = unblock(cx.background_executor(), move || {
+                let env = unblock(&host_cx, move || {
                     let secrets = settings_store.profile_secrets(&profile_id);
                     launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
                 })
                 .await;
-                let source = unblock(cx.background_executor(), move || {
+                let source = unblock(&host_cx, move || {
                     binary
                         .as_deref()
                         .map(detect_install_source)
@@ -2547,7 +2808,7 @@ impl AppState {
                 .await;
                 let installed = run_capture_env(&program, &["--version"], &env).await;
                 let latest = run_capture("npm", &["view", package, "version"]).await;
-                let _ = this.update(cx, |state, cx| {
+                host_cx.enqueue(move |state, cx| {
                     let update_available = match (&installed, &latest) {
                         (Some(i), Some(l)) => is_update_available(i, l),
                         _ => false,
@@ -2579,22 +2840,25 @@ impl AppState {
                         && !already
                         && let Some(version) = &latest_pretty
                     {
-                        cx.emit(AppEvent::Notice(RuntimeNotice::UpdateAvailable {
-                            provider,
-                            version: version.clone(),
-                        }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::UpdateAvailable {
+                                provider,
+                                version: version.clone(),
+                            }),
+                        );
                     }
+                    state.emit_providers_status(cx);
                     cx.notify();
                 });
-            })
-            .detach();
+            });
         }
         cx.notify();
     }
 
     /// Run the provider's self-update command (per its detected install source),
     /// showing an "updating" toast, then re-check its version.
-    pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
+    pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut HostCx) {
         let source = self
             .provider_versions
             .get(&provider)
@@ -2609,28 +2873,31 @@ impl AppState {
             return;
         }
         status.updating = true;
-        cx.emit(AppEvent::Notice(RuntimeNotice::UpdatingProvider {
-            provider,
-        }));
+        self.emit_providers_status(cx);
+        emit_runtime(
+            cx,
+            AppEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
+        );
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
             let ok = run_status(&command[0], &args).await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 if let Some(status) = state.provider_versions.get_mut(&provider) {
                     status.updating = false;
                 }
                 if ok {
-                    cx.emit(AppEvent::Notice(RuntimeNotice::UpdateDone { provider }));
+                    emit_runtime(cx, AppEvent::Notice(RuntimeNotice::UpdateDone { provider }));
                     // Refresh the version so the "update available" state clears.
                     state.check_provider_versions(cx);
                 } else {
                     state.report_error(RuntimeError::UpdateFailed { provider }, cx);
                 }
+                state.emit_providers_status(cx);
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// The copyable update command for a provider whose install source has
@@ -2784,10 +3051,9 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn toggle_sidebar_collapsed(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_collapsed = !self.sidebar_collapsed;
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut HostCx) {
         // Persist so the choice survives a restart (save errors are cosmetic).
-        self.settings.sidebar_collapsed = self.sidebar_collapsed;
+        self.settings.sidebar_collapsed = collapsed;
         let settings = self.settings.clone();
         self.enqueue_settings(&settings, cx);
         cx.notify();
@@ -2804,38 +3070,37 @@ impl AppState {
     /// Kick off a background refresh of the active session's git status (on
     /// session open, after each turn, and after each git action). A stale result
     /// (session switched, or a newer refresh superseded it) is discarded.
-    pub fn refresh_git_status(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_git_status(&mut self, cx: &mut HostCx) {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             self.git_status = None;
+            self.emit_git_status(cx);
             cx.notify();
             return;
         };
         let session_id = self.active_session_id().map(str::to_string);
         self.git_status_generation += 1;
         let generation = self.git_status_generation;
-        cx.spawn(async move |this, cx| {
-            let status = unblock(cx.background_executor(), move || read_status(&cwd)).await;
-            let _ = this.update(cx, |state, cx| {
+        self.emit_git_status(cx);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let status = unblock(&host_cx, move || read_status(&cwd)).await;
+            host_cx.enqueue(move |state, cx| {
                 if state.git_status_generation == generation
                     && state.active_session_id().map(str::to_string) == session_id
                 {
                     state.git_status = Some(status);
+                    state.emit_git_status(cx);
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        });
     }
 
-    fn refresh_session_git_branch(
-        &mut self,
-        session_id: String,
-        cwd: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            let branch = unblock(cx.background_executor(), move || read_git_branch(&cwd)).await;
-            let _ = this.update(cx, |state, cx| {
+    fn refresh_session_git_branch(&mut self, session_id: String, cwd: PathBuf, cx: &mut HostCx) {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let branch = unblock(&host_cx, move || read_git_branch(&cwd)).await;
+            host_cx.enqueue(move |state, cx| {
                 if let Some(session) = state
                     .active
                     .as_mut()
@@ -2843,11 +3108,11 @@ impl AppState {
                     .or_else(|| state.background.get_mut(&session_id))
                 {
                     session.git_branch = branch;
+                    state.emit_session_status(&session_id, cx);
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// The resolved primary quick-action for the active session, or `None` when
@@ -2894,15 +3159,13 @@ impl AppState {
     pub fn generate_commit_message(
         &self,
         included: Option<Vec<String>>,
-        cx: &gpui::App,
-    ) -> Task<Result<String, String>> {
+        cx: &HostCx,
+    ) -> HostTask<Result<String, String>> {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
-            return cx
-                .background_executor()
-                .spawn(async { Err("no active session".to_string()) });
+            return HostCx::spawn_background(cx, async { Err("no active session".to_string()) });
         };
         let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
-        cx.background_executor().spawn(async move {
+        HostCx::spawn_background(cx, async move {
             let (stat, patch) = commit_diff_context(&cwd, included.as_deref());
             let prompt = build_commit_prompt(&stat, &patch);
             let raw = run_claude_headless(binary.as_deref(), &cwd, &prompt)?;
@@ -2927,10 +3190,10 @@ impl AppState {
         message: Option<String>,
         included: Option<Vec<String>>,
         feature_branch: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         if self.git_busy {
-            cx.emit(AppEvent::Toast(RuntimeToast::GitBusy));
+            emit_runtime(cx, AppEvent::Toast(RuntimeToast::GitBusy));
             return;
         }
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
@@ -2938,6 +3201,7 @@ impl AppState {
         };
         let current_branch = self.git_branch_name();
         self.git_busy = true;
+        self.emit_git_status(cx);
         let operation = self.next_operation_id();
         let retry = GitActionRequest {
             action,
@@ -2945,13 +3209,14 @@ impl AppState {
             included: included.clone(),
             feature_branch: feature_branch.clone(),
         };
-        cx.emit(AppEvent::Toast(RuntimeToast::GitStarted {
-            operation,
-            action,
-        }));
+        emit_runtime(
+            cx,
+            AppEvent::Toast(RuntimeToast::GitStarted { operation, action }),
+        );
 
-        cx.spawn(async move |this, cx| {
-            let (result, git_branch) = unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let (result, git_branch) = unblock(&host_cx, move || {
                 let result = perform_action(
                     &cwd,
                     action,
@@ -2964,40 +3229,44 @@ impl AppState {
                 (result, git_branch)
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 state.git_busy = false;
                 match &result {
-                    Ok(_) => cx.emit(AppEvent::Toast(RuntimeToast::GitSucceeded {
-                        operation,
-                        action,
-                    })),
-                    Err(detail) => cx.emit(AppEvent::Toast(RuntimeToast::GitFailed {
-                        operation,
-                        detail: detail.clone(),
-                        retry,
-                    })),
+                    Ok(_) => emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::GitSucceeded { operation, action }),
+                    ),
+                    Err(detail) => emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::GitFailed {
+                            operation,
+                            detail: detail.clone(),
+                            retry,
+                        }),
+                    ),
                 }
                 if let Some(active) = state.active.as_mut() {
                     active.git_branch = git_branch;
                 }
+                state.emit_active_session_status(cx);
+                state.emit_git_status(cx);
                 state.refresh_git_status(cx);
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// Debug/E2E entry point (`--debug-git-commit "msg"`): stage everything and
     /// commit the active session's cwd with `message`, driving the same toast +
     /// status-refresh path as the UI commit.
-    pub fn debug_git_commit(&mut self, message: String, cx: &mut Context<Self>) {
+    pub fn debug_git_commit(&mut self, message: String, cx: &mut HostCx) {
         self.run_git_action(GitAction::Commit, Some(message), None, None, cx);
     }
 
     /// Debug/E2E entry point (`--debug-git-action push|pull|publish|init`): run a
     /// non-commit quick-action directly. The current branch is read fresh (the
     /// background status refresh may not have landed yet).
-    pub fn debug_git_action(&mut self, name: String, cx: &mut Context<Self>) {
+    pub fn debug_git_action(&mut self, name: String, cx: &mut HostCx) {
         let action = match name.as_str() {
             "push" => GitAction::Push,
             "pull" => GitAction::Pull,
@@ -3014,6 +3283,7 @@ impl AppState {
             && let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone())
         {
             self.git_status = Some(read_status(&cwd));
+            self.emit_git_status(cx);
         }
         self.run_git_action(action, None, None, None, cx);
     }
@@ -3021,50 +3291,54 @@ impl AppState {
     /// Debug/E2E entry point (`--debug-git-genmsg`): generate a commit message
     /// for the active session and surface it (logged + info toast) so the AI
     /// path can be exercised headlessly.
-    pub fn debug_git_generate_message(&mut self, cx: &mut Context<Self>) {
+    pub fn debug_git_generate_message(&mut self, cx: &mut HostCx) {
         let task = self.generate_commit_message(None, cx);
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let result = task.await;
-            let _ = this.update(cx, |_state, cx| match result {
+            host_cx.enqueue(move |_state, cx| match result {
                 Ok(message) => {
                     log::info!("generated commit message:\n{message}");
-                    cx.emit(AppEvent::Toast(RuntimeToast::CommitMessageGenerated {
-                        message,
-                    }));
+                    emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::CommitMessageGenerated { message }),
+                    );
                 }
                 Err(err) => {
                     log::warn!("commit message generation failed: {err}");
-                    cx.emit(AppEvent::Toast(RuntimeToast::CommitMessageFailed {
-                        detail: err,
-                    }));
+                    emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::CommitMessageFailed { detail: err }),
+                    );
                 }
             });
-        })
-        .detach();
+        });
     }
 
     // -- the ACP agent marketplace ------------------------------------------
 
     /// Load the registry index (cache first, network when stale). Cheap enough
     /// to call every time the Providers page opens.
-    pub fn refresh_acp_registry(&mut self, cx: &mut Context<Self>) {
+    pub fn refresh_acp_registry(&mut self, cx: &mut HostCx) {
         if self.acp_registry_loading {
             return;
         }
         self.acp_registry_loading = true;
+        self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let cache_dir = data_dir.clone();
-            let cached_registry =
-                unblock(cx.background_executor(), move || cached(&cache_dir)).await;
-            let _ = this.update(cx, |state, cx| {
+            let cached_registry = unblock(&host_cx, move || cached(&cache_dir)).await;
+            host_cx.enqueue(move |state, cx| {
                 if state.acp_registry_loading && state.acp_registry.is_none() {
                     state.acp_registry = cached_registry;
+                    state.emit_providers_status(cx);
                     cx.notify();
                 }
             });
-            let result = unblock(cx.background_executor(), move || load(&data_dir)).await;
-            let _ = this.update(cx, |state, cx| {
+            let result = unblock(&host_cx, move || load(&data_dir)).await;
+            host_cx.enqueue(move |state, cx| {
                 state.acp_registry_loading = false;
                 match result {
                     Ok(registry) => {
@@ -3076,10 +3350,10 @@ impl AppState {
                         state.acp_registry_error = Some(err.to_string());
                     }
                 }
+                state.emit_providers_status(cx);
                 cx.notify();
             });
-        })
-        .detach();
+        });
         cx.notify();
     }
 
@@ -3115,7 +3389,7 @@ impl AppState {
     }
 
     /// Download + install one registry agent, with a progress toast.
-    pub fn install_acp_agent(&mut self, id: String, cx: &mut Context<Self>) {
+    pub fn install_acp_agent(&mut self, id: String, cx: &mut HostCx) {
         let Some(agent) = self
             .acp_marketplace()
             .into_iter()
@@ -3126,59 +3400,68 @@ impl AppState {
         if !self.acp_installing.insert(id.clone()) {
             return;
         }
+        self.emit_providers_status(cx);
         let operation = self.next_operation_id();
         let data_dir = self.store.root().clone();
         let name = agent.name.clone();
-        cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallStarted {
-            operation,
-            name: name.clone(),
-        }));
-        cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
+        emit_runtime(
+            cx,
+            AppEvent::Toast(RuntimeToast::AcpInstallStarted {
+                operation,
+                name: name.clone(),
+            }),
+        );
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = unblock(&host_cx, move || {
                 install(&agent, &data_dir, |_done, _total| {})
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 state.acp_installing.remove(&id);
                 match result {
                     Ok(installed) => {
                         state.settings.acp_agents.insert(id.clone(), installed);
                         let settings = state.settings.clone();
                         state.enqueue_settings(&settings, cx);
-                        cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallSucceeded {
+                        emit_runtime(
+                            cx,
+                            AppEvent::Toast(RuntimeToast::AcpInstallSucceeded { operation, name }),
+                        );
+                    }
+                    Err(err) => emit_runtime(
+                        cx,
+                        AppEvent::Toast(RuntimeToast::AcpInstallFailed {
                             operation,
                             name,
-                        }));
-                    }
-                    Err(err) => cx.emit(AppEvent::Toast(RuntimeToast::AcpInstallFailed {
-                        operation,
-                        name,
-                        detail: err.to_string(),
-                    })),
+                            detail: err.to_string(),
+                        }),
+                    ),
                 }
+                state.emit_providers_status(cx);
                 cx.notify();
             });
-        })
-        .detach();
+        });
         cx.notify();
     }
 
     /// Remove an installed ACP agent (its files and its settings entry).
-    pub fn remove_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn remove_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
         self.settings.acp_agents.remove(id);
         let settings = self.settings.clone();
         self.enqueue_settings(&settings, cx);
+        self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
-        cx.spawn(async move |_this, cx| {
-            unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            unblock(&host_cx, move || {
                 if let Err(err) = uninstall(&data_dir, &id) {
                     log::warn!("could not remove ACP agent {id}: {err}");
                 }
             })
             .await;
-        })
-        .detach();
+        });
         cx.notify();
     }
 
@@ -3190,7 +3473,7 @@ impl AppState {
         command: String,
         args: Vec<String>,
         env: Vec<(String, String)>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let name = name.trim().to_string();
         let command = command.trim().to_string();
@@ -3218,14 +3501,15 @@ impl AppState {
     }
 
     /// Update one installed ACP agent in place (enable switch, env rows, args).
-    pub fn update_acp_agent(
-        &mut self,
-        id: &str,
-        edit: impl FnOnce(&mut InstalledAgent),
-        cx: &mut Context<Self>,
-    ) {
+    pub fn update_acp_agent(&mut self, id: &str, patch: AcpAgentPatch, cx: &mut HostCx) {
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
-            edit(agent);
+            match patch {
+                AcpAgentPatch::SetEnabled { enabled } => agent.enabled = enabled,
+                AcpAgentPatch::SetLaunchOptions { env, launch_args } => {
+                    agent.env = env;
+                    agent.launch_args = launch_args;
+                }
+            }
             let settings = self.settings.clone();
             self.enqueue_settings(&settings, cx);
             cx.notify();
@@ -3235,7 +3519,7 @@ impl AppState {
     /// Point the active draft at an installed ACP agent (the model picker's
     /// provider rail). ACP agents have no model catalog: the agent publishes its
     /// models over the wire once the session starts.
-    pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
         let provider_commands = self.cached_provider_commands(ProviderKind::Acp, Some(id));
         let Some(active) = self.active.as_mut() else {
             return;
@@ -3267,10 +3551,12 @@ impl AppState {
         active.provider_commands = provider_commands;
         active.pending_ultrathink = false;
         if active.draft {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
         if active.pending_relay.is_some() {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -3279,40 +3565,10 @@ impl AppState {
         self.persist_meta(&meta, cx);
     }
 
-    // -- routing + palette --------------------------------------------------
-
-    /// Switch to the full-page settings route (closes the palette).
-    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        self.route = Route::Settings;
-        cx.notify();
-    }
-
-    /// Return from settings to the chat workspace.
-    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.route = Route::Chat;
-        cx.notify();
-    }
-
-    pub fn open_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = true;
-        cx.notify();
-    }
-
-    pub fn close_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        cx.notify();
-    }
-
-    pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = !self.palette_open;
-        cx.notify();
-    }
-
     /// Reset user settings to defaults, preserving the sidebar's per-project
     /// collapsed state and the model favorites (UI state, not page settings).
     /// The theme is reset too; the caller re-applies it to the window.
-    pub fn reset_settings(&mut self, cx: &mut Context<Self>) {
+    pub fn reset_settings(&mut self, cx: &mut HostCx) {
         let settings = Settings {
             collapsed_projects: self.settings.collapsed_projects.clone(),
             favorite_models: self.settings.favorite_models.clone(),
@@ -3322,37 +3578,6 @@ impl AppState {
     }
 
     // -- diff panel (per-session, in-memory) --------------------------------
-
-    /// Turn indices (ascending) whose timeline contains at least one file
-    /// change, i.e. the turns the diff panel can display.
-    pub fn diff_turns(&self) -> Vec<usize> {
-        let Some(active) = self.active.as_ref() else {
-            return Vec::new();
-        };
-        active
-            .timeline
-            .turns
-            .iter()
-            .enumerate()
-            .filter_map(|(turn, meta)| {
-                meta.changes
-                    .as_ref()
-                    .is_some_and(|changes| !changes.changes.is_empty())
-                    .then_some(turn)
-            })
-            .collect()
-    }
-
-    /// The turn the diff panel currently shows: the explicit selection when it
-    /// still has changes, otherwise the latest turn that does.
-    pub fn diff_selected_turn(&self) -> Option<usize> {
-        let turns = self.diff_turns();
-        let explicit = self.active.as_ref().and_then(|a| a.diff_selected_turn);
-        match explicit {
-            Some(t) if turns.contains(&t) => Some(t),
-            _ => turns.last().copied(),
-        }
-    }
 
     /// Return the provider-attributed net changes for one turn. This never
     /// reads Git or the current working tree: exact provider snapshots and the
@@ -3379,124 +3604,21 @@ impl AppState {
             .map(|changes| changes.completeness)
     }
 
-    pub fn diff_panel_open(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.diff_open)
-    }
+    // -- conversation-owned terminal resources -----------------------------
 
-    pub fn diff_panel_expanded(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.diff_expanded)
-    }
-
-    /// Toggle the diff panel open/closed (header button). Opening with no prior
-    /// selection defaults to the latest turn with changes.
-    pub fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            // The header diff button focuses the Diff tab: opening (or switching
-            // tabs while already open) shows diffs; a second click closes.
-            if active.diff_open && active.right_tab == RightTab::Diff {
-                active.diff_open = false;
-                self.pending_diff_focus = None;
-                if active.timeline.turn_running {
-                    active.auto_open_suppressed = true;
-                }
-            } else {
-                active.diff_open = true;
-                active.right_tab = RightTab::Diff;
-                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            }
-            cx.notify();
-        }
-    }
-
-    /// Open the diff panel and select `turn` (a "View diff" card button).
-    pub fn open_diff_for_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_open = true;
-            active.right_tab = RightTab::Diff;
-            active.diff_selected_turn = Some(turn);
-            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    /// Open a turn diff and focus one file after its async render cache lands.
-    pub fn open_diff_for_file(&mut self, turn: usize, path: String, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_mut() else {
-            return;
-        };
-        let session = active.meta.id.clone();
-        active.diff_open = true;
-        active.right_tab = RightTab::Diff;
-        active.diff_selected_turn = Some(turn);
-        self.set_diff_focus(session, turn, path);
-        self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-        cx.notify();
-    }
-
-    pub fn pending_diff_focus(&self) -> Option<&DiffFocusRequest> {
-        self.pending_diff_focus.as_ref()
-    }
-
-    fn set_diff_focus(&mut self, session: String, turn: usize, path: String) {
-        self.pending_diff_focus = Some(DiffFocusRequest {
-            session,
-            turn,
-            path,
-        });
-    }
-
-    /// Consume a request only for the cache it was created for.
-    pub fn take_diff_focus(&mut self, session: &str, turn: usize) -> Option<DiffFocusRequest> {
-        let matches = self
-            .pending_diff_focus
-            .as_ref()
-            .is_some_and(|request| request.session == session && request.turn == turn);
-        matches.then(|| self.pending_diff_focus.take()).flatten()
-    }
-
-    /// Cancel pending file navigation when the user chooses another scope.
-    pub fn discard_diff_focus(&mut self) {
-        self.pending_diff_focus = None;
-    }
-
-    /// Open the diff panel on the latest turn with changes (used by
-    /// `--open-diff` and as a general "just show me the diffs" entry point).
-    pub fn open_diff_panel(&mut self, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_open = true;
-            active.right_tab = RightTab::Diff;
-            self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
-            cx.notify();
-        }
-    }
-
-    // -- conversation-owned right/bottom workspace -------------------------
-
-    /// Stable key used by UI-side resources which live outside `AppState`
-    /// (notably native WebViews). Drafts follow their project just like the
-    /// composer's text cache; persisted threads follow their session id.
-    pub fn active_conversation_ui_key(&self) -> Option<String> {
-        self.active
-            .as_ref()
-            .map(conversation_destination)
-            .map(|destination| destination.ui_key())
-    }
-
-    fn restore_conversation_ui(&mut self, active: &mut ActiveSession) -> bool {
+    fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) -> bool {
         let destination = conversation_destination(active);
-        let Some(ui) = self.conversation_ui.remove(&destination) else {
+        let Some(workspace) = self.terminal_workspaces.remove(&destination) else {
             return false;
         };
-        ui.restore_into(active);
+        active.terminal_workspace = workspace;
         true
     }
 
-    fn park_conversation_ui(&mut self, active: &mut ActiveSession) {
+    fn park_terminal_workspace(&mut self, active: &mut ActiveSession) {
         let destination = conversation_destination(active);
-        let ui = ConversationUiState::take_from(active);
-        self.conversation_ui.insert(destination, ui);
+        let workspace = std::mem::take(&mut active.terminal_workspace);
+        self.terminal_workspaces.insert(destination, workspace);
     }
 
     fn terminal_preferences_for(&self, active: &ActiveSession) -> Option<TerminalPreferences> {
@@ -3505,7 +3627,16 @@ impl AppState {
             .copied()
     }
 
-    fn write_terminal_preferences(&mut self, cx: &mut Context<Self>) {
+    /// Persisted drawer preferences seed the client-owned conversation entry.
+    pub fn active_terminal_ui_preferences(&self) -> (bool, f32) {
+        self.active
+            .as_ref()
+            .and_then(|active| self.terminal_preferences_for(active))
+            .map(|preferences| (preferences.open, preferences.height.clamp(120., 600.)))
+            .unwrap_or((false, 240.))
+    }
+
+    fn write_terminal_preferences(&mut self, cx: &mut HostCx) {
         match serde_json::to_vec_pretty(&self.terminal_preferences) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteTerminalUi(bytes), cx),
             Err(error) => log::warn!("failed to encode terminal UI state: {error}"),
@@ -3515,7 +3646,7 @@ impl AppState {
     fn reopen_persisted_terminals(
         &mut self,
         preferences: Option<TerminalPreferences>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         if !preferences.is_some_and(|preferences| preferences.open) {
             return;
@@ -3531,36 +3662,45 @@ impl AppState {
 
     // -- terminal drawer ---------------------------------------------------
 
-    fn persist_terminal_preferences(&mut self, cx: &mut Context<Self>) {
+    fn persist_terminal_resource_count(&mut self, cx: &mut HostCx) {
         if let Some(active) = self.active.as_ref() {
-            let workspace = &active.terminal_workspace;
             let key = conversation_destination(active).preference_key();
-            self.terminal_preferences.insert(
-                key,
-                TerminalPreferences {
-                    open: workspace.open,
-                    height: workspace.height,
-                    count: workspace.terminals.len(),
-                },
-            );
+            let count = active.terminal_workspace.terminals.len();
+            self.terminal_preferences
+                .entry(key)
+                .or_insert(TerminalPreferences {
+                    open: false,
+                    height: 240.,
+                    count,
+                })
+                .count = count;
         }
         self.write_terminal_preferences(cx);
     }
 
-    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            active.terminal_workspace.height = height;
-            self.persist_terminal_preferences(cx);
+    pub fn set_terminal_height(&mut self, height: f32, cx: &mut HostCx) {
+        if let Some(active) = self.active.as_ref() {
+            let key = conversation_destination(active).preference_key();
+            self.terminal_preferences
+                .entry(key)
+                .or_insert(TerminalPreferences {
+                    open: false,
+                    height,
+                    count: active.terminal_workspace.terminals.len(),
+                })
+                .height = height;
+            self.write_terminal_preferences(cx);
         }
     }
 
     pub fn terminal_panel_open(&self) -> bool {
         self.active
             .as_ref()
-            .is_some_and(|active| active.terminal_workspace.open)
+            .and_then(|active| self.terminal_preferences_for(active))
+            .is_some_and(|preferences| preferences.open)
     }
 
-    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_terminal_panel(&mut self, cx: &mut HostCx) {
         if self.terminal_panel_open() {
             self.close_terminal_panel(cx);
         } else {
@@ -3573,7 +3713,7 @@ impl AppState {
         session_id: String,
         cwd: PathBuf,
         action: TerminalSpawnAction,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         self.next_terminal_spawn_id = self
             .next_terminal_spawn_id
@@ -3588,10 +3728,10 @@ impl AppState {
         // Capture the thread-local cwd override before the work moves to the
         // background executor.
         let cwd = term::Terminal::resolve_spawn_cwd(cwd);
-        cx.spawn(async move |this, cx| {
-            let result =
-                unblock(cx.background_executor(), move || term::Terminal::spawn(cwd)).await;
-            let _ = this.update(cx, |state, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = unblock(&host_cx, move || term::Terminal::spawn(cwd)).await;
+            host_cx.enqueue(move |state, cx| {
                 let pending = state
                     .pending_terminal_spawns
                     .get_mut(&session_id)
@@ -3636,7 +3776,6 @@ impl AppState {
                     TerminalSpawnAction::Open { split_after } => {
                         if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
                             let first = workspace.push(terminal);
-                            workspace.open = true;
                             followup_split = split_after.map(|direction| (first, direction));
                             true
                         } else {
@@ -3649,12 +3788,10 @@ impl AppState {
                             .iter_mut()
                             .find(|entry| Some(entry.id) == terminal_id)
                         {
-                            entry.terminal = terminal;
-                            workspace.open = true;
+                            entry.terminal = terminal.into();
                             true
                         } else if terminal_id.is_none() && workspace.terminals.is_empty() {
                             workspace.push(terminal);
-                            workspace.open = true;
                             true
                         } else {
                             false
@@ -3663,7 +3800,6 @@ impl AppState {
                     TerminalSpawnAction::New => {
                         if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
                             workspace.push(terminal);
-                            workspace.open = true;
                             true
                         } else {
                             false
@@ -3687,7 +3823,7 @@ impl AppState {
                     }
                 };
                 if applied {
-                    state.persist_terminal_preferences(cx);
+                    state.persist_terminal_resource_count(cx);
                     cx.notify();
                 }
                 if let Some((first, direction)) = followup_split {
@@ -3700,56 +3836,81 @@ impl AppState {
                     );
                 }
             });
-        })
-        .detach();
+        });
     }
 
     fn cancel_pending_terminal_spawns(&mut self, session_id: &str) {
         self.pending_terminal_spawns.remove(session_id);
     }
 
-    pub fn open_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        if active.terminal_workspace.terminals.is_empty() {
-            let already_pending = self
-                .pending_terminal_spawns
-                .get(&active.meta.id)
-                .is_some_and(|spawns| {
-                    spawns
-                        .values()
-                        .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
-                });
-            if !already_pending {
-                self.schedule_terminal_spawn(
+    pub fn open_terminal_panel(&mut self, cx: &mut HostCx) {
+        let Some((session_id, cwd, destination, count, terminals_empty)) =
+            self.active.as_ref().map(|active| {
+                (
                     active.meta.id.clone(),
                     active.meta.cwd.clone(),
+                    conversation_destination(active),
+                    active.terminal_workspace.terminals.len(),
+                    active.terminal_workspace.terminals.is_empty(),
+                )
+            })
+        else {
+            return;
+        };
+        let key = destination.preference_key();
+        self.terminal_preferences
+            .entry(key)
+            .or_insert(TerminalPreferences {
+                open: true,
+                height: 240.,
+                count,
+            })
+            .open = true;
+        self.write_terminal_preferences(cx);
+        if terminals_empty {
+            let already_pending =
+                self.pending_terminal_spawns
+                    .get(&session_id)
+                    .is_some_and(|spawns| {
+                        spawns
+                            .values()
+                            .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
+                    });
+            if !already_pending {
+                self.schedule_terminal_spawn(
+                    session_id,
+                    cwd,
                     TerminalSpawnAction::Open { split_after: None },
                     cx,
                 );
             }
             return;
         }
-        let active = self.active.as_mut().unwrap();
-        active.terminal_workspace.open = true;
-        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
-    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
+    pub fn close_terminal_panel(&mut self, cx: &mut HostCx) {
         let session_id = self.active.as_ref().map(|active| active.meta.id.clone());
         if let Some(session_id) = session_id.as_deref() {
             self.cancel_pending_terminal_spawns(session_id);
         }
-        if let Some(active) = self.active.as_mut() {
-            active.terminal_workspace.open = false;
-            self.persist_terminal_preferences(cx);
+        if let Some(active) = self.active.as_ref() {
+            let key = conversation_destination(active).preference_key();
+            let count = active.terminal_workspace.terminals.len();
+            self.terminal_preferences
+                .entry(key)
+                .or_insert(TerminalPreferences {
+                    open: false,
+                    height: 240.,
+                    count,
+                })
+                .open = false;
+            self.write_terminal_preferences(cx);
             cx.notify();
         }
     }
 
-    pub fn restart_terminal(&mut self, cx: &mut Context<Self>) {
+    pub fn restart_terminal(&mut self, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -3767,7 +3928,7 @@ impl AppState {
         );
     }
 
-    pub fn new_terminal(&mut self, cx: &mut Context<Self>) {
+    pub fn new_terminal(&mut self, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -3786,7 +3947,7 @@ impl AppState {
         );
     }
 
-    pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+    pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -3796,7 +3957,7 @@ impl AppState {
         }
     }
 
-    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut HostCx) {
         let session_id = self.active.as_ref().map(|active| active.meta.id.clone());
         if let Some(session_id) = session_id.as_deref() {
             self.cancel_pending_terminal_spawns(session_id);
@@ -3812,14 +3973,15 @@ impl AppState {
         if workspace.active_id == Some(terminal_id) {
             workspace.active_id = workspace.terminals.last().map(|entry| entry.id);
         }
-        if workspace.terminals.is_empty() {
-            workspace.open = false;
+        let empty = workspace.terminals.is_empty();
+        self.persist_terminal_resource_count(cx);
+        if empty {
+            self.close_terminal_panel(cx);
         }
-        self.persist_terminal_preferences(cx);
         cx.notify();
     }
 
-    pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut Context<Self>) {
+    pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -3858,7 +4020,7 @@ impl AppState {
         );
     }
 
-    pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+    pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -3874,7 +4036,7 @@ impl AppState {
     }
 
     /// Hidden visual-QA fixture: two live PTYs in a split plus a captured chip.
-    pub fn open_terminal_demo(&mut self, cx: &mut Context<Self>) {
+    pub fn open_terminal_demo(&mut self, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -3890,25 +4052,29 @@ impl AppState {
         } else {
             self.split_terminal(TerminalSplitDirection::Horizontal, cx);
         }
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             smol::Timer::after(std::time::Duration::from_millis(700)).await;
-            let Ok(Some((first, _second))) = this.update(cx, |state, _| {
-                let active = state.active.as_ref()?;
-                let split = active.terminal_workspace.splits.first()?;
-                let first = active.terminal_workspace.terminal(split.first)?;
-                let second = active.terminal_workspace.terminal(split.second)?;
-                first
-                    .terminal
-                    .write_input(b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec());
-                second
-                    .terminal
-                    .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
-                Some((split.first, split.second))
-            }) else {
+            let Ok(Some((first, _second))) = host_cx
+                .enqueue_and_wait(move |state, _| {
+                    let active = state.active.as_ref()?;
+                    let split = active.terminal_workspace.splits.first()?;
+                    let first = active.terminal_workspace.terminal(split.first)?;
+                    let second = active.terminal_workspace.terminal(split.second)?;
+                    first.terminal.write_input(
+                        b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec(),
+                    );
+                    second
+                        .terminal
+                        .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
+                    Some((split.first, split.second))
+                })
+                .await
+            else {
                 return;
             };
             smol::Timer::after(std::time::Duration::from_millis(700)).await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 let selected = state.active.as_ref().and_then(|active| {
                     let entry = active.terminal_workspace.terminal(first)?;
                     let snapshot = entry.terminal.snapshot();
@@ -3923,28 +4089,15 @@ impl AppState {
                     state.capture_terminal_selection(first, cx);
                 }
             });
-        })
-        .detach();
+        });
     }
 
-    pub fn remove_terminal_context(&mut self, context_id: u64, cx: &mut Context<Self>) {
+    pub fn remove_terminal_context(&mut self, context_id: u64, cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut() {
             active
                 .terminal_workspace
                 .contexts
                 .retain(|context| context.id != context_id);
-            cx.notify();
-        }
-    }
-
-    pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        if let Some(active) = self.active.as_mut() {
-            active.diff_open = false;
-            // Closing during a turn suppresses auto-open for the rest of it.
-            if active.timeline.turn_running {
-                active.auto_open_suppressed = true;
-            }
             cx.notify();
         }
     }
@@ -3959,17 +4112,18 @@ impl AppState {
             .unwrap_or(&[])
     }
 
-    pub fn add_review_comment(&mut self, comment: ReviewComment, cx: &mut Context<Self>) {
+    pub fn add_review_comment(&mut self, comment: ReviewComment, cx: &mut HostCx) {
         if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
             self.review_comment_drafts
-                .entry(id)
+                .entry(id.clone())
                 .or_default()
                 .push(comment);
+            self.emit_session_status(&id, cx);
             cx.notify();
         }
     }
 
-    pub fn remove_review_comment(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub fn remove_review_comment(&mut self, index: usize, cx: &mut HostCx) {
         let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) else {
             return;
         };
@@ -3977,21 +4131,57 @@ impl AppState {
             && index < comments.len()
         {
             comments.remove(index);
+            self.emit_session_status(&id, cx);
             cx.notify();
         }
     }
 
-    pub fn clear_review_comments(&mut self) {
-        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
-            self.review_comment_drafts.remove(&id);
+    fn clear_review_comments(&mut self, cx: &mut HostCx) {
+        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone())
+            && self.review_comment_drafts.remove(&id).is_some()
+        {
+            self.emit_session_status(&id, cx);
         }
     }
 
-    pub fn toggle_diff_expanded(&mut self, cx: &mut Context<Self>) {
+    /// Drop the attached terminal contexts once a message consuming them is sent.
+    fn clear_terminal_contexts(&mut self) {
         if let Some(active) = self.active.as_mut() {
-            active.diff_expanded = !active.diff_expanded;
-            cx.notify();
+            active.terminal_workspace.contexts.clear();
         }
+    }
+
+    /// Assemble the provider-bound message at the runtime boundary. Unreadable
+    /// attachment files are skipped, matching the composer's previous behavior.
+    fn assemble_user_message(
+        &self,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+    ) -> (String, Vec<Attachment>) {
+        let terminal_contexts = self
+            .active
+            .as_ref()
+            .map(|active| active.terminal_workspace.contexts.as_slice())
+            .unwrap_or_default();
+        let text = append_terminal_contexts_to_prompt(&text, terminal_contexts);
+        let text = append_review_comments_to_prompt(&text, self.review_comments());
+        let attachments = attachment_paths
+            .into_iter()
+            .filter_map(|path| {
+                let bytes = fs::read(&path).ok()?;
+                Some(Attachment {
+                    media_type: mime_from_path(&path),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    source_path: Some(path.to_string_lossy().into_owned()),
+                })
+            })
+            .collect();
+        (text, attachments)
+    }
+
+    fn clear_consumed_draft_context(&mut self, cx: &mut HostCx) {
+        self.clear_terminal_contexts();
+        self.clear_review_comments(cx);
     }
 
     /// Sessions grouped by project for the sidebar (archived threads excluded).
@@ -4030,7 +4220,7 @@ impl AppState {
     }
 
     /// Cycle the sidebar PROJECTS ordering and persist it.
-    pub fn cycle_project_sort(&mut self, cx: &mut Context<Self>) {
+    pub fn cycle_project_sort(&mut self, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
         settings.project_sort = settings.project_sort.next();
         self.update_settings(settings, cx);
@@ -4038,7 +4228,7 @@ impl AppState {
 
     /// Create a project rooted at `root` (native picker feeds this).
     /// Returns the new project's id, or an existing one if `root` matches.
-    pub fn create_project(&mut self, root: PathBuf, cx: &mut Context<Self>) -> Option<String> {
+    pub fn create_project(&mut self, root: PathBuf, cx: &mut HostCx) -> Option<String> {
         if let Some(existing) = self.projects.iter().find(|p| p.root == root) {
             return Some(existing.id.clone());
         }
@@ -4062,10 +4252,7 @@ impl AppState {
 
     /// Scan supported external-agent histories without exposing the import
     /// service or application stores to callers.
-    pub fn scan_external_history(
-        &self,
-        executor: &gpui::BackgroundExecutor,
-    ) -> Task<Vec<RecentDir>> {
+    pub fn scan_external_history(&self, executor: &HostCx) -> HostTask<Vec<RecentDir>> {
         let exclude: Vec<_> = self
             .projects
             .iter()
@@ -4090,7 +4277,7 @@ impl AppState {
         &self,
         project_id: &str,
         threads: Vec<ExternalThread>,
-        executor: &gpui::BackgroundExecutor,
+        executor: &HostCx,
     ) -> Option<async_channel::Receiver<ExternalImportUpdate>> {
         let project = self
             .projects
@@ -4125,12 +4312,12 @@ impl AppState {
         Some(receiver)
     }
 
-    /// List the active session's workspace on the background executor.
-    pub fn list_active_workspace(
+    /// List one replicated session cwd on the background executor.
+    pub fn list_workspace_at(
         &self,
-        executor: &gpui::BackgroundExecutor,
-    ) -> Task<Vec<PathEntry>> {
-        let cwd = self.active.as_ref().map(|active| active.meta.cwd.clone());
+        cwd: Option<PathBuf>,
+        executor: &HostCx,
+    ) -> HostTask<Vec<PathEntry>> {
         unblock(executor, move || {
             cwd.map(|cwd| list_workspace(&cwd)).unwrap_or_default()
         })
@@ -4138,7 +4325,7 @@ impl AppState {
 
     /// Reload sessions written by the external-history importer and expand its
     /// project group.
-    pub fn finish_external_import(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
         self.sessions = self.store.load_index();
         if self
             .settings
@@ -4155,7 +4342,7 @@ impl AppState {
     }
 
     /// Toggle a project's collapsed state (persisted in settings).
-    pub fn toggle_project_collapsed(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_project_collapsed(&mut self, project_id: &str, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
         if let Some(pos) = settings
             .collapsed_projects
@@ -4185,11 +4372,9 @@ impl AppState {
         self.active.as_ref().map(|a| a.meta.cwd.clone())
     }
 
-    /// Directory where the active session's image attachments are persisted
-    /// (`<store root>/attachments/<session id>/`). `None` with no active session.
-    pub fn attachments_dir(&self) -> Option<PathBuf> {
-        let id = self.active_session_id()?;
-        Some(user_files::attachment_dir(self.store.root(), id))
+    /// Directory where one session's image attachments are persisted.
+    pub fn attachments_dir_for(&self, session_id: &str) -> PathBuf {
+        user_files::attachment_dir(self.store.root(), session_id)
     }
 
     /// Persist attachment `bytes` under the active session's attachments dir with
@@ -4212,14 +4397,19 @@ impl AppState {
         Ok(path)
     }
 
-    pub fn update_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+    pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
         self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
         self.settings = settings;
+        self.provider_secret_names = provider_secret_names(&self.settings, &self.settings_store);
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
         computer_use_mcp::config::set(computer_use_config(&self.settings));
-        cx.emit(AppEvent::Effect(RuntimeEffect::ApplyLocale { language }));
+        emit_runtime(
+            cx,
+            AppEvent::Effect(RuntimeEffect::ApplyLocale { language }),
+        );
+        self.emit_providers_status(cx);
         cx.notify();
     }
 
@@ -4240,18 +4430,15 @@ impl AppState {
     /// Settings on the recorded page. The page reruns a permission recheck as it
     /// mounts, so the user immediately sees the post-restart status. No-op when
     /// there is no marker (the normal launch path).
-    pub fn apply_pending_relaunch(&mut self, cx: &mut Context<Self>) {
-        let Some(marker) = self.pending_relaunch.take() else {
-            return;
-        };
+    pub fn apply_pending_relaunch(&mut self, cx: &mut HostCx) -> Option<String> {
+        let marker = self.pending_relaunch.take()?;
         if let Some(id) = marker.active_session.as_deref()
             && self.sessions.iter().any(|meta| meta.id == id)
         {
             self.select_session(id, cx);
         }
-        self.debug_settings_section = Some(marker.reopen_settings);
-        self.route = Route::Settings;
         cx.notify();
+        Some(marker.reopen_settings)
     }
 
     // -- archive / delete / rename / unread (Group A) -----------------------
@@ -4259,7 +4446,7 @@ impl AppState {
     /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
     /// its turn is running (returns without changing anything so the caller's
     /// tooltip stands). The active thread is closed back to the empty state.
-    pub fn archive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    pub fn archive_session(&mut self, session_id: &str, cx: &mut HostCx) {
         if self.turn_running_for(session_id)
             || self
                 .sessions
@@ -4274,7 +4461,7 @@ impl AppState {
     }
 
     /// Restore an archived thread (Settings → Archived Threads → Unarchive).
-    pub fn unarchive_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    pub fn unarchive_session(&mut self, session_id: &str, cx: &mut HostCx) {
         let Some(archived_at) = self
             .sessions
             .iter()
@@ -4300,7 +4487,7 @@ impl AppState {
 
     /// Sweep one project's visible sessions using the configured idle and
     /// sibling keep windows. Returns the number of threads archived.
-    pub fn auto_archive_sweep(&mut self, project_id: &str, cx: &mut Context<Self>) -> usize {
+    pub fn auto_archive_sweep(&mut self, project_id: &str, cx: &mut HostCx) -> usize {
         if self.settings.auto_archive_disabled {
             return 0;
         }
@@ -4341,7 +4528,7 @@ impl AppState {
         count
     }
 
-    fn archive_session_ids(&mut self, ids: &[String], archived_at: u64, cx: &mut Context<Self>) {
+    fn archive_session_ids(&mut self, ids: &[String], archived_at: u64, cx: &mut HostCx) {
         let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
         if self
             .active_session_id()
@@ -4351,7 +4538,7 @@ impl AppState {
         }
         for id in ids.iter().copied() {
             // An archived conversation must not leave an off-screen PTY running.
-            self.conversation_ui
+            self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.to_string()));
             self.drop_background(id);
             self.revoke_preview_registration(id);
@@ -4373,7 +4560,7 @@ impl AppState {
     }
 
     /// Rename a thread (context-menu inline edit). Empty titles are rejected.
-    pub fn rename_session(&mut self, session_id: &str, title: &str, cx: &mut Context<Self>) {
+    pub fn rename_session(&mut self, session_id: &str, title: &str, cx: &mut HostCx) {
         let title = title.trim();
         if title.is_empty() {
             return;
@@ -4395,7 +4582,7 @@ impl AppState {
     /// Duplicate a stored transcript and arrange for its next provider start to
     /// fork the source's native session. The fork stays idle until its first
     /// user turn, exactly like a cold-opened stored thread.
-    pub fn fork_thread(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) {
         let source = self
             .active
             .as_ref()
@@ -4464,12 +4651,13 @@ impl AppState {
             },
             cx,
         );
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let result = completed
                 .recv()
                 .await
                 .unwrap_or_else(|_| Err("session store writer stopped".into()));
-            let _ = this.update(cx, |state, cx| match result {
+            host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
                     state.enqueue_store_write(
                         StoreWrite::UpsertMeta {
@@ -4485,8 +4673,7 @@ impl AppState {
                     state.report_error(RuntimeError::PersistEvent { error }, cx);
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// The worktree that deleting `session_id` would orphan (i.e. it is the only
@@ -4507,12 +4694,7 @@ impl AppState {
     /// Permanently delete a thread: stop the provider, close its terminal,
     /// delete meta + JSONL, and (when `remove_worktree`) remove the git worktree
     /// it was the last user of.
-    pub fn delete_session(
-        &mut self,
-        session_id: &str,
-        remove_worktree: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
         self.sessions_awaiting_approval.remove(session_id);
         let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
         if self.active_session_id() == Some(session_id) {
@@ -4521,7 +4703,7 @@ impl AppState {
         }
         // Deleting a thread that is working in the background kills it for real.
         self.drop_background(session_id);
-        self.conversation_ui
+        self.terminal_workspaces
             .remove(&ConversationDestination::Thread(session_id.to_string()));
         if self.terminal_preferences.remove(session_id).is_some() {
             self.write_terminal_preferences(cx);
@@ -4541,12 +4723,10 @@ impl AppState {
         self.sessions.retain(|meta| meta.id != session_id);
         if let Some((root, cwd)) = worktree_remove {
             let deleted_id = session_id.to_string();
-            cx.spawn(async move |this, cx| {
-                let result = unblock(cx.background_executor(), move || {
-                    remove_git_worktree(&root, &cwd)
-                })
-                .await;
-                let _ = this.update(cx, |state, cx| {
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
+                let result = unblock(&host_cx, move || remove_git_worktree(&root, &cwd)).await;
+                host_cx.enqueue(move |state, cx| {
                     if let Err(err) = result
                         && !state.sessions.iter().any(|meta| meta.id == deleted_id)
                         && state.active_session_id() != Some(&deleted_id)
@@ -4560,15 +4740,14 @@ impl AppState {
                         );
                     }
                 });
-            })
-            .detach();
+            });
         }
         cx.notify();
     }
 
     /// Permanently remove a project and all of its threads from tcode. Project
     /// files and worktrees on disk are left in place.
-    pub fn delete_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn delete_project(&mut self, project_id: &str, cx: &mut HostCx) {
         let session_ids: Vec<String> = self
             .sessions
             .iter()
@@ -4583,7 +4762,7 @@ impl AppState {
             self.shutdown_active(cx);
         }
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
-        self.conversation_ui.remove(&draft_destination);
+        self.terminal_workspaces.remove(&draft_destination);
         if self
             .terminal_preferences
             .remove(&draft_destination.preference_key())
@@ -4652,7 +4831,7 @@ impl AppState {
     }
 
     /// Record that a thread has been visited now (clears its unread dot).
-    fn mark_visited(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    fn mark_visited(&mut self, session_id: &str, cx: &mut HostCx) {
         self.settings
             .last_visited
             .insert(session_id.to_string(), now_secs());
@@ -4662,7 +4841,7 @@ impl AppState {
 
     /// Mark a thread unread (context menu): set its last-visited just below its
     /// update time so the dot reappears.
-    pub fn mark_session_unread(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    pub fn mark_session_unread(&mut self, session_id: &str, cx: &mut HostCx) {
         let updated = self
             .sessions
             .iter()
@@ -4719,9 +4898,10 @@ impl AppState {
 
     /// Choose the draft's workspace mode (checkout-row picker). No-op unless the
     /// active thread is an unstarted draft.
-    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, cx: &mut Context<Self>) {
+    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut().filter(|a| a.draft) {
             active.draft_workspace = mode;
+            self.emit_active_session_status(cx);
             cx.notify();
         }
     }
@@ -4733,7 +4913,7 @@ impl AppState {
         text: String,
         attachments: Vec<Attachment>,
         base: String,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let Some(active) = self.active.as_mut() else {
             return;
@@ -4741,6 +4921,7 @@ impl AppState {
         active.preparing_worktree = true;
         let session_id = active.meta.id.clone();
         let root = active.meta.cwd.clone();
+        self.emit_session_status(&session_id, cx);
         cx.notify();
 
         let path = worktree_path_for(&session_id);
@@ -4749,8 +4930,9 @@ impl AppState {
         let root_for_task = root.clone();
         let path_for_task = path.clone();
         let branch_for_task = branch.clone();
-        cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = unblock(&host_cx, move || {
                 create_git_worktree(
                     &root_for_task,
                     &path_for_task,
@@ -4763,7 +4945,7 @@ impl AppState {
                 })
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 let Some(active) = state
                     .active
                     .as_mut()
@@ -4783,7 +4965,7 @@ impl AppState {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
                         active.git_branch = git_branch;
                         // Now that the worktree exists, run the deferred send.
-                        state.send_turn(text, attachments, cx);
+                        state.send_turn_assembled(text, attachments, cx);
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
@@ -4795,9 +4977,9 @@ impl AppState {
                         );
                     }
                 }
+                state.emit_session_status(&session_id, cx);
             });
-        })
-        .detach();
+        });
     }
 
     /// Create a new session, make it active, and start its provider process.
@@ -4814,7 +4996,7 @@ impl AppState {
         // Which provider profile to run against (`None` = the built-in profile
         // for `provider`; `Some(id)` selects a user-created profile).
         profile_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.acp_agent_id = acp_agent_id;
@@ -4866,14 +5048,17 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.emit_domain(
+            Topic::SessionEvents {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionSnapshot(Vec::new()),
+            cx,
+        );
+        self.emit_session_status(&session_id, cx);
         self.refresh_session_git_branch(session_id, cwd, cx);
         self.ensure_started(cx);
         self.refresh_git_status(cx);
@@ -4919,11 +5104,6 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
@@ -4989,7 +5169,7 @@ impl AppState {
     /// Switch the main area into a draft for `project_id` (rooted at `cwd`): an
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
-    pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
+    pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) {
         self.park_active(cx);
         let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
             self.draft_defaults(&project_id);
@@ -5005,15 +5185,13 @@ impl AppState {
         draft.meta.profile_id = profile_id;
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         let terminal_preferences = self.terminal_preferences_for(&draft);
-        let restored_ui = self.restore_conversation_ui(&mut draft);
-        if !restored_ui && let Some(preferences) = terminal_preferences {
-            draft.terminal_workspace.height = preferences.height.clamp(120., 600.);
-        }
+        let restored_terminal = self.restore_terminal_workspace(&mut draft);
         self.active = Some(draft);
+        self.emit_active_session_status(cx);
         if let Some(active) = self.active.as_ref() {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
-        if !restored_ui {
+        if !restored_terminal {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
@@ -5027,7 +5205,7 @@ impl AppState {
 
     /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
-    fn commit_draft(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
+    fn commit_draft(&mut self, cx: &mut HostCx) -> std::io::Result<()> {
         let preference_migration = self.active.as_ref().and_then(|active| {
             active.draft.then(|| {
                 (
@@ -5041,6 +5219,13 @@ impl AppState {
         {
             active.draft = false;
             let meta = active.meta.clone();
+            self.emit_domain(
+                Topic::SessionEvents {
+                    session_id: meta.id.clone(),
+                },
+                ServerEvent::SessionSnapshot(Vec::new()),
+                cx,
+            );
             self.enqueue_store_write(
                 StoreWrite::UpsertMeta {
                     meta: Box::new(meta.clone()),
@@ -5049,6 +5234,7 @@ impl AppState {
                 cx,
             );
             self.upsert_session_in_memory(meta);
+            self.emit_active_session_status(cx);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
@@ -5063,7 +5249,7 @@ impl AppState {
         &mut self,
         session_id: String,
         target: TimelineLoadTarget,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let generation = {
             let generation = self
@@ -5090,7 +5276,7 @@ impl AppState {
         generation: u64,
         watermark: u64,
         attempt: u8,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let intended = match target {
             TimelineLoadTarget::Active { .. } => self
@@ -5103,10 +5289,19 @@ impl AppState {
             return;
         };
         let store = self.store.clone();
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let read_id = session_id.clone();
-            let (timeline, git_branch) = unblock(cx.background_executor(), move || {
-                let mut timeline = Timeline::fold_events(store.read_events(&read_id));
+            let (timeline, records, git_branch) = {
+                let stored = store.read_events(&read_id);
+                let mut timeline = Timeline::fold_events(stored.iter().cloned());
+                let records = stored
+                    .into_iter()
+                    .map(|stored| SessionEventRecord {
+                        ts: stored.ts,
+                        event: stored.event,
+                    })
+                    .collect();
                 let (mark_idle, load_branch) = match target {
                     TimelineLoadTarget::Active {
                         mark_idle,
@@ -5118,10 +5313,9 @@ impl AppState {
                     timeline.mark_idle();
                 }
                 let git_branch = load_branch.then(|| read_git_branch(&cwd));
-                (timeline, git_branch)
-            })
-            .await;
-            let _ = this.update(cx, |state, cx| {
+                (timeline, records, git_branch)
+            };
+            host_cx.enqueue(move |state, cx| {
                 let generation_matches = state
                     .timeline_load_generations
                     .get(&session_id)
@@ -5162,6 +5356,14 @@ impl AppState {
                                 active.git_branch = git_branch;
                             }
                         }
+                        state.emit_domain(
+                            Topic::SessionEvents {
+                                session_id: session_id.clone(),
+                            },
+                            ServerEvent::SessionSnapshot(records),
+                            cx,
+                        );
+                        state.emit_session_status(&session_id, cx);
                     }
                     TimelineLoadTarget::Background { .. } => {
                         if let Some(background) = state.background.get_mut(&session_id) {
@@ -5171,17 +5373,15 @@ impl AppState {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// Make a stored session active: replay its JSONL log only. The provider
     /// process starts lazily on the next send (with the stored resume cursor).
-    pub fn select_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    pub fn select_session(&mut self, session_id: &str, cx: &mut HostCx) {
         if self.active_session_id() == Some(session_id) {
             return;
         }
-        self.pending_diff_focus = None;
         let Some(meta) = self.sessions.iter().find(|m| m.id == session_id).cloned() else {
             return;
         };
@@ -5200,18 +5400,8 @@ impl AppState {
                 parked.queue.len()
             );
             parked.idle_since = None;
-            // Background events may have auto-opened or otherwise changed the
-            // panel after it was parked; that live state wins over the snapshot
-            // captured when the user switched away.
-            let background_right_panel = RightPanelState::capture(&parked);
             let terminal_preferences = self.terminal_preferences_for(&parked);
-            let restored_ui = self.restore_conversation_ui(&mut parked);
-            if restored_ui {
-                background_right_panel.restore_into(&mut parked);
-            }
-            if !restored_ui && let Some(preferences) = terminal_preferences {
-                parked.terminal_workspace.height = preferences.height.clamp(120., 600.);
-            }
+            let restored_terminal = self.restore_terminal_workspace(&mut parked);
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
             self.active = Some(parked);
             self.schedule_timeline_load(
@@ -5222,7 +5412,7 @@ impl AppState {
                 },
                 cx,
             );
-            if !restored_ui {
+            if !restored_terminal {
                 self.reopen_persisted_terminals(terminal_preferences, cx);
             }
             // Anything still queued that can go now, goes now.
@@ -5235,6 +5425,7 @@ impl AppState {
                 self.ensure_started(cx);
             }
             self.refresh_git_status(cx);
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -5270,19 +5461,11 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
         let terminal_preferences = self.terminal_preferences_for(&active);
-        let restored_ui = self.restore_conversation_ui(&mut active);
-        if !restored_ui && let Some(preferences) = terminal_preferences {
-            active.terminal_workspace.height = preferences.height.clamp(120., 600.);
-        }
+        let restored_terminal = self.restore_terminal_workspace(&mut active);
         self.active = Some(active);
         self.schedule_timeline_load(
             session_id,
@@ -5292,16 +5475,17 @@ impl AppState {
             },
             cx,
         );
-        if !restored_ui {
+        if !restored_terminal {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
     /// Open the most recently updated stored session (replay only). Used by the
     /// hidden `--open-latest` launch flag. No-op when there are no sessions.
-    pub fn open_latest_session(&mut self, cx: &mut Context<Self>) {
+    pub fn open_latest_session(&mut self, cx: &mut HostCx) {
         // `sessions` is kept sorted newest-first by `load_index`.
         if let Some(id) = self.sessions.first().map(|m| m.id.clone()) {
             self.select_session(&id, cx);
@@ -5309,12 +5493,27 @@ impl AppState {
     }
 
     /// Submit a user turn. Starts the provider lazily if needed.
-    pub fn send_turn(
-        &mut self,
-        text: String,
-        attachments: Vec<Attachment>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut HostCx) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.send_turn_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context(cx);
+    }
+
+    /// Deterministic queue mutation for cross-crate replica consistency tests.
+    /// It deliberately skips provider dispatch so GPUI's test scheduler never
+    /// observes a real adapter thread.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn queue_message_for_replica_test(&mut self, text: String, cx: &mut HostCx) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.push_queued(text, Vec::new());
+        self.emit_active_session_status(cx);
+        cx.notify();
+    }
+
+    fn send_turn_assembled(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut HostCx) {
         if self.relay_confirmation().is_some() {
             log::warn!("send deferred until the pending conversation relay is confirmed");
             return;
@@ -5399,6 +5598,7 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
@@ -5429,14 +5629,25 @@ impl AppState {
     pub fn confirm_relay_and_send(
         &mut self,
         text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut HostCx,
+    ) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.confirm_relay_and_send_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context(cx);
+    }
+
+    fn confirm_relay_and_send_assembled(
+        &mut self,
+        text: String,
         attachments: Vec<Attachment>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
         let Some(pending) = active.pending_relay.take() else {
-            self.send_turn(text, attachments, cx);
+            self.send_turn_assembled(text, attachments, cx);
             return;
         };
         let transcript = render_relay_transcript(
@@ -5475,13 +5686,14 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
     /// Submit the queue head when the live provider can accept a turn. The head
     /// remains queued until the adapter emits its correlated `TurnAccepted`;
     /// only that provider-boundary acknowledgement persists the user bubble.
-    fn dispatch_next_queued(&mut self, _cx: &mut Context<Self>) -> Result<bool, ()> {
+    fn dispatch_next_queued(&mut self, _cx: &mut HostCx) -> Result<bool, ()> {
         let Some(active) = self.active.as_ref() else {
             return Ok(false);
         };
@@ -5493,7 +5705,7 @@ impl AppState {
 
     /// Finalize one submitted queue head. Queue-id correlation makes duplicate
     /// acceptance events idempotent, including after a provider close.
-    fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut Context<Self>) {
+    fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut HostCx) {
         let is_active = self.active_session_id() == Some(session_id);
         let accepted = if is_active {
             self.active
@@ -5520,12 +5732,13 @@ impl AppState {
         if is_active {
             self.maybe_generate_title(&message.text, &message.attachments, cx);
         }
+        self.emit_session_status(session_id, cx);
         cx.notify();
     }
 
     /// A parked session finished a turn: keep working through its queue, then
     /// retain its provider for the bounded resident-idle grace period.
-    fn on_background_turn_completed(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    fn on_background_turn_completed(&mut self, session_id: &str, cx: &mut HostCx) {
         let Some(parked) = self.background.get_mut(session_id) else {
             return;
         };
@@ -5536,11 +5749,13 @@ impl AppState {
                     "parked session {session_id}: deferring settings restart for {} background task(s)",
                     parked.background_task_count
                 );
+                self.emit_session_status(session_id, cx);
                 cx.notify();
                 return;
             }
             parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -5550,10 +5765,12 @@ impl AppState {
                     "retaining parked session {session_id} for {} background task(s)",
                     parked.background_task_count
                 );
+                self.emit_session_status(session_id, cx);
                 cx.notify();
                 return;
             }
             self.mark_resident_idle(session_id, cx);
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -5571,15 +5788,11 @@ impl AppState {
                 log::warn!("parked session {session_id}: dispatch failed (process gone)");
             }
         }
+        self.emit_session_status(session_id, cx);
         cx.notify();
     }
 
-    fn deliver_child_callback(
-        &mut self,
-        child_id: &str,
-        status: TurnStatus,
-        cx: &mut Context<Self>,
-    ) {
+    fn deliver_child_callback(&mut self, child_id: &str, status: TurnStatus, cx: &mut HostCx) {
         let Some(child) = self
             .sessions
             .iter()
@@ -5601,13 +5814,14 @@ impl AppState {
         let parent_id = child.parent_session_id.clone().unwrap();
         let title = child.title;
         let store = self.store.clone();
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let read_id = child_id.clone();
-            let timeline = unblock(cx.background_executor(), move || {
+            let timeline = unblock(&host_cx, move || {
                 Timeline::fold_events(store.read_events(&read_id))
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 let child_still_exists = state.sessions.iter().any(|meta| {
                     meta.id == child_id
                         && meta.parent_session_id.as_deref() == Some(parent_id.as_str())
@@ -5629,15 +5843,14 @@ impl AppState {
                 state.callback_last_turn.insert(child_id, turn);
                 state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
             });
-        })
-        .detach();
+        });
     }
 
     fn deliver_child_approval_callback(
         &mut self,
         child_id: &str,
         request: &agent::ApprovalRequest,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let Some(child) = self
             .sessions
@@ -5693,7 +5906,7 @@ impl AppState {
         &mut self,
         parent_id: &str,
         text: String,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let can_steer = self
             .active
@@ -5737,6 +5950,7 @@ impl AppState {
             if should_start {
                 self.ensure_started(cx);
             }
+            self.emit_session_status(parent_id, cx);
             cx.notify();
             return;
         }
@@ -5760,6 +5974,7 @@ impl AppState {
             if idle_runtime {
                 self.ensure_session_started(parent_id, cx);
             }
+            self.emit_session_status(parent_id, cx);
             cx.notify();
         }
     }
@@ -5773,7 +5988,7 @@ impl AppState {
         text: &str,
         context_len: Option<usize>,
         attachments: &[Attachment],
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
             id: format!("local-user-{}", uuid::Uuid::new_v4()),
@@ -5794,7 +6009,7 @@ impl AppState {
         session_id: &str,
         text: &str,
         attachments: &[Attachment],
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) -> String {
         let request_id = format!("local-steer-{}", uuid::Uuid::new_v4());
         self.record_event(
@@ -5818,17 +6033,25 @@ impl AppState {
     ///
     /// A steered message IS part of the conversation, so it is recorded to the
     /// session JSONL as a user message (unlike a merely queued one).
-    pub fn steer(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut Context<Self>) {
+    pub fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut HostCx) {
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        self.steer_assembled(text, attachments, cx);
+        self.clear_consumed_draft_context(cx);
+    }
+
+    fn steer_assembled(&mut self, text: String, attachments: Vec<Attachment>, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
         match active.route(true) {
             // Nothing is running, so there is nothing to steer into: an ordinary
             // send is exactly the right thing.
-            SendRouting::Send | SendRouting::Queue => self.send_turn(text, attachments, cx),
+            SendRouting::Send | SendRouting::Queue => {
+                self.send_turn_assembled(text, attachments, cx)
+            }
             SendRouting::QueueUnsupported => {
                 let agent = active.meta.provider.display_name();
-                self.send_turn(text, attachments, cx);
+                self.send_turn_assembled(text, attachments, cx);
                 self.report_error(
                     RuntimeError::SteerUnsupported {
                         agent: agent.to_string(),
@@ -5864,6 +6087,7 @@ impl AppState {
                 {
                     self.report_error(RuntimeError::ProcessGone, cx);
                 }
+                self.emit_session_status(&session_id, cx);
                 cx.notify();
             }
         }
@@ -5871,7 +6095,7 @@ impl AppState {
 
     /// Queue strip: convert an already-queued message into a steering message —
     /// pull it out of the queue and inject it into the running turn.
-    pub fn steer_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub fn steer_queued(&mut self, id: u64, cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -5881,20 +6105,21 @@ impl AppState {
         // `steer` consumes the session's armed Ultrathink flag, but this
         // message captured its own at queue time — re-arm so it rides along.
         active.pending_ultrathink = message.ultrathink;
-        self.steer(message.text, message.attachments, cx);
+        self.steer_assembled(message.text, message.attachments, cx);
     }
 
     /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
     /// so nothing needs undoing. A submitted head cannot be removed until its
     /// correlated provider acknowledgement commits it.
-    pub fn drop_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub fn drop_queued(&mut self, id: u64, cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut() {
             let _ = active.take_queued(id);
         }
+        self.emit_active_session_status(cx);
         cx.notify();
     }
 
-    pub fn interrupt(&mut self, cx: &mut Context<Self>) {
+    pub fn interrupt(&mut self, cx: &mut HostCx) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
@@ -5909,7 +6134,7 @@ impl AppState {
         &mut self,
         request_id: String,
         decision: ApprovalDecision,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
@@ -5931,7 +6156,7 @@ impl AppState {
         &mut self,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
@@ -5960,7 +6185,7 @@ impl AppState {
         // a backend change and goes through the relay confirmation, exactly like
         // a provider change.
         profile_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
         let store = self.store.clone();
@@ -5986,6 +6211,7 @@ impl AppState {
             active.meta.option_selections.clear();
             active.provider_commands = store.load_commands(active.meta.provider, None);
             active.pending_ultrathink = false;
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6018,6 +6244,7 @@ impl AppState {
             active.provider_options.clear();
             active.pending_ultrathink = false;
             if active.pending_relay.is_some() {
+                self.emit_active_session_status(cx);
                 cx.notify();
                 return;
             }
@@ -6033,6 +6260,7 @@ impl AppState {
         active.meta.option_selections.clear();
         active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6051,7 +6279,7 @@ impl AppState {
         &mut self,
         id: &str,
         value: Option<serde_json::Value>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let Some(active) = self.active.as_mut() else {
             return;
@@ -6081,6 +6309,7 @@ impl AppState {
             active.live_option_selections = active.meta.option_selections.clone();
         }
         if active.draft {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6092,9 +6321,10 @@ impl AppState {
     /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
     /// T3 does not persist this as an option (it resolves back to the default),
     /// so it lives as a transient per-send flag.
-    pub fn select_ultrathink(&mut self, cx: &mut Context<Self>) {
+    pub fn select_ultrathink(&mut self, cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut() {
             active.pending_ultrathink = true;
+            self.emit_active_session_status(cx);
             cx.notify();
         }
     }
@@ -6125,7 +6355,7 @@ impl AppState {
     /// Set the Build/Plan interaction mode for the active session. Both
     /// providers switch live (Codex per turn, Claude via a control request), so
     /// no restart is scheduled.
-    pub fn set_interaction_mode(&mut self, mode: InteractionMode, cx: &mut Context<Self>) {
+    pub fn set_interaction_mode(&mut self, mode: InteractionMode, cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -6137,6 +6367,7 @@ impl AppState {
             let _ = commands.try_send(SessionCommand::SetInteractionMode(mode));
         }
         if active.draft {
+            self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
@@ -6146,7 +6377,7 @@ impl AppState {
     }
 
     /// Toggle Build ↔ Plan (the chip click and Shift+Tab).
-    pub fn toggle_interaction_mode(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_interaction_mode(&mut self, cx: &mut HostCx) {
         let next = match self.active_interaction_mode() {
             InteractionMode::Build => InteractionMode::Plan,
             InteractionMode::Plan => InteractionMode::Build,
@@ -6168,7 +6399,7 @@ impl AppState {
 
     /// Accept the proposed plan: send the verbatim implementation prompt, switch
     /// to Build mode, and persist the decision before dispatching the turn.
-    pub fn implement_plan(&mut self, cx: &mut Context<Self>) {
+    pub fn implement_plan(&mut self, cx: &mut HostCx) {
         // A pending provider handoff makes `send_turn` defer. Validate it before
         // resolving the plan or changing mode, or the implementation prompt can
         // vanish while the UI claims the plan was accepted.
@@ -6195,12 +6426,12 @@ impl AppState {
             cx,
         );
         self.set_interaction_mode(InteractionMode::Build, cx);
-        self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
+        self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
     }
 
     /// Leave the plan captured in history while removing its actionable
     /// composer state.
-    pub fn dismiss_plan(&mut self, cx: &mut Context<Self>) {
+    pub fn dismiss_plan(&mut self, cx: &mut HostCx) {
         let Some((session_id, item_id)) = self.active.as_ref().and_then(|active| {
             active
                 .timeline
@@ -6222,7 +6453,7 @@ impl AppState {
 
     /// Accept the proposed plan in a fresh thread in the same project (same
     /// cwd/model/options, Build mode) titled "Implement <plan title>".
-    pub fn implement_plan_in_new_thread(&mut self, title: String, cx: &mut Context<Self>) {
+    pub fn implement_plan_in_new_thread(&mut self, title: String, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -6296,43 +6527,52 @@ impl AppState {
             idle_since: None,
             provider_commands,
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
+        self.emit_domain(
+            Topic::SessionEvents {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionSnapshot(Vec::new()),
+            cx,
+        );
         self.refresh_session_git_branch(session_id, cwd, cx);
-        self.send_turn(implement_prompt(&markdown), Vec::new(), cx);
+        self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
         cx.notify();
     }
 
     /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
-    pub fn copy_plan(&mut self, markdown: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown));
+    pub fn copy_plan(&mut self, markdown: String, cx: &mut HostCx) {
+        emit_runtime(
+            cx,
+            AppEvent::Effect(RuntimeEffect::CopyToClipboard { text: markdown }),
+        );
     }
 
     /// Write the plan markdown to `PLAN-<n>.md` in the session cwd, choosing the
     /// lowest unused index ("Save to workspace"). Emits a success/error notice.
-    pub fn save_plan_to_workspace(&mut self, markdown: String, cx: &mut Context<Self>) {
+    pub fn save_plan_to_workspace(&mut self, markdown: String, cx: &mut HostCx) {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             return;
         };
-        cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = unblock(&host_cx, move || {
                 user_files::save_plan_to_workspace(&cwd, &markdown)
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 match result {
                     Ok(path) => {
                         let name = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
+                        );
                     }
                     Err(err) => state.report_error(
                         RuntimeError::PersistEvent {
@@ -6343,34 +6583,32 @@ impl AppState {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// Save the plan markdown to the user's Downloads directory (falling back to
     /// the session cwd) with a title-derived filename ("Download as markdown").
-    pub fn download_plan(
-        &mut self,
-        markdown: String,
-        fallback_title: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn download_plan(&mut self, markdown: String, fallback_title: String, cx: &mut HostCx) {
         let title = plan_title(&markdown).unwrap_or(fallback_title);
         let filename = format!("{}.md", sanitize_filename(&title));
         let fallback_cwd = self.active.as_ref().map(|a| a.meta.cwd.clone());
-        cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = unblock(&host_cx, move || {
                 user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
             })
             .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 match result {
                     Ok(path) => {
                         let name = path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        cx.emit(AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
+                        );
                     }
                     Err(err) => state.report_error(
                         RuntimeError::PersistEvent {
@@ -6381,8 +6619,7 @@ impl AppState {
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// The active session's latest structured plan steps and proposed plan (for
@@ -6401,165 +6638,35 @@ impl AppState {
             .map(|p| p.markdown.clone())
     }
 
-    // -- right panel tabs ---------------------------------------------------
-
-    pub fn right_tab(&self) -> RightTab {
-        self.active
-            .as_ref()
-            .map(|a| a.right_tab)
-            .unwrap_or_default()
-    }
-
-    /// Whether the right panel should offer a "Plan" tab (a proposed plan
-    /// exists or the session is in Plan mode); otherwise the tab is "Tasks".
-    pub fn plan_tab_active_label(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| {
-            a.timeline.proposed_plan.is_some() || a.meta.interaction_mode == InteractionMode::Plan
-        })
-    }
-
-    /// Switch the right panel's tab without changing its open state.
-    pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            active.right_tab = tab;
-            cx.notify();
-        }
-    }
-
-    /// The header plan/task toggle: open the Plan tab, switch to it if already
-    /// open on another tab, else close it.
-    pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            if active.diff_open && active.right_tab == RightTab::Plan {
-                active.diff_open = false;
-                if active.timeline.turn_running {
-                    active.auto_open_suppressed = true;
-                }
-            } else {
-                active.diff_open = true;
-                active.right_tab = RightTab::Plan;
-            }
-            cx.notify();
-        }
-    }
-
-    /// The header preview toggle: open the Preview tab, switch to it if the
-    /// panel is already open on another tab, else close it.
-    pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            if active.diff_open && active.right_tab == RightTab::Preview {
-                active.diff_open = false;
-                if active.timeline.turn_running {
-                    active.auto_open_suppressed = true;
-                }
-            } else {
-                active.diff_open = true;
-                active.right_tab = RightTab::Preview;
-            }
-            cx.notify();
-        }
-    }
-
-    /// The preview chrome's close button: close the right panel when it is
-    /// showing Preview. The PreviewPanel pairs this with dropping the
-    /// conversation's WebView so the page itself is torn down, not just hidden.
-    pub fn close_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut()
-            && active.diff_open
-            && active.right_tab == RightTab::Preview
-        {
-            active.diff_open = false;
-            if active.timeline.turn_running {
-                active.auto_open_suppressed = true;
-            }
-            cx.notify();
-        }
-    }
-
-    /// Open the right panel on the Preview tab (used when the agent drives the
-    /// preview so the webview surfaces without a manual toggle).
-    pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(active) = self.active.as_mut() {
-            let mut panel = RightPanelState::capture(active);
-            if panel.open_preview() {
-                panel.restore_into(active);
-                cx.notify();
-            }
-        }
-    }
-
-    /// Open Preview in the owning conversation's right-panel state without
-    /// changing which conversation the user is viewing.
-    pub fn open_preview_panel_for(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.active_session_id() == Some(session_id) {
-            self.open_preview_panel(cx);
-            return;
-        }
-
-        let mut changed = false;
-        let destination = ConversationDestination::Thread(session_id.to_string());
-        let mut parked_ui = None;
-        if let Some(background) = self.background.get_mut(session_id) {
-            let mut panel = RightPanelState::capture(background);
-            changed |= panel.open_preview();
-            panel.restore_into(background);
-            if !self.conversation_ui.contains_key(&destination) {
-                parked_ui = Some(ConversationUiState::take_from(background));
-            }
-        }
-        if let Some(ui) = parked_ui {
-            self.conversation_ui.insert(destination.clone(), ui);
-        }
-        if let Some(ui) = self.conversation_ui.get_mut(&destination) {
-            changed |= ui.right_panel.open_preview();
-        }
-        if changed {
-            cx.notify();
-        }
-    }
-
-    /// Whether the right panel is open on the Preview tab (header button state).
-    pub fn preview_panel_showing(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.diff_open && a.right_tab == RightTab::Preview)
-    }
-
-    /// Whether the right panel is open on the Plan tab (header button state).
-    pub fn plan_panel_showing(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.diff_open && a.right_tab == RightTab::Plan)
-    }
-
     // -- git branch picker (checkout row) -----------------------------------
 
     /// Load the local branches for the active session's cwd in the background
     /// (called when the checkout-row popover opens).
-    pub fn load_branches(&mut self, cx: &mut Context<Self>) {
+    pub fn load_branches(&mut self, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
-        cx.spawn(async move |this, cx| {
-            let branches = unblock(cx.background_executor(), move || list_git_branches(&cwd)).await;
-            let _ = this.update(cx, |state, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let branches = unblock(&host_cx, move || list_git_branches(&cwd)).await;
+            host_cx.enqueue(move |state, cx| {
                 if let Some(active) = state.active.as_mut()
                     && active.meta.id == session_id
                 {
                     active.branches = branches;
+                    state.emit_session_status(&session_id, cx);
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// Check out `branch` in the active session's cwd, if the working tree is
     /// clean. Runs git off the main thread; reports success/failure as an
     /// `AppEvent` the chat view turns into a notification.
-    pub fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+    pub fn checkout_branch(&mut self, branch: String, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -6569,12 +6676,10 @@ impl AppState {
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
         let branch_for_task = branch.clone();
-        cx.spawn(async move |this, cx| {
-            let result = unblock(cx.background_executor(), move || {
-                checkout_if_clean(&cwd, &branch_for_task)
-            })
-            .await;
-            let _ = this.update(cx, |state, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = unblock(&host_cx, move || checkout_if_clean(&cwd, &branch_for_task)).await;
+            host_cx.enqueue(move |state, cx| {
                 match result {
                     Ok(()) => {
                         if let Some(cwd) = state
@@ -6585,19 +6690,21 @@ impl AppState {
                         {
                             state.refresh_session_git_branch(session_id.clone(), cwd, cx);
                         }
-                        cx.emit(AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }));
+                        emit_runtime(
+                            cx,
+                            AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
+                        );
                     }
                     Err(CheckoutError::Dirty) => {
-                        cx.emit(AppEvent::Error(RuntimeError::DirtyTree));
+                        emit_runtime(cx, AppEvent::Error(RuntimeError::DirtyTree));
                     }
                     Err(CheckoutError::Git(message)) => {
-                        cx.emit(AppEvent::Error(RuntimeError::External(message)))
+                        emit_runtime(cx, AppEvent::Error(RuntimeError::External(message)))
                     }
                 }
                 cx.notify();
             });
-        })
-        .detach();
+        });
     }
 
     /// Whether the live provider is running a different model than the one now
@@ -6621,7 +6728,7 @@ impl AppState {
     /// Select `mode` for the active session and persist it. Claude applies the
     /// switch live over the control protocol; Codex (which binds the mode at
     /// thread start) instead restarts via the resume cursor on the next turn.
-    pub fn set_active_approval_mode(&mut self, mode: ApprovalMode, cx: &mut Context<Self>) {
+    pub fn set_active_approval_mode(&mut self, mode: ApprovalMode, cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -6654,7 +6761,7 @@ impl AppState {
     }
 
     /// Toggle a model id in the persisted favorites list.
-    pub fn toggle_favorite_model(&mut self, model: &str, cx: &mut Context<Self>) {
+    pub fn toggle_favorite_model(&mut self, model: &str, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
         if let Some(pos) = settings.favorite_models.iter().position(|m| m == model) {
             settings.favorite_models.remove(pos);
@@ -6671,7 +6778,7 @@ impl AppState {
     /// Request a provider-owned restore point. No local Git or transcript
     /// operation is performed: the canonical timeline changes only after the
     /// provider confirms the native request.
-    pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode, cx: &mut Context<Self>) {
+    pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
@@ -6725,14 +6832,8 @@ impl AppState {
         } else {
             self.ensure_started(cx);
         }
+        self.emit_session_status(&session_id, cx);
         cx.notify();
-    }
-
-    /// Consume the prompt returned by Claude's native conversation rewind.
-    /// The composer calls this once and owns the visible edit buffer afterward.
-    pub fn take_native_rewind_prefill(&mut self) -> Option<String> {
-        let session_id = self.active_session_id()?.to_owned();
-        self.native_rewind_prefills.remove(&session_id)
     }
 
     pub fn native_rewind_pending(&self) -> bool {
@@ -6741,7 +6842,7 @@ impl AppState {
     }
 
     /// Spawn the provider process for the active session if it isn't running.
-    fn ensure_started(&mut self, cx: &mut Context<Self>) {
+    fn ensure_started(&mut self, cx: &mut HostCx) {
         let Some(session_id) = self.active_session_id().map(str::to_owned) else {
             return;
         };
@@ -6749,7 +6850,7 @@ impl AppState {
     }
 
     /// Spawn a provider for either the foreground session or a parked child.
-    fn ensure_session_started(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    fn ensure_session_started(&mut self, session_id: &str, cx: &mut HostCx) {
         let idle = self
             .active
             .as_ref()
@@ -6784,6 +6885,7 @@ impl AppState {
         active.live_option_selections = active.meta.option_selections.clone();
 
         let meta = active.meta.clone();
+        self.emit_session_status(session_id, cx);
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
         let preview_registration = self.preview_registration_for(&meta);
@@ -6800,10 +6902,11 @@ impl AppState {
             log::info!("starting provider {:?} (fresh session)", meta.provider);
         }
 
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let env_meta = meta.clone();
             let env_settings = settings.clone();
-            let launch_env = unblock(cx.background_executor(), move || {
+            let launch_env = unblock(&host_cx, move || {
                 session_launch_env(&env_settings, &settings_store, &env_meta)
             })
             .await;
@@ -6816,7 +6919,7 @@ impl AppState {
                 computer_use_registration,
             );
             let result = start_session(meta.provider, opts).await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 let matches_active = state.active.as_ref().is_some_and(|active| {
                     active.meta.id == session_id && active.is_starting_generation(generation)
                 });
@@ -6838,18 +6941,15 @@ impl AppState {
                         let events = handle.events.clone();
                         let pump_session = session_id.clone();
                         let pump_commands = handle.commands.clone();
-                        let pump = cx.spawn(async move |this, cx| {
+                        let pump_cx = cx.clone();
+                        let pump = HostCx::spawn_background(cx, async move {
                             while let Ok(event) = events.recv().await {
-                                if this
-                                    .update(cx, |state, cx| {
-                                        state.on_event(&pump_session, event, cx)
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                                let event_session = pump_session.clone();
+                                pump_cx.enqueue(move |state, cx| {
+                                    state.on_event(&event_session, event, cx);
+                                });
                             }
-                            let _ = this.update(cx, |state, cx| {
+                            pump_cx.enqueue(move |state, cx| {
                                 state.on_event_stream_ended(&pump_session, &pump_commands, cx);
                             });
                         });
@@ -6896,6 +6996,7 @@ impl AppState {
                                 state.on_background_turn_completed(&session_id, cx);
                             }
                         }
+                        state.emit_session_status(&session_id, cx);
                         cx.notify();
                     }
                     Err(err) => {
@@ -6937,13 +7038,13 @@ impl AppState {
                                 },
                                 cx,
                             );
+                            state.emit_session_status(&session_id, cx);
                             cx.notify();
                         }
                     }
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// The provider's event stream ended without a `SessionClosed`. If the
@@ -6959,7 +7060,7 @@ impl AppState {
         &mut self,
         session_id: &str,
         pump_commands: &async_channel::Sender<SessionCommand>,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let still_owned = self
             .active
@@ -6986,7 +7087,7 @@ impl AppState {
     }
 
     /// Handle one canonical event from the live provider.
-    fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut Context<Self>) {
+    fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
         if self.smoke.is_some() {
             log::info!(
                 "event: {}",
@@ -7001,6 +7102,7 @@ impl AppState {
 
         if let AgentEvent::RewindFailed { error, .. } = &event {
             self.pending_native_rewinds.remove(session_id);
+            self.emit_session_status(session_id, cx);
             self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
             cx.notify();
             return;
@@ -7031,6 +7133,7 @@ impl AppState {
                     self.mark_resident_idle(session_id, cx);
                 }
             }
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -7056,6 +7159,7 @@ impl AppState {
                     } else {
                         false
                     };
+                    self.emit_session_status(session_id, cx);
                     let is_child = self
                         .sessions
                         .iter()
@@ -7094,6 +7198,7 @@ impl AppState {
                 },
                 cx,
             );
+            self.emit_session_status(session_id, cx);
             cx.notify();
             return;
         }
@@ -7127,6 +7232,7 @@ impl AppState {
                     cx,
                 );
             }
+            self.emit_session_status(session_id, cx);
             return;
         }
 
@@ -7186,6 +7292,7 @@ impl AppState {
             if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
                 self.persist_meta(&meta, cx);
             }
+            self.emit_session_status(session_id, cx);
             return;
         }
 
@@ -7229,7 +7336,6 @@ impl AppState {
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
-                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
@@ -7255,31 +7361,44 @@ impl AppState {
                 if mode.includes_conversation()
                     && let Some(prefill) = prefill
                 {
-                    self.native_rewind_prefills
-                        .insert(session_id.to_owned(), prefill.clone());
+                    // Ownership of this one-shot value crosses serde exactly
+                    // once. The client replica retains it per session until
+                    // the composer consumes it.
+                    self.emit_domain(
+                        Topic::SessionStatus {
+                            session_id: session_id.to_owned(),
+                        },
+                        ServerEvent::NativeRewindPrefill {
+                            session_id: session_id.to_owned(),
+                            text: prefill.clone(),
+                        },
+                        cx,
+                    );
                 }
-                self.diff_refresh_generation = self.diff_refresh_generation.wrapping_add(1);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
-                cx.emit(AppEvent::Notice(RuntimeNotice::NativeRewindCompleted {
-                    mode: *mode,
-                }));
+                emit_runtime(
+                    cx,
+                    AppEvent::Notice(RuntimeNotice::NativeRewindCompleted { mode: *mode }),
+                );
             }
             AgentEvent::Error { message, .. } => {
-                cx.emit(AppEvent::Error(RuntimeError::ProviderMessage(
-                    message.clone(),
-                )));
+                emit_runtime(
+                    cx,
+                    AppEvent::Error(RuntimeError::ProviderMessage(message.clone())),
+                );
             }
             AgentEvent::Warning { message } => {
                 // Provider warnings (config problems, deprecations, failed
                 // mode switches) explain later misbehavior: a log line alone
                 // hides them from the person who needs to act on them.
-                cx.emit(AppEvent::Notice(RuntimeNotice::ProviderMessage(
-                    message.clone(),
-                )));
+                emit_runtime(
+                    cx,
+                    AppEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
+                );
             }
             _ => {}
         }
@@ -7295,28 +7414,6 @@ impl AppState {
                 self.deliver_child_approval_callback(session_id, request, cx);
             }
             _ => {}
-        }
-
-        // Plan surfaces: a new turn clears the per-turn auto-open suppression;
-        // the first structured plan update of a turn may auto-open the task
-        // panel. Proposed-plan readiness is entirely folded by Timeline.
-        let auto_open = self.settings.auto_open_task_panel;
-        if let Some(active) = self
-            .active
-            .as_mut()
-            .filter(|active| active.meta.id == session_id)
-        {
-            match &event {
-                AgentEvent::TurnStarted { .. } => active.auto_open_suppressed = false,
-                AgentEvent::PlanUpdated { .. } => {
-                    let already_showing = active.diff_open && active.right_tab == RightTab::Plan;
-                    if auto_open && !active.auto_open_suppressed && !already_showing {
-                        active.diff_open = true;
-                        active.right_tab = RightTab::Plan;
-                    }
-                }
-                _ => {}
-            }
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
@@ -7360,6 +7457,18 @@ impl AppState {
             && self.active_session_id() != Some(session_id)
         {
             self.on_background_turn_completed(session_id, cx);
+        }
+
+        if matches!(
+            event,
+            AgentEvent::TurnStarted { .. }
+                | AgentEvent::SessionStarted { .. }
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::RewindCompleted { .. }
+                | AgentEvent::ApprovalRequested(_)
+                | AgentEvent::ApprovalResolved { .. }
+        ) {
+            self.emit_session_status(session_id, cx);
         }
 
         // Smoke-mode automation.
@@ -7444,9 +7553,19 @@ impl AppState {
     /// Append to JSONL + fold into the matching active or background timeline.
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
-    fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut Context<Self>) {
+    fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
         self.store_append_generation += 1;
         let ts = now_millis();
+        self.emit_domain(
+            Topic::SessionEvents {
+                session_id: session_id.to_string(),
+            },
+            ServerEvent::SessionEvent(SessionEventRecord {
+                ts: Some(ts),
+                event: event.clone(),
+            }),
+            cx,
+        );
         self.enqueue_store_write(
             StoreWrite::AppendEvent {
                 id: session_id.to_string(),
@@ -7473,7 +7592,7 @@ impl AppState {
         &mut self,
         first_message: &str,
         attachments: &[Attachment],
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let fallback = truncate_title(first_message);
         if fallback.is_empty() {
@@ -7501,12 +7620,13 @@ impl AppState {
         let settings_store = self.settings_store.clone();
         let source = first_message.to_string();
         let attachments = attachments.to_vec();
-        let executor = cx.background_executor().clone();
+        let executor = cx.clone();
 
-        cx.spawn(async move |this, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
             let env_meta = title_meta.clone();
             let env_settings = settings.clone();
-            let launch_env = unblock(cx.background_executor(), move || {
+            let launch_env = unblock(&host_cx, move || {
                 session_launch_env(&env_settings, &settings_store, &env_meta)
             })
             .await;
@@ -7514,7 +7634,7 @@ impl AppState {
             let title =
                 generate_ai_title(title_meta.provider, options, source, attachments, executor)
                     .await;
-            let _ = this.update(cx, |state, cx| {
+            host_cx.enqueue(move |state, cx| {
                 if let Some(title) = title {
                     state.apply_generated_title(&session_id, &fallback, &title, cx);
                 } else {
@@ -7523,8 +7643,7 @@ impl AppState {
                     );
                 }
             });
-        })
-        .detach();
+        });
     }
 
     fn apply_generated_title(
@@ -7532,7 +7651,7 @@ impl AppState {
         session_id: &str,
         fallback: &str,
         generated: &str,
-        cx: &mut Context<Self>,
+        cx: &mut HostCx,
     ) {
         let fallback_is_current = self
             .sessions
@@ -7553,7 +7672,7 @@ impl AppState {
         self.background.get_mut(session_id).map(|s| &mut s.meta)
     }
 
-    fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut Context<Self>) {
+    fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
         // An update landing on the conversation the user is currently viewing
         // is already read: advance the last-visited watermark alongside it so
         // switching away later does not surface a stale unread dot. Threads the
@@ -7580,15 +7699,14 @@ impl AppState {
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
+        self.emit_session_status(&meta.id, cx);
         cx.notify();
     }
 
-    pub fn shutdown_active(&mut self, cx: &mut Context<Self>) {
-        self.persist_terminal_preferences(cx);
+    pub fn shutdown_active(&mut self, _cx: &mut HostCx) {
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             self.sessions_awaiting_approval.remove(&session_id);
             self.pending_native_rewinds.remove(&session_id);
-            self.native_rewind_prefills.remove(&session_id);
         }
         if let Some(active) = self.active.take()
             && let Runtime::Live(commands) = active.runtime
@@ -7598,7 +7716,7 @@ impl AppState {
     }
 
     /// Shut down every provider process before the application exits.
-    pub fn shutdown_all(&mut self, cx: &mut Context<Self>) {
+    pub fn shutdown_all(&mut self, cx: &mut HostCx) {
         self.shutdown_active(cx);
         for (_, parked) in self.background.drain() {
             if let Runtime::Live(commands) = parked.runtime {
@@ -7607,21 +7725,18 @@ impl AppState {
         }
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
-        self.conversation_ui.clear();
+        self.terminal_workspaces.clear();
         self.pending_native_rewinds.clear();
-        self.native_rewind_prefills.clear();
     }
 
     /// Leave the active session without killing its provider or in-memory work.
     /// Every "switch away" path goes through here; only destructive paths use
     /// `shutdown_active` directly.
-    fn park_active(&mut self, cx: &mut Context<Self>) {
-        self.pending_diff_focus = None;
-        self.persist_terminal_preferences(cx);
+    fn park_active(&mut self, cx: &mut HostCx) {
         let Some(mut active) = self.active.take() else {
             return;
         };
-        self.park_conversation_ui(&mut active);
+        self.park_terminal_workspace(&mut active);
         let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
         let has_work = active.turn_in_flight
             || active.delivery_in_flight.is_some()
@@ -7645,12 +7760,13 @@ impl AppState {
             if !has_work {
                 self.mark_resident_idle(&session_id, cx);
             }
+            self.emit_session_status(&session_id, cx);
         }
     }
 
     /// Start a fresh idle grace period, enforce the resident LRU bound, and
     /// reap only if no intervening work or re-adoption made the timer stale.
-    fn mark_resident_idle(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
         let fully_idle = self.background.get(session_id).is_some_and(|session| {
             session.queue.is_empty()
                 && !session.turn_in_flight
@@ -7663,6 +7779,7 @@ impl AppState {
 
         let idle_since = Instant::now();
         self.background.get_mut(session_id).unwrap().idle_since = Some(idle_since);
+        self.emit_session_status(session_id, cx);
 
         let oldest = {
             let mut residents: Vec<_> = self
@@ -7690,9 +7807,10 @@ impl AppState {
         }
 
         let session_id = session_id.to_string();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(RESIDENT_IDLE_GRACE).await;
-            let _ = this.update(cx, |state, cx| {
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            host_cx.timer(RESIDENT_IDLE_GRACE).await;
+            host_cx.enqueue(move |state, cx| {
                 let still_idle = state.background.get(&session_id).is_some_and(|session| {
                     session.idle_since == Some(idle_since)
                         && session.queue.is_empty()
@@ -7705,15 +7823,13 @@ impl AppState {
                     cx.notify();
                 }
             });
-        })
-        .detach();
+        });
     }
 
     /// Shut down and forget a parked session (archive/delete paths).
     fn drop_background(&mut self, session_id: &str) {
         self.sessions_awaiting_approval.remove(session_id);
         self.pending_native_rewinds.remove(session_id);
-        self.native_rewind_prefills.remove(session_id);
         if let Some(parked) = self.background.remove(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {
@@ -7748,9 +7864,9 @@ impl AppState {
         }
     }
 
-    fn report_error(&mut self, error: RuntimeError, cx: &mut Context<Self>) {
+    fn report_error(&mut self, error: RuntimeError, cx: &mut HostCx) {
         log::error!("{error:?}");
-        cx.emit(AppEvent::Error(error));
+        emit_runtime(cx, AppEvent::Error(error));
     }
 }
 
@@ -8102,14 +8218,13 @@ fn assemble_callback_text(
     format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
 }
 
-/// Parse a `#rrggbb` accent color into a gpui color; `None` when malformed.
-fn parse_hex_color(raw: &str) -> Option<gpui::Rgba> {
+/// Parse a `#rrggbb` accent color; `None` when malformed.
+fn parse_hex_color(raw: &str) -> Option<u32> {
     let hex = raw.trim().trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    let value = u32::from_str_radix(hex, 16).ok()?;
-    Some(gpui::rgb(value))
+    u32::from_str_radix(hex, 16).ok()
 }
 
 /// A stable settings key for a user-defined ACP agent, derived from its name.
@@ -8199,6 +8314,30 @@ fn launch_env_for_profile(
         env,
         home: profile_settings.effective_home(),
     }
+}
+
+fn provider_secret_names(
+    settings: &Settings,
+    settings_store: &SettingsStore,
+) -> HashMap<String, HashSet<String>> {
+    [
+        ProviderKind::Codex,
+        ProviderKind::ClaudeCode,
+        ProviderKind::Pi,
+        ProviderKind::OpenCode,
+    ]
+    .into_iter()
+    .flat_map(|kind| settings.profiles_for_kind(kind))
+    .map(|profile| {
+        let id = profile.id;
+        let names = launch_env_for_profile(settings, &id, settings_store.profile_secrets(&id))
+            .env
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        (id, names)
+    })
+    .collect()
 }
 
 fn session_launch_env(
@@ -8320,7 +8459,7 @@ async fn generate_ai_title(
     mut options: SessionOptions,
     source: String,
     attachments: Vec<Attachment>,
-    executor: BackgroundExecutor,
+    executor: HostCx,
 ) -> Option<String> {
     // Isolate even a badly behaved title request from the user's checkout. The
     // title prompt forbids tools and Supervised mode denies side effects, but a
@@ -8543,10 +8682,155 @@ fn descendant_session_ids(sessions: &[SessionMeta], root_id: &str) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext as _;
+    use std::cell::RefCell;
+    use std::rc::{Rc, Weak};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
 
-    #[gpui::test]
-    fn archive_and_unarchive_apply_exact_timestamp_cascades(cx: &mut gpui::TestAppContext) {
+    use crate::host::{HostMsg, HostOutput};
+
+    /// Plain smol/mailbox replacement for the former gpui test context.
+    ///
+    /// Tests still exercise the exact production [`HostCx`] seam: background
+    /// completions must re-enter through `HostMsg::Enqueued`, and
+    /// `run_until_parked` is the only code that mutates the owned `AppState`.
+    struct TestAppContext {
+        mailbox_tx: async_channel::Sender<HostMsg>,
+        mailbox_rx: async_channel::Receiver<HostMsg>,
+        outgoing_tx: async_channel::Sender<crate::host::HostOutput>,
+        outgoing_rx: async_channel::Receiver<crate::host::HostOutput>,
+        changed_tx: async_channel::Sender<()>,
+        changed_rx: async_channel::Receiver<()>,
+        state: Option<Weak<RefCell<AppState>>>,
+        virtual_clock_nanos: Arc<AtomicU64>,
+    }
+
+    impl Default for TestAppContext {
+        fn default() -> Self {
+            let (mailbox_tx, mailbox_rx) = async_channel::unbounded();
+            let (outgoing_tx, outgoing_rx) = async_channel::unbounded();
+            let (changed_tx, changed_rx) = async_channel::bounded(1);
+            Self {
+                mailbox_tx,
+                mailbox_rx,
+                outgoing_tx,
+                outgoing_rx,
+                changed_tx,
+                changed_rx,
+                state: None,
+                virtual_clock_nanos: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    impl TestAppContext {
+        fn new_entity(&mut self, build: impl FnOnce(&mut ()) -> AppState) -> TestEntity {
+            let state = Rc::new(RefCell::new(build(&mut ())));
+            self.state = Some(Rc::downgrade(&state));
+            TestEntity(state)
+        }
+
+        fn host_cx(&self) -> HostCx {
+            HostCx::new_for_test(
+                self.mailbox_tx.clone(),
+                self.outgoing_tx.clone(),
+                self.changed_tx.clone(),
+                self.virtual_clock_nanos.clone(),
+            )
+        }
+
+        fn executor(&self) -> TestExecutor {
+            TestExecutor(self.virtual_clock_nanos.clone())
+        }
+
+        fn run_until_parked(&mut self) {
+            let state = self
+                .state
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .expect("test state must outlive its context");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut idle_passes = 0_u32;
+
+            while Instant::now() < deadline {
+                let mut had_work = false;
+                while let Ok(message) = self.mailbox_rx.try_recv() {
+                    had_work = true;
+                    match message {
+                        HostMsg::Enqueued(completion) => {
+                            let mut host_cx = self.host_cx();
+                            let mut state = state.borrow_mut();
+                            completion(&mut state, &mut host_cx);
+                            state.sync_terminal_handles();
+                        }
+                        HostMsg::DecodedClient(_) => {
+                            panic!("unit test harness received a protocol client message")
+                        }
+                        HostMsg::ClientClosed => {
+                            panic!("unit test harness received a client-close message")
+                        }
+                    }
+                }
+                while self.outgoing_rx.try_recv().is_ok() {
+                    had_work = true;
+                }
+                while self.changed_rx.try_recv().is_ok() {
+                    had_work = true;
+                }
+
+                if had_work {
+                    idle_passes = 0;
+                } else {
+                    idle_passes += 1;
+                    if idle_passes >= 50 {
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("test host failed to park within five seconds");
+        }
+    }
+
+    struct TestExecutor(Arc<AtomicU64>);
+
+    impl TestExecutor {
+        fn advance_clock(&self, duration: Duration) {
+            let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+            self.0.fetch_add(nanos, Ordering::SeqCst);
+        }
+    }
+
+    struct TestEntity(Rc<RefCell<AppState>>);
+
+    impl TestEntity {
+        fn host_update<R>(
+            &self,
+            cx: &mut TestAppContext,
+            update: impl FnOnce(&mut AppState, &mut HostCx) -> R,
+        ) -> R {
+            let mut host_cx = cx.host_cx();
+            update(&mut self.0.borrow_mut(), &mut host_cx)
+        }
+
+        fn update<R>(
+            &self,
+            cx: &mut TestAppContext,
+            update: impl FnOnce(&mut AppState, &mut HostCx) -> R,
+        ) -> R {
+            self.host_update(cx, update)
+        }
+
+        fn read_with<R>(&self, _cx: &TestAppContext, read: impl FnOnce(&AppState, &()) -> R) -> R {
+            read(&self.0.borrow(), &())
+        }
+    }
+
+    #[test]
+    fn archive_and_unarchive_apply_exact_timestamp_cascades() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-archive-cascade-test-{}",
             uuid::Uuid::new_v4()
@@ -8562,9 +8846,9 @@ mod tests {
             meta.parent_session_id = parent.map(str::to_string);
             store.upsert_meta(&meta).unwrap();
         }
-        let state = cx.new(|_| AppState::new(store.clone()));
+        let state = cx.new_entity(|_| AppState::new(store.clone()));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.archive_session("parent", cx);
             let archived_at = state
                 .sessions
@@ -8634,34 +8918,6 @@ mod tests {
                 .filter(|meta| meta.id != "grandchild")
                 .all(|meta| meta.archived_at.is_none())
         );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn diff_file_focus_request_is_consumed_once_and_discarded_on_scope_change() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-diff-focus-test-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut state = AppState::new(store);
-
-        state.set_diff_focus("session-a".into(), 3, "src/second.rs".into());
-        assert_eq!(state.take_diff_focus("session-a", 2), None);
-        assert!(state.pending_diff_focus().is_some());
-        assert_eq!(
-            state.take_diff_focus("session-a", 3),
-            Some(DiffFocusRequest {
-                session: "session-a".into(),
-                turn: 3,
-                path: "src/second.rs".into(),
-            })
-        );
-        assert_eq!(state.take_diff_focus("session-a", 3), None);
-
-        state.set_diff_focus("session-a".into(), 3, "src/second.rs".into());
-        // The diff panel invokes this when its local scope selector changes.
-        state.discard_diff_focus();
-        assert!(state.pending_diff_focus().is_none());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -8759,8 +9015,9 @@ mod tests {
         assert_eq!(fallback.profile_id, None);
     }
 
-    #[gpui::test]
-    fn late_ai_title_does_not_overwrite_a_manual_rename(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn late_ai_title_does_not_overwrite_a_manual_rename() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-ai-title-race-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
@@ -8768,9 +9025,9 @@ mod tests {
         meta.title = "first message fallback".into();
         let id = meta.id.clone();
         store.upsert_meta(&meta).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.apply_generated_title(&id, "first message fallback", "AI generated title", cx);
             assert_eq!(state.sessions[0].title, "AI generated title");
 
@@ -8872,16 +9129,16 @@ mod tests {
         let mut state = AppState::new(store);
         state.provider_versions.insert(
             ProviderKind::ClaudeCode,
-            ProviderVersionStatus {
+            ProviderVersionState {
                 install_source: InstallSource::Npm,
-                ..ProviderVersionStatus::default()
+                ..ProviderVersionState::default()
             },
         );
         state.provider_versions.insert(
             ProviderKind::Codex,
-            ProviderVersionStatus {
+            ProviderVersionState {
                 install_source: InstallSource::Native,
-                ..ProviderVersionStatus::default()
+                ..ProviderVersionState::default()
             },
         );
 
@@ -8942,21 +9199,94 @@ mod tests {
         assert!(acp.contains("Generic lead"));
     }
 
-    #[gpui::test]
-    fn orchestrate_turn_records_the_context_split_on_the_user_message(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn send_turn_assembles_draft_context_and_attachment_paths() {
+        let cx = &mut TestAppContext::default();
+        let root =
+            std::env::temp_dir().join(format!("tcode-send-assembly-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let attachment_path = root.join("sample.png");
+        std::fs::write(&attachment_path, [1, 2, 3]).unwrap();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let state = cx.new_entity(|_| AppState::new(store));
+        let (commands, receiver) = async_channel::unbounded();
+
+        state.host_update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "assembled".into();
+            active.terminal_workspace.contexts.push(TerminalContext {
+                id: 1,
+                terminal_label: "zsh".into(),
+                line_start: 12,
+                line_end: 13,
+                text: "cargo test\nok".into(),
+            });
+            state.active = Some(active);
+            state.add_review_comment(
+                ReviewComment::new(
+                    "src/lib.rs".into(),
+                    7,
+                    7,
+                    tcode_core::session::ReviewSide::New,
+                    "Please fix".into(),
+                    "let bad = true;".into(),
+                    "section".into(),
+                    "Changes".into(),
+                    3,
+                    4,
+                ),
+                cx,
+            );
+
+            state.send_turn("Explain this".into(), vec![attachment_path.clone()], cx);
+
+            let SessionCommand::SendTurn {
+                text, attachments, ..
+            } = receiver.try_recv().expect("assembled send command")
+            else {
+                panic!("expected SendTurn")
+            };
+            assert_eq!(
+                text,
+                "Explain this\n\n<terminal_context>\n- zsh lines 12-13:\n  12 | cargo test\n  13 | ok\n</terminal_context>\n\n<review_comment sectionId=\"section\" sectionTitle=\"Changes\" filePath=\"src/lib.rs\" startIndex=\"3\" endIndex=\"4\" rangeLabel=\"+7\">\nPlease fix\n```diff\nlet bad = true;\n```\n</review_comment>"
+            );
+            assert_eq!(
+                attachments,
+                vec![Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "AQID".into(),
+                    source_path: Some(attachment_path.to_string_lossy().into_owned()),
+                }]
+            );
+            assert!(
+                state
+                    .active
+                    .as_ref()
+                    .unwrap()
+                    .terminal_workspace
+                    .contexts
+                    .is_empty()
+            );
+            assert!(state.review_comments().is_empty());
+        });
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orchestrate_turn_records_the_context_split_on_the_user_message() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-split-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
         let mut expected_full = String::new();
         let mut expected_context = 0;
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             // A live, idle, already-enabled orchestrator: the turn is an ordinary
             // send (no restart, nothing in flight), so it flows through
             // record_user_message where the split is stored.
@@ -9132,115 +9462,9 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn right_and_bottom_workspaces_follow_their_thread(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-conversation-ui-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let mut first = SessionMeta::new(
-            ProviderKind::Codex,
-            PathBuf::from("/tmp/conversation-a"),
-            Some("gpt-5.6-luna".into()),
-        );
-        first.title = "Conversation A".into();
-        let mut second = SessionMeta::new(
-            ProviderKind::ClaudeCode,
-            PathBuf::from("/tmp/conversation-b"),
-            Some("claude-fable-5".into()),
-        );
-        second.title = "Conversation B".into();
-        store.upsert_meta(&first).unwrap();
-        store.upsert_meta(&second).unwrap();
-        let first_id = first.id.clone();
-        let second_id = second.id.clone();
-        let state = cx.new(|_| AppState::new(store));
-
-        state.update(cx, |state, cx| {
-            state.select_session(&first_id, cx);
-            let first = state.active.as_mut().unwrap();
-            first.diff_open = true;
-            first.diff_expanded = true;
-            first.diff_selected_turn = Some(3);
-            first.right_tab = RightTab::Preview;
-            first.terminal_workspace.open = true;
-            first.terminal_workspace.height = 318.;
-
-            state.select_session(&second_id, cx);
-            let second = state.active.as_ref().unwrap();
-            assert!(
-                !second.diff_open,
-                "another thread must start with its own right panel"
-            );
-            assert!(!second.terminal_workspace.open);
-            assert_eq!(second.terminal_workspace.height, 240.);
-
-            let second = state.active.as_mut().unwrap();
-            second.diff_open = true;
-            second.right_tab = RightTab::Plan;
-            second.terminal_workspace.height = 402.;
-
-            state.select_session(&first_id, cx);
-            let first = state.active.as_ref().unwrap();
-            assert!(first.diff_open);
-            assert!(first.diff_expanded);
-            assert_eq!(first.diff_selected_turn, Some(3));
-            assert_eq!(first.right_tab, RightTab::Preview);
-            assert!(first.terminal_workspace.open);
-            assert_eq!(first.terminal_workspace.height, 318.);
-
-            state.select_session(&second_id, cx);
-            let second = state.active.as_ref().unwrap();
-            assert!(second.diff_open);
-            assert_eq!(second.right_tab, RightTab::Plan);
-            assert_eq!(second.terminal_workspace.height, 402.);
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
-    fn preview_open_for_background_thread_does_not_switch_the_active_thread(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-background-preview-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let first = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/a"), None);
-        let second = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/b"), None);
-        store.upsert_meta(&first).unwrap();
-        store.upsert_meta(&second).unwrap();
-        let first_id = first.id.clone();
-        let second_id = second.id.clone();
-        let state = cx.new(|_| AppState::new(store));
-
-        state.update(cx, |state, cx| {
-            state.select_session(&first_id, cx);
-            let first = state.active.as_mut().unwrap();
-            first.turn_in_flight = true;
-            first.runtime = Runtime::Starting { generation: 1 };
-            state.select_session(&second_id, cx);
-            assert!(state.background.contains_key(&first_id));
-            state.open_preview_panel_for(&first_id, cx);
-
-            assert_eq!(state.active_session_id(), Some(second_id.as_str()));
-            assert!(!state.preview_panel_showing());
-            let background = state.background.get(&first_id).unwrap();
-            assert!(background.diff_open);
-            assert_eq!(background.right_tab, RightTab::Preview);
-
-            state.select_session(&first_id, cx);
-            assert!(state.preview_panel_showing());
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
-    fn updates_on_the_viewed_thread_do_not_mark_it_unread(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-viewed-unread-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
@@ -9250,9 +9474,9 @@ mod tests {
         store.upsert_meta(&second).unwrap();
         let first_id = first.id.clone();
         let second_id = second.id.clone();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.select_session(&first_id, cx);
 
             // A turn finishes while the user is watching: updated_at moves past
@@ -9283,67 +9507,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn draft_workspace_uses_the_same_project_key_as_composer_text(cx: &mut gpui::TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-draft-conversation-ui-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
-
-        state.update(cx, |state, cx| {
-            state.start_draft(
-                "project-stable".into(),
-                PathBuf::from("/tmp/project-stable"),
-                cx,
-            );
-            let first_id = state.active_session_id().unwrap().to_string();
-            assert_eq!(
-                state.active_conversation_ui_key().as_deref(),
-                Some("draft:project-stable")
-            );
-            let draft = state.active.as_mut().unwrap();
-            draft.diff_open = true;
-            draft.right_tab = RightTab::Preview;
-            draft.terminal_workspace.open = true;
-            draft.terminal_workspace.height = 355.;
-
-            // Opening New thread again allocates a new transient session id,
-            // but it represents the same composer/UI destination.
-            state.start_draft(
-                "project-stable".into(),
-                PathBuf::from("/tmp/project-stable"),
-                cx,
-            );
-            let second_id = state.active_session_id().unwrap().to_string();
-            assert_ne!(first_id, second_id);
-            let draft = state.active.as_ref().unwrap();
-            assert!(draft.diff_open);
-            assert_eq!(draft.right_tab, RightTab::Preview);
-            assert!(draft.terminal_workspace.open);
-            assert_eq!(draft.terminal_workspace.height, 355.);
-
-            // Committing keeps the active resources but moves external caches
-            // (such as PreviewPanel's WebView pool) to the real thread key.
-            state.commit_draft(cx).unwrap();
-            assert_eq!(
-                state.active_conversation_ui_key().as_deref(),
-                Some(second_id.as_str())
-            );
-        });
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[gpui::test]
-    fn draft_send_creates_session_with_project_cwd(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn draft_send_creates_session_with_project_cwd() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!("tcode-draft-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let project = Project::from_root(PathBuf::from("/tmp/tcode-draft-proj"));
         // Persist the project so the draft's project_id survives index migration.
         store.upsert_project(&project).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         // A draft is set up (cwd = project root) but not yet persisted.
         let draft = AppState::build_draft_session(
             project.id.clone(),
@@ -9358,7 +9530,7 @@ mod tests {
         assert_eq!(draft.meta.project_id.as_deref(), Some(project.id.as_str()));
         assert!(matches!(draft.runtime, Runtime::Idle));
         let draft_id = draft.meta.id.clone();
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(draft);
             // Not in the index until the first send materializes it.
             assert!(!state.sessions.iter().any(|m| m.id == draft_id));
@@ -9375,16 +9547,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn draft_inherits_newest_unarchived_session_from_same_project(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn draft_inherits_newest_unarchived_session_from_same_project() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-draft-project-defaults-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut other_project = SessionMeta::new(
                 ProviderKind::ClaudeCode,
                 PathBuf::from("/tmp/other"),
@@ -9462,16 +9635,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn draft_model_selection_switches_to_the_rows_explicit_provider(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn draft_model_selection_switches_to_the_rows_explicit_provider() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-draft-provider-selection-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut previous = SessionMeta::new(
                 ProviderKind::Codex,
                 PathBuf::from("/tmp/previous"),
@@ -9536,18 +9710,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-draft-fallback-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut global = SessionMeta::new(
                 ProviderKind::Acp,
                 PathBuf::from("/tmp/existing"),
@@ -10171,17 +10344,18 @@ mod tests {
         assert!(failed.contains("tokens: input 100 (+25 cached), output 40, total 165."));
     }
 
-    #[gpui::test]
-    fn child_approval_request_sends_exactly_one_parent_callback(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn child_approval_request_sends_exactly_one_parent_callback() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-approval-callback-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut parent = live_session(ProviderKind::Codex, commands);
             parent.meta.id = "parent".into();
             parent.turn_in_flight = true;
@@ -10230,18 +10404,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn child_approval_always_allow_responds_without_parent_callback(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn child_approval_always_allow_responds_without_parent_callback() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-approval-auto-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (parent_commands, parent_receiver) = async_channel::unbounded();
         let (child_commands, child_receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.settings.orchestrate.child_approval = ChildApprovalMode::AlwaysAllow;
             let mut parent = live_session(ProviderKind::Codex, parent_commands);
             parent.meta.id = "parent".into();
@@ -10285,20 +10460,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn child_approval_manual_preserves_legacy_notice_without_auto_response(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn child_approval_manual_preserves_legacy_notice_without_auto_response() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-approval-manual-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (parent_commands, parent_receiver) = async_channel::unbounded();
         let (child_commands, child_receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.settings.orchestrate.child_approval = ChildApprovalMode::Manual;
             let mut parent = live_session(ProviderKind::Codex, parent_commands);
             parent.meta.id = "parent".into();
@@ -10340,17 +10514,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn orchestrate_approve_routes_decisions_and_validates_scope(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn orchestrate_approve_routes_decisions_and_validates_scope() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-approve-op-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut child = live_session(ProviderKind::Codex, commands);
             child.meta.id = "child".into();
             child.meta.parent_session_id = Some("parent".into());
@@ -10479,19 +10654,18 @@ mod tests {
         assert_eq!(final_assistant_message(&timeline), "Complete answer.");
     }
 
-    #[gpui::test]
-    fn resident_background_child_result_uses_completed_live_timeline(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn resident_background_child_result_uses_completed_live_timeline() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-resident-result-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let report = format!("Complete child report:\n{}", "full detail ".repeat(80));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut parent =
                 SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
             parent.id = "parent".into();
@@ -10541,18 +10715,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn steering_parked_orchestrator_callback_uses_recorded_id(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn steering_parked_orchestrator_callback_uses_recorded_id() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-steer-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
         let mut recorded_request_id = String::new();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut parent = live_session(ProviderKind::Codex, commands);
             parent.meta.id = "parent".into();
             parent.turn_in_flight = true;
@@ -10593,15 +10768,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn steering_user_and_queue_paths_send_the_same_id_they_record(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn steering_user_and_queue_paths_send_the_same_id_they_record() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-user-steer-id-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, commands);
             active.meta.id = "active".into();
             active.turn_in_flight = true;
@@ -10657,16 +10833,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn callbacks_racing_provider_start_share_one_wakeup_turn(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn callbacks_racing_provider_start_share_one_wakeup_turn() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-orchestrate-start-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut parent = live_session(ProviderKind::ClaudeCode, async_channel::unbounded().0);
             parent.meta.id = "parent".into();
             parent.runtime = Runtime::Starting { generation: 1 };
@@ -10709,11 +10886,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn shutdown_active_notifies_live_provider(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn shutdown_active_notifies_live_provider() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
         let active = ActiveSession {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
@@ -10738,16 +10916,11 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(active);
             state.shutdown_active(cx);
             assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
@@ -10788,11 +10961,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         });
@@ -10831,11 +10999,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -10871,17 +11034,16 @@ mod tests {
         assert!(active.queue.is_empty());
     }
 
-    #[gpui::test]
-    fn implement_plan_waits_for_pending_relay_without_mutating_state(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn implement_plan_waits_for_pending_relay_without_mutating_state() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-plan-relay-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, commands);
             active.meta.id = "plan-relay".into();
             active.meta.interaction_mode = InteractionMode::Plan;
@@ -10930,15 +11092,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn profile_switch_within_one_provider_requires_a_relay(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn profile_switch_within_one_provider_requires_a_relay() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-profile-relay-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, _receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, commands);
             active.meta.id = "profile-relay".into();
             active.meta.model = Some("claude-opus-5".into());
@@ -11070,25 +11233,21 @@ mod tests {
             background_task_count: 0,
             idle_since: None,
             provider_commands: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         }
     }
 
-    #[gpui::test]
-    fn native_rewind_waits_for_provider_confirmation_before_pruning(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn native_rewind_waits_for_provider_confirmation_before_pruning() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-native-rewind-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, commands);
             active.meta.id = "claude-session".into();
             for index in 1..=2 {
@@ -11135,28 +11294,37 @@ mod tests {
                 cx,
             );
             assert_eq!(state.active.as_ref().unwrap().timeline.turns.len(), 1);
-            assert_eq!(
-                state.take_native_rewind_prefill().as_deref(),
-                Some("original prompt")
-            );
             assert!(!state.native_rewind_pending());
         });
+        let mut serialized_prefill = None;
+        while let Ok(output) = cx.outgoing_rx.try_recv() {
+            if let HostOutput::Event(HostEvent::Domain(EventEnvelope {
+                event: ServerEvent::NativeRewindPrefill { session_id, text },
+                ..
+            })) = output
+                && session_id == "claude-session"
+            {
+                serialized_prefill = Some(text);
+            }
+        }
+        assert_eq!(serialized_prefill.as_deref(), Some("original prompt"));
 
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn shutdown_all_notifies_active_and_parked_live_providers(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn shutdown_all_notifies_active_and_parked_live_providers() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!("tcode-app-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
         let (active_commands, active_receiver) = async_channel::unbounded();
         let (parked_commands, parked_receiver) = async_channel::unbounded();
         let parked = live_session(ProviderKind::ClaudeCode, parked_commands);
         let (other_commands, other_receiver) = async_channel::unbounded();
         let other = live_session(ProviderKind::Acp, other_commands);
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(live_session(ProviderKind::Codex, active_commands));
             state.background.insert(parked.meta.id.clone(), parked);
             state.background.insert(other.meta.id.clone(), other);
@@ -11418,11 +11586,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -11433,10 +11596,9 @@ mod tests {
         assert!(!active.is_starting_generation(2));
     }
 
-    #[gpui::test]
-    fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
+        let cx = &mut TestAppContext::default();
         let cwd = std::env::temp_dir().join(format!(
             "tcode-acked-delivery-test-{}",
             uuid::Uuid::new_v4()
@@ -11447,11 +11609,11 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (session, first_actor) = fake_live_session(cwd.clone());
         let session_id = session.meta.id.clone();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(session);
             // The preceding model turn has completed, but Claude still owns a
             // background process. This is the idle-send window from the repro.
@@ -11563,19 +11725,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn inferred_startup_model_updates_live_model_without_restart(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn inferred_startup_model_updates_live_model_without_restart() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-live-model-sync-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "model-sync".into();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(session);
             state.on_event(
                 "model-sync",
@@ -11604,19 +11767,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn park_active_retains_provider_with_background_tasks(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn park_active_retains_provider_with_background_tasks() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-background-park-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "background-owner".into();
         session.background_task_count = 1;
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(session);
             state.park_active(cx);
 
@@ -11630,19 +11794,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn park_active_retains_idle_live_provider(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn park_active_retains_idle_live_provider() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-idle-resident-park-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(session);
             state.park_active(cx);
 
@@ -11658,20 +11823,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn select_session_readopts_idle_resident_without_shutdown(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn select_session_readopts_idle_resident_without_shutdown() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-idle-resident-readopt-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
         let meta = session.meta.clone();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.sessions.push(meta);
             state.active = Some(session);
             state.park_active(cx);
@@ -11688,19 +11854,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn resident_idle_reaper_shuts_down_untouched_provider(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn resident_idle_reaper_shuts_down_untouched_provider() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-idle-resident-reaper-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.active = Some(session);
             state.park_active(cx);
         });
@@ -11716,20 +11883,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn resident_idle_reaper_ignores_readopted_session(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn resident_idle_reaper_ignores_readopted_session() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-idle-resident-stale-timer-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
         let meta = session.meta.clone();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.sessions.push(meta);
             state.active = Some(session);
             state.park_active(cx);
@@ -11749,18 +11917,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn resident_idle_lru_evicts_only_oldest_provider(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn resident_idle_lru_evicts_only_oldest_provider() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-idle-resident-lru-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let base = Instant::now();
         let mut actors = Vec::new();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             for index in 0..MAX_IDLE_RESIDENTS {
                 let (commands, actor) = async_channel::unbounded();
                 let mut resident = live_session(ProviderKind::ClaudeCode, commands);
@@ -11790,14 +11959,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn settings_restart_waits_for_background_follow_up(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn settings_restart_waits_for_background_follow_up() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-background-restart-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, actor) = async_channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "background-restart".into();
@@ -11805,7 +11975,7 @@ mod tests {
         session.meta.model = Some("claude-sonnet-4-6".into());
         session.background_task_count = 1;
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state
                 .settings
                 .provider_mut(ProviderKind::ClaudeCode)
@@ -11879,11 +12049,6 @@ mod tests {
             idle_since: None,
             provider_commands: Vec::new(),
             provider_options: Vec::new(),
-            diff_open: false,
-            diff_expanded: false,
-            diff_selected_turn: None,
-            right_tab: RightTab::default(),
-            auto_open_suppressed: false,
             terminal_workspace: TerminalWorkspace::default(),
             _pump: None,
         };
@@ -11980,8 +12145,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn fork_thread_clones_timeline_and_provider_cursor(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn fork_thread_clones_timeline_and_provider_cursor() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!("tcode-fork-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let mut source = SessionMeta::new(
@@ -12008,9 +12174,9 @@ mod tests {
                 },
             )
             .unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
+        state.host_update(cx, |state, cx| state.fork_thread(&source.id, cx));
         cx.run_until_parked();
 
         state.update(cx, |state, _cx| {
@@ -12035,14 +12201,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn store_writer_appends_events_in_fifo_order(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn store_writer_appends_events_in_fifo_order() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-writer-events-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store.clone()));
+        let state = cx.new_entity(|_| AppState::new(store.clone()));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.record_event("ordered", &persisted_assistant_event("first"), cx);
             state.record_event("ordered", &persisted_assistant_event("second"), cx);
         });
@@ -12063,17 +12230,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn store_writer_upsert_is_visible_to_fresh_store(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn store_writer_upsert_is_visible_to_fresh_store() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-writer-upsert-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
         meta.title = "persisted by writer".into();
         let id = meta.id.clone();
 
-        state.update(cx, |state, cx| state.persist_meta(&meta, cx));
+        state.host_update(cx, |state, cx| state.persist_meta(&meta, cx));
         cx.run_until_parked();
 
         let fresh = SessionStore::open_at(root.clone()).unwrap();
@@ -12089,14 +12257,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn store_writer_profile_secret_is_visible_to_fresh_store(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn store_writer_profile_secret_is_visible_to_fresh_store() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-writer-secret-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.set_profile_secret(
                 "klaude-kode",
                 "ANTHROPIC_API_KEY",
@@ -12117,16 +12286,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-terminal-open-{}", uuid::Uuid::new_v4()));
         let override_cwd = root.join("override");
         std::fs::create_dir_all(&override_cwd).unwrap();
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
         state.update(cx, |state, _| {
             state.active = Some(AppState::build_draft_session(
@@ -12139,7 +12307,7 @@ mod tests {
             ));
         });
         term::Terminal::with_spawn_cwd(override_cwd.clone(), || {
-            state.update(cx, |state, cx| state.open_terminal_panel(cx));
+            state.host_update(cx, |state, cx| state.open_terminal_panel(cx));
         });
         state.read_with(cx, |state, _| {
             assert!(
@@ -12158,7 +12326,7 @@ mod tests {
         state.read_with(cx, |state, _| {
             let workspace = &state.active.as_ref().unwrap().terminal_workspace;
             assert_eq!(workspace.terminals.len(), 1);
-            assert!(workspace.open);
+            assert!(state.terminal_panel_open());
             assert_eq!(workspace.terminals[0].terminal.cwd(), override_cwd);
         });
         let _ = std::fs::remove_dir_all(root);
@@ -12195,10 +12363,9 @@ mod tests {
         })
     }
 
-    #[gpui::test]
-    fn cold_select_installs_immediately_then_loads_persisted_timeline(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn cold_select_installs_immediately_then_loads_persisted_timeline() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-cold-select-async-test-{}",
             uuid::Uuid::new_v4()
@@ -12214,9 +12381,9 @@ mod tests {
             )
             .unwrap();
         let id = meta.id.clone();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.select_session(&id, cx);
             let active = state.active.as_ref().unwrap();
             assert_eq!(active.meta.id, id);
@@ -12233,8 +12400,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn parked_readopt_refolds_events_appended_while_parked(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn parked_readopt_refolds_events_appended_while_parked() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-parked-readopt-async-test-{}",
             uuid::Uuid::new_v4()
@@ -12246,11 +12414,11 @@ mod tests {
             .append_event(&meta.id, 1, &persisted_assistant_event("before parking"))
             .unwrap();
         let id = meta.id.clone();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| state.select_session(&id, cx));
+        state.host_update(cx, |state, cx| state.select_session(&id, cx));
         cx.run_until_parked();
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let active = state.active.as_mut().unwrap();
             active.turn_in_flight = true;
             active.runtime = Runtime::Starting { generation: 1 };
@@ -12272,8 +12440,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn stale_timeline_completion_cannot_land_on_another_session(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn stale_timeline_completion_cannot_land_on_another_session() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-stale-timeline-load-test-{}",
             uuid::Uuid::new_v4()
@@ -12290,9 +12459,9 @@ mod tests {
             .append_event(&b.id, 1, &persisted_assistant_event("only session B"))
             .unwrap();
         let (id_a, id_b) = (a.id.clone(), b.id.clone());
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.select_session(&id_a, cx);
             state.select_session(&id_b, cx);
             assert_eq!(state.active_session_id(), Some(id_b.as_str()));
@@ -12313,8 +12482,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[gpui::test]
-    fn timeline_load_retries_when_append_watermark_moves(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn timeline_load_retries_when_append_watermark_moves() {
+        let cx = &mut TestAppContext::default();
         let root = std::env::temp_dir().join(format!(
             "tcode-timeline-watermark-test-{}",
             uuid::Uuid::new_v4()
@@ -12326,9 +12496,9 @@ mod tests {
             .append_event(&meta.id, 1, &persisted_assistant_event("before load"))
             .unwrap();
         let id = meta.id.clone();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.select_session(&id, cx);
             state.record_event(&id, &persisted_assistant_event("raced append"), cx);
         });
@@ -12356,20 +12526,21 @@ mod tests {
     /// moment it is dispatched (not asynchronously after), the fold only accepts
     /// events whose session id matches the active session, and the interrupted
     /// session's error cannot leak into the new thread.
-    #[gpui::test]
-    fn stop_then_new_thread_keeps_the_first_message_visible(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn stop_then_new_thread_keeps_the_first_message_visible() {
+        let cx = &mut TestAppContext::default();
         let cwd = std::env::temp_dir().join(format!("tcode-t3-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let data = std::env::temp_dir().join(format!("tcode-t3-data-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
         // Session A, live (fake provider: commands land on `commands_a`).
         let (session, commands_a) = fake_live_session(cwd.clone());
         let (commands_b, receiver_b) = async_channel::unbounded();
         let mut id_b = String::new();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             // No real provider may spawn if a start slips through.
             state
                 .settings
@@ -12496,10 +12667,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn submitted_queue_head_cannot_leak_delivery_after_turn_completion(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
+        let cx = &mut TestAppContext::default();
         let cwd =
             std::env::temp_dir().join(format!("tcode-submitted-drop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
@@ -12508,11 +12678,11 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (session, commands) = fake_live_session(cwd.clone());
         let id = session.meta.id.clone();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.store.upsert_meta(&session.meta).unwrap();
             state.sessions = state.store.load_index();
             state.active = Some(session);
@@ -12561,15 +12731,16 @@ mod tests {
     /// The T-"stuck Working" family: an adapter whose event stream dies without
     /// a `SessionClosed` must not leave the lifecycle flags set forever. The
     /// pump synthesizes the close, which runs the ordinary teardown.
-    #[gpui::test]
-    fn dead_event_stream_without_close_clears_working_flags(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn dead_event_stream_without_close_clears_working_flags() {
+        let cx = &mut TestAppContext::default();
         let data =
             std::env::temp_dir().join(format!("tcode-dead-stream-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, _receiver) = async_channel::unbounded();
 
-        let id = state.update(cx, |state, cx| {
+        let id = state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, commands.clone());
             active.turn_in_flight = true;
             active.background_task_count = 2;
@@ -12606,17 +12777,18 @@ mod tests {
 
     /// Same leak, parked variant: the flags of a backgrounded session must
     /// reset too (and the dead resident entry is released).
-    #[gpui::test]
-    fn dead_event_stream_clears_parked_working_flags(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn dead_event_stream_clears_parked_working_flags() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-dead-parked-stream-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (commands, _receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut parked = live_session(ProviderKind::ClaudeCode, commands.clone());
             parked.turn_in_flight = true;
             parked.background_task_count = 1;
@@ -12640,16 +12812,17 @@ mod tests {
     /// A stale pump (the session was already closed, restarted, or handed to a
     /// new provider process) must not tear down the successor runtime when its
     /// old event channel drains.
-    #[gpui::test]
-    fn stale_pump_close_leaves_successor_runtime_alone(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn stale_pump_close_leaves_successor_runtime_alone() {
+        let cx = &mut TestAppContext::default();
         let data =
             std::env::temp_dir().join(format!("tcode-stale-pump-test-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let (old_commands, _old_receiver) = async_channel::unbounded();
         let (new_commands, _new_receiver) = async_channel::unbounded();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, new_commands);
             active.turn_in_flight = true;
             let id = active.meta.id.clone();
@@ -12678,14 +12851,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn turn_running_for_is_independent_of_active_or_parked_location(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn turn_running_for_is_independent_of_active_or_parked_location() {
+        let cx = &mut TestAppContext::default();
         let data = std::env::temp_dir().join(format!(
             "tcode-working-location-test-{}",
             uuid::Uuid::new_v4()
         ));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let commands = async_channel::unbounded().0;
 
         let mut idle = live_session(ProviderKind::ClaudeCode, commands.clone());
@@ -12750,21 +12924,20 @@ mod tests {
     /// session parks in the background — process and queue alive, events still
     /// recorded, sidebar still "Working" — and selecting it again re-adopts it
     /// with the streamed-while-parked content visible.
-    #[gpui::test]
-    fn switching_threads_parks_a_working_session_instead_of_killing_it(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    #[test]
+    fn switching_threads_parks_a_working_session_instead_of_killing_it() {
+        let cx = &mut TestAppContext::default();
         let cwd = std::env::temp_dir().join(format!("tcode-park-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let data = std::env::temp_dir().join(format!("tcode-park-data-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
         // A live session (fake provider: commands land on `commands_a`).
         let (session, commands_a) = fake_live_session(cwd.clone());
         let id_a = session.meta.id.clone();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state
                 .settings
                 .provider_mut(ProviderKind::ClaudeCode)
@@ -12851,7 +13024,7 @@ mod tests {
 
         cx.run_until_parked();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             let active = state.active.as_ref().unwrap();
             assert_eq!(active.meta.id, id_a);
             assert!(matches!(active.runtime, Runtime::Live(_)));
@@ -12888,20 +13061,21 @@ mod tests {
 
     /// A parked session that runs out of work becomes an idle resident instead
     /// of immediately rebuilding its provider on the next selection.
-    #[gpui::test]
-    fn drained_parked_session_stays_resident(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn drained_parked_session_stays_resident() {
+        let cx = &mut TestAppContext::default();
         let cwd = std::env::temp_dir().join(format!("tcode-parkend-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let data =
             std::env::temp_dir().join(format!("tcode-parkend-data-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
         // A live session (fake provider: commands land on `commands`).
         let (session, commands) = fake_live_session(cwd.clone());
         let id = session.meta.id.clone();
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.store.upsert_meta(&session.meta).unwrap();
             state.sessions = state.store.load_index();
             state.active = Some(session);
@@ -12938,15 +13112,16 @@ mod tests {
     /// A failed provider start must not destroy what the user typed: the queued
     /// message stays in the queue (visible in the strip, flushed by the next
     /// successful start) instead of being cleared.
-    #[gpui::test]
-    fn failed_provider_start_keeps_the_queued_message(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn failed_provider_start_keeps_the_queued_message() {
+        let cx = &mut TestAppContext::default();
         let cwd = std::env::temp_dir().join(format!("tcode-t3f-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let data = std::env::temp_dir().join(format!("tcode-t3f-data-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             // A binary that cannot exist → start_session fails fast.
             state
                 .settings
@@ -12986,16 +13161,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn plan_workspace_save_completes_after_background_executor_runs(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn plan_workspace_save_completes_after_background_executor_runs() {
+        let cx = &mut TestAppContext::default();
         let cwd = std::env::temp_dir().join(format!("tcode-plan-save-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).unwrap();
         let data =
             std::env::temp_dir().join(format!("tcode-plan-save-data-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(data.clone()).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.start_draft("plan-project".into(), cwd.clone(), cx);
             state.save_plan_to_workspace("# Saved plan".into(), cx);
         });
@@ -13014,19 +13190,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
-    #[gpui::test]
-    fn orchestrate_dispatch_resolves_cwd_before_reply(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn orchestrate_dispatch_resolves_cwd_before_reply() {
+        let cx = &mut TestAppContext::default();
         let root =
             std::env::temp_dir().join(format!("tcode-dispatch-cwd-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let store = SessionStore::open_at(root.join("data")).unwrap();
-        let state = cx.new(|_| AppState::new(store));
+        let state = cx.new_entity(|_| AppState::new(store));
         let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         let parent_id = parent.id.clone();
         let missing = root.join("missing");
         let (reply, response) = async_channel::bounded(1);
 
-        state.update(cx, |state, cx| {
+        state.host_update(cx, |state, cx| {
             state.sessions.push(parent);
             state.handle_orchestrate_op(
                 orchestrate_mcp::OrchestrateOp::Dispatch {

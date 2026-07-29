@@ -40,7 +40,7 @@ pub fn is_directory(path: &Path) -> bool {
     tcode_services::user_files::is_directory(path)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExternalImportUpdate {
     Progress {
         done: usize,
@@ -53,13 +53,4 @@ pub enum ExternalImportUpdate {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcpMarketplaceItem {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub installed: bool,
-    pub installing: bool,
-    pub supported: bool,
-}
+pub use tcode_protocol::AcpMarketplaceItem;

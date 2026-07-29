@@ -8,7 +8,7 @@
 use gpui::{
     App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -21,10 +21,10 @@ use gpui_component::{
 
 use agent::{OptionDescriptor, ProviderKind};
 use tcode_core::settings::Settings;
-use tcode_runtime::app::AppState;
 
 use crate::provider_card::provider_glyph;
 use crate::settings::provider_label;
+use crate::store::WorkspaceStore;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelOption {
@@ -45,7 +45,7 @@ enum TriggerKind {
 }
 
 pub(crate) struct ProviderModelPicker {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     popover_id: &'static str,
     trigger_id: &'static str,
     trigger_kind: TriggerKind,
@@ -53,34 +53,34 @@ pub(crate) struct ProviderModelPicker {
     selected_profile: String,
     selected: Option<(ProviderKind, String, Option<String>)>,
     excluded: Vec<(ProviderKind, String)>,
-    _app_subscription: Subscription,
+    _store_subscription: Subscription,
 }
 
 impl EventEmitter<ModelSelected> for ProviderModelPicker {}
 
 impl ProviderModelPicker {
     pub fn add(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         popover_id: &'static str,
         trigger_id: &'static str,
         label: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let app_subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
+        let store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
-            app_state,
+            store,
             popover_id,
             trigger_id,
             trigger_kind: TriggerKind::Add(label.into()),
             selected_profile: Settings::builtin_profile_id(ProviderKind::Codex).to_string(),
             selected: None,
             excluded: Vec::new(),
-            _app_subscription: app_subscription,
+            _store_subscription: store_subscription,
         }
     }
 
     pub fn selection(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         popover_id: &'static str,
         trigger_id: &'static str,
         provider: ProviderKind,
@@ -88,17 +88,17 @@ impl ProviderModelPicker {
         profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let app_subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
+        let store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
         let model = model.into();
         Self {
-            app_state,
+            store,
             popover_id,
             trigger_id,
             trigger_kind: TriggerKind::Selection,
             selected_profile: selection_profile_id(provider, profile_id.as_deref()),
             selected: Some((provider, model, profile_id)),
             excluded: Vec::new(),
-            _app_subscription: app_subscription,
+            _store_subscription: store_subscription,
         }
     }
 
@@ -125,15 +125,18 @@ impl ProviderModelPicker {
     }
 
     fn options(&self, cx: &App) -> Vec<ModelOption> {
-        let state = self.app_state.read(cx);
         let mut options = Vec::new();
         // Only enabled profiles are offered for new selections; a disabled
         // profile stays configurable in Settings but never reaches the picker.
-        for profile in state.enabled_profiles() {
-            let catalog = state.models_for(profile.kind);
+        for profile in self.store.read(cx).enabled_provider_profiles(cx) {
+            let catalog = self.store.read(cx).provider_model_catalog(profile.kind, cx);
             let profile_id =
                 (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
-            for model in state.picker_models_for_profile(&profile.id) {
+            for model in self
+                .store
+                .read(cx)
+                .picker_models_for_profile(&profile.id, cx)
+            {
                 let effort = catalog
                     .iter()
                     .find(|spec| spec.id == model.id)
@@ -183,11 +186,14 @@ impl ProviderModelPicker {
                         (*provider, model.as_str(), profile_id.as_deref())
                     })
                     .unwrap_or_else(|| {
-                        let kind = self.app_state.read(cx).profile_kind(&self.selected_profile);
+                        let kind = self
+                            .store
+                            .read(cx)
+                            .provider_profile_kind(&self.selected_profile, cx);
                         (kind, "", None)
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
-                let glyph = tinted_glyph(self.app_state.read(cx), provider, profile_id);
+                let glyph = tinted_glyph(&self.store, provider, profile_id, cx);
                 // Ghost, not outline: a quiet resting trigger (glyph + value +
                 // muted chevron) that only tints on hover, matching the
                 // composer's model picker. The "Add" variant stays an outlined
@@ -226,13 +232,13 @@ impl Render for ProviderModelPicker {
                     let picker = picker.read(cx);
                     (
                         picker.options(cx),
-                        picker.app_state.read(cx).enabled_profiles(),
+                        picker.store.read(cx).enabled_provider_profiles(cx),
                         picker.selected_profile.clone(),
                         picker.selected.clone(),
                         picker.excluded.clone(),
                     )
                 };
-                let app_state = picker.read(cx).app_state.clone();
+                let store = picker.read(cx).store.clone();
                 // A deleted profile falls back to the first tab (built-ins
                 // always exist, so the list is never empty).
                 let current_profile = if profiles.iter().any(|p| p.id == selected_profile) {
@@ -286,9 +292,10 @@ impl Render for ProviderModelPicker {
                                 .hover(|style| style.bg(cx.theme().accent))
                                 .child(
                                     tinted_glyph(
-                                        app_state.read(cx),
+                                        &store,
                                         option.provider,
                                         option.profile_id.as_deref(),
+                                        cx,
                                     )
                                     .small(),
                                 )
@@ -360,9 +367,7 @@ impl Render for ProviderModelPicker {
                             .cursor_pointer()
                             .when(is_selected, |tab| tab.bg(cx.theme().accent).font_medium())
                             .hover(|tab| tab.bg(cx.theme().accent))
-                            .child(
-                                tinted_glyph(app_state.read(cx), kind, Some(&profile.id)).xsmall(),
-                            )
+                            .child(tinted_glyph(&store, kind, Some(&profile.id), cx).xsmall())
                             .child(div().text_size(px(13.)).child(label))
                             .on_click(move |_, _, cx| {
                                 picker.update(cx, |picker, cx| {
@@ -391,14 +396,19 @@ impl Render for ProviderModelPicker {
 
 /// The provider glyph tinted with the profile's own accent (falling back to the
 /// kind's built-in card accent), matching the composer's picker rail.
-fn tinted_glyph(state: &AppState, provider: ProviderKind, profile_id: Option<&str>) -> Icon {
+fn tinted_glyph(
+    store: &Entity<WorkspaceStore>,
+    provider: ProviderKind,
+    profile_id: Option<&str>,
+    cx: &App,
+) -> Icon {
     let glyph = provider_glyph(provider);
-    let accent = match profile_id {
-        Some(id) => state.profile_accent(id),
-        None => state.provider_accent(provider),
-    };
+    let profile_id = profile_id
+        .map(str::to_string)
+        .unwrap_or_else(|| Settings::builtin_profile_id(provider).to_string());
+    let accent = store.read(cx).provider_profile_accent(&profile_id, cx);
     match accent {
-        Some(accent) => glyph.text_color(accent),
+        Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,
     }
 }

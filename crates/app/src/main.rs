@@ -10,9 +10,10 @@ use gpui::{
     App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
 };
-use tcode_runtime::app::AppState;
+use tcode_protocol::{Command, CommandResponse};
+use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
-use tcode_ui::{AppShell, Quit, TogglePalette};
+use tcode_ui::{AppShell, Quit, TogglePalette, WindowState, store::WorkspaceStore};
 use tcode_ui::{assets, settings};
 
 use gpui_component::{
@@ -53,8 +54,8 @@ fn flatten_canvas_for_opaque_window(theme_json: &str) -> String {
 }
 const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn finish_quit_prompt(app_state: &Entity<AppState>, epoch: u64, cx: &mut App) -> bool {
-    app_state.update(cx, |state, _| {
+fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut App) -> bool {
+    window_state.update(cx, |state, _| {
         if !state.quit_prompt_open || state.quit_prompt_epoch != epoch {
             return false;
         }
@@ -64,8 +65,13 @@ fn finish_quit_prompt(app_state: &Entity<AppState>, epoch: u64, cx: &mut App) ->
     })
 }
 
-fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
-    let count = app_state.read(cx).working_sessions_count();
+fn handle_quit(
+    _: &Quit,
+    workspace_store: &Entity<WorkspaceStore>,
+    window_state: &Entity<WindowState>,
+    cx: &mut App,
+) {
+    let count = workspace_store.read(cx).working_sessions_count(cx);
     if count == 0 {
         cx.quit();
         return;
@@ -79,7 +85,7 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
         return;
     };
 
-    let epoch = app_state.update(cx, |state, _| {
+    let epoch = window_state.update(cx, |state, _| {
         if state.quit_prompt_open {
             return None;
         }
@@ -91,7 +97,7 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
         return;
     };
 
-    let prompt_state = app_state.clone();
+    let prompt_state = window_state.clone();
     if window_handle
         .update(cx, move |_, window, cx| {
             let quit_state = prompt_state.clone();
@@ -144,12 +150,12 @@ fn handle_quit(_: &Quit, app_state: &Entity<AppState>, cx: &mut App) {
         })
         .is_err()
     {
-        finish_quit_prompt(app_state, epoch, cx);
+        finish_quit_prompt(window_state, epoch, cx);
         cx.quit();
         return;
     }
 
-    let timeout_state = app_state.clone();
+    let timeout_state = window_state.clone();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(QUIT_PROMPT_TIMEOUT).await;
         cx.update(|cx| {
@@ -282,6 +288,29 @@ fn main() {
         .skip_while(|arg| arg != "--debug-git-action")
         .nth(1);
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
+    let mut host_services = HostServices::default();
+    match preview_mcp::start() {
+        Ok(server) => {
+            log::info!("preview MCP server listening at {}", server.url);
+            host_services.preview = Some(server);
+        }
+        Err(err) => log::warn!("preview MCP server failed to start: {err}"),
+    }
+    match orchestrate_mcp::start() {
+        Ok(server) => {
+            log::info!("orchestrate MCP server listening at {}", server.url);
+            host_services.orchestrate = Some(server);
+        }
+        Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
+    }
+    match computer_use_mcp::start() {
+        Ok(server) => {
+            log::info!("computer-use MCP server listening at {}", server.url);
+            host_services.computer_use = Some(server);
+        }
+        Err(err) => log::warn!("computer-use MCP server failed to start: {err}"),
+    }
+    let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -327,48 +356,15 @@ fn main() {
             Theme::global_mut(cx).apply_config(&light);
             Theme::global_mut(cx).apply_config(&dark);
 
-            let app_state = cx.new(|_| AppState::new(store));
+            let workspace_store =
+                cx.new(|cx| tcode_ui::store::WorkspaceStore::new(host.clone(), cx));
+            let initial_settings = workspace_store.read(cx).sidebar_settings(cx);
+            let sidebar_collapsed = initial_settings.sidebar_collapsed;
+            let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
-                let app_state = app_state.clone();
-                move |action, cx| handle_quit(action, &app_state, cx)
-            });
-            // Bring up the in-process preview MCP server and register it with the
-            // app so every spawned agent session can drive the embedded browser.
-            match preview_mcp::start() {
-                Ok(server) => {
-                    log::info!("preview MCP server listening at {}", server.url);
-                    app_state.update(cx, |state, _| state.attach_preview_mcp(server));
-                }
-                Err(err) => log::warn!("preview MCP server failed to start: {err}"),
-            }
-            match orchestrate_mcp::start() {
-                Ok(server) => {
-                    log::info!("orchestrate MCP server listening at {}", server.url);
-                    app_state.update(cx, |state, _| state.attach_orchestrate_mcp(server));
-                }
-                Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
-            }
-            match computer_use_mcp::start() {
-                Ok(server) => {
-                    log::info!("computer-use MCP server listening at {}", server.url);
-                    app_state.update(cx, |state, _| {
-                        state.attach_computer_use_mcp(server.url, server.token)
-                    });
-                }
-                Err(err) => log::warn!("computer-use MCP server failed to start: {err}"),
-            }
-            // Refresh the model catalogs in the background so the picker shows
-            // real, up-to-date models (the persisted cache serves until then).
-            app_state.update(cx, |state, cx| state.refresh_model_catalogs(cx));
-            // Check provider CLI versions on launch (unless disabled), toasting
-            // when a newer version is available (s3 §6).
-            app_state.update(cx, |state, cx| {
-                if state.provider_update_checks_enabled() {
-                    state.check_provider_versions(cx);
-                }
-                // Probe each provider's install + auth state for the Settings →
-                // Providers cards (independent of the update-check toggle).
-                state.refresh_provider_status(cx);
+                let workspace_store = workspace_store.clone();
+                let window_state = window_state.clone();
+                move |action, cx| handle_quit(action, &workspace_store, &window_state, cx)
             });
             {
                 let dc = debug_compose.clone();
@@ -378,7 +374,7 @@ fn main() {
                 let dsec = debug_settings_section.clone();
                 let dacp = debug_acp_search.clone();
                 let dexp = debug_provider_expanded.clone();
-                app_state.update(cx, |state, _| {
+                window_state.update(cx, |state, _| {
                     state.debug_compose = dc;
                     state.debug_image = di;
                     state.debug_diff_scope = dscope;
@@ -396,7 +392,14 @@ fn main() {
             // relaunch, reopen the recorded session and Settings page. Runs
             // synchronously before the window (and settings page) is built, so
             // the page mounts already on the recorded section. No-op otherwise.
-            app_state.update(cx, |state, cx| state.apply_pending_relaunch(cx));
+            if let Ok(CommandResponse::PendingRelaunchSection(Some(section))) =
+                host.command_blocking(Command::ApplyPendingRelaunch)
+            {
+                window_state.update(cx, |state, cx| {
+                    state.debug_settings_section = Some(section);
+                    state.open_settings(cx);
+                });
+            }
             let debug_seed = debug_compose.is_some()
                 || debug_image.is_some()
                 || debug_cwd.is_some()
@@ -407,13 +410,13 @@ fn main() {
                 || debug_live
                 || debug_send.is_some()
                 || debug_queue.is_some();
-            settings::apply_locale(app_state.read(cx).settings.language.as_deref());
+            settings::apply_locale(initial_settings.language.as_deref());
             #[cfg(target_os = "macos")]
             cx.set_menus([gpui::Menu::new("tcode").items([gpui::MenuItem::action(
                 tcode_i18n::tr!("quit.menu_item"),
                 Quit,
             )])]);
-            match app_state.read(cx).settings.theme_mode {
+            match initial_settings.theme_mode {
                 settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
                 settings::ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
                 settings::ThemeMode::System => Theme::sync_system_appearance(None, cx),
@@ -424,14 +427,11 @@ fn main() {
                 cx.theme().theme_name()
             );
             let quit_subscription = cx.on_app_quit({
-                let app_state = app_state.clone();
-                move |cx| {
-                    let barrier = app_state.update(cx, |state, cx| {
-                        state.shutdown_all(cx);
-                        state.store_write_barrier(cx)
-                    });
+                let host = host.clone();
+                move |_cx| {
+                    let host = host.clone();
                     async move {
-                        let _ = barrier.recv().await;
+                        let _ = host.shutdown().await;
                     }
                 }
             });
@@ -478,9 +478,11 @@ fn main() {
             cx.spawn(async move |cx| {
                 let window = cx
                     .open_window(window_options, {
-                        let app_state = app_state.clone();
+                        let theme_store = workspace_store.clone();
+                        let workspace_store = workspace_store.clone();
+                        let window_state = window_state.clone();
                         move |window, cx| {
-                            match app_state.read(cx).settings.theme_mode {
+                            match theme_store.read(cx).settings_page_settings(cx).theme_mode {
                                 settings::ThemeMode::Light => {
                                     Theme::change(ComponentThemeMode::Light, Some(window), cx)
                                 }
@@ -491,7 +493,8 @@ fn main() {
                                     Theme::sync_system_appearance(Some(window), cx)
                                 }
                             }
-                            let shell = cx.new(|cx| AppShell::new(app_state, window, cx));
+                            let shell = cx
+                                .new(|cx| AppShell::new(workspace_store, window_state, window, cx));
                             cx.new(|cx| Root::new(shell, window, cx))
                         }
                     })
@@ -503,7 +506,7 @@ fn main() {
                 });
 
                 if let Some(spec) = smoke_spec {
-                    cx.update(|cx| smoke::drive(spec, app_state, cx));
+                    smoke::drive(spec, host.clone());
                 } else if open_latest
                     || open_terminal
                     || terminal_demo
@@ -518,96 +521,139 @@ fn main() {
                     || debug_git_action.is_some()
                     || debug_git_dialog
                 {
-                    app_state.update(cx, |state, cx| {
-                        if let Some(cwd) = debug_cwd.clone() {
-                            // Deterministic draft rooted at `cwd` for screenshots.
-                            if let Some(project_id) = state.create_project(cwd.clone(), cx) {
-                                state.start_draft(project_id, cwd, cx);
-                            }
-                        } else if open_latest
-                            || open_terminal
-                            || open_plan
-                            || debug_seed
-                            || terminal_demo
-                            || open_preview.is_some()
-                            || debug_git_commit.is_some()
-                            || debug_git_genmsg
-                            || debug_git_action.is_some()
-                            || debug_git_dialog
+                    if let Some(cwd) = debug_cwd.clone() {
+                        if let Ok(CommandResponse::ProjectId(Some(project_id))) = host
+                            .command(Command::CreateProject { root: cwd.clone() })
+                            .await
                         {
-                            state.open_latest_session(cx);
+                            let _ = host.dispatch(Command::StartDraft { project_id, cwd });
                         }
-                        if let Some(url) = &open_preview {
-                            state.open_preview_with_url(url.clone(), cx);
+                    } else if open_latest
+                        || open_terminal
+                        || open_plan
+                        || debug_seed
+                        || terminal_demo
+                        || open_preview.is_some()
+                        || debug_git_commit.is_some()
+                        || debug_git_genmsg
+                        || debug_git_action.is_some()
+                        || debug_git_dialog
+                    {
+                        let _ = host.dispatch(Command::OpenLatestSession);
+                    }
+                    if open_terminal {
+                        let _ = host.dispatch(Command::OpenTerminalPanel);
+                    }
+                    if terminal_demo {
+                        let _ = host.dispatch(Command::OpenTerminalDemo);
+                    }
+                    if let Some(key) = &open_draft
+                        && let Some((project_id, root)) = cx.update(|cx| {
+                            workspace_store
+                                .read(cx)
+                                .project_ids(cx)
+                                .into_iter()
+                                .find_map(|id| {
+                                    let root = workspace_store.read(cx).project_root(&id, cx)?;
+                                    let matches = id == *key
+                                        || root.file_name().is_some_and(|name| {
+                                            name.to_string_lossy() == key.as_str()
+                                        });
+                                    matches.then_some((id, root))
+                                })
+                        })
+                    {
+                        let _ = host.dispatch(Command::StartDraft {
+                            project_id,
+                            cwd: root,
+                        });
+                    }
+                    if let Some(message) = debug_git_commit.clone() {
+                        let _ = host.dispatch(Command::DebugGitCommit { message });
+                    }
+                    if let Some(name) = debug_git_action.clone() {
+                        let _ = host.dispatch(Command::DebugGitAction { name });
+                    }
+                    if debug_git_genmsg {
+                        let _ = host.dispatch(Command::DebugGitGenerateMessage);
+                    }
+                    if debug_live {
+                        let _ = host.dispatch(Command::DebugStartProvider);
+                    }
+                    if let Some(text) = debug_send.clone() {
+                        let _ = host.dispatch(Command::SendTurn {
+                            text,
+                            attachment_paths: Vec::new(),
+                        });
+                    }
+                    if let Some(queued) = debug_queue.clone() {
+                        for message in queued
+                            .split('|')
+                            .filter(|message| !message.trim().is_empty())
+                        {
+                            let _ = host.dispatch(Command::SendTurn {
+                                text: message.trim().to_string(),
+                                attachment_paths: Vec::new(),
+                            });
                         }
+                    }
+                    for _ in 0..100 {
+                        if cx.update(|cx| workspace_store.read(cx).active_session_id(cx).is_some())
+                        {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(10))
+                            .await;
+                    }
+                    if let Some(secs) = debug_park_after {
+                        let (project, cwd) = cx.update(|cx| {
+                            (
+                                workspace_store
+                                    .read(cx)
+                                    .with_composer_destination(cx, |_, _, project| {
+                                        project.map(str::to_string)
+                                    })
+                                    .flatten(),
+                                workspace_store.read(cx).composer_active_cwd(cx),
+                            )
+                        });
+                        if let (Some(project_id), Some(cwd)) = (project, cwd) {
+                            let host = host.clone();
+                            smol::spawn(async move {
+                                smol::Timer::after(std::time::Duration::from_secs(secs)).await;
+                                log::info!("debug-park-after: opening a draft now");
+                                let _ = host.dispatch(Command::StartDraft { project_id, cwd });
+                            })
+                            .detach();
+                        }
+                    }
+                    workspace_store.update(cx, |store, cx| {
+                        store.sync_active_conversation_ui(cx);
                         if open_diff {
-                            state.open_diff_panel(cx);
+                            store.toggle_diff_panel(cx);
                         }
                         if open_plan {
-                            state.toggle_plan_panel(cx);
+                            store.toggle_plan_panel(cx);
                         }
-                        if open_terminal {
-                            state.open_terminal_panel(cx);
+                        if open_preview.is_some() {
+                            store.open_preview_panel(cx);
                         }
-                        if terminal_demo {
-                            state.open_terminal_demo(cx);
+                        if open_terminal || terminal_demo {
+                            store.show_terminal_panel(cx);
                         }
+                    });
+                    window_state.update(cx, |state, cx| {
+                        state.pending_preview_url = open_preview.clone();
                         if open_settings {
                             state.open_settings(cx);
                         }
                         if open_palette {
                             state.open_palette(cx);
                         }
-                        if let Some(key) = &open_draft
-                            && let Some(project) = state
-                                .projects
-                                .iter()
-                                .find(|p| p.id == *key || p.name == *key)
-                                .cloned()
-                        {
-                            state.start_draft(project.id, project.root, cx);
-                        }
-                        if let Some(message) = debug_git_commit.clone() {
-                            state.debug_git_commit(message, cx);
-                        }
-                        if let Some(name) = debug_git_action.clone() {
-                            state.debug_git_action(name, cx);
-                        }
-                        if debug_git_genmsg {
-                            state.debug_git_generate_message(cx);
-                        }
                         if debug_git_dialog {
                             state.debug_open_commit_dialog = true;
-                        }
-                        if debug_live {
-                            state.debug_start_provider(cx);
-                        }
-                        if let Some(text) = debug_send.clone() {
-                            state.send_turn(text, Vec::new(), cx);
-                        }
-                        if let Some(queued) = debug_queue.clone() {
-                            for message in queued.split('|').filter(|m| !m.trim().is_empty()) {
-                                state.send_turn(message.trim().to_string(), Vec::new(), cx);
-                            }
-                        }
-                        if let Some(secs) = debug_park_after {
-                            let project = state
-                                .active
-                                .as_ref()
-                                .and_then(|a| a.meta.project_id.clone());
-                            let cwd = state.active.as_ref().map(|a| a.meta.cwd.clone());
-                            if let (Some(project), Some(cwd)) = (project, cwd) {
-                                cx.spawn(async move |state, cx| {
-                                    cx.background_executor()
-                                        .timer(std::time::Duration::from_secs(secs))
-                                        .await;
-                                    let _ = state.update(cx, |state, cx| {
-                                        log::info!("debug-park-after: opening a draft now");
-                                        state.start_draft(project, cwd, cx);
-                                    });
-                                })
-                                .detach();
-                            }
+                            cx.notify();
                         }
                     });
                 }

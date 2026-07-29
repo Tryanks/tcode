@@ -33,6 +33,19 @@ pub struct InstalledAcpAgent {
     pub launch_args: Option<String>,
 }
 
+/// Serializable edits the UI can make to an installed ACP agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AcpAgentPatch {
+    SetEnabled {
+        enabled: bool,
+    },
+    SetLaunchOptions {
+        env: Vec<(String, String)>,
+        launch_args: Option<String>,
+    },
+}
+
 fn default_true() -> bool {
     true
 }

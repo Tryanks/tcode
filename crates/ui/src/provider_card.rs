@@ -20,16 +20,17 @@ use gpui_component::{
 };
 
 use agent::ProviderKind;
-use tcode_runtime::app::AppState;
+use tcode_protocol::Command;
 
 use crate::provider_dialog::ProviderDialog;
 use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
+use crate::store::WorkspaceStore;
 
 /// Claude's official Clay brand color from Anthropic's media resources.
 pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
 
 pub struct ProviderCard {
-    app_state: Entity<AppState>,
+    store: Entity<WorkspaceStore>,
     /// The protocol this card's profile drives (glyph, shared model catalog /
     /// status / version are all keyed on it).
     provider: ProviderKind,
@@ -43,14 +44,14 @@ pub struct ProviderCard {
 
 impl ProviderCard {
     pub fn new(
-        app_state: Entity<AppState>,
+        store: Entity<WorkspaceStore>,
         provider: ProviderKind,
         profile_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&app_state, |_, _, cx| cx.notify());
+        let subscription = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
-            app_state,
+            store,
             provider,
             profile_id: profile_id.into(),
             email_revealed: false,
@@ -60,13 +61,15 @@ impl ProviderCard {
 
     /// Open the per-profile settings modal (the transactional editor).
     fn open_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let app_state = self.app_state.clone();
+        let store = self.store.clone();
         let provider = self.provider;
         let profile_id = self.profile_id.clone();
-        let title = self.app_state.read(cx).profile_display_name(&profile_id);
-        let dialog = cx.new(|cx| {
-            ProviderDialog::new(app_state.clone(), provider, profile_id.clone(), window, cx)
-        });
+        let title = self
+            .store
+            .read(cx)
+            .provider_profile_display_name(&profile_id, cx);
+        let dialog = cx
+            .new(|cx| ProviderDialog::new(store.clone(), provider, profile_id.clone(), window, cx));
         window.open_dialog(cx, move |dlg, window, cx| {
             let content = dialog.clone();
             dlg.title(title.clone())
@@ -83,30 +86,26 @@ impl ProviderCard {
 
     /// The row: glyph + dot, name, version, update icon, summary, gear, switch.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.app_state.read(cx);
         let provider = self.provider;
         // Name, enabled state, and probe result all belong to this profile;
         // update-check versions remain shared by protocol kind.
-        let name = state.profile_display_name(&self.profile_id);
-        let enabled = state.profile_settings(&self.profile_id).enabled;
-        let summary = crate::provider_status::summarize(
-            provider,
-            state.profile_snapshot(&self.profile_id),
-            enabled,
-        );
-        let version = state
-            .profile_snapshot(&self.profile_id)
+        let store = self.store.read(cx);
+        let name = store.provider_profile_display_name(&self.profile_id, cx);
+        let enabled = store
+            .provider_profile_settings(&self.profile_id, cx)
+            .enabled;
+        let snapshot = store.provider_profile_snapshot(&self.profile_id, cx);
+        let summary = crate::provider_status::summarize(provider, snapshot.as_ref(), enabled);
+        let provider_version = store.provider_version_status(provider, cx);
+        let version = snapshot
+            .as_ref()
             .and_then(|s| s.version.clone())
-            .or_else(|| {
-                state
-                    .provider_version(provider)
-                    .and_then(|v| v.installed.clone())
-            });
-        let update_available = state
-            .provider_version(provider)
+            .or_else(|| provider_version.as_ref().and_then(|v| v.installed.clone()));
+        let update_available = provider_version
+            .as_ref()
             .is_some_and(|v| v.update_available);
         let muted = cx.theme().muted_foreground;
-        let accent = state.profile_accent(&self.profile_id);
+        let accent = store.provider_profile_accent(&self.profile_id, cx);
 
         let dot_color = match summary.dot {
             StatusDot::Success => cx.theme().success,
@@ -117,7 +116,7 @@ impl ProviderCard {
 
         let provider_icon = provider_glyph(provider).small();
         let provider_icon = match accent {
-            Some(accent) => provider_icon.text_color(accent),
+            Some(accent) => provider_icon.text_color(rgb(accent)),
             None => provider_icon,
         };
         let glyph = div()
@@ -205,14 +204,19 @@ impl ProviderCard {
                     .tooltip(tcode_i18n::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let checked = *checked;
-                        this.app_state.update(cx, |state, cx| {
-                            let profile_id = this.profile_id.clone();
-                            state.update_profile_settings(
-                                &profile_id,
-                                move |settings| settings.enabled = checked,
+                        let profile_id = this.profile_id.clone();
+                        let provider = this.provider;
+                        this.store.update(cx, |store, cx| {
+                            store.dispatch(
+                                Command::UpdateProfileSettings {
+                                    profile_id,
+                                    patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
+                                        enabled: checked,
+                                    },
+                                },
                                 cx,
                             );
-                            state.reload_provider(this.provider, cx);
+                            store.dispatch(Command::ReloadProvider { provider }, cx);
                         });
                     })),
             )
@@ -307,12 +311,11 @@ impl ProviderCard {
 
     /// The update-available icon + its popover.
     fn render_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
-        let state = self.app_state.read(cx);
         let provider = self.provider;
-        let version = state.provider_version(provider);
+        let version = self.store.read(cx).provider_version_status(provider, cx);
         let updating = version.is_some_and(|v| v.updating);
-        let command = state.provider_update_command(provider);
-        let app_state = self.app_state.clone();
+        let command = self.store.read(cx).provider_update_command(provider, cx);
+        let store = self.store.clone();
 
         Popover::new("update-popover")
             // Single panel surface at the 14px overlay radius; content transparent.
@@ -326,7 +329,7 @@ impl ProviderCard {
                     .tooltip(tcode_i18n::tr!("providers.update_aria")),
             )
             .content(move |_, _, cx| {
-                let app_state = app_state.clone();
+                let store = store.clone();
                 let command = command.clone();
                 let muted = cx.theme().muted_foreground;
                 // The Popover panel supplies the fill, border, shadow and p_3
@@ -358,10 +361,10 @@ impl ProviderCard {
                                 tcode_i18n::tr!("providers.update_now")
                             })
                             .on_click({
-                                let app_state = app_state.clone();
+                                let store = store.clone();
                                 move |_, _, cx| {
-                                    app_state.update(cx, |state, cx| {
-                                        state.update_provider(provider, cx);
+                                    store.update(cx, |store, cx| {
+                                        store.dispatch(Command::UpdateProvider { provider }, cx);
                                     });
                                 }
                             }),
