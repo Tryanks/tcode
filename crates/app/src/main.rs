@@ -510,9 +510,8 @@ fn main() {
                                     Theme::sync_system_appearance(Some(window), cx)
                                 }
                             }
-                            let shell = cx.new(|cx| {
-                                AppShell::new(app_state, workspace_store, window_state, window, cx)
-                            });
+                            let shell = cx
+                                .new(|cx| AppShell::new(workspace_store, window_state, window, cx));
                             cx.new(|cx| Root::new(shell, window, cx))
                         }
                     })
