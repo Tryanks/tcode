@@ -261,6 +261,9 @@ Approval panel (above composer): "PENDING APPROVAL" label, summary + count,
 expandable detail (command text / file list), actions Deny / Always allow /
 Approve (primary).
 
+Pi extension select, input, and editor dialogs surface through the native
+user-input panel, including editor prefill in its free-text field.
+
 ### Diff panel
 Right resizable split (default 560px, min 320px). Sidebar · chat · right panel
 are **one** resizable group: nesting a second group inside the chat panel does not
@@ -304,7 +307,16 @@ faintest inset hairline. General: Language, Theme
 Delete confirmation, task-panel behavior, and provider update checks. The title
 model defaults to Codex `gpt-5.6-luna`; its isolated background request always
 uses `low` reasoning effort. Providers: Claude / Codex / pi / OpenCode
-configuration.
+configuration. Each pi profile includes an off-by-default "Trust project
+extensions" toggle; enabling it launches pi with `--approve` so the project's
+`.pi` extensions, settings, and skills are loaded for that session. pi also
+defaults to zero tcode injection: sessions run with effective Full access, no
+tcode permission extension, and no preview MCP registration. The off-by-default
+"Native approvals" toggle opts supervised and auto-accept-edits sessions into
+the tcode permission gate; without it those stored modes are effectively Full
+access while Read only remains enforced by pi's native tool filter. Because pi
+has no MCP client, its unattached-tools warning is emitted only for explicitly
+enabled orchestration or computer-use registrations.
 
 Orchestrate begins with an explicit built-in `/orchestrate` explanation. Every
 main model is eligible: the page exposes one multiline generic identity plus

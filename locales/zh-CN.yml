@@ -393,6 +393,10 @@ providers:
   home_help: "该提供方实例使用的自定义主目录或数据目录。"
   launch_args: "启动参数"
   launch_args_help: "会话启动时额外传入的 CLI 参数。"
+  pi_trust_project_extensions: "信任项目扩展"
+  pi_trust_project_extensions_help: "以 --approve 启动 pi，加载项目 .pi 目录中的扩展、设置与技能。"
+  pi_native_approvals: "原生审批"
+  pi_native_approvals_help: "向 pi 注入 tcode 权限扩展，使监督类模式可对命令、编辑与扩展工具进行原生确认。关闭则保持 pi 会话零注入（完全访问）。"
   models:
     title: "模型"
     count: "有 %{count} 个可用模型。"
@@ -530,6 +534,7 @@ approval:
   auto_edits_description: "自动批准编辑，执行其他操作前询问。"
   full_access: "完全访问"
   full_access_description: "无需提示即可执行命令和编辑。"
+  pi_native_approvals_required: "在 pi 提供方设置中开启「原生审批」后可用"
   command_requested: "请求批准执行命令"
   file_read_requested: "请求批准读取文件"
   file_requested: "请求批准修改文件"

@@ -1610,6 +1610,10 @@ impl Composer {
     /// description, ✓ on the current one).
     fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.workspace_store.read(cx).composer_approval_mode(cx);
+        let native_approval_modes_enabled = self
+            .workspace_store
+            .read(cx)
+            .composer_native_approval_modes_enabled(cx);
         let (label, _, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
 
@@ -1636,7 +1640,14 @@ impl Composer {
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_permission_pane(current, pending_restart, &store_entity, &cx.entity(), cx)
+                render_permission_pane(
+                    current,
+                    pending_restart,
+                    native_approval_modes_enabled,
+                    &store_entity,
+                    &cx.entity(),
+                    cx,
+                )
             })
             .into_any_element()
     }
@@ -2269,14 +2280,19 @@ impl Composer {
         let current = self
             .workspace_store
             .read(cx)
-            .composer_pending_user_input(cx)
-            .map(|(id, _)| id);
-        if current != self.ui_request_id {
-            self.ui_request_id = current;
+            .composer_pending_user_input(cx);
+        let current_id = current.as_ref().map(|(id, _)| id.clone());
+        if current_id != self.ui_request_id {
+            self.ui_request_id = current_id;
             self.ui_question_index = 0;
             self.ui_selections.clear();
+            let prefill = current
+                .as_ref()
+                .and_then(|(_, questions)| questions.first())
+                .and_then(|question| question.prefill.as_deref())
+                .unwrap_or_default();
             self.user_input_custom.update(cx, |state, cx| {
-                state.set_value("", window, cx);
+                state.set_value(prefill, window, cx);
             });
         }
     }
@@ -2481,22 +2497,28 @@ impl Composer {
         let request_submit = request_id.clone();
         let mut actions = h_flex().w_full().gap_2().items_center();
         if index > 0 {
+            let questions_previous = questions.clone();
             actions = actions.child(
                 Button::new("ui-prev")
                     .ghost()
                     .small()
                     .label(tcode_i18n::tr!("userinput.previous"))
-                    .on_click(cx.listener(|this, _, _, cx| this.ui_go(-1, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ui_go(-1, &questions_previous, window, cx)
+                    })),
             );
         }
         actions = actions.child(div().flex_1());
         if !is_last {
+            let questions_next = questions.clone();
             actions = actions.child(
                 Button::new("ui-next")
                     .outline()
                     .small()
                     .label(tcode_i18n::tr!("userinput.next_question"))
-                    .on_click(cx.listener(|this, _, _, cx| this.ui_go(1, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ui_go(1, &questions_next, window, cx)
+                    })),
             );
         }
         if multi && all_answered {
@@ -2610,12 +2632,33 @@ impl Composer {
         cx.notify();
     }
 
-    fn ui_go(&mut self, delta: i32, cx: &mut Context<Self>) {
+    fn ui_go(
+        &mut self,
+        delta: i32,
+        questions: &[UserInputQuestion],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let next = self.ui_question_index as i32 + delta;
         if next >= 0 {
             self.ui_question_index = next as usize;
+            self.seed_user_input_prefill(questions, window, cx);
             cx.notify();
         }
+    }
+
+    fn seed_user_input_prefill(
+        &mut self,
+        questions: &[UserInputQuestion],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = questions
+            .get(self.ui_question_index)
+            .and_then(|question| question.prefill.as_deref())
+            .unwrap_or_default();
+        self.user_input_custom
+            .update(cx, |state, cx| state.set_value(prefill, window, cx));
     }
 
     /// After answering: jump to the next unanswered question, or — when the
@@ -2646,6 +2689,7 @@ impl Composer {
                     next_unanswered_question(&questions, &this.ui_selections, at)
                 {
                     this.ui_question_index = next;
+                    this.seed_user_input_prefill(&questions, window, cx);
                     cx.notify();
                 }
             });
@@ -3906,6 +3950,7 @@ fn render_model_row(
 fn render_permission_pane(
     current: ApprovalMode,
     pending_restart: bool,
+    native_approval_modes_enabled: bool,
     store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
@@ -3923,12 +3968,22 @@ fn render_permission_pane(
     for (index, (mode, label, description, icon_path)) in APPROVAL_MODES.iter().enumerate() {
         let mode = *mode;
         let is_current = mode == current;
+        let is_disabled = !native_approval_modes_enabled
+            && matches!(
+                mode,
+                ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
+            );
         let store = store_entity.clone();
         let popover = popover.clone();
+        let disabled_hint = tcode_i18n::tr!("approval.pi_native_approvals_required");
         let accessible_label = tcode_i18n::tr!(
             "approval.mode_option",
             label = tcode_i18n::tr!(*label),
-            description = tcode_i18n::tr!(*description)
+            description = if is_disabled {
+                format!("{} {}", tcode_i18n::tr!(*description), disabled_hint)
+            } else {
+                tcode_i18n::tr!(*description).into_owned()
+            }
         )
         .into_owned();
         list = list.child(
@@ -3944,13 +3999,16 @@ fn render_permission_pane(
                 .gap_2()
                 .items_start()
                 .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().muted))
-                .on_click(move |_, window, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(Command::SetActiveApprovalMode { mode }, cx)
-                    });
-                    popover.update(cx, |st, cx| st.dismiss(window, cx));
+                .when(is_disabled, |row| row.opacity(0.55))
+                .when(!is_disabled, |row| {
+                    row.cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .on_click(move |_, window, cx| {
+                            store.update(cx, |store, cx| {
+                                store.dispatch(Command::SetActiveApprovalMode { mode }, cx)
+                            });
+                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                        })
                 })
                 .child(
                     Icon::empty()
@@ -3976,10 +4034,12 @@ fn render_permission_pane(
                                 }),
                         )
                         .child(
-                            div()
+                            v_flex()
+                                .gap_0p5()
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!(*description)),
+                                .child(tcode_i18n::tr!(*description))
+                                .when(is_disabled, |text| text.child(disabled_hint)),
                         ),
                 ),
         );
@@ -5021,6 +5081,7 @@ mod tests {
                 description: String::new(),
             }],
             multi_select: false,
+            prefill: None,
         };
         let questions = vec![question("q1"), question("q2"), question("q3")];
         let mut selections = std::collections::HashMap::new();
@@ -5075,6 +5136,7 @@ mod tests {
                     },
                 ],
                 multi_select: false,
+                prefill: None,
             },
             UserInputQuestion {
                 id: "q2".into(),
@@ -5091,6 +5153,7 @@ mod tests {
                     },
                 ],
                 multi_select: true,
+                prefill: None,
             },
         ];
         let mut selections = std::collections::HashMap::new();
