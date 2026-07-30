@@ -1720,10 +1720,40 @@ impl WorkspaceStore {
     }
 
     pub fn composer_approval_mode(&self, _cx: &App) -> agent::ApprovalMode {
-        self.session_status_replica
+        let mode = self
+            .session_status_replica
             .as_ref()
             .map(|status| status.approval_mode)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !self.composer_native_approval_modes_enabled(_cx)
+            && matches!(
+                mode,
+                agent::ApprovalMode::Supervised | agent::ApprovalMode::AutoAcceptEdits
+            )
+        {
+            agent::ApprovalMode::FullAccess
+        } else {
+            mode
+        }
+    }
+
+    pub fn composer_native_approval_modes_enabled(&self, _cx: &App) -> bool {
+        let Some(status) = self.session_status_replica.as_ref() else {
+            return true;
+        };
+        if status.provider != agent::ProviderKind::Pi {
+            return true;
+        }
+        status
+            .requested_profile_id
+            .as_deref()
+            .and_then(|id| self.settings_replica.resolved_profile(id))
+            .map(|profile| profile.settings.pi_native_approvals)
+            .unwrap_or_else(|| {
+                self.settings_replica
+                    .provider(agent::ProviderKind::Pi)
+                    .pi_native_approvals
+            })
     }
 
     pub fn composer_approval_pending_restart(&self, _cx: &App) -> bool {
