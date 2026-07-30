@@ -55,6 +55,21 @@
 
 验收：settings 回环/默认值测试、launch-args 测试、locale parity、全量门禁。
 
+## Module E — 默认零注入
+
+- `ProviderSettings` 增加默认关闭的 `pi_native_approvals`。关闭时不向 pi
+  注入 tcode 权限 extension 或相关环境变量；仅在 Supervised /
+  AutoAcceptEdits 且开关启用时注入权限门。ReadOnly 继续使用 pi 原生
+  `--tools read,grep,find,ls`。
+- runtime 只修改 `SessionOptions` 的有效审批模式，不改写持久化
+  `SessionMeta`：开关关闭时 Supervised / AutoAcceptEdits → FullAccess，
+  ReadOnly / FullAccess 保持不变；开关打开时全部保持原值。
+- pi 会话不再创建或传递 preview MCP registration。orchestrate 与
+  computer-use 仍是显式 opt-in，且是仅有的 unattached-MCP 警告来源。
+- composer 对关闭开关的 pi 会话将 Supervised / AutoAcceptEdits 显示为
+  禁用，并提示到 pi 提供方设置开启「原生审批」；当前高亮使用与 runtime
+  一致的有效 FullAccess，但保留存储偏好以便开启开关后恢复。
+
 ## 排期与派工
 
 前置：先提交当前未提交的 pi.rs 修复（MCP 警告措辞 + notify warning/error 冒泡），保证 clean tree。

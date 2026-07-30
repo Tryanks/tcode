@@ -1610,6 +1610,10 @@ impl Composer {
     /// description, ✓ on the current one).
     fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.workspace_store.read(cx).composer_approval_mode(cx);
+        let native_approval_modes_enabled = self
+            .workspace_store
+            .read(cx)
+            .composer_native_approval_modes_enabled(cx);
         let (label, _, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
 
@@ -1636,7 +1640,14 @@ impl Composer {
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
-                render_permission_pane(current, pending_restart, &store_entity, &cx.entity(), cx)
+                render_permission_pane(
+                    current,
+                    pending_restart,
+                    native_approval_modes_enabled,
+                    &store_entity,
+                    &cx.entity(),
+                    cx,
+                )
             })
             .into_any_element()
     }
@@ -3939,6 +3950,7 @@ fn render_model_row(
 fn render_permission_pane(
     current: ApprovalMode,
     pending_restart: bool,
+    native_approval_modes_enabled: bool,
     store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
@@ -3956,12 +3968,22 @@ fn render_permission_pane(
     for (index, (mode, label, description, icon_path)) in APPROVAL_MODES.iter().enumerate() {
         let mode = *mode;
         let is_current = mode == current;
+        let is_disabled = !native_approval_modes_enabled
+            && matches!(
+                mode,
+                ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
+            );
         let store = store_entity.clone();
         let popover = popover.clone();
+        let disabled_hint = tcode_i18n::tr!("approval.pi_native_approvals_required");
         let accessible_label = tcode_i18n::tr!(
             "approval.mode_option",
             label = tcode_i18n::tr!(*label),
-            description = tcode_i18n::tr!(*description)
+            description = if is_disabled {
+                format!("{} {}", tcode_i18n::tr!(*description), disabled_hint)
+            } else {
+                tcode_i18n::tr!(*description).into_owned()
+            }
         )
         .into_owned();
         list = list.child(
@@ -3977,13 +3999,16 @@ fn render_permission_pane(
                 .gap_2()
                 .items_start()
                 .rounded(px(6.))
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().muted))
-                .on_click(move |_, window, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(Command::SetActiveApprovalMode { mode }, cx)
-                    });
-                    popover.update(cx, |st, cx| st.dismiss(window, cx));
+                .when(is_disabled, |row| row.opacity(0.55))
+                .when(!is_disabled, |row| {
+                    row.cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().muted))
+                        .on_click(move |_, window, cx| {
+                            store.update(cx, |store, cx| {
+                                store.dispatch(Command::SetActiveApprovalMode { mode }, cx)
+                            });
+                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                        })
                 })
                 .child(
                     Icon::empty()
@@ -4009,10 +4034,12 @@ fn render_permission_pane(
                                 }),
                         )
                         .child(
-                            div()
+                            v_flex()
+                                .gap_0p5()
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!(*description)),
+                                .child(tcode_i18n::tr!(*description))
+                                .when(is_disabled, |text| text.child(disabled_hint)),
                         ),
                 ),
         );
