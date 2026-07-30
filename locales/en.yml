@@ -397,6 +397,8 @@ providers:
   home_help: "Custom home or data directory used by this provider instance."
   launch_args: "Launch arguments"
   launch_args_help: "Additional CLI arguments passed on session start."
+  pi_trust_project_extensions: "Trust project extensions"
+  pi_trust_project_extensions_help: "Launch pi with --approve so extensions, settings, and skills in the project's .pi directory are loaded."
   models:
     title: "Models"
     count: "%{count} models available."

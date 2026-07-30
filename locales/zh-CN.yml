@@ -393,6 +393,8 @@ providers:
   home_help: "该提供方实例使用的自定义主目录或数据目录。"
   launch_args: "启动参数"
   launch_args_help: "会话启动时额外传入的 CLI 参数。"
+  pi_trust_project_extensions: "信任项目扩展"
+  pi_trust_project_extensions_help: "以 --approve 启动 pi，加载项目 .pi 目录中的扩展、设置与技能。"
   models:
     title: "模型"
     count: "有 %{count} 个可用模型。"

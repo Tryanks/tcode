@@ -105,6 +105,9 @@ pub struct ProviderSettings {
     /// Native-provider CLI arguments appended on session start (ignored for Codex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_args: Option<String>,
+    /// Whether pi should trust and load the project's local `.pi` configuration.
+    #[serde(default)]
+    pub pi_trust_project_extensions: bool,
     /// Model slugs added by hand in the Models section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<String>,
@@ -131,6 +134,8 @@ pub struct ProfileConfigurationPatch {
     pub binary_path: Option<PathBuf>,
     pub home_path: Option<PathBuf>,
     pub launch_args: Option<String>,
+    #[serde(default)]
+    pub pi_trust_project_extensions: bool,
     pub custom_models: Vec<String>,
     pub hidden_models: Vec<String>,
 }
@@ -149,6 +154,7 @@ impl Default for ProviderSettings {
             binary_path: None,
             home_path: None,
             launch_args: None,
+            pi_trust_project_extensions: false,
             custom_models: Vec::new(),
             hidden_models: Vec::new(),
         }
@@ -1002,6 +1008,35 @@ mod tests {
         };
         assert_eq!(settings.extra_args(), vec!["--chrome", "--verbose"]);
         assert!(ProviderSettings::default().extra_args().is_empty());
+    }
+
+    #[test]
+    fn pi_project_trust_defaults_off_and_round_trips() {
+        let legacy: ProviderSettings = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.pi_trust_project_extensions);
+
+        let settings = ProviderSettings {
+            pi_trust_project_extensions: true,
+            ..ProviderSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: ProviderSettings = serde_json::from_str(&json).unwrap();
+        assert!(back.pi_trust_project_extensions);
+
+        let legacy_patch: ProfileConfigurationPatch = serde_json::from_str(
+            r#"{
+                "display_name": null,
+                "accent_color": null,
+                "env": [],
+                "binary_path": null,
+                "home_path": null,
+                "launch_args": null,
+                "custom_models": [],
+                "hidden_models": []
+            }"#,
+        )
+        .unwrap();
+        assert!(!legacy_patch.pi_trust_project_extensions);
     }
 
     #[test]

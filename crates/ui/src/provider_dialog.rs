@@ -59,6 +59,7 @@ pub struct ProviderDialog {
     binary: Entity<InputState>,
     home: Entity<InputState>,
     launch_args: Entity<InputState>,
+    pi_trust_project_extensions: bool,
     custom_model: Entity<InputState>,
     slug_error: Option<String>,
     /// Draft accent (`#rrggbb`); applied on Save.
@@ -166,6 +167,7 @@ impl ProviderDialog {
             binary,
             home,
             launch_args,
+            pi_trust_project_extensions: settings.pi_trust_project_extensions,
             custom_model,
             slug_error: None,
             accent: settings.accent_color.clone(),
@@ -232,6 +234,7 @@ impl ProviderDialog {
         let binary = trimmed(&self.binary, cx);
         let home = trimmed(&self.home, cx);
         let launch = trimmed(&self.launch_args, cx);
+        let pi_trust_project_extensions = self.pi_trust_project_extensions;
         let accent = self.accent.clone();
         let custom = self.custom_models.clone();
         let hidden = self.hidden_models.clone();
@@ -257,6 +260,7 @@ impl ProviderDialog {
                                 ProviderKind::Codex => None,
                                 _ => launch,
                             },
+                            pi_trust_project_extensions,
                             custom_models: custom,
                             hidden_models: hidden,
                         }),
@@ -572,6 +576,26 @@ impl ProviderDialog {
                         .into(),
                     Input::new(&self.launch_args)
                         .rounded(crate::material::radius_input())
+                        .into_any_element(),
+                    cx,
+                ),
+            );
+        }
+        if provider == ProviderKind::Pi {
+            blocks.push(
+                self.field_block(
+                    tcode_i18n::tr!("providers.pi_trust_project_extensions")
+                        .into_owned()
+                        .into(),
+                    tcode_i18n::tr!("providers.pi_trust_project_extensions_help")
+                        .into_owned()
+                        .into(),
+                    Switch::new("pi-trust-project-extensions")
+                        .checked(self.pi_trust_project_extensions)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.pi_trust_project_extensions = *checked;
+                            cx.notify();
+                        }))
                         .into_any_element(),
                     cx,
                 ),

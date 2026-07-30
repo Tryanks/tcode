@@ -2545,6 +2545,7 @@ impl AppState {
                 target.binary_path = configuration.binary_path;
                 target.home_path = configuration.home_path;
                 target.launch_args = configuration.launch_args;
+                target.pi_trust_project_extensions = configuration.pi_trust_project_extensions;
                 target.custom_models = configuration.custom_models;
                 target.hidden_models = configuration.hidden_models;
             }
@@ -8416,8 +8417,13 @@ fn session_options(
         // Native providers that expose "Launch arguments" use their profile;
         // an ACP agent carries its own from the installed-agent card.
         extra_args: match meta.provider {
-            ProviderKind::ClaudeCode | ProviderKind::Pi | ProviderKind::OpenCode => {
-                provider_settings.extra_args()
+            ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
+            ProviderKind::Pi => {
+                let mut extra_args = provider_settings.extra_args();
+                if provider_settings.pi_trust_project_extensions {
+                    extra_args.push("--approve".into());
+                }
+                extra_args
             }
             ProviderKind::Codex => Vec::new(),
             ProviderKind::Acp => acp_agent
@@ -9950,6 +9956,8 @@ mod tests {
         claude.launch_args = Some("--chrome --verbose".into());
         let codex = settings.provider_mut(ProviderKind::Codex);
         codex.home_path = Some(PathBuf::from("/tmp/codex-shadow"));
+        let pi = settings.provider_mut(ProviderKind::Pi);
+        pi.launch_args = Some("--verbose".into());
 
         let launch_env = LaunchEnv {
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
@@ -9981,6 +9989,17 @@ mod tests {
             opts.launch_env.pairs(ProviderKind::Codex),
             vec![("CODEX_HOME".to_string(), "/tmp/codex-shadow".to_string())]
         );
+
+        // pi project trust is opt-in and appends --approve after launch args.
+        let meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+        assert_eq!(opts.extra_args, vec!["--verbose"]);
+
+        settings
+            .provider_mut(ProviderKind::Pi)
+            .pi_trust_project_extensions = true;
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+        assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
     }
 
     /// Sensitive env rows contribute their value from `secrets.json`, never from
