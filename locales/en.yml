@@ -110,6 +110,8 @@ sidebar:
   child_threads: "%{count} child threads"
   waiting_approval: "Approval"
   waiting_approval_tooltip: "Waiting for approval"
+  waiting_input: "Question"
+  waiting_input_tooltip: "Waiting for your answer"
   archive: "Archive thread"
   archive_title: "Archive thread?"
   archive_description: 'Archive "%{title}" and its saved conversation? This cannot be undone.'

@@ -45,7 +45,7 @@ pub struct WorkspaceStore {
     session_status_replica: Option<SessionStatus>,
     providers_replica: ProvidersStatus,
     git_status_replica: GitStatusStatus,
-    background_session_flags: HashMap<String, (bool, bool)>,
+    background_session_flags: HashMap<String, (bool, bool, bool)>,
     active_destination: Option<ConversationDestination>,
     native_rewind_prefills: HashMap<String, String>,
     conversation_ui: ConversationUi,
@@ -344,7 +344,11 @@ impl WorkspaceStore {
                 } else {
                     self.background_session_flags.insert(
                         session_id.clone(),
-                        (status.working, status.pending_approval),
+                        (
+                            status.working,
+                            status.pending_approval,
+                            status.pending_user_input,
+                        ),
                     );
                 }
             }
@@ -515,7 +519,7 @@ impl WorkspaceStore {
             + self
                 .background_session_flags
                 .values()
-                .filter(|(working, _)| *working)
+                .filter(|(working, _, _)| *working)
                 .count()
     }
 
@@ -889,6 +893,19 @@ impl WorkspaceStore {
                 self.background_session_flags
                     .get(session_id)
                     .map(|flags| flags.1)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn pending_user_input_for(&self, session_id: &str, _cx: &App) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .filter(|status| status.session_id == session_id)
+            .map(|status| status.pending_user_input)
+            .or_else(|| {
+                self.background_session_flags
+                    .get(session_id)
+                    .map(|flags| flags.2)
             })
             .unwrap_or(false)
     }
@@ -2377,6 +2394,59 @@ mod tests {
             workspace.read_with(cx, |store, cx| store.composer_review_comments(cx)),
             replica.review_comment_drafts
         );
+
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn background_session_status_tracks_pending_user_input(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-background-user-input-status-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
+        let session_id = meta.id.clone();
+        session_store.upsert_meta(&meta).expect("persist session");
+
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: session_id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "selected session status", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == session_id)
+            })
+        });
+
+        let background_session_id = "background-session".to_string();
+        workspace.update(cx, |store, _| {
+            let mut status = store
+                .session_status_replica
+                .clone()
+                .expect("active session status");
+            status.session_id = background_session_id.clone();
+            status.pending_user_input = true;
+            store.apply_domain_event(&EventEnvelope {
+                topic: Topic::SessionStatus {
+                    session_id: background_session_id.clone(),
+                },
+                seq: 1,
+                event: ServerEvent::SessionStatusReplaced(status),
+            });
+        });
+
+        assert!(workspace.read_with(cx, |store, cx| {
+            store.pending_user_input_for(&background_session_id, cx)
+        }));
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
