@@ -1469,6 +1469,7 @@ impl AppState {
             turn_running: session.turn_in_flight,
             working: session.has_work(),
             pending_approval,
+            pending_user_input: session.timeline.pending_user_input.is_some(),
             supports_steering: session.supports_steering(),
             provider_option_descriptors,
             provider_option_selections: meta.option_selections.clone(),
@@ -7479,6 +7480,8 @@ impl AppState {
                 | AgentEvent::RewindCompleted { .. }
                 | AgentEvent::ApprovalRequested(_)
                 | AgentEvent::ApprovalResolved { .. }
+                | AgentEvent::UserInputRequested { .. }
+                | AgentEvent::UserInputResolved { .. }
         ) {
             self.emit_session_status(session_id, cx);
         }

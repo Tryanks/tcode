@@ -1136,6 +1136,7 @@ impl SessionsSidebar {
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
         let unread = self.store.read(cx).session_unread(&session_id, cx);
         let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
+        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
         let is_worktree = meta.worktree.is_some();
         let render_state = {
             let sessions = self.store.read(cx).sidebar_sessions(cx);
@@ -1212,6 +1213,12 @@ impl SessionsSidebar {
                     .build(window, cx)
             })
         })
+        .when(waiting_for_input && !waiting_for_approval, |row| {
+            row.tooltip(|window, cx| {
+                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
+                    .build(window, cx)
+            })
+        })
         .when(waiting_for_approval, |row| {
             row.child(
                 h_flex()
@@ -1228,22 +1235,41 @@ impl SessionsSidebar {
                     ),
             )
         })
-        .when(working && !waiting_for_approval, |row| {
+        .when(waiting_for_input && !waiting_for_approval, |row| {
             row.child(
                 h_flex()
                     .flex_none()
                     .items_center()
                     .gap_1()
-                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
                     .child(
                         div()
                             .whitespace_nowrap()
                             .text_size(px(11.))
-                            .text_color(cx.theme().success)
-                            .child(tcode_i18n::tr!("sidebar.working")),
+                            .text_color(cx.theme().warning)
+                            .child(tcode_i18n::tr!("sidebar.waiting_input")),
                     ),
             )
         })
+        .when(
+            working && !waiting_for_approval && !waiting_for_input,
+            |row| {
+                row.child(
+                    h_flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+                        .child(
+                            div()
+                                .whitespace_nowrap()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().success)
+                                .child(tcode_i18n::tr!("sidebar.working")),
+                        ),
+                )
+            },
+        )
         .when(is_child, |row| {
             row.child(
                 div()
