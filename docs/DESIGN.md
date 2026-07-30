@@ -304,7 +304,9 @@ faintest inset hairline. General: Language, Theme
 Delete confirmation, task-panel behavior, and provider update checks. The title
 model defaults to Codex `gpt-5.6-luna`; its isolated background request always
 uses `low` reasoning effort. Providers: Claude / Codex / pi / OpenCode
-configuration.
+configuration. Each pi profile includes an off-by-default "Trust project
+extensions" toggle; enabling it launches pi with `--approve` so the project's
+`.pi` extensions, settings, and skills are loaded for that session.
 
 Orchestrate begins with an explicit built-in `/orchestrate` explanation. Every
 main model is eligible: the page exposes one multiline generic identity plus
