@@ -338,16 +338,15 @@ async fn run_actor(
              })
             .await;
     }
-    if opts.mcp_server.is_some()
-        || opts.orchestrate_server.is_some()
-        || opts.computer_use_server.is_some()
-    {
+    let unattached = unattached_servers(&opts);
+    if !unattached.is_empty() {
         actor
             .emit(AgentEvent::Warning {
-                message:
-                "pi RPC does not expose native MCP registration; configured tcode MCP servers were not attached"
-                    .into(),
-             })
+                message: format!(
+                    "pi has no MCP client of its own, so tcode's {} tools are unavailable in this session",
+                    unattached.join(", ")
+                ),
+            })
             .await;
     }
     if ready.send(Ok(())).await.is_err() {
@@ -487,6 +486,13 @@ impl PiActor {
                         ensure_success(&message)?;
                         return Ok(message);
                     }
+                    // Extensions load before this handshake completes, so the
+                    // one notification that explains a broken extension arrives
+                    // while we are still here. Everything else that lands early
+                    // belongs to the mapper, not to startup.
+                    if let Some(warning) = extension_warning(&message) {
+                        self.emit(AgentEvent::Warning { message: warning }).await;
+                    }
                 }
                 Ok(ChildOutput::Error(err)) => return Err(AgentError::Protocol(err)),
                 Ok(ChildOutput::Eof) | Err(_) => {
@@ -543,6 +549,10 @@ impl PiActor {
     async fn handle_extension_ui(&mut self, message: &Value) {
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         if method != "confirm" {
+            if let Some(warning) = extension_warning(message) {
+                self.emit(AgentEvent::Warning { message: warning }).await;
+                return;
+            }
             if matches!(
                 method,
                 "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text"
@@ -1192,6 +1202,28 @@ fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
     }
 }
 
+/// The text of a warning-or-worse `notify` from a pi extension.
+///
+/// pi's fire-and-forget UI methods expect no response, so an extension that
+/// reports trouble this way is otherwise invisible to the user — including a
+/// user's own installed extension explaining why it could not start.
+fn extension_warning(message: &Value) -> Option<String> {
+    if message.get("type").and_then(Value::as_str) != Some("extension_ui_request")
+        || message.get("method").and_then(Value::as_str) != Some("notify")
+    {
+        return None;
+    }
+    let level = message
+        .get("notifyType")
+        .and_then(Value::as_str)
+        .unwrap_or("info");
+    if !matches!(level, "warning" | "error") {
+        return None;
+    }
+    let text = message.get("message").and_then(Value::as_str)?.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 fn result_text(result: &Value) -> String {
     result
         .get("content")
@@ -1327,6 +1359,27 @@ fn pi_approval_mode(mode: ApprovalMode) -> &'static str {
         ApprovalMode::AutoAcceptEdits => "auto_accept_edits",
         ApprovalMode::FullAccess => "full_access",
     }
+}
+
+/// The tcode tool families this session does without, named the way the user
+/// knows them from Settings.
+///
+/// pi has no MCP client (its README: "No MCP"), and its RPC protocol exposes no
+/// registration hook, so every tcode MCP server stays behind. Naming them beats
+/// a blanket notice: the person reading it wants to know which tools went
+/// missing, not that a protocol lacks a feature.
+fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
+    let mut unattached = Vec::new();
+    if opts.mcp_server.is_some() {
+        unattached.push("preview browser");
+    }
+    if opts.orchestrate_server.is_some() {
+        unattached.push("orchestration");
+    }
+    if opts.computer_use_server.is_some() {
+        unattached.push("computer-use");
+    }
+    unattached
 }
 
 fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
@@ -1488,6 +1541,35 @@ fn spawn_stderr_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_warning_notifications_become_session_warnings() {
+        let notify = |level: &str| {
+            json!({
+                "type":"extension_ui_request",
+                "id":"1",
+                "method":"notify",
+                "message":"my-extension could not start",
+                "notifyType":level
+            })
+        };
+        assert_eq!(
+            extension_warning(&notify("warning")).as_deref(),
+            Some("my-extension could not start")
+        );
+        assert_eq!(
+            extension_warning(&notify("error")).as_deref(),
+            Some("my-extension could not start")
+        );
+        assert!(extension_warning(&notify("info")).is_none());
+        assert!(
+            extension_warning(&json!({
+                "type":"extension_ui_request","id":"1","method":"setStatus","statusText":"busy"
+            }))
+            .is_none()
+        );
+        assert!(extension_warning(&json!({"type":"agent_start"})).is_none());
+    }
 
     #[test]
     fn map_model_uses_supported_state_thinking_level_as_default() {
