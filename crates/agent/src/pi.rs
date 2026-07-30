@@ -224,24 +224,27 @@ async fn run_actor(
             return;
         }
     };
-    let extension = match materialize_permission_extension() {
-        Ok(path) => path,
-        Err(err) => {
-            let _ = ready.send(Err(err)).await;
-            return;
+    let extension = if gate_required(opts.approval_mode) {
+        match materialize_permission_extension() {
+            Ok(path) => Some(path),
+            Err(err) => {
+                let _ = ready.send(Err(err)).await;
+                return;
+            }
         }
+    } else {
+        None
     };
     let supports_settled =
         pi_version(&binary, &opts.launch_env).is_some_and(|version| version >= SETTLED_MIN_VERSION);
     let mut cmd = crate::process::command(&binary);
-    // Profile arguments are applied first. The transport, permission
+    // Profile arguments are applied first. The transport, optional permission
     // extension, resume target, and read-only tool set are tcode-owned and go
     // last so a profile cannot accidentally override the safety boundary.
-    cmd.args(&opts.extra_args)
-        .arg("--mode")
-        .arg("rpc")
-        .arg("--extension")
-        .arg(extension);
+    cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
+    if let Some(extension) = extension {
+        cmd.arg("--extension").arg(extension);
+    }
     if let Some(thinking) = selected_thinking(&opts.option_selections) {
         cmd.arg("--thinking").arg(thinking);
     }
@@ -258,11 +261,13 @@ async fn run_actor(
     for (key, value) in opts.launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
     }
-    cmd.env(
-        "TCODE_PI_APPROVAL_MODE",
-        pi_approval_mode(opts.approval_mode),
-    )
-    .env("TCODE_PI_CWD", &opts.cwd);
+    if gate_required(opts.approval_mode) {
+        cmd.env(
+            "TCODE_PI_APPROVAL_MODE",
+            pi_approval_mode(opts.approval_mode),
+        )
+        .env("TCODE_PI_CWD", &opts.cwd);
+    }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -1571,18 +1576,22 @@ fn pi_approval_mode(mode: ApprovalMode) -> &'static str {
     }
 }
 
+fn gate_required(mode: ApprovalMode) -> bool {
+    matches!(
+        mode,
+        ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
+    )
+}
+
 /// The tcode tool families this session does without, named the way the user
 /// knows them from Settings.
 ///
 /// pi has no MCP client (its README: "No MCP"), and its RPC protocol exposes no
-/// registration hook, so every tcode MCP server stays behind. Naming them beats
-/// a blanket notice: the person reading it wants to know which tools went
-/// missing, not that a protocol lacks a feature.
+/// registration hook, so explicitly enabled tcode MCP servers stay behind.
+/// Naming them beats a blanket notice: the person reading it wants to know
+/// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
     let mut unattached = Vec::new();
-    if opts.mcp_server.is_some() {
-        unattached.push("preview browser");
-    }
     if opts.orchestrate_server.is_some() {
         unattached.push("orchestration");
     }
@@ -1751,6 +1760,14 @@ fn spawn_stderr_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_gate_is_only_required_for_supervised_modes() {
+        assert!(gate_required(ApprovalMode::Supervised));
+        assert!(gate_required(ApprovalMode::AutoAcceptEdits));
+        assert!(!gate_required(ApprovalMode::FullAccess));
+        assert!(!gate_required(ApprovalMode::ReadOnly));
+    }
 
     #[test]
     fn extension_bash_approval_is_tool_use() {

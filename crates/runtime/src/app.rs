@@ -2546,6 +2546,7 @@ impl AppState {
                 target.home_path = configuration.home_path;
                 target.launch_args = configuration.launch_args;
                 target.pi_trust_project_extensions = configuration.pi_trust_project_extensions;
+                target.pi_native_approvals = configuration.pi_native_approvals;
                 target.custom_models = configuration.custom_models;
                 target.hidden_models = configuration.hidden_models;
             }
@@ -6895,7 +6896,11 @@ impl AppState {
         self.emit_session_status(session_id, cx);
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
-        let preview_registration = self.preview_registration_for(&meta);
+        let preview_registration = if meta.provider == ProviderKind::Pi {
+            None
+        } else {
+            self.preview_registration_for(&meta)
+        };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let computer_use_registration = self.computer_use_registration.clone();
         let session_id = meta.id.clone();
@@ -8393,16 +8398,31 @@ fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
+    let approval_mode = if meta.provider == ProviderKind::Pi
+        && !provider_settings.pi_native_approvals
+    {
+        match meta.approval_mode {
+            ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits => ApprovalMode::FullAccess,
+            ApprovalMode::ReadOnly => ApprovalMode::ReadOnly,
+            ApprovalMode::FullAccess => ApprovalMode::FullAccess,
+        }
+    } else {
+        meta.approval_mode
+    };
     SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
         fork: meta.pending_fork,
         binary_path: provider_settings.binary_path.clone(),
-        approval_mode: meta.approval_mode,
+        approval_mode,
         option_selections: meta.option_selections.clone(),
         interaction_mode: meta.interaction_mode,
-        mcp_server,
+        mcp_server: if meta.provider == ProviderKind::Pi {
+            None
+        } else {
+            mcp_server
+        },
         orchestrate_server: if meta.orchestrate_enabled {
             orchestrate_server
         } else {
@@ -10231,6 +10251,79 @@ mod tests {
         let mcp = opts.mcp_server.expect("registration threaded through");
         assert_eq!(mcp.url, "http://127.0.0.1:7/mcp");
         assert_eq!(mcp.bearer_token, "tok");
+    }
+
+    #[test]
+    fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
+        let settings = Settings::default();
+        let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
+        meta.approval_mode = ApprovalMode::Supervised;
+        let reg = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
+            url: "http://127.0.0.1:7/mcp".into(),
+            bearer_token: "tok".into(),
+        };
+
+        let opts = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            Some(reg),
+            None,
+            None,
+        );
+
+        assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
+        assert!(opts.mcp_server.is_none());
+        assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
+
+        meta.approval_mode = ApprovalMode::AutoAcceptEdits;
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+        assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
+
+        meta.approval_mode = ApprovalMode::ReadOnly;
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+        assert_eq!(opts.approval_mode, ApprovalMode::ReadOnly);
+
+        meta.approval_mode = ApprovalMode::FullAccess;
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+        assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
+    }
+
+    #[test]
+    fn pi_session_options_preserve_supervised_with_native_approvals() {
+        let mut settings = Settings::default();
+        settings.provider_mut(ProviderKind::Pi).pi_native_approvals = true;
+        let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
+        meta.approval_mode = ApprovalMode::Supervised;
+
+        let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+
+        assert_eq!(opts.approval_mode, ApprovalMode::Supervised);
+    }
+
+    #[test]
+    fn non_pi_session_options_preserve_mode_and_preview_registration() {
+        let settings = Settings::default();
+        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
+        meta.approval_mode = ApprovalMode::AutoAcceptEdits;
+        let reg = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
+            url: "http://127.0.0.1:7/mcp".into(),
+            bearer_token: "tok".into(),
+        };
+
+        let opts = session_options(
+            &meta,
+            &settings,
+            LaunchEnv::default(),
+            Some(reg),
+            None,
+            None,
+        );
+
+        assert_eq!(opts.approval_mode, ApprovalMode::AutoAcceptEdits);
+        assert!(opts.mcp_server.is_some());
     }
 
     #[test]

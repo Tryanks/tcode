@@ -170,6 +170,7 @@ mod tests {
                 home_path: Some(PathBuf::from("/tmp/codex-home")),
                 launch_args: None,
                 pi_trust_project_extensions: false,
+                pi_native_approvals: false,
                 custom_models: vec!["gpt-6.7-codex".into()],
                 hidden_models: vec!["gpt-5".into()],
             },

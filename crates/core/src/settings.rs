@@ -108,6 +108,9 @@ pub struct ProviderSettings {
     /// Whether pi should trust and load the project's local `.pi` configuration.
     #[serde(default)]
     pub pi_trust_project_extensions: bool,
+    /// Whether tcode should inject its native approval extension into pi.
+    #[serde(default)]
+    pub pi_native_approvals: bool,
     /// Model slugs added by hand in the Models section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<String>,
@@ -136,6 +139,8 @@ pub struct ProfileConfigurationPatch {
     pub launch_args: Option<String>,
     #[serde(default)]
     pub pi_trust_project_extensions: bool,
+    #[serde(default)]
+    pub pi_native_approvals: bool,
     pub custom_models: Vec<String>,
     pub hidden_models: Vec<String>,
 }
@@ -155,6 +160,7 @@ impl Default for ProviderSettings {
             home_path: None,
             launch_args: None,
             pi_trust_project_extensions: false,
+            pi_native_approvals: false,
             custom_models: Vec::new(),
             hidden_models: Vec::new(),
         }
@@ -1014,14 +1020,17 @@ mod tests {
     fn pi_project_trust_defaults_off_and_round_trips() {
         let legacy: ProviderSettings = serde_json::from_str("{}").unwrap();
         assert!(!legacy.pi_trust_project_extensions);
+        assert!(!legacy.pi_native_approvals);
 
         let settings = ProviderSettings {
             pi_trust_project_extensions: true,
+            pi_native_approvals: true,
             ..ProviderSettings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         let back: ProviderSettings = serde_json::from_str(&json).unwrap();
         assert!(back.pi_trust_project_extensions);
+        assert!(back.pi_native_approvals);
 
         let legacy_patch: ProfileConfigurationPatch = serde_json::from_str(
             r#"{
@@ -1037,6 +1046,7 @@ mod tests {
         )
         .unwrap();
         assert!(!legacy_patch.pi_trust_project_extensions);
+        assert!(!legacy_patch.pi_native_approvals);
     }
 
     #[test]
