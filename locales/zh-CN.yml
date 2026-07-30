@@ -110,6 +110,8 @@ sidebar:
   child_threads: "%{count} 个子对话"
   waiting_approval: "待审批"
   waiting_approval_tooltip: "正在等待审批"
+  waiting_input: "待回答"
+  waiting_input_tooltip: "正在等待你的回答"
   archive: "归档对话"
   archive_title: "归档对话？"
   archive_description: "要归档“%{title}”及其已保存的对话吗？此操作无法撤销。"
