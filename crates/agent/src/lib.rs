@@ -424,6 +424,8 @@ pub struct UserInputQuestion {
     pub question: String,
     pub options: Vec<UserInputOption>,
     pub multi_select: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
