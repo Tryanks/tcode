@@ -182,6 +182,7 @@ pub struct SessionStatus {
     pub turn_running: bool,
     pub working: bool,
     pub pending_approval: bool,
+    pub pending_user_input: bool,
     pub supports_steering: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
     pub provider_option_selections: Vec<OptionSelection>,
