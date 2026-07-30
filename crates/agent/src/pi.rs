@@ -1163,6 +1163,29 @@ fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
         .get("reason")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    if payload.get("source").and_then(Value::as_str) == Some("extension") {
+        let path = payload
+            .get("extensionPath")
+            .and_then(Value::as_str)
+            .unwrap_or("(unknown path)");
+        let mut source = format!("extension tool from {path}");
+        if payload
+            .get("shadowsBuiltin")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            source.push_str(&format!(" (overrides builtin {tool_name})"));
+        }
+        let detail = match reason {
+            Some(reason) => format!("{reason}; {source}"),
+            None => source,
+        };
+        return ApprovalKind::ToolUse {
+            name: tool_name.to_owned(),
+            input,
+            detail,
+        };
+    }
     match tool_name {
         "bash" => ApprovalKind::ExecCommand {
             command: input
@@ -1541,6 +1564,81 @@ fn spawn_stderr_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_bash_approval_is_tool_use() {
+        let approval = approval_kind(
+            "bash",
+            &json!({
+                "toolName": "bash",
+                "source": "extension",
+                "extensionPath": "/extensions/bash.ts",
+                "input": { "command": "x" }
+            }),
+        );
+        assert!(matches!(
+            approval,
+            ApprovalKind::ToolUse { name, input, .. }
+                if name == "bash" && input == json!({ "command": "x" })
+        ));
+    }
+
+    #[test]
+    fn builtin_bash_approval_remains_exec_command() {
+        let approval = approval_kind(
+            "bash",
+            &json!({
+                "toolName": "bash",
+                "input": { "command": "x" },
+                "cwd": "/project"
+            }),
+        );
+        assert!(matches!(
+            approval,
+            ApprovalKind::ExecCommand { command, cwd, .. }
+                if command == "x" && cwd.as_deref() == Some("/project")
+        ));
+    }
+
+    #[test]
+    fn extension_tool_approval_detail_contains_path() {
+        let approval = approval_kind(
+            "hello_world",
+            &json!({
+                "toolName": "hello_world",
+                "source": "extension",
+                "extensionPath": "/extensions/hello.ts",
+                "input": {}
+            }),
+        );
+        assert!(matches!(
+            approval,
+            ApprovalKind::ToolUse { name, detail, .. }
+                if name == "hello_world" && detail.contains("/extensions/hello.ts")
+        ));
+    }
+
+    #[test]
+    fn shadowed_builtin_is_noted_in_extension_approval_detail() {
+        let approval = approval_kind(
+            "bash",
+            &json!({
+                "toolName": "bash",
+                "source": "extension",
+                "extensionPath": "/extensions/bash.ts",
+                "shadowsBuiltin": true,
+                "input": { "command": "x" },
+                "reason": "requires confirmation"
+            }),
+        );
+        assert!(matches!(
+            approval,
+            ApprovalKind::ToolUse { detail, .. }
+                if detail.contains("requires confirmation")
+                    && detail.contains("/extensions/bash.ts")
+                    && detail.contains("overrides builtin bash")
+        ));
+    }
 
     #[test]
     fn only_warning_notifications_become_session_warnings() {

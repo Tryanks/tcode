@@ -18,9 +18,35 @@ export default function tcodePermissions(pi: any) {
 	pi.on("tool_call", async (event: any, ctx: any) => {
 		const toolName = String(event.toolName ?? "");
 		const input = event.input ?? {};
+		const info = pi.getAllTools().find((tool: any) => tool.name === toolName)?.sourceInfo;
 
-		// Unknown extension tools never inherit blanket access. This is the
-		// fail-closed boundary if pi adds a new built-in tool in the future.
+		if (!info) {
+			return { block: true, reason: `tcode blocked tool with unknown source: ${toolName || "(unnamed)"}` };
+		}
+
+		if (info.source !== "builtin") {
+			if (mode === "read_only") {
+				return { block: true, reason: `tcode read-only mode blocked ${toolName}` };
+			}
+			if (mode === "full_access") return undefined;
+
+			const reason = "requires confirmation";
+			const payload = JSON.stringify({
+				toolName,
+				input,
+				cwd,
+				reason,
+				source: "extension",
+				extensionPath: info.path,
+				shadowsBuiltin: known.has(toolName),
+			});
+			const confirmed = await ctx.ui.confirm(`tcode:${toolName}`, payload);
+			if (!confirmed) return { block: true, reason: `tcode denied ${toolName}` };
+			return undefined;
+		}
+
+		// Built-ins unknown to this gate never inherit blanket access. This is
+		// the fail-closed boundary if pi adds a new built-in tool in the future.
 		if (!known.has(toolName)) {
 			return { block: true, reason: `tcode blocked unknown tool: ${toolName || "(unnamed)"}` };
 		}
