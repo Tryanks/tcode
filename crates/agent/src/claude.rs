@@ -2534,6 +2534,7 @@ fn parse_ask_user_questions(input: &Value) -> Vec<UserInputQuestion> {
                 question,
                 options,
                 multi_select,
+                prefill: None,
             }
         })
         .collect()

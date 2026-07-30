@@ -2269,14 +2269,19 @@ impl Composer {
         let current = self
             .workspace_store
             .read(cx)
-            .composer_pending_user_input(cx)
-            .map(|(id, _)| id);
-        if current != self.ui_request_id {
-            self.ui_request_id = current;
+            .composer_pending_user_input(cx);
+        let current_id = current.as_ref().map(|(id, _)| id.clone());
+        if current_id != self.ui_request_id {
+            self.ui_request_id = current_id;
             self.ui_question_index = 0;
             self.ui_selections.clear();
+            let prefill = current
+                .as_ref()
+                .and_then(|(_, questions)| questions.first())
+                .and_then(|question| question.prefill.as_deref())
+                .unwrap_or_default();
             self.user_input_custom.update(cx, |state, cx| {
-                state.set_value("", window, cx);
+                state.set_value(prefill, window, cx);
             });
         }
     }
@@ -2481,22 +2486,28 @@ impl Composer {
         let request_submit = request_id.clone();
         let mut actions = h_flex().w_full().gap_2().items_center();
         if index > 0 {
+            let questions_previous = questions.clone();
             actions = actions.child(
                 Button::new("ui-prev")
                     .ghost()
                     .small()
                     .label(tcode_i18n::tr!("userinput.previous"))
-                    .on_click(cx.listener(|this, _, _, cx| this.ui_go(-1, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ui_go(-1, &questions_previous, window, cx)
+                    })),
             );
         }
         actions = actions.child(div().flex_1());
         if !is_last {
+            let questions_next = questions.clone();
             actions = actions.child(
                 Button::new("ui-next")
                     .outline()
                     .small()
                     .label(tcode_i18n::tr!("userinput.next_question"))
-                    .on_click(cx.listener(|this, _, _, cx| this.ui_go(1, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ui_go(1, &questions_next, window, cx)
+                    })),
             );
         }
         if multi && all_answered {
@@ -2610,12 +2621,33 @@ impl Composer {
         cx.notify();
     }
 
-    fn ui_go(&mut self, delta: i32, cx: &mut Context<Self>) {
+    fn ui_go(
+        &mut self,
+        delta: i32,
+        questions: &[UserInputQuestion],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let next = self.ui_question_index as i32 + delta;
         if next >= 0 {
             self.ui_question_index = next as usize;
+            self.seed_user_input_prefill(questions, window, cx);
             cx.notify();
         }
+    }
+
+    fn seed_user_input_prefill(
+        &mut self,
+        questions: &[UserInputQuestion],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = questions
+            .get(self.ui_question_index)
+            .and_then(|question| question.prefill.as_deref())
+            .unwrap_or_default();
+        self.user_input_custom
+            .update(cx, |state, cx| state.set_value(prefill, window, cx));
     }
 
     /// After answering: jump to the next unanswered question, or — when the
@@ -2646,6 +2678,7 @@ impl Composer {
                     next_unanswered_question(&questions, &this.ui_selections, at)
                 {
                     this.ui_question_index = next;
+                    this.seed_user_input_prefill(&questions, window, cx);
                     cx.notify();
                 }
             });
@@ -5021,6 +5054,7 @@ mod tests {
                 description: String::new(),
             }],
             multi_select: false,
+            prefill: None,
         };
         let questions = vec![question("q1"), question("q2"), question("q3")];
         let mut selections = std::collections::HashMap::new();
@@ -5075,6 +5109,7 @@ mod tests {
                     },
                 ],
                 multi_select: false,
+                prefill: None,
             },
             UserInputQuestion {
                 id: "q2".into(),
@@ -5091,6 +5126,7 @@ mod tests {
                     },
                 ],
                 multi_select: true,
+                prefill: None,
             },
         ];
         let mut selections = std::collections::HashMap::new();

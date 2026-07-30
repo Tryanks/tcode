@@ -18,7 +18,7 @@ use crate::{
     Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
     ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, TurnStatus,
+    ThreadItem, TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
@@ -317,6 +317,7 @@ async fn run_actor(
         next_request: 1,
         approval_mode: opts.approval_mode,
         pending_approvals: HashMap::new(),
+        pending_dialogs: HashSet::new(),
         approved_for_session: HashSet::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
@@ -364,7 +365,10 @@ async fn run_actor(
         })
         .await;
         match input {
-            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => break None,
+            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => {
+                let _ = actor.cancel_pending_ui();
+                break None;
+            }
             Input::Command(Ok(command)) => {
                 if let Err(err) = actor.handle_command(command).await {
                     actor
@@ -408,6 +412,7 @@ struct PiActor {
     next_request: u64,
     approval_mode: ApprovalMode,
     pending_approvals: HashMap<String, String>,
+    pending_dialogs: HashSet<String>,
     approved_for_session: HashSet<String>,
     /// Native prompt request id -> canonical steering request id. pi's prompt
     /// response is only an acceptance signal, but it is stronger than merely
@@ -492,6 +497,17 @@ impl PiActor {
                     // belongs to the mapper, not to startup.
                     if let Some(warning) = extension_warning(&message) {
                         self.emit(AgentEvent::Warning { message: warning }).await;
+                    } else if is_extension_dialog(&message)
+                        && let Some(request_id) = message.get("id").and_then(Value::as_str)
+                    {
+                        send_json(
+                            &mut self.stdin,
+                            &json!({
+                                "type":"extension_ui_response",
+                                "id":request_id,
+                                "cancelled":true
+                            }),
+                        )?;
                     }
                 }
                 Ok(ChildOutput::Error(err)) => return Err(AgentError::Protocol(err)),
@@ -541,13 +557,36 @@ impl PiActor {
             self.handle_extension_ui(&message).await;
             return;
         }
-        for event in self.mapper.on_message(&message) {
+        let events = self.mapper.on_message(&message);
+        let turn_completed = events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
+        for event in events {
             self.emit(event).await;
+        }
+        if turn_completed {
+            let _ = self.cancel_pending_ui();
         }
     }
 
     async fn handle_extension_ui(&mut self, message: &Value) {
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+        if matches!(method, "select" | "input" | "editor") {
+            let Some((id, question)) = extension_dialog_question(message) else {
+                self.emit(AgentEvent::Warning {
+                    message: format!("pi extension `{method}` dialog omitted its id"),
+                })
+                .await;
+                return;
+            };
+            self.pending_dialogs.insert(id.clone());
+            self.emit(AgentEvent::UserInputRequested {
+                request_id: id,
+                questions: vec![question],
+            })
+            .await;
+            return;
+        }
         if method != "confirm" {
             if let Some(warning) = extension_warning(message) {
                 self.emit(AgentEvent::Warning { message: warning }).await;
@@ -642,6 +681,7 @@ impl PiActor {
             }
             SessionCommand::Interrupt => {
                 self.mapper.interrupt_pending = true;
+                self.cancel_pending_ui()?;
                 send_json(&mut self.stdin, &json!({"type":"abort"})).map_err(|err| err.to_string())
             }
             SessionCommand::RespondApproval {
@@ -665,6 +705,7 @@ impl PiActor {
                 .map_err(|err| err.to_string())?;
                 if decision == ApprovalDecision::Cancel {
                     self.mapper.interrupt_pending = true;
+                    self.cancel_pending_ui()?;
                     send_json(&mut self.stdin, &json!({"type":"abort"}))
                         .map_err(|err| err.to_string())?;
                 }
@@ -706,11 +747,18 @@ impl PiActor {
                 }
                 Ok(())
             }
-            SessionCommand::RespondUserInput { .. } => {
-                self.emit(AgentEvent::Warning {
-                    message: "pi RPC does not expose structured user-input requests".into(),
-                })
-                .await;
+            SessionCommand::RespondUserInput {
+                request_id,
+                answers,
+            } => {
+                let Some(response) = take_extension_dialog_response(
+                    &mut self.pending_dialogs,
+                    &request_id,
+                    &answers,
+                ) else {
+                    return Ok(());
+                };
+                send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
                 Ok(())
             }
             SessionCommand::Rewind { .. } => {
@@ -728,6 +776,18 @@ impl PiActor {
         let id = format!("tcode-{}", self.next_request);
         self.next_request += 1;
         id
+    }
+
+    fn cancel_pending_ui(&mut self) -> Result<(), String> {
+        for id in self.pending_approvals.drain().map(|(id, _)| id) {
+            send_json(
+                &mut self.stdin,
+                &json!({"type":"extension_ui_response","id":id,"confirmed":false}),
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        cancel_pending_dialogs(&mut self.stdin, &mut self.pending_dialogs)
+            .map_err(|err| err.to_string())
     }
 
     async fn emit(&self, event: AgentEvent) {
@@ -997,6 +1057,35 @@ impl PiMapper {
             // prompt. pi echoes it back; mapping that echo would duplicate the
             // user bubble, as with Codex/OpenCode.
             Some("user") => Vec::new(),
+            Some("custom") if message.get("display").and_then(Value::as_bool) == Some(true) => {
+                let summary = match message.get("content") {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(Value::Array(parts)) => parts
+                        .iter()
+                        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                if summary.trim().is_empty() {
+                    return Vec::new();
+                }
+                let provider_kind = message
+                    .get("customType")
+                    .and_then(Value::as_str)
+                    .filter(|kind| !kind.trim().is_empty())
+                    .unwrap_or("pi-extension")
+                    .to_owned();
+                vec![AgentEvent::ItemCompleted(ThreadItem {
+                    id: assistant_message_id(message),
+                    parent_item_id: None,
+                    content: ItemContent::Other {
+                        provider_kind,
+                        summary,
+                    },
+                })]
+            }
             Some("assistant") => {
                 let mut events = Vec::new();
                 let id = assistant_message_id(message);
@@ -1247,6 +1336,104 @@ fn extension_warning(message: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+fn is_extension_dialog(message: &Value) -> bool {
+    message.get("type").and_then(Value::as_str) == Some("extension_ui_request")
+        && matches!(
+            message.get("method").and_then(Value::as_str),
+            Some("select" | "input" | "editor")
+        )
+}
+
+fn extension_dialog_question(message: &Value) -> Option<(String, UserInputQuestion)> {
+    if !is_extension_dialog(message) {
+        return None;
+    }
+    let id = message.get("id")?.as_str()?.to_owned();
+    let method = message.get("method")?.as_str()?;
+    let title = message
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (question, options, prefill) = match method {
+        "select" => (
+            title.to_owned(),
+            message
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|label| UserInputOption {
+                    label: label.to_owned(),
+                    description: String::new(),
+                })
+                .collect(),
+            None,
+        ),
+        "input" => {
+            let question = match message.get("placeholder").and_then(Value::as_str) {
+                Some(placeholder) => format!("{title} ({placeholder})"),
+                None => title.to_owned(),
+            };
+            (question, Vec::new(), None)
+        }
+        "editor" => (
+            title.to_owned(),
+            Vec::new(),
+            message
+                .get("prefill")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        ),
+        _ => return None,
+    };
+    Some((
+        id.clone(),
+        UserInputQuestion {
+            id,
+            header: "pi".into(),
+            question,
+            options,
+            multi_select: false,
+            prefill,
+        },
+    ))
+}
+
+fn extension_dialog_response(id: &str, answer: Option<&str>) -> Value {
+    match answer {
+        Some(value) => json!({"type":"extension_ui_response","id":id,"value":value}),
+        None => json!({"type":"extension_ui_response","id":id,"cancelled":true}),
+    }
+}
+
+fn take_extension_dialog_response(
+    pending_dialogs: &mut HashSet<String>,
+    request_id: &str,
+    answers: &serde_json::Map<String, Value>,
+) -> Option<Value> {
+    if !pending_dialogs.remove(request_id) {
+        return None;
+    }
+    Some(extension_dialog_response(
+        request_id,
+        answers.get(request_id).and_then(Value::as_str),
+    ))
+}
+
+fn cancel_pending_dialogs(
+    writer: &mut impl Write,
+    pending_dialogs: &mut HashSet<String>,
+) -> Result<(), AgentError> {
+    for id in pending_dialogs.drain() {
+        send_json(
+            writer,
+            &json!({"type":"extension_ui_response","id":id,"cancelled":true}),
+        )?;
+    }
+    Ok(())
+}
+
 fn result_text(result: &Value) -> String {
     result
         .get("content")
@@ -1484,7 +1671,7 @@ fn response_error(message: &Value) -> String {
         })
 }
 
-fn send_json(writer: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), AgentError> {
+fn send_json(writer: &mut impl Write, value: &Value) -> Result<(), AgentError> {
     serde_json::to_writer(&mut *writer, value)
         .map_err(|err| AgentError::Protocol(format!("serializing pi request: {err}")))?;
     writer.write_all(b"\n")?;
@@ -1670,6 +1857,105 @@ mod tests {
     }
 
     #[test]
+    fn maps_extension_dialog_requests_to_native_user_input() {
+        let (id, select) = extension_dialog_question(&json!({
+            "type":"extension_ui_request",
+            "id":"select-id",
+            "method":"select",
+            "title":"Choose",
+            "options":["a","b"],
+            "timeout":10000
+        }))
+        .unwrap();
+        assert_eq!(id, "select-id");
+        assert_eq!(select.id, "select-id");
+        assert_eq!(select.header, "pi");
+        assert_eq!(select.question, "Choose");
+        assert!(!select.multi_select);
+        assert_eq!(select.prefill, None);
+        assert_eq!(
+            select
+                .options
+                .iter()
+                .map(|option| (option.label.clone(), option.description.clone()))
+                .collect::<Vec<_>>(),
+            vec![("a".into(), String::new()), ("b".into(), String::new())]
+        );
+
+        let (_, input) = extension_dialog_question(&json!({
+            "type":"extension_ui_request",
+            "id":"input-id",
+            "method":"input",
+            "title":"Name",
+            "placeholder":"type here"
+        }))
+        .unwrap();
+        assert_eq!(input.question, "Name (type here)");
+        assert!(input.options.is_empty());
+        assert_eq!(input.prefill, None);
+
+        let (_, editor) = extension_dialog_question(&json!({
+            "type":"extension_ui_request",
+            "id":"editor-id",
+            "method":"editor",
+            "title":"Edit",
+            "prefill":"initial text"
+        }))
+        .unwrap();
+        assert_eq!(editor.question, "Edit");
+        assert!(editor.options.is_empty());
+        assert_eq!(editor.prefill.as_deref(), Some("initial text"));
+    }
+
+    #[test]
+    fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
+        let mut pending = HashSet::from(["dialog".to_owned()]);
+        let answers = serde_json::Map::from_iter([("dialog".into(), json!("custom answer"))]);
+        assert_eq!(
+            take_extension_dialog_response(&mut pending, "dialog", &answers),
+            Some(json!({
+                "type":"extension_ui_response",
+                "id":"dialog",
+                "value":"custom answer"
+            }))
+        );
+        assert!(pending.is_empty());
+
+        for answers in [
+            serde_json::Map::new(),
+            serde_json::Map::from_iter([("dialog".into(), json!(["not", "a string"]))]),
+        ] {
+            pending.insert("dialog".into());
+            assert_eq!(
+                take_extension_dialog_response(&mut pending, "dialog", &answers),
+                Some(json!({
+                    "type":"extension_ui_response",
+                    "id":"dialog",
+                    "cancelled":true
+                }))
+            );
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn cleanup_cancels_pending_extension_dialogs() {
+        let mut pending = HashSet::from(["dialog".to_owned()]);
+        let mut output = Vec::new();
+        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
+        assert!(pending.is_empty());
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            response,
+            json!({
+                "type":"extension_ui_response",
+                "id":"dialog",
+                "cancelled":true
+            })
+        );
+    }
+
+    #[test]
     fn map_model_uses_supported_state_thinking_level_as_default() {
         let model = json!({
             "id": "gpt-test",
@@ -1783,6 +2069,65 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn displayed_custom_messages_become_work_log_items() {
+        let mut mapper = PiMapper::new(true);
+        let plain = mapper.on_message(&json!({
+            "type":"message_end",
+            "message":{
+                "role":"custom",
+                "customType":"my-extension",
+                "content":"plain text",
+                "display":true,
+                "timestamp":1785400000000_u64
+            }
+        }));
+        assert!(matches!(
+            plain.as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::Other { provider_kind, summary },
+                ..
+            })] if provider_kind == "my-extension" && summary == "plain text"
+        ));
+
+        let parts = mapper.on_message(&json!({
+            "type":"message_end",
+            "message":{
+                "role":"custom",
+                "content":[
+                    {"type":"text","text":"first"},
+                    {"type":"image","data":"ignored"},
+                    {"type":"text","text":"second"}
+                ],
+                "display":true,
+                "timestamp":1785400000001_u64
+            }
+        }));
+        assert!(matches!(
+            parts.as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::Other { provider_kind, summary },
+                ..
+            })] if provider_kind == "pi-extension" && summary == "first\nsecond"
+        ));
+    }
+
+    #[test]
+    fn hidden_or_empty_custom_messages_are_ignored() {
+        let mut mapper = PiMapper::new(true);
+        for message in [
+            json!({"role":"custom","content":"hidden","display":false}),
+            json!({"role":"custom","content":"implicit hidden"}),
+            json!({"role":"custom","content":[{"type":"image","data":"ignored"}],"display":true}),
+        ] {
+            assert!(
+                mapper
+                    .on_message(&json!({"type":"message_end","message":message}))
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

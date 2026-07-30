@@ -2104,6 +2104,7 @@ fn parse_elicitation_form(
             question: question.to_owned(),
             options,
             multi_select,
+            prefill: None,
         });
         fields.push(ElicitField {
             key: key.clone(),
@@ -2137,6 +2138,7 @@ fn parse_elicitation_url(
             elicit_option(ELICITATION_URL_CANCEL_LABEL),
         ],
         multi_select: false,
+        prefill: None,
     };
     let field = ElicitField {
         key: "url".into(),
@@ -2200,6 +2202,7 @@ fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
                 question: question.to_owned(),
                 options,
                 multi_select: false,
+                prefill: None,
             })
         })
         .collect()

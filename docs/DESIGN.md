@@ -261,6 +261,9 @@ Approval panel (above composer): "PENDING APPROVAL" label, summary + count,
 expandable detail (command text / file list), actions Deny / Always allow /
 Approve (primary).
 
+Pi extension select, input, and editor dialogs surface through the native
+user-input panel, including editor prefill in its free-text field.
+
 ### Diff panel
 Right resizable split (default 560px, min 320px). Sidebar · chat · right panel
 are **one** resizable group: nesting a second group inside the chat panel does not
