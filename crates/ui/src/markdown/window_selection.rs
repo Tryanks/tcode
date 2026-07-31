@@ -645,3 +645,112 @@ impl Element for TextSelectionController {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement as _,
+        Render, Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+
+    use super::*;
+    use crate::markdown::{MarkdownView, state::MarkdownState};
+
+    /// A titlebar drag strip above a selectable Markdown view — the layout of
+    /// every window header that hosts `window_drag_area`.
+    struct DragAreaRoot {
+        markdown: Entity<MarkdownState>,
+    }
+
+    impl DragAreaRoot {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self {
+                markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
+            }
+        }
+    }
+
+    impl Render for DragAreaRoot {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(TextSelectionController)
+                .child(crate::window_drag_area(
+                    "test-titlebar",
+                    div().w_full().h(px(52.)),
+                    window,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .h(px(40.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+                .child(div().h(px(60.)))
+        }
+    }
+
+    fn setup(cx: &mut TestAppContext) -> &mut VisualTestContext {
+        cx.update(gpui_component::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|_, cx| DragAreaRoot::new(cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx
+    }
+
+    fn is_selecting(cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            cx.try_global::<SelectionGlobal>()
+                .and_then(|global| global.windows.get(&window_id(window)))
+                .is_some_and(|state| state.selection.is_selecting)
+        })
+    }
+
+    /// A press on a `window_drag_area` strip must not begin a window text
+    /// selection. Left unprevented, the press proxy-anchors a selection to the
+    /// nearest Markdown view; once `start_window_move` swallows the mouse-up
+    /// the auto-scroll loop keeps scrolling the chat up and extending the
+    /// selection for as long as the titlebar is held.
+    #[gpui::test]
+    fn press_on_titlebar_drag_area_does_not_start_selection(cx: &mut TestAppContext) {
+        let cx = setup(cx);
+
+        // Sanity: a press outside the drag strip (blank space below the
+        // content) does arm the controller, so the assertion below is not
+        // vacuously true.
+        cx.simulate_mouse_down(
+            point(px(10.), px(130.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(is_selecting(cx), "blank-space press should arm selection");
+        cx.simulate_mouse_up(
+            point(px(10.), px(130.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // The press under test: on the titlebar drag strip.
+        cx.simulate_mouse_down(
+            point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            !is_selecting(cx),
+            "a titlebar press must not begin a window text selection"
+        );
+    }
+}

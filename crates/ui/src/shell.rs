@@ -63,6 +63,14 @@ pub(crate) fn window_drag_area(
     .on_mouse_down(
         MouseButton::Left,
         window.listener_for(&state, |state, event: &MouseDownEvent, window, _| {
+            // A titlebar press must never begin a window text selection. Left
+            // unprevented, the Markdown selection controller proxy-anchors a
+            // selection to the nearest message and its auto-scroll loop takes
+            // over once `start_window_move` swallows the mouse-up: the chat
+            // keeps scrolling up and selecting while the window is dragged.
+            // The controller skips presses outside Markdown hitboxes when the
+            // default is prevented, and drag strips contain no Markdown.
+            window.prevent_default();
             // Double-click zooms/maximizes the window like a native titlebar.
             if event.click_count >= 2 {
                 state.should_move = false;
