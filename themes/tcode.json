@@ -13,6 +13,9 @@
       "colors": {
         "background": "#F2F4F7C7",
         "foreground": "#1F2328",
+        "scrollbar.background": "#00000000",
+        "scrollbar.thumb.background": "#24344D33",
+        "scrollbar.thumb.hover.background": "#24344D55",
         "border": "#1F232814",
         "input.border": "#1F23281F",
         "ring": "#1447E6",
@@ -60,6 +63,9 @@
       "colors": {
         "background": "#15171CC7",
         "foreground": "#ECEEF1",
+        "scrollbar.background": "#00000000",
+        "scrollbar.thumb.background": "#C9D4E833",
+        "scrollbar.thumb.hover.background": "#C9D4E855",
         "border": "#C9D4E80F",
         "input.border": "#C9D4E817",
         "ring": "#155DFC",

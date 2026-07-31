@@ -362,9 +362,9 @@ pub fn group_sessions(
     groups
 }
 
-/// Stable parent-first ordering for one project. Orphans are roots; each
+/// Stable parent-first ordering for a session pool. Orphans are roots; each
 /// parent's newest children follow it immediately.
-fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMeta> {
+pub fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMeta> {
     let ids: std::collections::HashSet<&str> =
         sessions.iter().map(|session| session.id.as_str()).collect();
     let mut roots: Vec<&SessionMeta> = sessions

@@ -11,7 +11,7 @@ use gpui_component::{
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::ContextMenuExt as _,
+    menu::{ContextMenuExt as _, DropdownMenu as _},
     notification::Notification,
     scroll::ScrollableElement as _,
     tooltip::Tooltip,
@@ -19,7 +19,7 @@ use gpui_component::{
 };
 use serde::Deserialize;
 
-use tcode_core::project::SessionMeta;
+use tcode_core::{project::SessionMeta, settings::SidebarLayout};
 use tcode_protocol::Command;
 use tcode_runtime::app::ProjectGroup;
 
@@ -95,6 +95,19 @@ fn child_count_badge(
         .child(label)
 }
 
+/// Fold indicator for a parent row. Trails the title (just before the
+/// child-count badge) so the leading edge stays reserved for the title.
+fn collapse_chevron(collapsed: bool, cx: &Context<SessionsSidebar>) -> Icon {
+    Icon::new(if collapsed {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    })
+    .flex_none()
+    .size_3()
+    .text_color(cx.theme().muted_foreground)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ThreadRenderState {
     is_child: bool,
@@ -149,6 +162,75 @@ fn visible_threads<'a>(
 ) -> Vec<&'a SessionMeta> {
     sessions
         .iter()
+        .filter(|meta| thread_visible(meta, collapsed_parents))
+        .collect()
+}
+
+#[derive(Debug)]
+struct FlatThreadBlock<'a> {
+    sessions: Vec<&'a SessionMeta>,
+    bucket: u8,
+    updated_at: u64,
+}
+
+/// Sort a parent-first flat session pool by block attention and recency, then
+/// apply project filtering and the shared parent-collapse state.
+fn flat_visible_threads<'a>(
+    sessions: &'a [SessionMeta],
+    collapsed_parents: &HashSet<String>,
+    project_filter: Option<&str>,
+    mut is_waiting: impl FnMut(&str) -> bool,
+    mut is_working: impl FnMut(&str) -> bool,
+) -> Vec<&'a SessionMeta> {
+    let ids: HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
+    let mut blocks: Vec<Vec<&SessionMeta>> = Vec::new();
+    for session in sessions {
+        let is_root = session
+            .parent_session_id
+            .as_deref()
+            .is_none_or(|parent_id| !ids.contains(parent_id));
+        if is_root || blocks.is_empty() {
+            blocks.push(vec![session]);
+        } else if let Some(block) = blocks.last_mut() {
+            block.push(session);
+        }
+    }
+
+    let mut blocks: Vec<FlatThreadBlock<'_>> = blocks
+        .into_iter()
+        .filter(|block| {
+            project_filter
+                .is_none_or(|project_id| block[0].project_id.as_deref() == Some(project_id))
+        })
+        .map(|block| {
+            let waiting = block.iter().any(|session| is_waiting(&session.id));
+            let working = block.iter().any(|session| is_working(&session.id));
+            let updated_at = block
+                .iter()
+                .map(|session| session.updated_at)
+                .max()
+                .unwrap_or_default();
+            FlatThreadBlock {
+                sessions: block,
+                bucket: if waiting {
+                    0
+                } else if working {
+                    1
+                } else {
+                    2
+                },
+                updated_at,
+            }
+        })
+        .collect();
+    blocks.sort_by(|a, b| {
+        a.bucket
+            .cmp(&b.bucket)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    blocks
+        .into_iter()
+        .flat_map(|block| block.sessions)
         .filter(|meta| thread_visible(meta, collapsed_parents))
         .collect()
 }
@@ -232,6 +314,13 @@ struct ProjectDelete(String);
 #[action(namespace = tcode_project, no_json)]
 struct ProjectReveal(String);
 
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct FilterProject(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct StartDraftForProject(String);
+
 /// In-progress inline rename of a thread row.
 struct RenameState {
     session_id: String,
@@ -246,6 +335,8 @@ pub struct SessionsSidebar {
     expanded_groups: HashSet<String>,
     /// Parent session ids whose direct child rows are folded away.
     collapsed_parents: HashSet<String>,
+    /// Optional project id filter for the session-local flat list.
+    project_filter: Option<String>,
     /// The thread currently being renamed inline, if any.
     renaming: Option<RenameState>,
     /// Last expansion sweep result, cleared on collapse or the next sweep.
@@ -315,6 +406,7 @@ impl SessionsSidebar {
             window_state,
             expanded_groups: HashSet::new(),
             collapsed_parents,
+            project_filter: None,
             renaming: None,
             auto_archive_notice: None,
             startup_archive_dialog: None,
@@ -426,6 +518,42 @@ impl SessionsSidebar {
     }
 
     // -- context-menu action handlers ---------------------------------------
+
+    fn on_filter_project(
+        &mut self,
+        action: &FilterProject,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_filter = (!action.0.is_empty()).then(|| action.0.clone());
+        cx.notify();
+    }
+
+    fn on_start_draft_for_project(
+        &mut self,
+        action: &StartDraftForProject,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self
+            .store
+            .read(cx)
+            .projects(cx)
+            .into_iter()
+            .find(|project| project.id == action.0)
+        else {
+            return;
+        };
+        self.store.update(cx, |store, cx| {
+            store.dispatch(
+                Command::StartDraft {
+                    project_id: project.id,
+                    cwd: project.root,
+                },
+                cx,
+            );
+        });
+    }
 
     fn on_rename(&mut self, action: &ThreadRename, window: &mut Window, cx: &mut Context<Self>) {
         let session_id = action.0.clone();
@@ -854,6 +982,29 @@ impl SessionsSidebar {
         )
     }
 
+    fn render_layout_toggle(&self, layout: SidebarLayout, cx: &mut Context<Self>) -> Button {
+        let tooltip = match layout {
+            SidebarLayout::Flat => tcode_i18n::tr!("sidebar.layout_grouped"),
+            SidebarLayout::Grouped => tcode_i18n::tr!("sidebar.layout_flat"),
+        };
+        Button::new("toggle-sidebar-layout")
+            .ghost()
+            .xsmall()
+            .compact()
+            .icon(IconName::LayoutDashboard)
+            .tooltip(tooltip)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let mut settings = this.store.read(cx).sidebar_settings(cx);
+                settings.sidebar_layout = match layout {
+                    SidebarLayout::Flat => SidebarLayout::Grouped,
+                    SidebarLayout::Grouped => SidebarLayout::Flat,
+                };
+                this.store.update(cx, |store, cx| {
+                    store.dispatch(Command::UpdateSettings { settings }, cx);
+                });
+            }))
+    }
+
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort(cx));
         h_flex()
@@ -886,6 +1037,123 @@ impl SessionsSidebar {
                                 });
                             })),
                     )
+                    .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
+                    .child(
+                        Button::new("add-project")
+                            .ghost()
+                            .xsmall()
+                            .compact()
+                            .icon(
+                                Icon::empty()
+                                    .path("icons/folder-plus.svg")
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .tooltip(tcode_i18n::tr!("sidebar.add_project"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_project(window, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn render_flat_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let projects = self.store.read(cx).projects(cx);
+        let active_filter = self.project_filter.clone();
+        let filter_icon_color = if active_filter.is_some() {
+            cx.theme().primary
+        } else {
+            cx.theme().muted_foreground
+        };
+        let filter_projects = projects.clone();
+        let filter_for_menu = active_filter.clone();
+        let filter_button = Button::new("filter-sidebar-project")
+            .ghost()
+            .xsmall()
+            .compact()
+            .icon(Icon::new(IconName::Folder).text_color(filter_icon_color))
+            .tooltip(tcode_i18n::tr!("sidebar.filter_project"))
+            .dropdown_menu(move |menu, _window, _cx| {
+                let mut menu = menu.menu_with_check(
+                    tcode_i18n::tr!("sidebar.all_projects").into_owned(),
+                    filter_for_menu.is_none(),
+                    Box::new(FilterProject(String::new())),
+                );
+                for project in &filter_projects {
+                    menu = menu.menu_with_check(
+                        project.name.clone(),
+                        filter_for_menu.as_deref() == Some(project.id.as_str()),
+                        Box::new(FilterProject(project.id.clone())),
+                    );
+                }
+                menu
+            });
+
+        let draft_project = active_filter
+            .as_deref()
+            .and_then(|id| projects.iter().find(|project| project.id == id))
+            .cloned()
+            .or_else(|| (projects.len() == 1).then(|| projects[0].clone()));
+        let new_thread = if let Some(project) = draft_project {
+            let project_id = project.id;
+            let cwd = project.root;
+            Button::new("new-flat-thread")
+                .ghost()
+                .xsmall()
+                .compact()
+                .icon(IconName::Plus)
+                .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.store.update(cx, |store, cx| {
+                        store.dispatch(
+                            Command::StartDraft {
+                                project_id: project_id.clone(),
+                                cwd: cwd.clone(),
+                            },
+                            cx,
+                        );
+                    });
+                }))
+                .into_any_element()
+        } else {
+            let draft_projects = projects.clone();
+            Button::new("new-flat-thread")
+                .ghost()
+                .xsmall()
+                .compact()
+                .icon(IconName::Plus)
+                .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
+                .dropdown_menu(move |menu, _window, _cx| {
+                    let mut menu = menu;
+                    for project in &draft_projects {
+                        menu = menu.menu(
+                            project.name.clone(),
+                            Box::new(StartDraftForProject(project.id.clone())),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
+        };
+
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .items_center()
+            .justify_between()
+            .px_3()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tcode_i18n::tr!("sidebar.threads").to_uppercase()),
+            )
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(filter_button)
+                    .child(self.render_layout_toggle(SidebarLayout::Flat, cx))
+                    .child(new_thread)
                     .child(
                         Button::new("add-project")
                             .ghost()
@@ -1278,21 +1546,11 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground)
                     .child("↳"),
             )
-        })
-        .when(has_direct_children, |row| {
-            row.child(
-                Icon::new(if children_collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
-                .flex_none()
-                .size_3()
-                .text_color(cx.theme().muted_foreground),
-            )
         });
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
+        // The fold chevron trails the title, right before the child-count
+        // badge, so the title keeps the row's full leading width.
         let row = if let Some(input) = renaming {
             row.child(
                 div()
@@ -1302,12 +1560,13 @@ impl SessionsSidebar {
                     .child(Input::new(&input).small()),
             )
             .when(has_direct_children, |row| {
-                row.child(child_count_badge(
-                    &session_id,
-                    direct_children,
-                    active_direct_children,
-                    cx,
-                ))
+                row.child(collapse_chevron(children_collapsed, cx))
+                    .child(child_count_badge(
+                        &session_id,
+                        direct_children,
+                        active_direct_children,
+                        cx,
+                    ))
             })
         } else {
             row.when(show_unread, |row| {
@@ -1334,15 +1593,18 @@ impl SessionsSidebar {
                     .child(meta.title.clone()),
             )
             .when(has_direct_children, |row| {
-                row.child(child_count_badge(
-                    &session_id,
-                    direct_children,
-                    active_direct_children,
-                    cx,
-                ))
+                row.child(collapse_chevron(children_collapsed, cx))
+                    .child(child_count_badge(
+                        &session_id,
+                        direct_children,
+                        active_direct_children,
+                        cx,
+                    ))
             })
             .when(!working, |row| {
-                // Right slot: relative time, replaced by an archive button on hover.
+                // Right slot: relative time, replaced by an archive button on
+                // hover. The slot sizes to the time text (no fixed width), so
+                // the title's flexible width runs right up to it.
                 let title = meta.title.clone();
                 let archive_id = session_id.clone();
                 row.child(
@@ -1350,12 +1612,12 @@ impl SessionsSidebar {
                         .relative()
                         .flex_none()
                         .h(px(20.))
-                        .min_w(px(52.))
+                        .min_w(px(20.))
                         .child(
-                            div()
-                                .absolute()
-                                .right_0()
-                                .top(px(3.))
+                            h_flex()
+                                .h_full()
+                                .items_center()
+                                .whitespace_nowrap()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
                                 .group_hover(row_key.clone(), |s| s.invisible())
@@ -1402,6 +1664,418 @@ impl SessionsSidebar {
                         ),
                 )
             })
+        };
+
+        row.context_menu(move |menu, _window, _cx| {
+            let id = menu_id.clone();
+            menu.menu(
+                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
+                Box::new(ThreadRename(id.clone())),
+            )
+            .when(menu_can_fork, |menu| {
+                menu.menu(
+                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
+                    Box::new(ThreadFork(id.clone())),
+                )
+            })
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
+                Box::new(ThreadMarkUnread(id.clone())),
+            )
+            .separator()
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
+                Box::new(ThreadCopyPath(id.clone())),
+            )
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
+                Box::new(ThreadCopyId(id.clone())),
+            )
+            .separator()
+            .menu_with_enable(
+                tcode_i18n::tr!("sidebar.archive").into_owned(),
+                Box::new(ThreadArchive(id.clone())),
+                !menu_running,
+            )
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
+                Box::new(ThreadDelete(id.clone())),
+            )
+        })
+        .into_any_element()
+    }
+
+    fn render_flat_thread_right_slot(
+        &self,
+        meta: &SessionMeta,
+        row_key: &str,
+        waiting: bool,
+        archive_on_hover: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let session_id = meta.id.clone();
+        let archive_id = session_id.clone();
+        let archive_title = meta.title.clone();
+        let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
+        let row_key = row_key.to_string();
+        div()
+            .relative()
+            .flex_none()
+            .h(px(20.))
+            .min_w(px(20.))
+            .child(
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .text_size(px(11.))
+                    .text_color(if waiting {
+                        cx.theme().warning
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .when(archive_on_hover, |time| {
+                        time.group_hover(row_key.clone(), |time| time.invisible())
+                    })
+                    .child(ago),
+            )
+            .when(archive_on_hover, |slot| {
+                slot.child(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        gpui::SharedString::from(format!("archive-flat-thread-{session_id}")),
+                        Role::Button,
+                        tcode_i18n::tr!("sidebar.archive"),
+                        cx,
+                    )
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .size_5()
+                    .items_center()
+                    .justify_center()
+                    .rounded(cx.theme().radius * 0.5)
+                    .cursor_pointer()
+                    .opacity(0.)
+                    .group_hover(row_key, |button| button.opacity(1.))
+                    .focus(|button| button.opacity(1.).bg(cx.theme().sidebar_accent))
+                    .hover(|button| button.bg(cx.theme().sidebar_accent))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.archive_thread(&archive_id, &archive_title, window, cx);
+                    }))
+                    .child(
+                        Icon::empty()
+                            .path("icons/archive.svg")
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+                )
+            })
+    }
+
+    fn render_flat_thread(
+        &self,
+        meta: &SessionMeta,
+        sessions: &[SessionMeta],
+        project_name: Option<String>,
+        is_active: bool,
+        working: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let session_id = meta.id.clone();
+        let row_key = format!("flat-thread-{session_id}");
+        let unread = self.store.read(cx).session_unread(&session_id, cx);
+        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
+        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
+        let waiting = waiting_for_approval || waiting_for_input;
+        let render_state = derive_thread_render_state(meta, sessions, unread, working, |id| {
+            self.store.read(cx).turn_running_for(id, cx)
+        });
+        let is_child = render_state.is_child;
+        let show_unread = render_state.show_unread;
+        let direct_children = render_state.direct_children;
+        let active_direct_children = render_state.active_direct_children;
+        let has_direct_children = direct_children > 0;
+        let children_collapsed = self.collapsed_parents.contains(&session_id);
+        let renaming = self
+            .renaming
+            .as_ref()
+            .filter(|rename| rename.session_id == session_id)
+            .map(|rename| rename.input.clone());
+
+        let menu_id = session_id.clone();
+        let menu_running = working;
+        let menu_can_fork = meta.provider.supports_fork();
+        let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
+        let row = crate::material::accessible_clickable(
+            if is_child { h_flex() } else { v_flex() },
+            gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
+            Role::Button,
+            row_label,
+            cx,
+        )
+        .aria_selected(is_active)
+        .when(has_direct_children, |row| {
+            row.aria_expanded(!children_collapsed)
+        })
+        .group(row_key.clone())
+        .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
+        .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
+        .px_2()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(is_active, |row| row.bg(cx.theme().list_active))
+        .when(!is_active, |row| {
+            row.hover(|row| row.bg(cx.theme().sidebar_accent))
+        })
+        .on_click(cx.listener({
+            let session_id = session_id.clone();
+            move |this, _, _, cx| {
+                let session_id = session_id.clone();
+                toggle_parent_for_row_click(
+                    &mut this.collapsed_parents,
+                    &session_id,
+                    is_active,
+                    has_direct_children,
+                );
+                this.store.update(cx, |store, cx| {
+                    store.dispatch(
+                        Command::SelectSession {
+                            session_id: session_id.clone(),
+                        },
+                        cx,
+                    );
+                });
+                cx.notify();
+            }
+        }))
+        .when(waiting_for_approval, |row| {
+            row.tooltip(|window, cx| {
+                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
+                    .build(window, cx)
+            })
+        })
+        .when(waiting_for_input && !waiting_for_approval, |row| {
+            row.tooltip(|window, cx| {
+                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
+                    .build(window, cx)
+            })
+        });
+
+        let row = if is_child {
+            let title_or_input = if let Some(input) = renaming {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
+                    .child(Input::new(&input).small())
+                    .into_any_element()
+            } else {
+                truncated_sidebar_label()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().sidebar_foreground)
+                    .child(meta.title.clone())
+                    .into_any_element()
+            };
+            row.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .when(waiting_for_approval, |line| {
+                        line.child(
+                            h_flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1()
+                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
+                                .child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().warning)
+                                        .child(tcode_i18n::tr!("sidebar.waiting_approval")),
+                                ),
+                        )
+                    })
+                    .when(waiting_for_input && !waiting_for_approval, |line| {
+                        line.child(
+                            h_flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1()
+                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
+                                .child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().warning)
+                                        .child(tcode_i18n::tr!("sidebar.waiting_input")),
+                                ),
+                        )
+                    })
+                    .when(working && !waiting, |line| {
+                        line.child(
+                            h_flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_1()
+                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
+                                .child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().success)
+                                        .child(tcode_i18n::tr!("sidebar.working")),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("↳"),
+                    )
+                    .child(title_or_input)
+                    .when(has_direct_children, |line| {
+                        line.child(collapse_chevron(children_collapsed, cx)).child(
+                            child_count_badge(
+                                &session_id,
+                                direct_children,
+                                active_direct_children,
+                                cx,
+                            ),
+                        )
+                    })
+                    .when(!working, |line| {
+                        line.child(
+                            self.render_flat_thread_right_slot(meta, &row_key, waiting, true, cx),
+                        )
+                    }),
+            )
+        } else {
+            let title_or_input = if let Some(input) = renaming {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
+                    .child(Input::new(&input).small())
+                    .into_any_element()
+            } else {
+                truncated_sidebar_label()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().sidebar_foreground)
+                    .when(show_unread, |title| title.font_semibold())
+                    .child(meta.title.clone())
+                    .into_any_element()
+            };
+            let line_one = h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .when(show_unread, |line| {
+                    line.child(
+                        div()
+                            .flex_none()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(cx.theme().primary),
+                    )
+                })
+                .when(!show_unread && waiting, |line| {
+                    line.child(
+                        div()
+                            .flex_none()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(cx.theme().warning),
+                    )
+                })
+                .when(!show_unread && !waiting && working, |line| {
+                    line.child(
+                        div()
+                            .flex_none()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(cx.theme().success),
+                    )
+                })
+                .child(title_or_input)
+                .child(self.render_flat_thread_right_slot(meta, &row_key, waiting, !working, cx));
+
+            let has_project = project_name.is_some();
+            let line_two = h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_1()
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .when(waiting_for_approval, |line| {
+                    line.child(
+                        div()
+                            .flex_none()
+                            .text_color(cx.theme().warning)
+                            .child(tcode_i18n::tr!("sidebar.waiting_approval")),
+                    )
+                })
+                .when(waiting_for_input && !waiting_for_approval, |line| {
+                    line.child(
+                        div()
+                            .flex_none()
+                            .text_color(cx.theme().warning)
+                            .child(tcode_i18n::tr!("sidebar.waiting_input")),
+                    )
+                })
+                .when(working && !waiting, |line| {
+                    line.child(
+                        div()
+                            .flex_none()
+                            .text_color(cx.theme().success)
+                            .child(tcode_i18n::tr!("sidebar.working")),
+                    )
+                })
+                .when((waiting || working) && has_project, |line| {
+                    line.child(div().flex_none().child("·"))
+                })
+                .when_some(project_name, |line, project_name| {
+                    line.child(
+                        Icon::new(IconName::Folder)
+                            .flex_none()
+                            .size_3()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(truncated_sidebar_label().child(project_name))
+                })
+                // Without a project label there is no flex-1 element on the
+                // line, so a spacer keeps the chevron and badge bottom-right.
+                .when(!has_project, |line| line.child(div().flex_1()))
+                .when(meta.worktree.is_some(), |line| {
+                    line.child(
+                        Icon::empty()
+                            .path("icons/git-branch.svg")
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                })
+                .when(has_direct_children, |line| {
+                    line.child(collapse_chevron(children_collapsed, cx))
+                        .child(child_count_badge(
+                            &session_id,
+                            direct_children,
+                            active_direct_children,
+                            cx,
+                        ))
+                });
+            row.child(line_one).child(line_two)
         };
 
         row.context_menu(move |menu, _window, _cx| {
@@ -1557,26 +2231,85 @@ impl Render for SessionsSidebar {
                 this.show_auto_archive_dialog(count, days, keep, window, cx);
             });
         }
-        let groups = self.store.read(cx).grouped_sessions(cx);
+        let layout = self.store.read(cx).sidebar_layout(cx);
         let active_id = self.store.read(cx).active_session_id(cx);
-
-        let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
-
-        if groups.is_empty() {
-            list_content = list_content.child(
-                div()
-                    .px_2()
-                    .py_3()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("sidebar.empty")),
-            );
-        } else {
-            for group in &groups {
-                list_content =
-                    list_content.child(self.render_group(group, active_id.as_deref(), cx));
+        let (header, list_content) = match layout {
+            SidebarLayout::Grouped => {
+                let groups = self.store.read(cx).grouped_sessions(cx);
+                let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
+                if groups.is_empty() {
+                    list_content = list_content.child(
+                        div()
+                            .px_2()
+                            .py_3()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tcode_i18n::tr!("sidebar.empty")),
+                    );
+                } else {
+                    for group in &groups {
+                        list_content =
+                            list_content.child(self.render_group(group, active_id.as_deref(), cx));
+                    }
+                }
+                (
+                    self.render_projects_header(cx).into_any_element(),
+                    list_content,
+                )
             }
-        }
+            SidebarLayout::Flat => {
+                let sessions = self.store.read(cx).flat_sessions(cx);
+                let projects = self.store.read(cx).projects(cx);
+                let visible = flat_visible_threads(
+                    &sessions,
+                    &self.collapsed_parents,
+                    self.project_filter.as_deref(),
+                    |id| {
+                        self.store.read(cx).pending_approval_for(id, cx)
+                            || self.store.read(cx).pending_user_input_for(id, cx)
+                    },
+                    |id| self.store.read(cx).turn_running_for(id, cx),
+                );
+                let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
+                if visible.is_empty() {
+                    // An active project filter can empty the list while threads
+                    // exist; that state gets its own hint, not the no-projects one.
+                    let hint = if sessions.is_empty() {
+                        tcode_i18n::tr!("sidebar.empty")
+                    } else {
+                        tcode_i18n::tr!("sidebar.filter_empty")
+                    };
+                    list_content = list_content.child(
+                        div()
+                            .px_2()
+                            .py_3()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(hint),
+                    );
+                } else {
+                    for meta in visible {
+                        let project_name = meta.project_id.as_deref().and_then(|project_id| {
+                            projects
+                                .iter()
+                                .find(|project| project.id == project_id)
+                                .map(|project| project.name.clone())
+                        });
+                        let is_active = active_id.as_deref() == Some(meta.id.as_str());
+                        let working = self.store.read(cx).turn_running_for(&meta.id, cx);
+                        list_content = list_content.child(self.render_flat_thread(
+                            meta,
+                            &sessions,
+                            project_name,
+                            is_active,
+                            working,
+                            cx,
+                        ));
+                    }
+                }
+                (self.render_flat_header(cx).into_any_element(), list_content)
+            }
+        };
 
         let list = div()
             .id("sidebar-project-list")
@@ -1600,9 +2333,11 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_project_archive_all))
             .on_action(cx.listener(Self::on_project_delete))
             .on_action(cx.listener(Self::on_project_reveal))
+            .on_action(cx.listener(Self::on_filter_project))
+            .on_action(cx.listener(Self::on_start_draft_for_project))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
-            .child(self.render_projects_header(cx))
+            .child(header)
             .child(list)
             .child(self.render_footer(cx))
             .into_any_element()
@@ -1613,7 +2348,7 @@ impl Render for SessionsSidebar {
 // Relative-time humanizer
 // ---------------------------------------------------------------------------
 
-fn humanize_ago(secs: u64) -> String {
+pub(crate) fn humanize_ago(secs: u64) -> String {
     if secs < 60 {
         tcode_i18n::tr!("time.just_now").into_owned()
     } else if secs < 3600 {
@@ -1977,5 +2712,104 @@ mod tests {
             &collapsed
         ));
         assert!(thread_visible(&session("parent-a", None), &collapsed));
+    }
+
+    #[test]
+    fn flat_blocks_sort_by_attention_then_recency_and_keep_children_adjacent() {
+        let mut waiting_root = session("waiting-root", None);
+        waiting_root.updated_at = 10;
+        let mut waiting_child = session("waiting-child", Some("waiting-root"));
+        waiting_child.updated_at = 11;
+        let mut working_root = session("working-root", None);
+        working_root.updated_at = 40;
+        let mut idle_new = session("idle-new", None);
+        idle_new.updated_at = 30;
+        let mut idle_old = session("idle-old", None);
+        idle_old.updated_at = 20;
+        let sessions = vec![
+            working_root,
+            waiting_root,
+            waiting_child,
+            idle_old,
+            idle_new,
+        ];
+
+        let visible = flat_visible_threads(
+            &sessions,
+            &HashSet::new(),
+            None,
+            |id| id == "waiting-root",
+            |id| id == "working-root",
+        );
+        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            vec![
+                "waiting-root",
+                "waiting-child",
+                "working-root",
+                "idle-new",
+                "idle-old"
+            ]
+        );
+    }
+
+    #[test]
+    fn flat_block_attention_is_lifted_from_a_waiting_child() {
+        let mut lifted_root = session("lifted-root", None);
+        lifted_root.updated_at = 1;
+        let lifted_child = session("lifted-child", Some("lifted-root"));
+        let mut working_root = session("working-root", None);
+        working_root.updated_at = 100;
+        let sessions = vec![working_root, lifted_root, lifted_child];
+
+        let visible = flat_visible_threads(
+            &sessions,
+            &HashSet::new(),
+            None,
+            |id| id == "lifted-child",
+            |id| id == "working-root",
+        );
+        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["lifted-root", "lifted-child", "working-root"]);
+    }
+
+    #[test]
+    fn flat_order_applies_the_shared_collapse_filter() {
+        let sessions = vec![
+            session("parent", None),
+            session("child", Some("parent")),
+            session("other", None),
+        ];
+        let collapsed = HashSet::from(["parent".to_string()]);
+
+        let visible = flat_visible_threads(&sessions, &collapsed, None, |_| false, |_| false);
+        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["parent", "other"]);
+    }
+
+    #[test]
+    fn flat_project_filter_keeps_only_matching_blocks_with_their_children() {
+        let mut project_a_root = session("a-root", None);
+        project_a_root.project_id = Some("project-a".into());
+        let mut project_a_child = session("a-child", Some("a-root"));
+        project_a_child.project_id = Some("project-a".into());
+        let mut project_b_root = session("b-root", None);
+        project_b_root.project_id = Some("project-b".into());
+        let sessions = vec![project_b_root, project_a_root, project_a_child];
+
+        let visible = flat_visible_threads(
+            &sessions,
+            &HashSet::new(),
+            Some("project-a"),
+            |_| false,
+            |_| false,
+        );
+        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["a-root", "a-child"]);
     }
 }
