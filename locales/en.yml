@@ -49,6 +49,8 @@ chat:
   open_zed: "Open in Zed"
   empty_title: "Pick a thread to continue"
   empty_description: "Select an existing thread or create a new one to get started."
+  start_hub_title: "Start a new thread in"
+  palette_hint: "or press %{shortcut} to search"
   scroll_end: "Scroll to end"
   copy: "Copy"
   copied: "Copied!"

@@ -49,6 +49,8 @@ chat:
   open_zed: "在 Zed 中打开"
   empty_title: "选择一个对话以继续"
   empty_description: "选择已有对话或新建一个对话以开始。"
+  start_hub_title: "开始新对话"
+  palette_hint: "或按 %{shortcut} 搜索"
   scroll_end: "滚动到底部"
   copy: "复制"
   copied: "已复制！"
