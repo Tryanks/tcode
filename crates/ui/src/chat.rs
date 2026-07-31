@@ -26,6 +26,7 @@ use gpui_component::{
 };
 
 use tcode_core::git::GitAction;
+use tcode_core::project::{Project, SessionMeta};
 use tcode_core::session::{
     EntryContent, OrchestrateCallback, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming,
     parse_orchestrate_callback,
@@ -37,9 +38,10 @@ use crate::commit_dialog::CommitDialog;
 use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::markdown::{MarkdownState, MarkdownView};
+use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::terminal_drawer::TerminalDrawer;
-use crate::time::now_millis;
+use crate::time::{now_millis, now_secs};
 use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
@@ -57,6 +59,46 @@ pub(crate) const CONTENT_MIN_PADDING: f32 = 24.;
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// How many activity rows to show before the "+N previous log entrys" expander.
 const WORKLOG_VISIBLE_ROWS: usize = 2;
+const START_HUB_PROJECT_LIMIT: usize = 6;
+
+/// Projects shown by the empty-chat start hub, ordered by latest unarchived
+/// thread activity. Projects without threads follow alphabetically.
+fn start_hub_projects(
+    projects: &[Project],
+    sessions: &[SessionMeta],
+) -> Vec<(Project, Option<u64>)> {
+    let mut projects: Vec<(Project, Option<u64>)> = projects
+        .iter()
+        .cloned()
+        .map(|project| {
+            let last_activity = sessions
+                .iter()
+                .filter(|session| session.archived_at.is_none())
+                .filter(|session| session.project_id.as_deref() == Some(project.id.as_str()))
+                .map(|session| session.updated_at)
+                .max();
+            (project, last_activity)
+        })
+        .collect();
+    projects.sort_by(|(project_a, activity_a), (project_b, activity_b)| {
+        match (activity_a, activity_b) {
+            (Some(activity_a), Some(activity_b)) => activity_b.cmp(activity_a).then_with(|| {
+                project_a
+                    .name
+                    .to_lowercase()
+                    .cmp(&project_b.name.to_lowercase())
+            }),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => project_a
+                .name
+                .to_lowercase()
+                .cmp(&project_b.name.to_lowercase()),
+        }
+    });
+    projects.truncate(START_HUB_PROJECT_LIMIT);
+    projects
+}
 
 /// Localized previous-log toggle. The label remains available while rows are
 /// expanded so the same control can collapse them again.
@@ -2968,25 +3010,135 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn render_empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .flex_1()
-            .min_h_0()
+    fn render_empty_state(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let projects = self.workspace_store.read(cx).projects(cx);
+        let sessions = self.workspace_store.read(cx).sidebar_sessions(cx);
+        let hub_projects = start_hub_projects(&projects, &sessions);
+        let add_project = Button::new("add-project-empty")
+            .ghost()
+            .small()
+            .icon(
+                Icon::empty()
+                    .path("icons/folder-plus.svg")
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .label(tcode_i18n::tr!("sidebar.add_project"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                WorkspaceStore::open_add_project_dialog(this.workspace_store.clone(), window, cx);
+            }));
+
+        let mut content = v_flex()
+            .w_full()
+            .max_w(px(420.))
+            .px_4()
             .items_center()
-            .justify_center()
-            .gap_1()
+            .gap_3()
             .child(
                 div()
                     .text_size(px(15.))
                     .font_semibold()
                     .child(tcode_i18n::tr!("chat.empty_title")),
-            )
-            .child(
+            );
+        if projects.is_empty() {
+            content = content
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tcode_i18n::tr!("chat.empty_description")),
+                )
+                .child(add_project);
+        } else {
+            let mut launcher = v_flex().w_full().gap_1().child(
                 div()
-                    .text_size(px(13.))
+                    .px_3()
+                    .text_size(px(11.))
+                    .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("chat.empty_description")),
-            )
+                    .child(tcode_i18n::tr!("chat.start_hub_title").to_uppercase()),
+            );
+            for (project, last_activity) in hub_projects {
+                let project_id = project.id.clone();
+                let cwd = project.root.clone();
+                let row_label =
+                    tcode_i18n::tr!("sidebar.project", name = project.name.clone()).into_owned();
+                launcher = launcher.child(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        SharedString::from(format!("start-hub-project-{}", project.id)),
+                        Role::Button,
+                        row_label,
+                        cx,
+                    )
+                    .h(px(40.))
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .rounded(cx.theme().radius)
+                    .cursor_pointer()
+                    .hover(|row| row.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.dispatch(
+                                Command::StartDraft {
+                                    project_id: project_id.clone(),
+                                    cwd: cwd.clone(),
+                                },
+                                cx,
+                            );
+                        });
+                    }))
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().foreground)
+                            .child(project.name),
+                    )
+                    .when_some(last_activity, |row, last_activity| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(crate::sidebar::humanize_ago(
+                                    now_secs().saturating_sub(last_activity),
+                                )),
+                        )
+                    }),
+                );
+            }
+            content = content.child(launcher).child(
+                h_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(add_project)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tcode_i18n::tr!(
+                                "chat.palette_hint",
+                                shortcut = format_secondary_shortcut("k")
+                            )),
+                    ),
+            );
+        }
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .child(content)
             .into_any_element()
     }
 
@@ -3035,7 +3187,7 @@ impl Render for ChatView {
         let Some((title, cwd, is_draft)) = active else {
             return root
                 .child(self.render_header(None, false, None, window, cx))
-                .child(self.render_empty_state(cx));
+                .child(self.render_empty_state(window, cx));
         };
 
         let title = if is_draft { None } else { Some(title) };
@@ -3717,20 +3869,69 @@ mod tests {
         copy_payload, diff_stats, displayed_error_text, file_edit_row, finished_work_log_label,
         format_duration, format_span, index_turns, list_sync, live_edit_counts, live_edit_rows,
         md_sync, plain_text_as_markdown, previous_logs_toggle_label, segment_entries,
-        timeline_overdraw, turn_time_clauses, turn_time_footer, turn_time_parts,
-        turn_work_log_summary, work_log_auto_expands, work_log_counts, work_log_row_entries,
-        work_log_summary,
+        start_hub_projects, timeline_overdraw, turn_time_clauses, turn_time_footer,
+        turn_time_parts, turn_work_log_summary, work_log_auto_expands, work_log_counts,
+        work_log_row_entries, work_log_summary,
     };
     use crate::markdown::MarkdownState;
     use crate::window_state::WindowState;
-    use agent::{FileChange, FileChangeKind, ItemStatus};
+    use agent::{FileChange, FileChangeKind, ItemStatus, ProviderKind};
     use gpui::{AppContext as _, Entity, TestAppContext};
     use std::collections::{HashMap, HashSet};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use tcode_core::project::{Project, SessionMeta};
     use tcode_core::session::{
         EntryContent, SteeringStatus, Timeline, TimelineEntry, TurnMeta, TurnTiming,
     };
+
+    #[test]
+    fn start_hub_orders_active_projects_then_alphabetical_empty_projects_and_caps_at_six() {
+        let project = |id: &str, name: &str| Project {
+            id: id.into(),
+            name: name.into(),
+            root: PathBuf::from(format!("/{id}")),
+            created_at: 0,
+        };
+        let projects = vec![
+            project("archived", "Archived only"),
+            project("alpha", "Alpha"),
+            project("recent", "Recent"),
+            project("older", "Older"),
+            project("middle", "Middle"),
+            project("extra", "Extra"),
+            project("zulu", "Zulu"),
+        ];
+        let session = |id: &str, project_id: &str, updated_at: u64, archived: bool| {
+            let mut session =
+                SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
+            session.id = id.into();
+            session.project_id = Some(project_id.into());
+            session.updated_at = updated_at;
+            session.archived_at = archived.then_some(updated_at);
+            session
+        };
+        let sessions = vec![
+            session("recent-thread", "recent", 50, false),
+            session("middle-thread", "middle", 30, false),
+            session("older-thread", "older", 20, false),
+            session("extra-thread", "extra", 10, false),
+            session("archived-thread", "archived", 100, true),
+        ];
+
+        let ordered = start_hub_projects(&projects, &sessions);
+        let ids: Vec<&str> = ordered
+            .iter()
+            .map(|(project, _)| project.id.as_str())
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["recent", "middle", "older", "extra", "alpha", "archived"]
+        );
+        assert_eq!(ordered[0].1, Some(50));
+        assert_eq!(ordered[5].1, None);
+    }
 
     #[gpui::test]
     fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(

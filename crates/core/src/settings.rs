@@ -29,6 +29,16 @@ pub enum ProjectSort {
     NameAsc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarLayout {
+    /// One flat list of threads sorted by attention then recency (default).
+    #[default]
+    Flat,
+    /// Threads grouped under project headers (the legacy layout).
+    Grouped,
+}
+
 impl ProjectSort {
     /// The next mode in the cycle (RecentActivity → NameAsc → RecentActivity).
     pub fn next(self) -> Self {
@@ -678,6 +688,9 @@ pub struct Settings {
     /// Sidebar PROJECTS ordering (cycled by the sort button).
     #[serde(default)]
     pub project_sort: ProjectSort,
+    /// Sidebar thread layout (flat by default; grouped keeps the legacy view).
+    #[serde(default)]
+    pub sidebar_layout: SidebarLayout,
     /// Per-session last-visited time (unix secs), keyed by session id. A session
     /// whose `updated_at` exceeds its last-visited time (and isn't active) shows
     /// an unread dot. Opening a thread refreshes it; "Mark unread" clears it.
@@ -731,6 +744,7 @@ impl Default for Settings {
             collapsed_projects: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
+            sidebar_layout: SidebarLayout::default(),
             last_visited: HashMap::new(),
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),

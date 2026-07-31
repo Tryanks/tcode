@@ -4,11 +4,13 @@ use std::path::PathBuf;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
-    project::{Project, SessionMeta, WorktreeInfo, group_sessions},
+    project::{Project, SessionMeta, WorktreeInfo, group_sessions, order_sessions_with_children},
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
     session::{ReviewComment, StoredEvent, Timeline},
-    settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
+    settings::{
+        BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings, SidebarLayout,
+    },
     ui::{ConversationDestination, RightTab},
 };
 use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
@@ -834,6 +836,25 @@ impl WorkspaceStore {
 
     pub fn project_sort(&self, _cx: &App) -> ProjectSort {
         self.settings_replica.project_sort
+    }
+
+    pub fn sidebar_layout(&self, _cx: &App) -> SidebarLayout {
+        self.settings_replica.sidebar_layout
+    }
+
+    pub fn flat_sessions(&self, _cx: &App) -> Vec<SessionMeta> {
+        let visible = self
+            .index_replica
+            .0
+            .iter()
+            .filter(|meta| meta.archived_at.is_none())
+            .cloned()
+            .collect();
+        order_sessions_with_children(visible)
+    }
+
+    pub fn projects(&self, _cx: &App) -> Vec<Project> {
+        self.index_replica.1.clone()
     }
 
     pub fn is_project_collapsed(&self, project_id: &str, _cx: &App) -> bool {

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use agent::ProviderKind;
 #[cfg(test)]
-use tcode_core::settings::{EnvVar, ProjectSort, ProviderSettings, ThemeMode};
+use tcode_core::settings::{EnvVar, ProjectSort, ProviderSettings, SidebarLayout, ThemeMode};
 use tcode_core::settings::{Settings, provider_key};
 
 #[derive(Debug, Clone)]
@@ -207,6 +207,7 @@ mod tests {
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,
+            sidebar_layout: SidebarLayout::Flat,
             last_visited: std::collections::HashMap::from([("sess-a".to_string(), 42)]),
             acp_agents: BTreeMap::new(),
         };
