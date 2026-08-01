@@ -8746,7 +8746,7 @@ dependencies = [
  "libc",
  "polling",
  "sysinfo 0.39.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
