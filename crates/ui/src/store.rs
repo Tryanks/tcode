@@ -243,14 +243,38 @@ impl WorkspaceStore {
         match (&envelope.topic, &envelope.event) {
             (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(status)) => {
                 let previous = self.active_destination.clone();
-                let previous_session = self
-                    .session_status_replica
+                let previous_status = self.session_status_replica.clone();
+                let previous_session = previous_status
                     .as_ref()
                     .map(|status| status.session_id.clone());
                 let mut status = status.clone();
                 if let Some(status) = status.as_mut() {
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(&status.session_id);
+                }
+                let next_session = status.as_ref().map(|status| status.session_id.as_str());
+
+                // A thread switch parks the old session before ActiveSession is
+                // replaced. Its SessionStatus event therefore arrives while the
+                // client still considers it active and updates the foreground
+                // replica instead of `background_session_flags`. Preserve that
+                // final, authoritative status when the active id changes so the
+                // sidebar does not lose Working/waiting state during the handoff.
+                if let Some(previous_status) = previous_status.as_ref()
+                    && next_session != Some(previous_status.session_id.as_str())
+                    && !previous_status.draft
+                    && self.index_replica.0.iter().any(|meta| {
+                        meta.id == previous_status.session_id && meta.archived_at.is_none()
+                    })
+                {
+                    self.background_session_flags.insert(
+                        previous_status.session_id.clone(),
+                        (
+                            previous_status.working,
+                            previous_status.pending_approval,
+                            previous_status.pending_user_input,
+                        ),
+                    );
                 }
                 self.session_status_replica = status.clone();
                 let destination = status.as_ref().map(Self::destination);
@@ -2468,6 +2492,84 @@ mod tests {
         assert!(workspace.read_with(cx, |store, cx| {
             store.pending_user_input_for(&background_session_id, cx)
         }));
+
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn active_session_handoff_preserves_parked_working_status(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-background-working-handoff-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let first = SessionMeta::new(ProviderKind::Codex, root.join("first"), None);
+        let second = SessionMeta::new(ProviderKind::Codex, root.join("second"), None);
+        session_store
+            .upsert_meta(&first)
+            .expect("persist first session");
+        session_store
+            .upsert_meta(&second)
+            .expect("persist second session");
+
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: first.id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "first selected session", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == first.id)
+            })
+        });
+
+        workspace.update(cx, |store, _| {
+            let mut parked = store
+                .session_status_replica
+                .clone()
+                .expect("first session status");
+            parked.turn_running = true;
+            parked.working = true;
+            store.apply_domain_event(&EventEnvelope {
+                topic: Topic::SessionStatus {
+                    session_id: first.id.clone(),
+                },
+                seq: 1,
+                event: ServerEvent::SessionStatusReplaced(parked.clone()),
+            });
+
+            let mut next = parked;
+            next.session_id = second.id.clone();
+            next.cwd = second.cwd.clone();
+            next.turn_running = false;
+            next.working = false;
+            store.apply_domain_event(&EventEnvelope {
+                topic: Topic::SessionStatus {
+                    session_id: second.id.clone(),
+                },
+                seq: 1,
+                event: ServerEvent::SessionStatusReplaced(next.clone()),
+            });
+            store.apply_domain_event(&EventEnvelope {
+                topic: Topic::ActiveSession,
+                seq: 2,
+                event: ServerEvent::ActiveSessionReplaced(Some(next)),
+            });
+        });
+
+        assert!(workspace.read_with(cx, |store, cx| { store.turn_running_for(&first.id, cx) }));
+        assert!(!workspace.read_with(cx, |store, cx| { store.turn_running_for(&second.id, cx) }));
+        assert_eq!(
+            workspace.read_with(cx, |store, cx| store.working_sessions_count(cx)),
+            1
+        );
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
