@@ -2222,20 +2222,6 @@ mod tests {
                 }));
             });
         }
-        wait_until(
-            cx,
-            &workspace,
-            "incremental session timeline replica",
-            |cx| {
-                workspace.read_with(cx, |store, _| {
-                    store
-                        .session_replica
-                        .as_ref()
-                        .is_some_and(|(_, timeline)| timeline.turns.len() == 2)
-                })
-            },
-        );
-
         let live = update_host(&host, |state, _| {
             let timeline = &state.active.as_ref().expect("active session").timeline;
             (
@@ -2247,6 +2233,25 @@ mod tests {
                 timeline.turns.len(),
             )
         });
+        // Wait for the replica to catch up to the live timeline's shape before
+        // comparing contents; turn count alone flips at TurnStarted, while later
+        // events may still be queued.
+        wait_until(
+            cx,
+            &workspace,
+            "incremental session timeline replica",
+            |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store
+                        .session_replica
+                        .as_ref()
+                        .is_some_and(|(_, timeline)| {
+                            timeline.turns.len() == live.1
+                                && timeline.entries.len() == live.0.len()
+                        })
+                })
+            },
+        );
         let replica = workspace.read_with(cx, |store, _| {
             let (id, timeline) = store.session_replica.as_ref().expect("session replica");
             assert_eq!(id, &session_id);
