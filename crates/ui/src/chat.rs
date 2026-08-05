@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use agent::{ChangeCompleteness, FileChange, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, FollowMode,
-    Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState, ObjectFit,
-    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Task, Window, div, img, list, prelude::FluentBuilder as _, px,
+    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState,
+    ObjectFit, ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledImage as _, StyledText, Subscription, Task, Window, div, img, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -1937,6 +1938,11 @@ impl ChatView {
                 } else {
                     IconName::Check
                 };
+                let (preview, breaks) = one_line_with_break_markers(command);
+                let marker_style = HighlightStyle {
+                    color: Some(muted.opacity(0.45)),
+                    ..Default::default()
+                };
                 let summary = h_flex()
                     .min_w_0()
                     .flex_1()
@@ -1950,7 +1956,9 @@ impl ChatView {
                             .text_ellipsis()
                             .text_color(muted)
                             .font_family(cx.theme().mono_font_family.clone())
-                            .child(one_line(command)),
+                            .child(StyledText::new(preview).with_highlights(
+                                breaks.into_iter().map(|range| (range, marker_style)),
+                            )),
                     )
                     .into_any_element();
                 (icon, summary)
@@ -3436,13 +3444,57 @@ fn activity_icon(status: ItemStatus) -> IconName {
     }
 }
 
-/// First non-empty line of `text`, collapsed to a single spaced line.
+/// `text` collapsed to a single spaced line: every whitespace run (newlines
+/// included) becomes one space, so a multi-line command shows its full content
+/// in a one-line preview instead of just its first line. Clipped to more
+/// characters than any row can render; the visual ellipsis comes from the
+/// row's `text_ellipsis`.
 fn one_line(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-        .to_string()
+    const MAX_CHARS: usize = 600;
+    let mut out = String::new();
+    for word in text.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+        if out.chars().count() >= MAX_CHARS {
+            out = out.chars().take(MAX_CHARS).collect();
+            break;
+        }
+    }
+    out
+}
+
+/// Like [`one_line`], but line breaks stay visible: each break between
+/// non-empty lines becomes a literal `\n` marker in the output, and the
+/// returned byte ranges let the row paint those markers fainter than the
+/// text around them so they read as break symbols, not command content.
+fn one_line_with_break_markers(text: &str) -> (String, Vec<Range<usize>>) {
+    const MAX_CHARS: usize = 600;
+    let mut out = String::new();
+    let mut markers = Vec::new();
+    let mut chars = 0usize;
+    for line in text.lines() {
+        let mut on_new_line = !out.is_empty();
+        for word in line.split_whitespace() {
+            if on_new_line {
+                let start = out.len();
+                out.push_str("\\n");
+                markers.push(start..out.len());
+                chars += 2;
+                on_new_line = false;
+            } else if !out.is_empty() {
+                out.push(' ');
+                chars += 1;
+            }
+            out.push_str(word);
+            chars += word.chars().count();
+            if chars >= MAX_CHARS {
+                return (out, markers);
+            }
+        }
+    }
+    (out, markers)
 }
 
 /// A short one-line summary of a tool call's input for the Work Log.
@@ -4616,6 +4668,42 @@ This begins after the hard break."#;
 
     fn refs(entries: &[Arc<TimelineEntry>]) -> Vec<&TimelineEntry> {
         entries.iter().map(AsRef::as_ref).collect()
+    }
+
+    /// A multi-line command must keep its whole body in the one-line preview
+    /// (whitespace collapsed), not just its first line — a heredoc opener like
+    /// `set pipe -e "` alone tells the user nothing about what ran.
+    #[test]
+    fn one_line_collapses_multiline_commands_into_a_single_spaced_line() {
+        let cmd = "set pipe -e \"\n  cargo fmt --check\n  cargo clippy\n\"";
+        assert_eq!(
+            super::one_line(cmd),
+            "set pipe -e \" cargo fmt --check cargo clippy \""
+        );
+
+        let long = "word ".repeat(500);
+        assert_eq!(super::one_line(&long).chars().count(), 600);
+    }
+
+    /// The command row's preview keeps line breaks visible as literal `\n`
+    /// markers, and reports each marker's byte range so rendering can paint
+    /// them fainter. Blank lines collapse into a single marker.
+    #[test]
+    fn break_marker_preview_marks_every_line_break_with_its_range() {
+        let cmd = "set pipe -e \"\n  cargo fmt --check\n\n  cargo clippy\n\"";
+        let (preview, markers) = super::one_line_with_break_markers(cmd);
+        assert_eq!(
+            preview,
+            "set pipe -e \"\\ncargo fmt --check\\ncargo clippy\\n\""
+        );
+        assert_eq!(markers.len(), 3);
+        for range in markers {
+            assert_eq!(&preview[range], "\\n");
+        }
+
+        let (single, markers) = super::one_line_with_break_markers("cargo test");
+        assert_eq!(single, "cargo test");
+        assert!(markers.is_empty());
     }
 
     #[test]
