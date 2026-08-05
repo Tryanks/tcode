@@ -2242,13 +2242,9 @@ mod tests {
             "incremental session timeline replica",
             |cx| {
                 workspace.read_with(cx, |store, _| {
-                    store
-                        .session_replica
-                        .as_ref()
-                        .is_some_and(|(_, timeline)| {
-                            timeline.turns.len() == live.1
-                                && timeline.entries.len() == live.0.len()
-                        })
+                    store.session_replica.as_ref().is_some_and(|(_, timeline)| {
+                        timeline.turns.len() == live.1 && timeline.entries.len() == live.0.len()
+                    })
                 })
             },
         );
