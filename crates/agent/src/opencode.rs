@@ -151,7 +151,6 @@ async fn run_actor(
         sse,
         events,
         mapper: OpenCodeMapper::new(session_id.clone()),
-        session_id: session_id.clone(),
         model,
         variant: selected_variant(&opts.option_selections).map(str::to_owned),
         interaction_mode: opts.interaction_mode,
@@ -222,7 +221,12 @@ async fn run_actor(
         }
     };
     actor.shutdown().await;
-    let reason = close_reason.map(|reason| actor.server.describe_failure(reason));
+    let reason = close_reason.map(|reason| {
+        actor
+            .server
+            .stderr_tail
+            .append_to(reason, "\nserver output:\n")
+    });
     let _ = actor
         .events
         .send(AgentEvent::SessionClosed { reason })
@@ -234,7 +238,6 @@ struct OpenCodeActor {
     sse: Receiver<SseOutput>,
     events: Sender<AgentEvent>,
     mapper: OpenCodeMapper,
-    session_id: String,
     model: Option<(String, String)>,
     variant: Option<String>,
     interaction_mode: InteractionMode,
@@ -295,7 +298,10 @@ impl OpenCodeActor {
                 let (status, _) = self
                     .server
                     .http
-                    .post_json(&format!("/session/{}/prompt_async", self.session_id), &body)
+                    .post_json(
+                        &format!("/session/{}/prompt_async", self.mapper.session_id),
+                        &body,
+                    )
                     .map_err(|err| err.to_string())?;
                 if status != 204 {
                     return Err(format!(
@@ -309,7 +315,10 @@ impl OpenCodeActor {
                 self.mapper.interrupted = true;
                 self.server
                     .http
-                    .post_json(&format!("/session/{}/abort", self.session_id), &json!({}))
+                    .post_json(
+                        &format!("/session/{}/abort", self.mapper.session_id),
+                        &json!({}),
+                    )
                     .map_err(|err| err.to_string())?;
                 Ok(())
             }
@@ -336,10 +345,10 @@ impl OpenCodeActor {
                     .map_err(|err| err.to_string())?;
                 if decision == ApprovalDecision::Cancel {
                     self.mapper.interrupted = true;
-                    let _ = self
-                        .server
-                        .http
-                        .post_json(&format!("/session/{}/abort", self.session_id), &json!({}));
+                    let _ = self.server.http.post_json(
+                        &format!("/session/{}/abort", self.mapper.session_id),
+                        &json!({}),
+                    );
                 }
                 self.emit(AgentEvent::ApprovalResolved {
                     request_id,
@@ -363,9 +372,7 @@ impl OpenCodeActor {
                 self.interaction_mode = mode;
                 Ok(())
             }
-            SessionCommand::SetOption { id, value }
-                if id == "variant" || id == "reasoningEffort" =>
-            {
+            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
                 self.variant = value.as_str().map(str::to_owned);
                 Ok(())
             }
@@ -400,14 +407,9 @@ impl OpenCodeActor {
         let diff = self
             .server
             .http
-            .get_json(&format!("/session/{}/diff", self.session_id))?;
+            .get_json(&format!("/session/{}/diff", self.mapper.session_id))?;
         Ok(AgentEvent::TurnChangesUpdated {
-            turn_id: self
-                .mapper
-                .active_turn
-                .clone()
-                .or_else(|| self.mapper.last_turn.clone())
-                .unwrap_or_else(|| "opencode-turn".into()),
+            turn_id: self.mapper.turn_id(),
             changes: map_snapshot_diffs(&diff),
             completeness: ChangeCompleteness::Exact,
         })
@@ -429,29 +431,19 @@ impl OpenCodeActor {
     }
 }
 
+#[derive(Default)]
 struct MappedEvent {
     events: Vec<AgentEvent>,
     permission_ids: Vec<String>,
     fetch_diff: bool,
 }
 
-impl MappedEvent {
-    fn none() -> Self {
-        Self {
-            events: Vec::new(),
-            permission_ids: Vec::new(),
-            fetch_diff: false,
-        }
-    }
-}
-
-pub(crate) struct OpenCodeMapper {
+struct OpenCodeMapper {
     session_id: String,
     turn_counter: u64,
     active_turn: Option<String>,
     last_turn: Option<String>,
     part_kinds: HashMap<String, DeltaKind>,
-    part_text: HashMap<String, String>,
     user_messages: HashSet<String>,
     /// The same assistant usage is reported by both its step-finish part and
     /// message.updated reconciliation. Keying by message id prevents counting
@@ -465,14 +457,13 @@ pub(crate) struct OpenCodeMapper {
 }
 
 impl OpenCodeMapper {
-    pub(crate) fn new(session_id: String) -> Self {
+    fn new(session_id: String) -> Self {
         Self {
             session_id,
             turn_counter: 0,
             active_turn: None,
             last_turn: None,
             part_kinds: HashMap::new(),
-            part_text: HashMap::new(),
             user_messages: HashSet::new(),
             turn_usages: HashMap::new(),
             turn_usage: None,
@@ -489,9 +480,9 @@ impl OpenCodeMapper {
         if let Some(session_id) = properties.get("sessionID").and_then(Value::as_str)
             && session_id != self.session_id
         {
-            return MappedEvent::none();
+            return MappedEvent::default();
         }
-        let mut mapped = MappedEvent::none();
+        let mut mapped = MappedEvent::default();
         match kind {
             "session.status" => match properties.pointer("/status/type").and_then(Value::as_str) {
                 Some("busy") => mapped.events.extend(self.start_turn()),
@@ -529,10 +520,6 @@ impl OpenCodeMapper {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if !delta.is_empty() {
-                    self.part_text
-                        .entry(part_id.to_owned())
-                        .or_default()
-                        .push_str(delta);
                     mapped.events.push(AgentEvent::Delta {
                         item_id: part_id.to_owned(),
                         kind: self
@@ -602,11 +589,7 @@ impl OpenCodeMapper {
             }
             "session.diff" => {
                 mapped.events.push(AgentEvent::TurnChangesUpdated {
-                    turn_id: self
-                        .active_turn
-                        .clone()
-                        .or_else(|| self.last_turn.clone())
-                        .unwrap_or_else(|| "opencode-turn".into()),
+                    turn_id: self.turn_id(),
                     changes: map_snapshot_diffs(properties.get("diff").unwrap_or(&Value::Null)),
                     completeness: ChangeCompleteness::Exact,
                 });
@@ -650,6 +633,13 @@ impl OpenCodeMapper {
         vec![AgentEvent::TurnStarted { turn_id }]
     }
 
+    fn turn_id(&self) -> String {
+        self.active_turn
+            .clone()
+            .or_else(|| self.last_turn.clone())
+            .unwrap_or_else(|| "opencode-turn".into())
+    }
+
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
         let Some(turn_id) = self.active_turn.take() else {
             return Vec::new();
@@ -690,7 +680,6 @@ impl OpenCodeMapper {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
-                self.part_text.insert(part_id.clone(), text.clone());
                 let mut events = Vec::new();
                 if let Some(delta) = explicit_delta.and_then(Value::as_str)
                     && !delta.is_empty()
@@ -735,29 +724,6 @@ impl OpenCodeMapper {
                     Vec::new()
                 }
             }
-            Some("patch") => {
-                let changes = part
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(|path| FileChange {
-                        path: path.to_owned(),
-                        kind: FileChangeKind::Modify,
-                        diff: None,
-                    })
-                    .collect();
-                vec![AgentEvent::TurnChangesUpdated {
-                    turn_id: self
-                        .active_turn
-                        .clone()
-                        .or_else(|| self.last_turn.clone())
-                        .unwrap_or_else(|| "opencode-turn".into()),
-                    changes,
-                    completeness: ChangeCompleteness::Partial,
-                }]
-            }
             _ => Vec::new(),
         }
     }
@@ -795,7 +761,10 @@ impl OpenCodeMapper {
             }
             _ => (ItemStatus::InProgress, None),
         };
-        let exit_code = state.pointer("/metadata/exit").and_then(json_i32);
+        let exit_code = state
+            .pointer("/metadata/exit")
+            .and_then(Value::as_i64)
+            .and_then(|number| i32::try_from(number).ok());
         let item = open_code_tool_item(&call_id, &name, input, output, exit_code, status);
         vec![match state.get("status").and_then(Value::as_str) {
             Some("pending") => AgentEvent::ItemStarted(item),
@@ -969,18 +938,8 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
             .checked_add(output.unwrap_or(0))
             .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
             .and_then(|total| total.checked_add(cache_write)),
-        context_window: None,
-        total_processed_tokens: None,
-        cost_usd: None,
-        duration_ms: None,
+        ..Default::default()
     })
-}
-
-fn json_i32(value: &Value) -> Option<i32> {
-    value
-        .as_i64()
-        .and_then(|number| i32::try_from(number).ok())
-        .or_else(|| value.as_str()?.parse().ok())
 }
 
 fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
@@ -1132,20 +1091,11 @@ fn reconcile_provider_catalog(catalog: &mut Value, provider_state: &Value) {
 }
 
 fn title_case(value: &str) -> String {
-    let mut output = String::new();
-    let mut capitalize = true;
-    for character in value.chars() {
-        if matches!(character, '-' | '_') {
-            output.push(' ');
-            capitalize = true;
-        } else if capitalize {
-            output.extend(character.to_uppercase());
-            capitalize = false;
-        } else {
-            output.push(character);
-        }
-    }
-    output
+    let mut characters = value.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_default()
 }
 
 fn discover_commands(http: &HttpClient) -> Vec<ProviderCommand> {
@@ -1212,7 +1162,7 @@ fn split_model_id(model: &str) -> Option<(&str, &str)> {
 fn selected_variant(selections: &[OptionSelection]) -> Option<&str> {
     selections
         .iter()
-        .find(|selection| matches!(selection.id.as_str(), "variant" | "reasoningEffort"))
+        .find(|selection| selection.id == "reasoningEffort")
         .and_then(|selection| selection.value.as_str())
 }
 
@@ -1288,11 +1238,15 @@ impl OpenCodeServer {
         let mut last_error = None;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
-                return Err(AgentError::Provider(self.describe_failure(format!(
-                    "OpenCode server exited during startup ({status})"
-                ))));
+                return Err(AgentError::Provider(self.stderr_tail.append_to(
+                    format!("OpenCode server exited during startup ({status})"),
+                    "\nserver output:\n",
+                )));
             }
-            match self.http.get_health() {
+            match self
+                .http
+                .get_json_with(&self.http.health_agent, "/global/health")
+            {
                 Ok(health)
                     if health.get("healthy").and_then(Value::as_bool) == Some(true)
                         && health.get("version").and_then(Value::as_str).is_some() =>
@@ -1304,10 +1258,13 @@ impl OpenCodeServer {
             }
             std::thread::sleep(Duration::from_millis(75));
         }
-        Err(AgentError::Protocol(self.describe_failure(format!(
-            "timed out waiting for OpenCode health: {}",
-            last_error.unwrap_or_else(|| "no response".into())
-        ))))
+        Err(AgentError::Protocol(self.stderr_tail.append_to(
+            format!(
+                "timed out waiting for OpenCode health: {}",
+                last_error.unwrap_or_else(|| "no response".into())
+            ),
+            "\nserver output:\n",
+        )))
     }
 
     fn subscribe(&self) -> Result<Receiver<SseOutput>, AgentError> {
@@ -1335,13 +1292,8 @@ impl OpenCodeServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-
-    fn describe_failure(&self, base: String) -> String {
-        self.stderr_tail.append_to(base, "\nserver output:\n")
-    }
 }
 
-#[derive(Clone)]
 struct HttpClient {
     base: String,
     authorization: String,
@@ -1374,19 +1326,12 @@ impl HttpClient {
         }
     }
 
-    fn get_health(&self) -> Result<Value, AgentError> {
-        let response = self
-            .health_agent
-            .get(&format!("{}/global/health", self.base))
-            .set("Authorization", &self.authorization)
-            .call()
-            .map_err(http_error)?;
-        parse_response(response)
+    fn get_json(&self, path: &str) -> Result<Value, AgentError> {
+        self.get_json_with(&self.agent, path)
     }
 
-    fn get_json(&self, path: &str) -> Result<Value, AgentError> {
-        let response = self
-            .agent
+    fn get_json_with(&self, agent: &ureq::Agent, path: &str) -> Result<Value, AgentError> {
+        let response = agent
             .get(&format!("{}{path}", self.base))
             .set("Authorization", &self.authorization)
             .call()
@@ -1449,17 +1394,10 @@ enum SseOutput {
 }
 
 fn read_sse(reader: impl Read, sender: Sender<SseOutput>) {
-    let mut reader = BufReader::new(reader);
     let mut data = Vec::new();
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                let _ = sender.send_blocking(SseOutput::Eof);
-                return;
-            }
-            Ok(_) => {
-                let line = line.trim_end_matches(['\r', '\n']);
+    for line in BufReader::new(reader).lines() {
+        match line {
+            Ok(line) => {
                 if line.is_empty() {
                     if !data.is_empty() {
                         let payload = data.join("\n");
@@ -1490,6 +1428,7 @@ fn read_sse(reader: impl Read, sender: Sender<SseOutput>) {
             }
         }
     }
+    let _ = sender.send_blocking(SseOutput::Eof);
 }
 
 async fn wait_for_server_connected(events: &Receiver<SseOutput>) -> Result<(), AgentError> {

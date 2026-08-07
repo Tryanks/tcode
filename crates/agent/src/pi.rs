@@ -22,7 +22,8 @@ use crate::{
 };
 
 const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
-const SETTLED_MIN_VERSION: (u32, u32, u32) = (0, 80, 4);
+const PLAN_MODE_WARNING: &str =
+    "pi RPC has no native Plan interaction mode; this session is running in Build mode";
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
@@ -83,9 +84,9 @@ fn list_models_blocking(
     let mut current = None;
     let mut thinking_level = None;
     let mut catalog = None;
-    let mut reader = BufReader::new(stdout);
+    let mut lines = BufReader::new(stdout).lines();
     while current.is_none() || catalog.is_none() {
-        let line = read_lf_record(&mut reader)?.ok_or_else(|| {
+        let line = lines.next().transpose()?.ok_or_else(|| {
             AgentError::Protocol("pi closed stdout during model discovery".into())
         })?;
         let message: Value = serde_json::from_str(&line)
@@ -173,17 +174,15 @@ fn map_model(
     })
 }
 
-fn thinking_label(level: &str) -> &'static str {
-    match level {
-        "off" => "Off",
-        "minimal" => "Minimal",
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        _ => "Custom",
+fn thinking_label(level: &str) -> String {
+    if level == "xhigh" {
+        return "Extra High".into();
     }
+    let mut characters = level.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_default()
 }
 
 fn model_wire_id(model: Option<&Value>) -> Option<String> {
@@ -219,10 +218,6 @@ async fn run_actor(
     } else {
         None
     };
-    let supports_settled =
-        crate::process::probe_version(&binary, &opts.launch_env, ProviderKind::Pi)
-            .await
-            .is_some_and(|version| version >= SETTLED_MIN_VERSION);
     let mut cmd = crate::process::command(&binary);
     // Profile arguments are applied first. The transport, optional permission
     // extension, resume target, and read-only tool set are tcode-owned and go
@@ -305,7 +300,7 @@ async fn run_actor(
         stdin,
         lines: line_rx,
         events,
-        mapper: PiMapper::new(supports_settled),
+        mapper: PiMapper::new(),
         next_request: 1,
         approval_mode: opts.approval_mode,
         pending_approvals: HashMap::new(),
@@ -318,17 +313,15 @@ async fn run_actor(
     let startup = actor.initialize().await;
     if let Err(err) = startup {
         actor.stop();
-        let details = actor.describe_failure(err.to_string());
+        let details = actor.stderr_tail.append_to(err.to_string(), "\nstderr:\n");
         let _ = ready.send(Err(AgentError::Provider(details))).await;
         return;
     }
     if opts.interaction_mode == InteractionMode::Plan {
         actor
             .emit(AgentEvent::Warning {
-                message:
-                "pi RPC has no native Plan interaction mode; this session is running in Build mode"
-                    .into(),
-             })
+                message: PLAN_MODE_WARNING.into(),
+            })
             .await;
     }
     let unattached = unattached_servers(&opts);
@@ -388,7 +381,7 @@ async fn run_actor(
         }
     };
     actor.stop();
-    let reason = close_reason.map(|base| actor.describe_failure(base));
+    let reason = close_reason.map(|base| actor.stderr_tail.append_to(base, "\nstderr:\n"));
     let _ = actor
         .events
         .send(AgentEvent::SessionClosed { reason })
@@ -708,9 +701,7 @@ impl PiActor {
                 .await;
                 Ok(())
             }
-            SessionCommand::SetOption { id, value }
-                if matches!(id.as_str(), "reasoningEffort" | "thinkingLevel") =>
-            {
+            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
                 let Some(level) = value.as_str() else {
                     return Ok(());
                 };
@@ -733,7 +724,7 @@ impl PiActor {
             SessionCommand::SetInteractionMode(mode) => {
                 if mode == InteractionMode::Plan {
                     self.emit(AgentEvent::Warning {
-                        message: "pi RPC has no native Plan interaction mode".into(),
+                        message: PLAN_MODE_WARNING.into(),
                     })
                     .await;
                 }
@@ -791,23 +782,16 @@ impl PiActor {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-
-    fn describe_failure(&self, base: String) -> String {
-        self.stderr_tail.append_to(base, "\nstderr:\n")
-    }
 }
 
-pub(crate) struct PiMapper {
-    supports_settled: bool,
+struct PiMapper {
     turn_counter: u64,
     current_turn: Option<String>,
-    turn_usage: TokenUsage,
-    has_usage: bool,
+    turn_usage: Option<TokenUsage>,
     cumulative_processed: u64,
     interrupt_pending: bool,
     failed: bool,
     tool_items: HashMap<String, PiTool>,
-    usage_messages: HashSet<String>,
     finalized_messages: HashSet<String>,
 }
 
@@ -819,35 +803,23 @@ struct PiTool {
 }
 
 impl PiMapper {
-    pub(crate) fn new(supports_settled: bool) -> Self {
+    fn new() -> Self {
         Self {
-            supports_settled,
             turn_counter: 0,
             current_turn: None,
-            turn_usage: TokenUsage::default(),
-            has_usage: false,
+            turn_usage: None,
             cumulative_processed: 0,
             interrupt_pending: false,
             failed: false,
             tool_items: HashMap::new(),
-            usage_messages: HashSet::new(),
             finalized_messages: HashSet::new(),
         }
     }
 
-    pub(crate) fn on_message(&mut self, message: &Value) -> Vec<AgentEvent> {
+    fn on_message(&mut self, message: &Value) -> Vec<AgentEvent> {
         match message.get("type").and_then(Value::as_str).unwrap_or("") {
             "agent_start" => self.start_turn(),
             "agent_settled" => self.complete_turn(),
-            "agent_end"
-                if !self.supports_settled
-                    && !message
-                        .get("willRetry")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false) =>
-            {
-                self.complete_turn()
-            }
             "message_update" => self.message_update(message),
             "message_end" => self.message_end(message),
             // Current pi emits both message_end and turn_end. Treat turn_end as
@@ -945,8 +917,7 @@ impl PiMapper {
         self.turn_counter += 1;
         let turn_id = format!("pi-turn-{}", self.turn_counter);
         self.current_turn = Some(turn_id.clone());
-        self.turn_usage = TokenUsage::default();
-        self.has_usage = false;
+        self.turn_usage = None;
         self.failed = false;
         vec![AgentEvent::TurnStarted { turn_id }]
     }
@@ -966,7 +937,7 @@ impl PiMapper {
         vec![AgentEvent::TurnCompleted {
             turn_id,
             status,
-            usage: self.has_usage.then_some(self.turn_usage),
+            usage: self.turn_usage,
         }]
     }
 
@@ -1108,9 +1079,7 @@ impl PiMapper {
                         }
                     }
                 }
-                if self.usage_messages.insert(id)
-                    && let Some(usage) = map_usage(message.get("usage"))
-                {
+                if first_finalization && let Some(usage) = map_usage(message.get("usage")) {
                     let processed = usage.used_tokens.unwrap_or_else(|| {
                         usage
                             .input_tokens
@@ -1123,8 +1092,7 @@ impl PiMapper {
                         total_processed_tokens: Some(self.cumulative_processed),
                         ..usage
                     };
-                    self.turn_usage.merge(usage);
-                    self.has_usage = true;
+                    self.turn_usage.get_or_insert_default().merge(usage);
                     events.push(AgentEvent::TokenUsage(usage));
                 }
                 if message.get("stopReason").and_then(Value::as_str) == Some("error") {
@@ -1387,13 +1355,6 @@ fn extension_dialog_question(message: &Value) -> Option<(String, UserInputQuesti
     ))
 }
 
-fn extension_dialog_response(id: &str, answer: Option<&str>) -> Value {
-    match answer {
-        Some(value) => json!({"type":"extension_ui_response","id":id,"value":value}),
-        None => json!({"type":"extension_ui_response","id":id,"cancelled":true}),
-    }
-}
-
 fn take_extension_dialog_response(
     pending_dialogs: &mut HashSet<String>,
     request_id: &str,
@@ -1402,10 +1363,10 @@ fn take_extension_dialog_response(
     if !pending_dialogs.remove(request_id) {
         return None;
     }
-    Some(extension_dialog_response(
-        request_id,
-        answers.get(request_id).and_then(Value::as_str),
-    ))
+    Some(match answers.get(request_id).and_then(Value::as_str) {
+        Some(value) => json!({"type":"extension_ui_response","id":request_id,"value":value}),
+        None => json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
+    })
 }
 
 fn cancel_pending_dialogs(
@@ -1455,10 +1416,7 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
         cached_input_tokens: cache_read,
         output_tokens: output,
         used_tokens: crate::json_u64(usage.get("totalTokens")),
-        context_window: None,
-        total_processed_tokens: None,
-        cost_usd: None,
-        duration_ms: None,
+        ..Default::default()
     })
 }
 
@@ -1512,7 +1470,7 @@ fn map_commands(response: &Value) -> Vec<ProviderCommand> {
 fn selected_thinking(selections: &[OptionSelection]) -> Option<&str> {
     selections
         .iter()
-        .find(|selection| matches!(selection.id.as_str(), "reasoningEffort" | "thinkingLevel"))
+        .find(|selection| selection.id == "reasoningEffort")
         .and_then(|selection| selection.value.as_str())
 }
 
@@ -1549,22 +1507,24 @@ fn gate_required(mode: ApprovalMode) -> bool {
 /// Naming them beats a blanket notice: the person reading it wants to know
 /// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
-    let mut unattached = Vec::new();
-    if opts
-        .mcp_servers
-        .iter()
-        .any(|server| server.name == crate::McpRegistration::SERVER_NAME_ORCHESTRATE)
-    {
-        unattached.push("orchestration");
-    }
-    if opts
-        .mcp_servers
-        .iter()
-        .any(|server| server.name == crate::McpRegistration::SERVER_NAME_COMPUTER_USE)
-    {
-        unattached.push("computer-use");
-    }
-    unattached
+    [
+        (
+            crate::McpRegistration::SERVER_NAME_ORCHESTRATE,
+            "orchestration",
+        ),
+        (
+            crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
+            "computer-use",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(server_name, label)| {
+        opts.mcp_servers
+            .iter()
+            .any(|server| server.name == server_name)
+            .then_some(label)
+    })
+    .collect()
 }
 
 fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
@@ -1579,10 +1539,7 @@ fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
         "tcode-permissions-{}.ts",
         env!("CARGO_PKG_VERSION")
     ));
-    let current = std::fs::read_to_string(&path).ok();
-    if current.as_deref() != Some(PERMISSION_EXTENSION) {
-        std::fs::write(&path, PERMISSION_EXTENSION)?;
-    }
+    std::fs::write(&path, PERMISSION_EXTENSION)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1636,18 +1593,13 @@ enum ChildOutput {
 }
 
 fn read_pi_stdout(stdout: impl std::io::Read, sender: Sender<ChildOutput>) {
-    let mut reader = BufReader::new(stdout);
-    loop {
-        match read_lf_record(&mut reader) {
-            Ok(Some(line)) => {
+    for line in BufReader::new(stdout).lines() {
+        match line {
+            Ok(line) => {
                 if !line.trim().is_empty() && sender.send_blocking(ChildOutput::Line(line)).is_err()
                 {
                     return;
                 }
-            }
-            Ok(None) => {
-                let _ = sender.send_blocking(ChildOutput::Eof);
-                return;
             }
             Err(err) => {
                 let _ = sender.send_blocking(ChildOutput::Error(err.to_string()));
@@ -1655,26 +1607,7 @@ fn read_pi_stdout(stdout: impl std::io::Read, sender: Sender<ChildOutput>) {
             }
         }
     }
-}
-
-fn read_lf_record(reader: &mut impl BufRead) -> Result<Option<String>, AgentError> {
-    let mut bytes = Vec::new();
-    let count = reader.read_until(b'\n', &mut bytes)?;
-    if count == 0 {
-        return Ok(None);
-    }
-    if bytes.last() != Some(&b'\n') {
-        return Err(AgentError::Protocol(
-            "pi stdout ended with an unterminated JSONL record".into(),
-        ));
-    }
-    bytes.pop();
-    if bytes.last() == Some(&b'\r') {
-        bytes.pop();
-    }
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|err| AgentError::Protocol(format!("pi stdout was not UTF-8: {err}")))
+    let _ = sender.send_blocking(ChildOutput::Eof);
 }
 
 #[cfg(test)]
@@ -1920,7 +1853,7 @@ mod tests {
 
     #[test]
     fn maps_recorded_rpc_fixture() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         let mut events = Vec::new();
         for line in include_str!("../tests/fixtures/pi/rpc_events.jsonl").lines() {
             let message: Value = serde_json::from_str(line).unwrap();
@@ -1984,7 +1917,7 @@ mod tests {
 
     #[test]
     fn multi_message_turn_sums_used_tokens() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         mapper.on_message(&json!({"type":"agent_start"}));
         mapper.on_message(&json!({
             "type":"message_end",
@@ -2010,7 +1943,7 @@ mod tests {
 
     #[test]
     fn displayed_custom_messages_become_work_log_items() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         let plain = mapper.on_message(&json!({
             "type":"message_end",
             "message":{
@@ -2053,7 +1986,7 @@ mod tests {
 
     #[test]
     fn hidden_or_empty_custom_messages_are_ignored() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         for message in [
             json!({"role":"custom","content":"hidden","display":false}),
             json!({"role":"custom","content":"implicit hidden"}),
@@ -2068,23 +2001,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pi_uses_agent_end_fallback() {
-        let mut mapper = PiMapper::new(false);
-        mapper.on_message(&json!({"type":"agent_start"}));
-        assert!(matches!(
-            mapper
-                .on_message(&json!({"type":"agent_end","willRetry":false}))
-                .as_slice(),
-            [AgentEvent::TurnCompleted { .. }]
-        ));
-    }
-
-    #[test]
     fn lf_reader_preserves_unicode_line_separators() {
         let bytes = b"{\"text\":\"a\xE2\x80\xA8b\"}\n";
-        let mut reader = BufReader::new(bytes.as_slice());
-        let record = read_lf_record(&mut reader).unwrap().unwrap();
+        let mut lines = BufReader::new(bytes.as_slice()).lines();
+        let record = lines.next().unwrap().unwrap();
         assert!(record.contains('\u{2028}'));
-        assert!(read_lf_record(&mut reader).unwrap().is_none());
+        assert!(lines.next().is_none());
     }
 }

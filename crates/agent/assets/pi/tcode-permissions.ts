@@ -25,11 +25,6 @@ export default function tcodePermissions(pi: any) {
 		}
 
 		if (info.source !== "builtin") {
-			if (mode === "read_only") {
-				return { block: true, reason: `tcode read-only mode blocked ${toolName}` };
-			}
-			if (mode === "full_access") return undefined;
-
 			const reason = "requires confirmation";
 			const payload = JSON.stringify({
 				toolName,
@@ -51,11 +46,6 @@ export default function tcodePermissions(pi: any) {
 			return { block: true, reason: `tcode blocked unknown tool: ${toolName || "(unnamed)"}` };
 		}
 		if (safe.has(toolName)) return undefined;
-
-		if (mode === "read_only") {
-			return { block: true, reason: `tcode read-only mode blocked ${toolName}` };
-		}
-		if (mode === "full_access") return undefined;
 
 		let reason = "requires confirmation";
 		if (writes.has(toolName) && mode === "auto_accept_edits") {
