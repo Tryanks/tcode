@@ -4,8 +4,13 @@
 //! allocates a console for the child, which pops a black box on screen.
 //! `CREATE_NO_WINDOW` suppresses it. No-ops elsewhere.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use smol::channel::Receiver;
+
+use crate::AgentError;
 
 const STDERR_TAIL_LINES: usize = 20;
 
@@ -61,6 +66,63 @@ pub(crate) fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
             .parse()
             .ok()?,
     ))
+}
+
+pub(crate) enum ChildOutput {
+    Line(String),
+    Eof,
+    Error(String),
+}
+
+pub(crate) fn spawn_line_reader(
+    stdout: impl Read + Send + 'static,
+    thread_name: &str,
+    error_prefix: Option<&'static str>,
+    skip_empty: bool,
+) -> (Receiver<ChildOutput>, std::io::Result<()>) {
+    let (sender, receiver) = smol::channel::unbounded();
+    let spawned = std::thread::Builder::new()
+        .name(thread_name.into())
+        .spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => {
+                        if (!skip_empty || !line.trim().is_empty())
+                            && sender.send_blocking(ChildOutput::Line(line)).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        let error = match error_prefix {
+                            Some(prefix) => format!("{prefix}: {err}"),
+                            None => err.to_string(),
+                        };
+                        let _ = sender.send_blocking(ChildOutput::Error(error));
+                        return;
+                    }
+                }
+            }
+            let _ = sender.send_blocking(ChildOutput::Eof);
+        })
+        .map(|_| ());
+    (receiver, spawned)
+}
+
+pub(crate) fn send_json(
+    writer: &mut impl Write,
+    value: &Value,
+    serialization_context: Option<&str>,
+) -> Result<(), AgentError> {
+    serde_json::to_writer(&mut *writer, value).map_err(|err| {
+        AgentError::Protocol(match serialization_context {
+            Some(context) => format!("{context}: {err}"),
+            None => err.to_string(),
+        })
+    })?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// A rolling tail of process output used to enrich startup and exit errors.

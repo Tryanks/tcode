@@ -113,6 +113,65 @@ pub enum AcpLaunch {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeCursor(pub serde_json::Value);
 
+impl ResumeCursor {
+    pub(crate) fn str_field(&self, keys: &[&str]) -> Option<&str> {
+        keys.iter()
+            .find_map(|key| self.0.get(*key).and_then(serde_json::Value::as_str))
+    }
+}
+
+pub(crate) fn processed_tokens(usage: TokenUsage) -> u64 {
+    usage.used_tokens.unwrap_or_else(|| {
+        usage
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(usage.output_tokens.unwrap_or(0))
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
+    })
+}
+
+pub(crate) fn start_mapped_turn(
+    prefix: &str,
+    counter: &mut u64,
+    current: &mut Option<String>,
+    usage: &mut Option<TokenUsage>,
+    failed: &mut bool,
+) -> Vec<AgentEvent> {
+    if current.is_some() {
+        return Vec::new();
+    }
+    *counter += 1;
+    let turn_id = format!("{prefix}-turn-{counter}");
+    *current = Some(turn_id.clone());
+    *usage = None;
+    *failed = false;
+    vec![AgentEvent::TurnStarted { turn_id }]
+}
+
+pub(crate) fn complete_mapped_turn(
+    current: &mut Option<String>,
+    interrupted: &mut bool,
+    failed: bool,
+    usage: Option<TokenUsage>,
+) -> Vec<AgentEvent> {
+    let Some(turn_id) = current.take() else {
+        return Vec::new();
+    };
+    let status = if *interrupted {
+        TurnStatus::Interrupted
+    } else if failed {
+        TurnStatus::Failed
+    } else {
+        TurnStatus::Completed
+    };
+    *interrupted = false;
+    vec![AgentEvent::TurnCompleted {
+        turn_id,
+        status,
+        usage,
+    }]
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionOptions {
     pub cwd: PathBuf,
@@ -1516,69 +1575,6 @@ mod resolve_binary_tests {
                 .iter()
                 .any(|ext| ext.eq_ignore_ascii_case(".CMD"))
         );
-    }
-}
-
-#[cfg(test)]
-mod pathext_logic_tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    /// The PATHEXT candidate order (and the bare-name fallback) is pure logic:
-    /// assert it on every OS, independent of filesystem case rules.
-    #[test]
-    fn pathext_candidates_are_tried_in_order_then_the_bare_name() {
-        let pathext: Vec<String> = [".COM", ".EXE", ".BAT", ".CMD"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            candidate_names("codex", &pathext),
-            vec![
-                "codex.COM".to_string(),
-                "codex.EXE".to_string(),
-                "codex.BAT".to_string(),
-                "codex.CMD".to_string(),
-                "codex".to_string(),
-            ]
-        );
-    }
-
-    /// A name that already carries an extension is used as-is (no PATHEXT sweep).
-    #[test]
-    fn an_explicit_extension_is_not_expanded() {
-        let pathext: Vec<String> = vec![".EXE".to_string(), ".CMD".to_string()];
-        assert_eq!(
-            candidate_names("claude.cmd", &pathext),
-            vec!["claude.cmd".to_string()]
-        );
-    }
-
-    /// Exact-case fixtures, so the search behaves identically on a
-    /// case-sensitive filesystem: the first PATHEXT hit wins.
-    #[test]
-    fn first_matching_candidate_wins_on_any_filesystem() {
-        let dir = std::env::temp_dir().join(format!("tcode-pathext-{}", uuid_like()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("tool.CMD"), "").unwrap();
-        std::fs::write(dir.join("tool.EXE"), "").unwrap();
-        let pathext: Vec<String> = vec![".EXE".to_string(), ".CMD".to_string()];
-        let found = find_in_dirs([dir.clone()], "tool", &pathext, |p: &std::path::Path| {
-            p.is_file()
-        });
-        assert_eq!(
-            found.and_then(|p: PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned())),
-            Some("tool.EXE".to_string())
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    fn uuid_like() -> u128 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
     }
 }
 

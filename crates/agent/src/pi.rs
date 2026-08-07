@@ -13,12 +13,15 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 use smol::future;
 
+#[cfg(test)]
+use crate::TurnStatus;
+use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
     ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
+    ThreadItem, TokenUsage, UserInputOption, UserInputQuestion,
 };
 
 const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
@@ -288,10 +291,7 @@ async fn run_actor(
             return;
         }
     };
-    let (line_tx, line_rx) = smol::channel::unbounded();
-    let _ = std::thread::Builder::new()
-        .name("pi-rpc-stdout".into())
-        .spawn(move || read_pi_stdout(stdout, line_tx));
+    let (line_rx, _) = spawn_line_reader(stdout, "pi-rpc-stdout", None, true);
     let stderr_tail = crate::process::StderrTail::default();
     let _ = stderr_tail.spawn(stderr, "pi-rpc-stderr", "pi");
 
@@ -911,34 +911,22 @@ impl PiMapper {
     }
 
     fn start_turn(&mut self) -> Vec<AgentEvent> {
-        if self.current_turn.is_some() {
-            return Vec::new();
-        }
-        self.turn_counter += 1;
-        let turn_id = format!("pi-turn-{}", self.turn_counter);
-        self.current_turn = Some(turn_id.clone());
-        self.turn_usage = None;
-        self.failed = false;
-        vec![AgentEvent::TurnStarted { turn_id }]
+        crate::start_mapped_turn(
+            "pi",
+            &mut self.turn_counter,
+            &mut self.current_turn,
+            &mut self.turn_usage,
+            &mut self.failed,
+        )
     }
 
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
-        let Some(turn_id) = self.current_turn.take() else {
-            return Vec::new();
-        };
-        let status = if self.interrupt_pending {
-            TurnStatus::Interrupted
-        } else if self.failed {
-            TurnStatus::Failed
-        } else {
-            TurnStatus::Completed
-        };
-        self.interrupt_pending = false;
-        vec![AgentEvent::TurnCompleted {
-            turn_id,
-            status,
-            usage: self.turn_usage,
-        }]
+        crate::complete_mapped_turn(
+            &mut self.current_turn,
+            &mut self.interrupt_pending,
+            self.failed,
+            self.turn_usage,
+        )
     }
 
     fn message_update(&mut self, message: &Value) -> Vec<AgentEvent> {
@@ -1080,13 +1068,7 @@ impl PiMapper {
                     }
                 }
                 if first_finalization && let Some(usage) = map_usage(message.get("usage")) {
-                    let processed = usage.used_tokens.unwrap_or_else(|| {
-                        usage
-                            .input_tokens
-                            .unwrap_or(0)
-                            .saturating_add(usage.output_tokens.unwrap_or(0))
-                            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
-                    });
+                    let processed = crate::processed_tokens(usage);
                     self.cumulative_processed = self.cumulative_processed.saturating_add(processed);
                     let usage = TokenUsage {
                         total_processed_tokens: Some(self.cumulative_processed),
@@ -1475,12 +1457,7 @@ fn selected_thinking(selections: &[OptionSelection]) -> Option<&str> {
 }
 
 fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
-    let cursor = resume.as_ref()?;
-    cursor
-        .0
-        .get("session_file")
-        .or_else(|| cursor.0.get("session_id"))
-        .and_then(Value::as_str)
+    resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
 fn pi_approval_mode(mode: ApprovalMode) -> &'static str {
@@ -1579,35 +1556,7 @@ fn response_error(message: &Value) -> String {
 }
 
 fn send_json(writer: &mut impl Write, value: &Value) -> Result<(), AgentError> {
-    serde_json::to_writer(&mut *writer, value)
-        .map_err(|err| AgentError::Protocol(format!("serializing pi request: {err}")))?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
-    Ok(())
-}
-
-enum ChildOutput {
-    Line(String),
-    Eof,
-    Error(String),
-}
-
-fn read_pi_stdout(stdout: impl std::io::Read, sender: Sender<ChildOutput>) {
-    for line in BufReader::new(stdout).lines() {
-        match line {
-            Ok(line) => {
-                if !line.trim().is_empty() && sender.send_blocking(ChildOutput::Line(line)).is_err()
-                {
-                    return;
-                }
-            }
-            Err(err) => {
-                let _ = sender.send_blocking(ChildOutput::Error(err.to_string()));
-                return;
-            }
-        }
-    }
-    let _ = sender.send_blocking(ChildOutput::Eof);
+    write_json(writer, value, Some("serializing pi request"))
 }
 
 #[cfg(test)]

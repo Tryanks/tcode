@@ -2,7 +2,9 @@
 //! by `codex app-server`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::BufWriter;
+#[cfg(test)]
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 
@@ -10,6 +12,7 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 use smol::future;
 
+use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
@@ -20,7 +23,7 @@ use crate::{
 };
 
 mod developer_instructions;
-use developer_instructions::{default_mode_instructions, plan_mode_instructions};
+use developer_instructions::{DEFAULT_MODE_INSTRUCTIONS, PLAN_MODE_INSTRUCTIONS};
 
 /// Fallback model slug for `collaborationMode.settings.model` when the session
 /// has no resolved model yet (mirrors T3's `DEFAULT_MODEL`).
@@ -332,12 +335,6 @@ fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "serviceTier")
 }
 
-enum ChildOutput {
-    Line(String),
-    Eof,
-    Error(String),
-}
-
 enum PendingRequest {
     TurnStart,
     Interrupt,
@@ -548,8 +545,6 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
         .collect()
 }
 
-use crate::process::StderrTail;
-
 /// Append the child's exit status and captured stderr to a process-death
 /// message, so the error shows the provider's own words instead of a bare
 /// "exited".
@@ -636,29 +631,13 @@ fn spawn_server(
         .stderr
         .take()
         .ok_or_else(|| AgentError::Spawn("missing child stderr".into()))?;
-    let (tx, rx) = smol::channel::unbounded();
-
-    std::thread::Builder::new()
-        .name("codex-app-server-stdout".into())
-        .spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send_blocking(ChildOutput::Line(line)).is_err() {
-                            return;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = tx.send_blocking(ChildOutput::Error(format!(
-                            "failed reading codex stdout: {err}"
-                        )));
-                        return;
-                    }
-                }
-            }
-            let _ = tx.send_blocking(ChildOutput::Eof);
-        })
-        .map_err(|err| AgentError::Spawn(err.to_string()))?;
+    let (rx, reader) = spawn_line_reader(
+        stdout,
+        "codex-app-server-stdout",
+        Some("failed reading codex stdout"),
+        false,
+    );
+    reader.map_err(|err| AgentError::Spawn(err.to_string()))?;
     let stderr_tail = StderrTail::default();
     stderr_tail
         .spawn(stderr, "codex-app-server-stderr", "codex app-server")
@@ -735,13 +714,9 @@ fn resume_request(
     approval_policy: &str,
     sandbox: &str,
 ) -> Result<(&'static str, Value), AgentError> {
-    let thread_id = resume
-        .0
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
-        })?;
+    let thread_id = resume.str_field(&["thread_id"]).ok_or_else(|| {
+        AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
+    })?;
     Ok((
         if fork { "thread/fork" } else { "thread/resume" },
         json!({
@@ -919,20 +894,16 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
     }
 }
 
-fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), AgentError> {
-    serde_json::to_writer(&mut *stdin, value)
-        .map_err(|err| AgentError::Protocol(err.to_string()))?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()?;
-    Ok(())
-}
-
 fn stop_child(child: &mut Child, stdin: BufWriter<ChildStdin>) {
     drop(stdin);
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
     }
     let _ = child.wait();
+}
+
+fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), AgentError> {
+    write_json(stdin, value, None)
 }
 
 /// Wait briefly for a child that has already closed stdout to become waitable.
@@ -1001,8 +972,8 @@ impl Actor {
             InteractionMode::Plan => "plan",
         };
         let developer_instructions = match mode {
-            InteractionMode::Plan => plan_mode_instructions(),
-            InteractionMode::Build => default_mode_instructions(),
+            InteractionMode::Plan => PLAN_MODE_INSTRUCTIONS,
+            InteractionMode::Build => DEFAULT_MODE_INSTRUCTIONS,
         };
         let model = self
             .model

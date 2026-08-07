@@ -375,8 +375,7 @@ struct SessionConfig {
 fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
     let Some(session_id) = resume
         .as_ref()
-        .and_then(|cursor| cursor.0.get("session_id"))
-        .and_then(Value::as_str)
+        .and_then(|cursor| cursor.str_field(&["session_id"]))
         .map(str::to_owned)
     else {
         return Vec::new();
@@ -2200,7 +2199,7 @@ impl Mapper {
         let usage = msg.get("usage").map(|u| {
             let mut usage = map_usage(u, msg.get("modelUsage"));
             // Accumulate this turn's processed tokens into the session total.
-            self.cumulative_processed += usage.used_tokens.unwrap_or(0);
+            self.cumulative_processed += crate::processed_tokens(usage);
             usage.total_processed_tokens = Some(self.cumulative_processed);
             usage.cost_usd = msg.get("total_cost_usd").and_then(Value::as_f64);
             usage.duration_ms = msg.get("duration_ms").and_then(Value::as_u64);

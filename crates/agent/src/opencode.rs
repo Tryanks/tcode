@@ -13,12 +13,14 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 use smol::future;
 
+#[cfg(test)]
+use crate::TurnStatus;
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    SessionHandle, SessionOptions, ThreadItem, TokenUsage,
 };
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -624,13 +626,14 @@ impl OpenCodeMapper {
         if self.active_turn.is_some() {
             return Vec::new();
         }
-        self.turn_counter += 1;
-        let turn_id = format!("opencode-turn-{}", self.turn_counter);
-        self.active_turn = Some(turn_id.clone());
         self.turn_usages.clear();
-        self.turn_usage = None;
-        self.turn_failed = false;
-        vec![AgentEvent::TurnStarted { turn_id }]
+        crate::start_mapped_turn(
+            "opencode",
+            &mut self.turn_counter,
+            &mut self.active_turn,
+            &mut self.turn_usage,
+            &mut self.turn_failed,
+        )
     }
 
     fn turn_id(&self) -> String {
@@ -641,23 +644,15 @@ impl OpenCodeMapper {
     }
 
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
-        let Some(turn_id) = self.active_turn.take() else {
-            return Vec::new();
-        };
-        self.last_turn = Some(turn_id.clone());
-        let status = if self.interrupted {
-            TurnStatus::Interrupted
-        } else if self.turn_failed {
-            TurnStatus::Failed
-        } else {
-            TurnStatus::Completed
-        };
-        self.interrupted = false;
-        vec![AgentEvent::TurnCompleted {
-            turn_id,
-            status,
-            usage: self.turn_usage,
-        }]
+        if let Some(turn_id) = &self.active_turn {
+            self.last_turn = Some(turn_id.clone());
+        }
+        crate::complete_mapped_turn(
+            &mut self.active_turn,
+            &mut self.interrupted,
+            self.turn_failed,
+            self.turn_usage,
+        )
     }
 
     fn part_updated(&mut self, part: &Value, explicit_delta: Option<&Value>) -> Vec<AgentEvent> {
@@ -784,9 +779,9 @@ impl OpenCodeMapper {
         let previous = self
             .turn_usages
             .insert(key.to_owned(), usage)
-            .map(processed_tokens)
+            .map(crate::processed_tokens)
             .unwrap_or(0);
-        let current = processed_tokens(usage);
+        let current = crate::processed_tokens(usage);
         if current >= previous {
             self.cumulative_processed =
                 self.cumulative_processed.saturating_add(current - previous);
@@ -805,16 +800,6 @@ impl OpenCodeMapper {
         self.turn_usage = Some(aggregate);
         events.push(AgentEvent::TokenUsage(aggregate));
     }
-}
-
-fn processed_tokens(usage: TokenUsage) -> u64 {
-    usage.used_tokens.unwrap_or_else(|| {
-        usage
-            .input_tokens
-            .unwrap_or(0)
-            .saturating_add(usage.output_tokens.unwrap_or(0))
-            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
-    })
 }
 
 fn open_code_tool_item(
@@ -1167,7 +1152,7 @@ fn selected_variant(selections: &[OptionSelection]) -> Option<&str> {
 }
 
 fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<&str> {
-    resume.as_ref()?.0.get("session_id").and_then(Value::as_str)
+    resume.as_ref()?.str_field(&["session_id"])
 }
 
 struct OpenCodeServer {
