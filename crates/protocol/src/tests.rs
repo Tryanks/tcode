@@ -96,6 +96,7 @@ fn round_trips_top_level_wire_types() {
             queued_messages: vec![QueuedMessageStatus {
                 id: 4,
                 text: "next".into(),
+                fire_at_unix_secs: None,
             }],
             review_comment_drafts: vec![ReviewComment::new(
                 "src/lib.rs".into(),
