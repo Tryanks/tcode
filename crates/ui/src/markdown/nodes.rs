@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use gpui::{DefiniteLength, Hsla, SharedString, SharedUri};
+use gpui::{SharedString, SharedUri};
 
 use super::inline::InlineState;
 
@@ -16,34 +16,27 @@ use super::inline::InlineState;
 pub(crate) enum BlockNode {
     Root {
         children: Vec<BlockNode>,
-        span: Option<Span>,
     },
     Paragraph(Paragraph),
     Heading {
         level: u8,
         children: Paragraph,
-        span: Option<Span>,
     },
     Blockquote {
         children: Vec<BlockNode>,
-        span: Option<Span>,
     },
     List {
         children: Vec<BlockNode>,
         ordered: bool,
-        span: Option<Span>,
     },
     ListItem {
         children: Vec<BlockNode>,
         spread: bool,
         checked: Option<bool>,
-        span: Option<Span>,
     },
     CodeBlock(CodeBlock),
     Table(Table),
-    HorizontalRule {
-        span: Option<Span>,
-    },
+    HorizontalRule,
     Unknown,
 }
 
@@ -74,7 +67,7 @@ impl BlockNode {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            Self::HorizontalRule { .. } | Self::Unknown => String::new(),
+            Self::HorizontalRule | Self::Unknown => String::new(),
         }
     }
 
@@ -122,7 +115,7 @@ impl BlockNode {
             Self::Paragraph(_) | Self::Heading { .. } | Self::CodeBlock(_) | Self::Table(_) => {
                 leaves.push(self)
             }
-            Self::HorizontalRule { .. } | Self::Unknown => {}
+            Self::HorizontalRule | Self::Unknown => {}
         }
     }
 
@@ -152,7 +145,7 @@ impl BlockNode {
             | Self::Blockquote { .. }
             | Self::List { .. }
             | Self::ListItem { .. }
-            | Self::HorizontalRule { .. }
+            | Self::HorizontalRule
             | Self::Unknown => String::new(),
         }
     }
@@ -175,7 +168,7 @@ impl BlockNode {
                     }
                 }
             }
-            Self::HorizontalRule { .. } | Self::Unknown => {}
+            Self::HorizontalRule | Self::Unknown => {}
         }
     }
 }
@@ -183,7 +176,6 @@ impl BlockNode {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct LinkMark {
     pub(crate) url: SharedString,
-    pub(crate) identifier: Option<SharedString>,
     pub(crate) title: Option<SharedString>,
 }
 
@@ -192,9 +184,7 @@ pub(crate) struct TextMark {
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) strikethrough: bool,
-    pub(crate) underline: bool,
     pub(crate) code: bool,
-    pub(crate) highlight: Option<Hsla>,
     pub(crate) link: Option<LinkMark>,
 }
 
@@ -228,21 +218,11 @@ impl TextMark {
         self.bold |= other.bold;
         self.italic |= other.italic;
         self.strikethrough |= other.strikethrough;
-        self.underline |= other.underline;
         self.code |= other.code;
-        if other.highlight.is_some() {
-            self.highlight = other.highlight;
-        }
         if other.link.is_some() {
             self.link = other.link;
         }
     }
-}
-
-#[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub(crate) struct Span {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -251,8 +231,6 @@ pub(crate) struct ImageNode {
     pub(crate) link: Option<LinkMark>,
     pub(crate) title: Option<SharedString>,
     pub(crate) alt: Option<SharedString>,
-    pub(crate) width: Option<DefiniteLength>,
-    pub(crate) height: Option<DefiniteLength>,
 }
 
 impl ImageNode {
@@ -270,8 +248,6 @@ impl PartialEq for ImageNode {
             && self.link == other.link
             && self.title == other.title
             && self.alt == other.alt
-            && self.width == other.width
-            && self.height == other.height
     }
 }
 
@@ -314,14 +290,13 @@ impl InlineNode {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Paragraph {
-    pub(crate) span: Option<Span>,
     pub(crate) children: Vec<InlineNode>,
     pub(super) state: Arc<Mutex<InlineState>>,
 }
 
 impl PartialEq for Paragraph {
     fn eq(&self, other: &Self) -> bool {
-        self.span == other.span && self.children == other.children
+        self.children == other.children
     }
 }
 
@@ -354,13 +329,12 @@ impl Paragraph {
 pub(crate) struct CodeBlock {
     pub(crate) code: SharedString,
     pub(crate) lang: Option<SharedString>,
-    pub(crate) span: Option<Span>,
     pub(super) line_states: Arc<Mutex<Vec<Arc<Mutex<InlineState>>>>>,
 }
 
 impl PartialEq for CodeBlock {
     fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.lang == other.lang && self.span == other.span
+        self.code == other.code && self.lang == other.lang
     }
 }
 
@@ -418,7 +392,6 @@ impl CodeBlock {
 pub(crate) struct Table {
     pub(crate) children: Vec<TableRow>,
     pub(crate) column_aligns: Vec<ColumnumnAlign>,
-    pub(crate) span: Option<Span>,
 }
 
 impl Table {

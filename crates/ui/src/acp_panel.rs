@@ -21,7 +21,6 @@ use tcode_protocol::Command;
 
 use crate::material;
 use crate::store::WorkspaceStore;
-use crate::window_state::WindowState;
 
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
@@ -298,12 +297,7 @@ pub struct AcpPanel {
 }
 
 impl AcpPanel {
-    pub fn new(
-        store: Entity<WorkspaceStore>,
-        _window_state: Entity<WindowState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = |placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };

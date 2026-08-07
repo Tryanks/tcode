@@ -103,7 +103,6 @@ pub struct AppShell {
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
     operation_toasts: HashMap<RuntimeOperationId, ToastId>,
-    toast_kinds: HashMap<ToastId, ToastKind>,
     next_toast_id: ToastId,
     /// Tracks the palette's open state across frames so it can be focused on the
     /// open transition.
@@ -230,7 +229,6 @@ impl AppShell {
                 CommandPalette::new(workspace_store.clone(), window_state.clone(), window, cx)
             }),
             operation_toasts: HashMap::new(),
-            toast_kinds: HashMap::new(),
             next_toast_id: 1,
             store: workspace_store,
             window_state,
@@ -344,19 +342,13 @@ impl AppShell {
             ToastKind::Error | ToastKind::Loading => None,
         };
         if let Some(delay) = delay {
-            self.toast_kinds.insert(id, kind);
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(delay).await;
-                _ = this.update_in(cx, |this, window, cx| {
-                    if this.toast_kinds.get(&id) == Some(&kind) {
-                        this.toast_kinds.remove(&id);
-                        window.remove_notification1::<RuntimeToastNotification>(id as usize, cx);
-                    }
+                _ = this.update_in(cx, |_, window, cx| {
+                    window.remove_notification1::<RuntimeToastNotification>(id as usize, cx);
                 });
             })
             .detach();
-        } else {
-            self.toast_kinds.remove(&id);
         }
     }
 

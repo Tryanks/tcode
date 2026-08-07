@@ -21,7 +21,7 @@ use gpui_component::{
     ActiveTheme as _, h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex,
 };
 
-use crate::highlight;
+use crate::{diff::model::sub_runs, highlight};
 
 use super::{
     inline::{Inline, InlineState},
@@ -455,7 +455,7 @@ fn render_block(
         BlockNode::ListItem { .. } => render_list_item(node, 0, options, state, window, cx),
         BlockNode::CodeBlock(code) => render_code_block(code, &options, state, window, cx),
         BlockNode::Table(table) => render_table(table, &options, state, window, cx),
-        BlockNode::HorizontalRule { .. } => div()
+        BlockNode::HorizontalRule => div()
             .id(options.path)
             .pb(gap)
             .child(div().h(px(2.)).w_full().bg(cx.theme().border))
@@ -502,8 +502,6 @@ fn render_paragraph(
                     .max_w(relative(1.))
                     .min_w(px(15.))
                     .min_h(px(15.))
-                    .when_some(image.width, |this, width| this.w(width))
-                    .when_some(image.height, |this, height| this.h(height))
                     .when_some(image.link.clone(), |this, link| {
                         let title = title.clone();
                         this.cursor_pointer()
@@ -573,18 +571,9 @@ fn marks_for_node(marks: &[(Range<usize>, TextMark)], offset: usize, cx: &mut Ap
                 ..Default::default()
             });
         }
-        if mark.underline {
-            highlight.underline = Some(gpui::UnderlineStyle {
-                thickness: px(1.),
-                ..Default::default()
-            });
-        }
         if mark.code {
             highlight.background_color = Some(*cx.theme().tokens.muted);
             fonts.push((range.clone(), cx.theme().mono_font_family.clone()));
-        }
-        if let Some(color) = mark.highlight {
-            highlight.background_color = Some(color);
         }
         if let Some(link) = mark.link.clone() {
             highlight.color = Some(cx.theme().link);
@@ -645,8 +634,6 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
                 url: image.url.clone(),
                 link: image.link.clone(),
                 title: image.title(),
-                width: image.width,
-                height: image.height,
             });
             continue;
         }
@@ -853,21 +840,6 @@ fn cached_code_width(
         cache.entries.insert(key, max_width);
         max_width
     })
-}
-
-fn sub_runs(
-    runs: &[(Range<usize>, HighlightStyle)],
-    start: usize,
-    end: usize,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    runs.iter()
-        .filter(|(range, _)| range.start < end && range.end > start)
-        .map(|(range, style)| {
-            let clipped_start = range.start.max(start) - start;
-            let clipped_end = range.end.min(end) - start;
-            (clipped_start..clipped_end, *style)
-        })
-        .collect()
 }
 
 /// Split code content into display lines. The fence's single terminating
@@ -1182,13 +1154,6 @@ fn horizontal_scroll_area(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn clips_and_rebases_code_runs() {
-        let style = HighlightStyle::default();
-        let runs = vec![(0..5, style), (5..12, style)];
-        assert_eq!(sub_runs(&runs, 4, 10), vec![(0..1, style), (1..6, style)]);
-    }
 
     #[test]
     fn code_lines_drops_only_the_terminating_newline() {

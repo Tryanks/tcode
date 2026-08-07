@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Task, Window};
+use gpui::{App, Context, EventEmitter, Task};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{Project, SessionMeta, WorktreeInfo, group_sessions, order_sessions_with_children},
@@ -27,12 +27,7 @@ use tcode_runtime::{
 };
 use tcode_services::import::ExternalImportUpdate;
 
-use crate::{
-    composer::Composer,
-    conversation_ui::{ConversationUiState, DiffFocus},
-    terminal_drawer::TerminalDrawer,
-    window_state::WindowState,
-};
+use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -785,13 +780,6 @@ impl WorkspaceStore {
         cx.notify();
     }
 
-    pub fn show_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = true;
-            cx.notify();
-        }
-    }
-
     pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
         if let Some(ui) = self.active_conversation_ui_mut() {
             ui.terminal_height = height;
@@ -1012,15 +1000,10 @@ impl WorkspaceStore {
 
     pub fn preview_active_identity(&self) -> Option<(String, String)> {
         self.session_status_replica.as_ref().map(|status| {
-            let key = if status.draft {
-                format!(
-                    "draft:{}",
-                    status.project_id.as_deref().unwrap_or(&status.session_id)
-                )
-            } else {
-                status.session_id.clone()
-            };
-            (status.session_id.clone(), key)
+            (
+                status.session_id.clone(),
+                Self::destination(status).ui_key(),
+            )
         })
     }
 
@@ -1355,20 +1338,11 @@ impl WorkspaceStore {
         (open, expanded, tab, plan_tab_active_label)
     }
 
-    pub fn diff_review_comments(&self) -> Vec<ReviewComment> {
+    pub fn review_comments(&self) -> Vec<ReviewComment> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.review_comment_drafts.clone())
             .unwrap_or_default()
-    }
-
-    pub fn with_diff_review_comments<R>(&self, read: impl FnOnce(&[ReviewComment]) -> R) -> R {
-        read(
-            self.session_status_replica
-                .as_ref()
-                .map(|status| status.review_comment_drafts.as_slice())
-                .unwrap_or_default(),
-        )
     }
 
     pub fn load_git_diff(
@@ -1501,13 +1475,6 @@ impl WorkspaceStore {
         let status = self.session_status_replica.as_ref()?;
         let workspace = TerminalWorkspace::from_replica(status, &self.terminal_registry);
         Some(read(&workspace))
-    }
-
-    pub fn composer_review_comments(&self) -> Vec<ReviewComment> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.review_comment_drafts.clone())
-            .unwrap_or_default()
     }
 
     pub fn composer_relay_confirmation(&self) -> Option<(String, String)> {
@@ -1869,23 +1836,6 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn chat_git_status_loaded(&self) -> bool {
-        self.git_status_replica.status.is_some()
-    }
-
-    pub(crate) fn new_composer(
-        store: Entity<Self>,
-        window_state: Entity<WindowState>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Entity<Composer> {
-        cx.new(|cx| Composer::new(store, window_state, window, cx))
-    }
-
-    pub(crate) fn new_terminal_drawer(store: Entity<Self>, cx: &mut App) -> Entity<TerminalDrawer> {
-        cx.new(|cx| TerminalDrawer::new(store, cx))
-    }
-
     pub fn generate_commit_message(
         &self,
         included: Option<Vec<String>>,
@@ -1929,10 +1879,6 @@ impl WorkspaceStore {
                     .is_some_and(|other| other.branch == worktree.branch)
         });
         (!shared).then_some(worktree)
-    }
-
-    pub(crate) fn open_add_project_dialog(store: Entity<Self>, window: &mut Window, cx: &mut App) {
-        crate::add_project_dialog::open(store, window, cx);
     }
 }
 
@@ -2320,7 +2266,7 @@ mod tests {
         assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
         assert_eq!(replica.review_comment_drafts.len(), 1);
         assert_eq!(
-            workspace.read_with(cx, |store, _cx| store.composer_review_comments()),
+            workspace.read_with(cx, |store, _cx| store.review_comments()),
             replica.review_comment_drafts
         );
 

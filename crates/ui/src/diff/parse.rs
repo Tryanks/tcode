@@ -26,7 +26,7 @@ pub struct ParsedDiff {
     pub removed: u32,
 }
 
-pub fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     let rest = line.strip_prefix("@@")?;
     let body = rest.split("@@").next().unwrap_or("").trim();
     let mut old_start = None;
@@ -49,7 +49,7 @@ pub fn parse_unified_diff(diff: &str) -> ParsedDiff {
     }
 }
 
-pub fn parse_standard(diff: &str) -> ParsedDiff {
+fn parse_standard(diff: &str) -> ParsedDiff {
     let mut out = ParsedDiff::default();
     let mut cur: Option<Hunk> = None;
     let mut seen_hunk = false;
@@ -138,7 +138,7 @@ pub fn parse_standard(diff: &str) -> ParsedDiff {
     out
 }
 
-pub fn parse_bare(diff: &str) -> ParsedDiff {
+fn parse_bare(diff: &str) -> ParsedDiff {
     let mut out = ParsedDiff::default();
     let mut rows = Vec::new();
     let mut old_cursor = 1u32;

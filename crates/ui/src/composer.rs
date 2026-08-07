@@ -43,7 +43,6 @@ use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
-use crate::window_state::WindowState;
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::validate_attachment;
 use tcode_core::ui::{ConversationDestination, WorkspaceMode};
@@ -144,22 +143,18 @@ const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
     ),
 ];
 
-fn approval_mode_meta(mode: ApprovalMode) -> (String, String, &'static str) {
+fn approval_mode_meta(mode: ApprovalMode) -> (String, &'static str) {
     // ReadOnly is dispatch-only for now. A selected child still needs a stable
     // chip, but it must not add a fourth choice to the user-facing picker.
     let mode = match mode {
         ApprovalMode::ReadOnly => ApprovalMode::Supervised,
         mode => mode,
     };
-    let (_, label_key, description_key, icon) = APPROVAL_MODES
+    let (_, label_key, _, icon) = APPROVAL_MODES
         .iter()
         .find(|(m, ..)| *m == mode)
         .expect("every ApprovalMode is present in APPROVAL_MODES");
-    (
-        tcode_i18n::tr!(*label_key).into_owned(),
-        tcode_i18n::tr!(*description_key).into_owned(),
-        icon,
-    )
+    (tcode_i18n::tr!(*label_key).into_owned(), icon)
 }
 
 /// Which rail filter the model picker is showing.
@@ -455,7 +450,6 @@ impl EventEmitter<ComposerEvent> for Composer {}
 impl Composer {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
-        _window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -493,7 +487,7 @@ impl Composer {
                         // injected into the turn that is already running rather
                         // than held until it finishes. With no turn running the
                         // two are equivalent (there is nothing to steer into).
-                        if this.menu_visible(cx) {
+                        if this.menu_visible() {
                             this.accept_menu(this.menu_highlight, window, cx);
                         } else {
                             let input = input.clone();
@@ -610,11 +604,7 @@ impl Composer {
                 .read(cx)
                 .composer_terminal_contexts()
                 .is_empty()
-            || !self
-                .workspace_store
-                .read(cx)
-                .composer_review_comments()
-                .is_empty()
+            || !self.workspace_store.read(cx).review_comments().is_empty()
     }
 
     /// Send the composer's contents. `steer` is set by the ⌘/Ctrl+Enter gesture:
@@ -780,7 +770,7 @@ impl Composer {
     // -- inline triggers (@ mentions / $ skills / commands) ----------------
 
     /// Whether a trigger menu should currently be shown.
-    fn menu_visible(&self, _cx: &App) -> bool {
+    fn menu_visible(&self) -> bool {
         self.active_trigger.is_some() && !self.menu_dismissed
     }
 
@@ -1520,7 +1510,7 @@ impl Composer {
             .workspace_store
             .read(cx)
             .composer_native_approval_modes_enabled();
-        let (label, _, icon_path) = approval_mode_meta(current);
+        let (label, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
 
         let trigger = Button::new("permission-chip").ghost().compact().child(
@@ -1584,7 +1574,7 @@ impl Composer {
     /// The floating `@`/`/`/`$` menu, rendered in-flow just above the composer
     /// card. `None` when no trigger is active (or it was dismissed).
     fn render_trigger_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.menu_visible(cx) {
+        if !self.menu_visible() {
             return None;
         }
         let (rows, empty_text, loading) = self.menu_rows(cx);
@@ -3287,7 +3277,7 @@ impl Render for Composer {
                             });
                         }))
                 }));
-        let review_comments = self.workspace_store.read(cx).composer_review_comments();
+        let review_comments = self.workspace_store.read(cx).review_comments();
         let has_review_comments = !review_comments.is_empty();
         let review_chips = h_flex().w_full().flex_wrap().gap_1().children(
             review_comments
@@ -3338,7 +3328,7 @@ impl Render for Composer {
                     this.paste_clipboard_image(window, cx);
                     return;
                 }
-                if !this.menu_visible(cx) {
+                if !this.menu_visible() {
                     return;
                 }
                 let (rows, _, _) = this.menu_rows(cx);
@@ -4000,7 +3990,7 @@ fn render_traits_pane(
                     let opt_value = opt.value.clone();
                     pane = pane.child(
                         h_flex()
-                            .id(("trait-opt", index * 31 + descriptor_hash(id)))
+                            .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
                             .flex_none()
                             .w_full()
                             .px_2()
@@ -4054,7 +4044,7 @@ fn render_traits_pane(
                     let opt_id = id.clone();
                     pane = pane.child(
                         h_flex()
-                            .id(("trait-bool", index * 61 + descriptor_hash(id)))
+                            .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
                             .flex_none()
                             .w_full()
                             .px_2()
@@ -4107,13 +4097,6 @@ fn render_traits_pane(
         .into_any_element()
 }
 
-/// A tiny stable hash of a descriptor id, to keep row element ids unique across
-/// sections without colliding.
-fn descriptor_hash(id: &str) -> usize {
-    id.bytes()
-        .fold(0usize, |acc, b| acc.wrapping_add(b as usize))
-}
-
 /// The "⋯" overflow popover: the context chip's usage summary plus the
 /// permission / mode chips, shown when the control row collapses at narrow
 /// widths.
@@ -4141,7 +4124,7 @@ fn render_overflow_pane(
             .into_any_element()
     };
 
-    let (mode_label, _, mode_icon) = approval_mode_meta(mode);
+    let (mode_label, mode_icon) = approval_mode_meta(mode);
     let (interaction_icon, interaction_label) = match interaction {
         InteractionMode::Build => ("icons/box.svg", tcode_i18n::tr!("composer.build")),
         InteractionMode::Plan => ("icons/ruler.svg", tcode_i18n::tr!("composer.plan")),
@@ -4549,18 +4532,6 @@ fn current_model_name_resolved(
         .unwrap_or_else(|| current_model_name(catalog, Some(id)))
 }
 
-/// Compact token count, e.g. 42_000 -> "42k", 1_500_000 -> "1.5M".
-fn compact_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        let m = n as f64 / 1_000_000.0;
-        format!("{m:.1}M")
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        n.to_string()
-    }
-}
-
 /// The context chip label: "42k / 200k" when both known, "200k" when only the
 /// window is known, "Context" when nothing is known.
 fn context_label(usage: Option<TokenUsage>) -> String {
@@ -4570,10 +4541,14 @@ fn context_label(usage: Option<TokenUsage>) -> String {
             let used = u.used_tokens.or(u.input_tokens);
             match (used, window) {
                 (Some(used), Some(window)) => {
-                    format!("{} / {}", compact_tokens(used), compact_tokens(window))
+                    format!(
+                        "{} / {}",
+                        context_meter::format_tokens(Some(used)),
+                        context_meter::format_tokens(Some(window))
+                    )
                 }
-                (Some(used), None) => compact_tokens(used),
-                (None, Some(window)) => compact_tokens(window),
+                (Some(used), None) => context_meter::format_tokens(Some(used)),
+                (None, Some(window)) => context_meter::format_tokens(Some(window)),
                 (None, None) => tcode_i18n::tr!("composer.context").into_owned(),
             }
         }
@@ -4771,27 +4746,15 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         assert_eq!(
             approval_mode_meta(ApprovalMode::Supervised),
-            (
-                "Supervised".to_string(),
-                "Ask before commands and file changes.".to_string(),
-                "icons/lock.svg"
-            )
+            ("Supervised".to_string(), "icons/lock.svg")
         );
         assert_eq!(
             approval_mode_meta(ApprovalMode::AutoAcceptEdits),
-            (
-                "Auto-accept edits".to_string(),
-                "Auto-approve edits, ask before other actions.".to_string(),
-                "icons/pencil.svg"
-            )
+            ("Auto-accept edits".to_string(), "icons/pencil.svg")
         );
         assert_eq!(
             approval_mode_meta(ApprovalMode::FullAccess),
-            (
-                "Full access".to_string(),
-                "Allow commands and edits without prompts.".to_string(),
-                "icons/unlock.svg"
-            )
+            ("Full access".to_string(), "icons/unlock.svg")
         );
     }
 

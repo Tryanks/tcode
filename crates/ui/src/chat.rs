@@ -153,7 +153,7 @@ enum MdSync {
     /// The text grew by an append.
     Push(String),
     /// The text changed in a way an append cannot express.
-    Reset(String),
+    Reset,
 }
 
 /// The pure delta/reset decision behind [`MdState::sync`].
@@ -163,7 +163,7 @@ fn md_sync(synced: &str, text: &str) -> MdSync {
     }
     match text.strip_prefix(synced) {
         Some(delta) if !delta.is_empty() => MdSync::Push(delta.to_string()),
-        _ => MdSync::Reset(text.to_string()),
+        _ => MdSync::Reset,
     }
 }
 
@@ -753,7 +753,7 @@ impl MdState {
                     .update(cx, |state, cx| state.push_str(&delta, cx));
                 self.synced = Arc::from(text);
             }
-            MdSync::Reset(_) => {
+            MdSync::Reset => {
                 self.state.update(cx, |state, cx| state.set_text(&text, cx));
                 self.synced = Arc::from(text);
             }
@@ -790,8 +790,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let composer =
-            WorkspaceStore::new_composer(workspace_store.clone(), window_state.clone(), window, cx);
+        let composer = cx.new(|cx| Composer::new(workspace_store.clone(), window, cx));
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -809,7 +808,7 @@ impl ChatView {
                 cx.notify();
             }),
         ];
-        let terminal_drawer = WorkspaceStore::new_terminal_drawer(workspace_store.clone(), cx);
+        let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), cx));
 
         let mut this = Self {
             workspace_store,
@@ -1328,7 +1327,6 @@ impl ChatView {
     /// row's height is always reserved, so revealing it on hover never shifts
     /// the timeline; it is revealed for `pinned` (the last user message) so the
     /// action is reachable without hovering.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn render_user(
         &self,
@@ -3144,7 +3142,7 @@ impl ChatView {
             )
             .label(tcode_i18n::tr!("sidebar.add_project"))
             .on_click(cx.listener(|this, _, window, cx| {
-                WorkspaceStore::open_add_project_dialog(this.workspace_store.clone(), window, cx);
+                crate::add_project_dialog::open(this.workspace_store.clone(), window, cx);
             }));
 
         let mut content = v_flex()
@@ -5165,9 +5163,9 @@ This begins after the hard break."#;
         assert_eq!(md_sync("I", "I'll go"), MdSync::Push("'ll go".into()));
         // Anything that is not an append is a reset: a rewrite, a shrink, or a
         // snapshot that replaces the accumulated text.
-        assert_eq!(md_sync("abc", "xbc"), MdSync::Reset("xbc".into()));
-        assert_eq!(md_sync("abcd", "abc"), MdSync::Reset("abc".into()));
-        assert_eq!(md_sync("abc", ""), MdSync::Reset(String::new()));
+        assert_eq!(md_sync("abc", "xbc"), MdSync::Reset);
+        assert_eq!(md_sync("abcd", "abc"), MdSync::Reset);
+        assert_eq!(md_sync("abc", ""), MdSync::Reset);
     }
 
     // -- headless MarkdownState mirroring ------------------------------------
@@ -5269,10 +5267,7 @@ This begins after the hard break."#;
         assert_eq!(md.synced.as_ref(), "Seed tail");
         assert_eq!(rendered(&md.state, cx), "Seed tail\n");
 
-        assert_eq!(
-            md_sync(&md.synced, "Replacement"),
-            MdSync::Reset("Replacement".into())
-        );
+        assert_eq!(md_sync(&md.synced, "Replacement"), MdSync::Reset);
         cx.update(|cx| md.sync("Replacement".into(), cx));
         assert_eq!(md.synced.as_ref(), "Replacement");
         assert_eq!(rendered(&md.state, cx), "Replacement\n");

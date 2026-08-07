@@ -249,7 +249,7 @@ impl DiffPanel {
     ) -> Self {
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
-            let comments = store.read(cx).diff_review_comments();
+            let comments = store.read(cx).review_comments();
             if this.observed_review_comments != comments {
                 this.observed_review_comments = comments;
                 this.remeasure_lists();
@@ -1232,16 +1232,7 @@ impl DiffPanel {
             .iter()
             .enumerate()
             .filter(|(index, _)| *index >= start && *index <= end)
-            .filter_map(|(_, row)| match row {
-                RenderedRow::Code {
-                    kind,
-                    old,
-                    new,
-                    text,
-                    ..
-                } => Some((*kind, *old, *new, text)),
-                RenderedRow::Gap(_) => None,
-            })
+            .map(|(_, row)| (row.kind, row.old, row.new, &row.text))
             .collect::<Vec<_>>();
         let old_start = selected.iter().find_map(|(_, old, _, _)| *old).unwrap_or(0);
         let new_start = selected.iter().find_map(|(_, _, new, _)| *new).unwrap_or(0);
@@ -1400,30 +1391,16 @@ impl DiffPanel {
                         self.render_gap(file_index, *count, new_lines.clone(), *expandable, cx),
                         None,
                     ),
-                    VisibleItem::Row(row_index) => match &file.all_rows[*row_index] {
-                        RenderedRow::Gap(gap) => (
-                            self.render_gap(
-                                file_index,
-                                gap.count,
-                                gap.new_lines.clone(),
-                                false,
-                                cx,
-                            ),
-                            None,
-                        ),
-                        RenderedRow::Code {
-                            kind,
-                            old,
-                            new,
-                            text,
-                            runs,
-                        } => (
+                    VisibleItem::Row(row_index) => {
+                        let row = &file.all_rows[*row_index];
+                        (
                             self.render_code_row(
-                                &file.path, *row_index, *kind, *old, *new, text, runs, wrap, cx,
+                                &file.path, *row_index, row.kind, row.old, row.new, &row.text,
+                                &row.runs, wrap, cx,
                             ),
-                            Some((*old, *new)),
-                        ),
-                    },
+                            Some((row.old, row.new)),
+                        )
+                    }
                 };
                 v_flex()
                     .min_w_full()
@@ -1450,14 +1427,8 @@ impl DiffPanel {
                     VisibleSplitItem::Pair(pair_index) => {
                         let pair = file.all_split[*pair_index];
                         let rendered = self.render_split_row(file, pair, wrap, cx);
-                        let old = pair.left.and_then(|index| match &file.all_rows[index] {
-                            RenderedRow::Code { old, .. } => *old,
-                            RenderedRow::Gap(_) => None,
-                        });
-                        let new = pair.right.and_then(|index| match &file.all_rows[index] {
-                            RenderedRow::Code { new, .. } => *new,
-                            RenderedRow::Gap(_) => None,
-                        });
+                        let old = pair.left.and_then(|index| file.all_rows[index].old);
+                        let new = pair.right.and_then(|index| file.all_rows[index].new);
                         let comments = self.render_comment_ui(&file.path, old, new, cx);
                         (rendered, comments)
                     }
@@ -1654,43 +1625,41 @@ impl DiffPanel {
         let mut rows = self
             .workspace_store
             .read(cx)
-            .with_diff_review_comments(|comments| {
-                comments
-                    .iter()
-                    .filter(|comment| {
-                        comment.file == file
-                            && match comment.side {
-                                ReviewSide::Old => old,
-                                ReviewSide::New => new,
-                            } == Some(comment.line_end)
-                    })
-                    .map(|comment| {
-                        h_flex()
-                            .min_w_full()
-                            .px_3()
-                            .py_1p5()
-                            .gap_2()
-                            .relative()
-                            .rounded(material::radius_card())
-                            .bg(cx.theme().muted)
-                            .font_family(cx.theme().font_family.clone())
-                            .text_size(px(11.))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(0.))
-                                    .top(px(6.))
-                                    .bottom(px(6.))
-                                    .w(px(2.))
-                                    .rounded_full()
-                                    .bg(cx.theme().primary),
-                            )
-                            .child(Icon::empty().path("icons/pencil.svg").xsmall())
-                            .child(comment.text.clone())
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>()
-            });
+            .review_comments()
+            .iter()
+            .filter(|comment| {
+                comment.file == file
+                    && match comment.side {
+                        ReviewSide::Old => old,
+                        ReviewSide::New => new,
+                    } == Some(comment.line_end)
+            })
+            .map(|comment| {
+                h_flex()
+                    .min_w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .relative()
+                    .rounded(material::radius_card())
+                    .bg(cx.theme().muted)
+                    .font_family(cx.theme().font_family.clone())
+                    .text_size(px(11.))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .w(px(2.))
+                            .rounded_full()
+                            .bg(cx.theme().primary),
+                    )
+                    .child(Icon::empty().path("icons/pencil.svg").xsmall())
+                    .child(comment.text.clone())
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let selection = self.selection.as_ref().filter(|selection| {
             selection.file == file
                 && match selection.side {
@@ -1761,18 +1730,13 @@ impl DiffPanel {
         wrap: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let paired_as_context = pair.left.zip(pair.right).is_some_and(|(left, right)| {
-            matches!(
-                (&file.all_rows[left], &file.all_rows[right]),
-                (
-                    RenderedRow::Code { text: left, .. },
-                    RenderedRow::Code { text: right, .. }
-                ) if left == right
-            )
-        });
+        let paired_as_context = pair
+            .left
+            .zip(pair.right)
+            .is_some_and(|(left, right)| file.all_rows[left].text == file.all_rows[right].text);
         let cell = |row_index: Option<usize>, side: ReviewSide, cx: &mut Context<Self>| {
             let index = row_index.unwrap_or_default();
-            let Some(RenderedRow::Code {
+            let Some(RenderedRow {
                 kind,
                 old,
                 new,
@@ -2002,7 +1966,7 @@ mod tests {
 
     #[test]
     fn resolves_file_headers_independently_for_unified_and_split_lists() {
-        let code_row = |text: &str| RenderedRow::Code {
+        let code_row = |text: &str| RenderedRow {
             kind: RowKind::Added,
             old: None,
             new: Some(1),
@@ -2056,7 +2020,7 @@ mod tests {
     #[test]
     fn large_diff_builds_virtual_list_models_without_row_elements() {
         let rows = (1..=5_000)
-            .map(|line| RenderedRow::Code {
+            .map(|line| RenderedRow {
                 kind: RowKind::Added,
                 old: None,
                 new: Some(line),

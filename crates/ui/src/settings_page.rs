@@ -83,10 +83,6 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
     }
 }
 
-fn apply_toggle_value(settings: &mut Settings, checked: bool, mutate: fn(&mut Settings, bool)) {
-    mutate(settings, !checked);
-}
-
 pub struct SettingsPage {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -185,7 +181,7 @@ impl SettingsPage {
         // Consume relaunch and in-app navigation requests through the same
         // channel used by in-app Settings links.
         let section = Self::take_requested_section(&window_state, cx).unwrap_or(Section::General);
-        let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window_state.clone(), window, cx));
+        let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
         let settings = store.read(cx).settings();
@@ -1427,15 +1423,12 @@ impl SettingsPage {
                 {
                     window.prevent_default();
                     cx.stop_propagation();
-                    this.update_settings(
-                        |settings| apply_toggle_value(settings, checked, mutate),
-                        cx,
-                    );
+                    this.update_settings(|settings| mutate(settings, !checked), cx);
                 }
             }),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.update_settings(|settings| apply_toggle_value(settings, checked, mutate), cx);
+            this.update_settings(|settings| mutate(settings, !checked), cx);
         }))
         .child(self.row_labels(title, desc, cx))
         // gpui-component 0315556's Switch is still mouse-only. It is
@@ -1668,29 +1661,5 @@ impl Render for SettingsPage {
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
             )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accessible_toggle_activation_applies_the_inverse_setting_value() {
-        let mut settings = Settings::default();
-
-        apply_toggle_value(&mut settings, false, |settings, value| {
-            settings.word_wrap_diffs = value;
-        });
-        assert!(settings.word_wrap_diffs);
-
-        apply_toggle_value(&mut settings, true, |settings, value| {
-            settings.word_wrap_diffs = value;
-        });
-        assert!(!settings.word_wrap_diffs);
     }
 }

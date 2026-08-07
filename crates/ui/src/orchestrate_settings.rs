@@ -211,9 +211,6 @@ impl OrchestrateSettingsPanel {
             .collect();
         self.identity_model_picker
             .update(cx, |picker, cx| picker.set_excluded(identities, cx));
-
-        self.child_model_picker
-            .update(cx, |picker, cx| picker.set_excluded(Vec::new(), cx));
     }
 
     fn commit_model_identity(&self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {

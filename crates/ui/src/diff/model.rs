@@ -14,22 +14,13 @@ pub struct DiffColors {
     pub removed_word_bg: Hsla,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GapInfo {
-    pub count: u32,
-    pub new_lines: Range<u32>,
-}
-
 #[derive(Debug, Clone)]
-pub enum RenderedRow {
-    Gap(GapInfo),
-    Code {
-        kind: RowKind,
-        old: Option<u32>,
-        new: Option<u32>,
-        text: String,
-        runs: Vec<(Range<usize>, HighlightStyle)>,
-    },
+pub struct RenderedRow {
+    pub kind: RowKind,
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    pub text: String,
+    pub runs: Vec<(Range<usize>, HighlightStyle)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,11 +264,9 @@ pub fn build_file(
     apply_word_highlights(&mut file.all_rows, colors);
     if input.show_invisibles {
         for row in &mut file.all_rows {
-            if let RenderedRow::Code { text, runs, .. } = row {
-                let (new_text, new_runs) = apply_invisibles(text, runs, whitespace_style);
-                *text = new_text;
-                *runs = new_runs;
-            }
+            let (new_text, new_runs) = apply_invisibles(&row.text, &row.runs, whitespace_style);
+            row.text = new_text;
+            row.runs = new_runs;
         }
     }
     file.all_split = pair_rendered_rows(&file.all_rows);
@@ -309,7 +298,7 @@ fn build_from_texts(
         }
         for old_index in hunk.old.clone().map(|line| line as usize) {
             let line = &old_lines[old_index];
-            rows.push(RenderedRow::Code {
+            rows.push(RenderedRow {
                 kind: RowKind::Removed,
                 old: Some(old_index as u32 + 1),
                 new: None,
@@ -319,7 +308,7 @@ fn build_from_texts(
         }
         for new_index in hunk.new.clone().map(|line| line as usize) {
             let line = &new_lines[new_index];
-            rows.push(RenderedRow::Code {
+            rows.push(RenderedRow {
                 kind: RowKind::Added,
                 old: None,
                 new: Some(new_index as u32 + 1),
@@ -336,7 +325,7 @@ fn build_from_texts(
         new_cursor += 1;
     }
     for (old_index, line) in old_lines.iter().enumerate().skip(old_cursor) {
-        rows.push(RenderedRow::Code {
+        rows.push(RenderedRow {
             kind: RowKind::Removed,
             old: Some(old_index as u32 + 1),
             new: None,
@@ -345,7 +334,7 @@ fn build_from_texts(
         });
     }
     for (new_index, line) in new_lines.iter().enumerate().skip(new_cursor) {
-        rows.push(RenderedRow::Code {
+        rows.push(RenderedRow {
             kind: RowKind::Added,
             old: None,
             new: Some(new_index as u32 + 1),
@@ -375,7 +364,7 @@ fn push_context_row(
     new_index: usize,
 ) {
     let line = &new_lines[new_index];
-    rows.push(RenderedRow::Code {
+    rows.push(RenderedRow {
         kind: RowKind::Context,
         old: Some(old_index as u32 + 1),
         new: Some(new_index as u32 + 1),
@@ -454,7 +443,7 @@ fn build_from_patch(
     let old_styles = highlight::highlight_source(&old_src, lang, theme);
     let all_rows = rows_with_sources
         .into_iter()
-        .map(|(row, source, range)| RenderedRow::Code {
+        .map(|(row, source, range)| RenderedRow {
             kind: row.kind,
             old: row.old_line,
             new: row.new_line,
@@ -482,17 +471,12 @@ fn build_from_patch(
 fn apply_word_highlights(rows: &mut [RenderedRow], colors: &DiffColors) {
     let mut index = 0;
     while index < rows.len() {
-        if row_kind(&rows[index]) == Some(RowKind::Context) {
+        if rows[index].kind == RowKind::Context {
             index += 1;
             continue;
         }
         let start = index;
-        while index < rows.len()
-            && matches!(
-                row_kind(&rows[index]),
-                Some(RowKind::Added | RowKind::Removed)
-            )
-        {
+        while index < rows.len() && matches!(rows[index].kind, RowKind::Added | RowKind::Removed) {
             index += 1;
         }
         let removed = block_text_and_offsets(rows, start..index, RowKind::Removed);
@@ -513,14 +497,11 @@ fn block_text_and_offsets(
     let mut text = String::new();
     let mut offsets = Vec::new();
     for index in range {
-        let RenderedRow::Code {
+        let RenderedRow {
             kind,
             text: row_text,
             ..
-        } = &rows[index]
-        else {
-            continue;
-        };
+        } = &rows[index];
         if *kind == wanted {
             let start = text.len();
             text.push_str(row_text);
@@ -547,9 +528,8 @@ fn apply_block_ranges(
                 (start < end).then(|| start - row_range.start..end - row_range.start)
             })
             .collect::<Vec<_>>();
-        if let RenderedRow::Code { text, runs, .. } = &mut rows[*index] {
-            *runs = overlay_background(text.len(), runs, &local, background);
-        }
+        let row = &mut rows[*index];
+        row.runs = overlay_background(row.text.len(), &row.runs, &local, background);
     }
 }
 
@@ -608,7 +588,7 @@ fn push_style_run(
     }
 }
 
-pub fn sub_runs(
+pub(crate) fn sub_runs(
     all: &[(Range<usize>, HighlightStyle)],
     start: usize,
     end: usize,
@@ -658,7 +638,7 @@ fn pair_rendered_rows(rows: &[RenderedRow]) -> Vec<PairedRow> {
     let mut output = Vec::new();
     let mut index = 0;
     while index < rows.len() {
-        if row_kind(&rows[index]) == Some(RowKind::Context) {
+        if rows[index].kind == RowKind::Context {
             output.push(PairedRow {
                 left: Some(index),
                 right: Some(index),
@@ -667,19 +647,14 @@ fn pair_rendered_rows(rows: &[RenderedRow]) -> Vec<PairedRow> {
             continue;
         }
         let start = index;
-        while index < rows.len()
-            && matches!(
-                row_kind(&rows[index]),
-                Some(RowKind::Added | RowKind::Removed)
-            )
-        {
+        while index < rows.len() && matches!(rows[index].kind, RowKind::Added | RowKind::Removed) {
             index += 1;
         }
         let removed = (start..index)
-            .filter(|&row| row_kind(&rows[row]) == Some(RowKind::Removed))
+            .filter(|&row| rows[row].kind == RowKind::Removed)
             .collect::<Vec<_>>();
         let added = (start..index)
-            .filter(|&row| row_kind(&rows[row]) == Some(RowKind::Added))
+            .filter(|&row| rows[row].kind == RowKind::Added)
             .collect::<Vec<_>>();
         let old_text = joined_row_text(rows, &removed);
         let new_text = joined_row_text(rows, &added);
@@ -721,40 +696,25 @@ fn pair_rendered_rows(rows: &[RenderedRow]) -> Vec<PairedRow> {
 fn joined_row_text(rows: &[RenderedRow], indices: &[usize]) -> String {
     let mut output = String::new();
     for index in indices {
-        if let RenderedRow::Code { text, .. } = &rows[*index] {
-            output.push_str(text);
-            output.push('\n');
-        }
+        output.push_str(&rows[*index].text);
+        output.push('\n');
     }
     output
-}
-
-fn row_kind(row: &RenderedRow) -> Option<RowKind> {
-    match row {
-        RenderedRow::Gap(_) => None,
-        RenderedRow::Code { kind, .. } => Some(*kind),
-    }
 }
 
 fn row_anchors(rows: &[RenderedRow]) -> Vec<Option<u32>> {
     let mut anchors = vec![None; rows.len()];
     let mut following_new = None;
     for (index, row) in rows.iter().enumerate().rev() {
-        if let RenderedRow::Code {
-            new: Some(line), ..
-        } = row
-        {
-            following_new = Some(*line);
+        if row.new.is_some() {
+            following_new = row.new;
         }
-        anchors[index] = match row {
-            RenderedRow::Code {
-                new: Some(line), ..
-            } => Some(*line),
-            RenderedRow::Code {
-                kind: RowKind::Removed,
-                ..
-            } => following_new,
-            _ => None,
+        anchors[index] = if row.new.is_some() {
+            row.new
+        } else if row.kind == RowKind::Removed {
+            following_new
+        } else {
+            None
         };
     }
     anchors
@@ -880,19 +840,17 @@ pub fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
     for file in files {
         header_columns = header_columns.max(display_columns(&file.path));
         for row in &file.all_rows {
-            if let Some(text) = rendered_row_text(row) {
-                unified_columns = unified_columns.max(display_columns(text));
-            }
+            unified_columns = unified_columns.max(display_columns(rendered_row_text(row)));
         }
         for pair in &file.all_split {
             let columns = pair
                 .left
-                .and_then(|index| rendered_row_text(&file.all_rows[index]))
+                .map(|index| rendered_row_text(&file.all_rows[index]))
                 .map(display_columns)
                 .unwrap_or(0)
                 + pair
                     .right
-                    .and_then(|index| rendered_row_text(&file.all_rows[index]))
+                    .map(|index| rendered_row_text(&file.all_rows[index]))
                     .map(display_columns)
                     .unwrap_or(0);
             split_columns = split_columns.max(columns);
@@ -905,11 +863,8 @@ pub fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
     )
 }
 
-pub fn rendered_row_text(row: &RenderedRow) -> Option<&str> {
-    match row {
-        RenderedRow::Code { text, .. } => Some(text),
-        RenderedRow::Gap(_) => None,
-    }
+pub fn rendered_row_text(row: &RenderedRow) -> &str {
+    &row.text
 }
 
 pub fn display_columns(text: &str) -> usize {
@@ -973,7 +928,7 @@ mod tests {
     }
 
     fn code(kind: RowKind, old: Option<u32>, new: Option<u32>, text: &str) -> RenderedRow {
-        RenderedRow::Code {
+        RenderedRow {
             kind,
             old,
             new,
@@ -1240,7 +1195,7 @@ mod tests {
             .all_rows
             .iter()
             .filter_map(|row| match row {
-                RenderedRow::Code {
+                RenderedRow {
                     kind, text, runs, ..
                 } if matches!(kind, RowKind::Added | RowKind::Removed) => Some((kind, text, runs)),
                 _ => None,
@@ -1290,12 +1245,10 @@ mod tests {
                 expandable: false,
             })
         );
-        assert!(file.all_rows[..2].iter().all(|row| match row {
-            RenderedRow::Code { runs, .. } => {
-                runs.iter()
-                    .any(|(_, style)| style.background_color.is_some())
-            }
-            RenderedRow::Gap(_) => false,
+        assert!(file.all_rows[..2].iter().all(|row| {
+            row.runs
+                .iter()
+                .any(|(_, style)| style.background_color.is_some())
         }));
     }
 

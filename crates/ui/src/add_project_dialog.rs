@@ -461,7 +461,6 @@ fn render_add_footer(
     _window: &mut Window,
     _cx: &mut App,
 ) -> AnyElement {
-    let cancel = dialog.clone();
     let open = dialog.clone();
     DialogFooter::new()
         .child(
@@ -469,7 +468,6 @@ fn render_add_footer(
                 .rounded(crate::material::radius_button())
                 .label(tcode_i18n::tr!("sidebar.cancel"))
                 .on_click(move |_, window, cx| {
-                    let _ = &cancel;
                     window.close_dialog(cx);
                 }),
         )

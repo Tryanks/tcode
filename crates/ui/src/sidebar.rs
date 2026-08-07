@@ -441,7 +441,7 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        WorkspaceStore::open_add_project_dialog(self.store.clone(), window, cx);
+        crate::add_project_dialog::open(self.store.clone(), window, cx);
     }
 
     fn toggle_group(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1598,7 +1598,6 @@ impl SessionsSidebar {
         working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
         let sessions = self.store.read(cx).sidebar_sessions();
         let state =
             self.thread_row_state(meta, &sessions, format!("thread-{}", meta.id), working, cx);
@@ -1685,67 +1684,7 @@ impl SessionsSidebar {
                     ))
             })
             .when(!working, |row| {
-                // Right slot: relative time, replaced by an archive button on
-                // hover. The slot sizes to the time text (no fixed width), so
-                // the title's flexible width runs right up to it.
-                let title = meta.title.clone();
-                let archive_id = session_id.clone();
-                row.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .h(px(20.))
-                        .min_w(px(20.))
-                        .child(
-                            h_flex()
-                                .h_full()
-                                .items_center()
-                                .whitespace_nowrap()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .group_hover(row_key.clone(), |s| s.invisible())
-                                .child(ago),
-                        )
-                        .child(
-                            crate::material::accessible_clickable(
-                                h_flex(),
-                                gpui::SharedString::from(format!("archive-thread-{session_id}")),
-                                Role::Button,
-                                tcode_i18n::tr!("sidebar.archive"),
-                                cx,
-                            )
-                            .absolute()
-                            .right_0()
-                            .top_0()
-                            .size_5()
-                            .items_center()
-                            .justify_center()
-                            .rounded(cx.theme().radius * 0.5)
-                            .cursor_pointer()
-                            // Keep the archived action registered as a tab stop;
-                            // the icon reveals only when the button itself is
-                            // focused (`in_focus` would pin it visible while the
-                            // click-focused row stays selected).
-                            .opacity(0.)
-                            .group_hover(row_key.clone(), |s| s.opacity(1.))
-                            .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
-                            .hover(|s| s.bg(cx.theme().sidebar_accent))
-                            .tooltip(|window, cx| {
-                                Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.archive_thread(&archive_id, &title, window, cx);
-                            }))
-                            .child(
-                                Icon::empty()
-                                    .path("icons/archive.svg")
-                                    .xsmall()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                        ),
-                )
+                row.child(self.render_flat_thread_right_slot(meta, &row_key, false, true, cx))
             })
         };
 
