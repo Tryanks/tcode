@@ -186,11 +186,6 @@ impl ProviderSettings {
             .unwrap_or_default()
     }
 
-    /// The home directory this provider's children should run against
-    /// (`None` = inherit).
-    pub fn effective_home(&self) -> Option<PathBuf> {
-        self.home_path.clone()
-    }
 }
 
 /// A user-created provider profile (Settings → Providers "+ New profile").
@@ -988,16 +983,6 @@ mod tests {
         .unwrap();
         assert!(!legacy_patch.pi_trust_project_extensions);
         assert!(!legacy_patch.pi_native_approvals);
-    }
-
-    #[test]
-    fn effective_home_reads_home_path() {
-        let settings = ProviderSettings {
-            home_path: Some(PathBuf::from("/a")),
-            ..ProviderSettings::default()
-        };
-        assert_eq!(settings.effective_home(), Some(PathBuf::from("/a")));
-        assert_eq!(ProviderSettings::default().effective_home(), None);
     }
 
     #[test]

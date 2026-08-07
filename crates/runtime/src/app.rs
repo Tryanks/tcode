@@ -55,7 +55,7 @@ use tcode_services::import::{
     scan_recent_dirs,
 };
 use tcode_services::provider_probe::{
-    default_program, probe_provider, run_capture, run_capture_env, run_status, which_in_path,
+    default_program, probe_provider, run_capture, run_capture_env, run_status,
 };
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::{SessionStore, now_millis, now_secs};
@@ -2281,7 +2281,7 @@ impl AppState {
         profile
             .settings
             .binary_path
-            .or_else(|| which_in_path(&default_program(profile.kind)))
+            .or_else(|| agent::find_on_path(&default_program(profile.kind)))
     }
 
     // -- per-provider configuration (Settings → Providers) ------------------
@@ -7345,7 +7345,7 @@ fn launch_env_for_profile(
         .collect();
     LaunchEnv {
         env,
-        home: profile_settings.effective_home(),
+        home: profile_settings.home_path.clone(),
     }
 }
 
@@ -8947,7 +8947,7 @@ mod tests {
 
         let launch_env = LaunchEnv {
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
-            home: settings.provider(ProviderKind::ClaudeCode).effective_home(),
+            home: settings.provider(ProviderKind::ClaudeCode).home_path.clone(),
         };
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
         let opts = session_options(&meta, &settings, launch_env, None, None, None);
@@ -8966,7 +8966,7 @@ mod tests {
         // Codex takes its home as CODEX_HOME, and has no launch args.
         let launch_env = LaunchEnv {
             env: Vec::new(),
-            home: settings.provider(ProviderKind::Codex).effective_home(),
+            home: settings.provider(ProviderKind::Codex).home_path.clone(),
         };
         let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
         let opts = session_options(&meta, &settings, launch_env, None, None, None);

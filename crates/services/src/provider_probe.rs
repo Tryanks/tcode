@@ -21,10 +21,6 @@ pub fn default_program(provider: ProviderKind) -> String {
     }
 }
 
-/// Locate the first executable named `name` on PATH.
-pub fn which_in_path(name: &str) -> Option<PathBuf> {
-    agent::find_on_path(name)
-}
 
 /// Spawn `program args...` and return its trimmed stdout on success.
 pub async fn run_capture(program: &str, args: &[&str]) -> Option<String> {

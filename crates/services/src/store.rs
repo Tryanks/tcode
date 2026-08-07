@@ -203,11 +203,6 @@ impl SessionStore {
         metas
     }
 
-    /// Persist a whole index file (used to flush migration on startup).
-    pub fn persist_index(&self, file: &IndexFile) -> std::io::Result<()> {
-        self.write_file(file)
-    }
-
     /// Insert or replace a meta in the index (by id), then persist.
     pub fn upsert_meta(&self, meta: &SessionMeta) -> std::io::Result<()> {
         let mut file = self.read_file();
@@ -216,7 +211,7 @@ impl SessionStore {
         } else {
             file.sessions.push(meta.clone());
         }
-        self.write_file(&file)
+        self.persist_index(&file)
     }
 
     /// Insert or replace a project (by id), then persist.
@@ -227,7 +222,7 @@ impl SessionStore {
         } else {
             file.projects.push(project.clone());
         }
-        self.write_file(&file)
+        self.persist_index(&file)
     }
 
     /// Remove a project from the index. Its sessions are removed separately so
@@ -235,10 +230,11 @@ impl SessionStore {
     pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
         file.projects.retain(|project| project.id != id);
-        self.write_file(&file)
+        self.persist_index(&file)
     }
 
-    fn write_file(&self, file: &IndexFile) -> std::io::Result<()> {
+    /// Persist a whole index file atomically (also flushes migration on startup).
+    pub fn persist_index(&self, file: &IndexFile) -> std::io::Result<()> {
         let tmp = self.index_path().with_extension("json.tmp");
         let data = serde_json::to_vec_pretty(file)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -317,7 +313,7 @@ impl SessionStore {
     pub fn remove_session(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
         file.sessions.retain(|meta| meta.id != id);
-        self.write_file(&file)?;
+        self.persist_index(&file)?;
         match fs::remove_file(self.events_path(id)) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
