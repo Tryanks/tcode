@@ -207,6 +207,10 @@ pub struct TerminalContextStatus {
 pub struct QueuedMessageStatus {
     pub id: u64,
     pub text: String,
+    /// Unix timestamp for a scheduled row, or `None` for an ordinary queued
+    /// message. Like the queue itself, this status is ephemeral.
+    #[serde(default)]
+    pub fire_at_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -7,18 +7,20 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent::{
     ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest,
     FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommand,
     ProviderCommandKind, ProviderKind, TokenUsage, UserInputQuestion,
 };
+use chrono::{DateTime, Local, NaiveDate, TimeZone as _};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
     EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, PathBuilder, Pixels, Render, Role, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, canvas, div, img, point, prelude::FluentBuilder as _, px,
-    rgb,
+    Styled as _, Subscription, Task, Window, canvas, div, img, point, prelude::FluentBuilder as _,
+    px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
@@ -190,6 +192,108 @@ fn strip_orchestrate_prefix(text: &str) -> Option<&str> {
     (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
 }
 
+/// User-facing validation failures for a syntactically recognized `/later`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaterError {
+    MissingTime,
+    MissingMessage,
+    InvalidTime,
+}
+
+/// Parse a scheduled-message command against an injectable local clock. A
+/// non-command returns `None`, keeping provider commands and lookalikes on the
+/// ordinary submit path; recognized but malformed commands return an error.
+fn parse_later(text: &str, now: DateTime<Local>) -> Option<Result<(u64, String), LaterError>> {
+    let text = text.trim();
+    let rest = text.strip_prefix("/later")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Some(Err(LaterError::MissingTime));
+    }
+    let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let time_spec = &rest[..split];
+    let message = rest[split..].trim();
+    if message.is_empty() {
+        return Some(Err(LaterError::MissingMessage));
+    }
+
+    let fire_at = if let Some((hour, minute)) = parse_wall_clock(time_spec) {
+        let today = local_occurrence(now.date_naive(), hour, minute);
+        let candidate = today.filter(|candidate| *candidate > now).or_else(|| {
+            now.date_naive()
+                .succ_opt()
+                .and_then(|date| local_occurrence(date, hour, minute))
+        });
+        candidate.ok_or(LaterError::InvalidTime)
+    } else {
+        parse_relative(time_spec)
+            .and_then(|duration| now.checked_add_signed(duration))
+            .ok_or(LaterError::InvalidTime)
+    };
+    Some(fire_at.and_then(|fire_at| {
+        u64::try_from(fire_at.timestamp())
+            .map(|timestamp| (timestamp, message.to_string()))
+            .map_err(|_| LaterError::InvalidTime)
+    }))
+}
+
+fn parse_wall_clock(spec: &str) -> Option<(u32, u32)> {
+    let (hour, minute) = spec.split_once(':')?;
+    if hour.is_empty()
+        || hour.len() > 2
+        || minute.len() != 2
+        || !hour.bytes().all(|byte| byte.is_ascii_digit())
+        || !minute.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let hour = hour.parse().ok()?;
+    let minute = minute.parse().ok()?;
+    (hour < 24 && minute < 60).then_some((hour, minute))
+}
+
+fn local_occurrence(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Local>> {
+    Local
+        .from_local_datetime(&date.and_hms_opt(hour, minute, 0)?)
+        .earliest()
+}
+
+fn parse_relative(spec: &str) -> Option<chrono::Duration> {
+    let (digits, unit_seconds) = if let Some(digits) = spec.strip_suffix("min") {
+        (digits, 60_i64)
+    } else if let Some(digits) = spec.strip_suffix('s') {
+        (digits, 1_i64)
+    } else {
+        (spec.strip_suffix('h')?, 3_600_i64)
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let count: i64 = digits.parse().ok()?;
+    if count < 1 {
+        return None;
+    }
+    count
+        .checked_mul(unit_seconds)
+        .map(chrono::Duration::seconds)
+}
+
+/// Compact queue-strip countdown: hours retain an hour column, shorter waits
+/// use minutes and seconds.
+fn format_countdown(secs: u64) -> String {
+    let hours = secs / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// Recognize a standalone `/plan`, `/default`, or `/model` message (T3 strips
 /// the command and switches mode / opens the picker instead of sending it).
 fn slash_command(text: &str) -> Option<SlashCommand> {
@@ -304,6 +408,8 @@ enum MenuAccept {
     InsertCommand(String),
     /// Insert the native orchestration command without consuming following text.
     InsertOrchestrate,
+    /// Insert the scheduled-message command prefix.
+    InsertLater,
     /// Strip the `/model` command and open the model picker.
     OpenModelPicker,
     /// Strip the command and switch interaction mode.
@@ -442,6 +548,9 @@ pub struct Composer {
     image_load_generation: u64,
     /// Reserved strip slots for image jobs that have not completed yet.
     pending_image_loads: usize,
+    /// One cancellable one-second repaint loop, present only while the queue
+    /// strip contains at least one scheduled row.
+    scheduled_countdown_tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -548,6 +657,7 @@ impl Composer {
             images_session: None,
             image_load_generation: 0,
             pending_image_loads: 0,
+            scheduled_countdown_tick: None,
             _subscriptions: subscriptions,
         }
     }
@@ -632,6 +742,35 @@ impl Composer {
         }
         if !self.workspace_store.read(cx).composer_has_active_session() {
             window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
+            return;
+        }
+        if terminal_contexts.is_empty()
+            && let Some(later) = parse_later(&text, Local::now())
+        {
+            let Ok((fire_at_unix_secs, message)) = later else {
+                window
+                    .push_notification(Notification::error(crate::tr!("composer.later_usage")), cx);
+                return;
+            };
+            let attachment_paths = self
+                .pending_images
+                .iter()
+                .map(|image| image.path.clone())
+                .collect();
+            self.text_cache.clear_current();
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            self.pending_images.clear();
+            self.image_load_generation = self.image_load_generation.wrapping_add(1);
+            self.pending_image_loads = 0;
+            self.workspace_store.update(cx, |store, _cx| {
+                store.dispatch(Command::ScheduleTurn {
+                    text: message,
+                    attachment_paths,
+                    fire_at_unix_secs,
+                });
+            });
+            cx.emit(ComposerEvent::Submitted);
+            cx.notify();
             return;
         }
         // Intercept the minimal `/`-command set (S1 §4/§7): `/plan` and
@@ -868,7 +1007,7 @@ impl Composer {
                 (rows, crate::tr!("composer.no_skills").into_owned(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let builtins: [(&str, Option<&str>, &str, MenuAccept); 4] = [
+                let builtins: [(&str, Option<&str>, &str, MenuAccept); 5] = [
                     (
                         "model",
                         None,
@@ -892,6 +1031,12 @@ impl Composer {
                         Some("composer.cmd_orchestrate_label"),
                         "composer.cmd_orchestrate_desc",
                         MenuAccept::InsertOrchestrate,
+                    ),
+                    (
+                        "later",
+                        None,
+                        "composer.cmd_later_desc",
+                        MenuAccept::InsertLater,
                     ),
                 ];
                 let mut rows: Vec<MenuRow> = builtins
@@ -963,6 +1108,7 @@ impl Composer {
                 self.replace_trigger(&format!("/{name} "), window, cx)
             }
             MenuAccept::InsertOrchestrate => self.replace_trigger("/orchestrate ", window, cx),
+            MenuAccept::InsertLater => self.replace_trigger("/later ", window, cx),
             MenuAccept::OpenModelPicker => {
                 self.replace_trigger("", window, cx);
                 self.model_picker_token = self.model_picker_token.wrapping_add(1);
@@ -1692,10 +1838,31 @@ impl Composer {
     /// attached; each thumbnail opens an expanded preview and has a remove `x`.
     /// The queue strip shown ABOVE the card whenever messages are waiting for
     /// the running turn to finish: one row per queued message (truncated text),
-    /// each with a steer button (inject it into the running turn NOW) and an ✕
-    /// (drop it). Rows are reorderable-by-removal only.
-    fn render_queue_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (queued, can_steer, agent) = self.workspace_store.read(cx).composer_queue()?;
+    /// each with a send-now/steer button and an ✕ (drop it). Scheduled rows add
+    /// a live countdown; rows are reorderable-by-removal only.
+    fn render_queue_strip(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some((queued, can_steer, agent)) = self.workspace_store.read(cx).composer_queue()
+        else {
+            self.scheduled_countdown_tick = None;
+            return None;
+        };
+        let has_scheduled = queued
+            .iter()
+            .any(|message| message.fire_at_unix_secs.is_some());
+        if has_scheduled && self.scheduled_countdown_tick.is_none() {
+            self.scheduled_countdown_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    smol::Timer::after(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }));
+        } else if !has_scheduled {
+            // Dropping the task cancels its timer, so at most one repaint loop
+            // exists and it stops as soon as the last scheduled row disappears.
+            self.scheduled_countdown_tick = None;
+        }
         if queued.is_empty() {
             return None;
         }
@@ -1720,11 +1887,21 @@ impl Composer {
 
         for message in queued {
             let id = message.id;
-            let steer_tooltip = if can_steer {
+            let scheduled = message.fire_at_unix_secs.is_some();
+            let steer_tooltip = if scheduled {
+                crate::tr!("composer.send_now").into_owned()
+            } else if can_steer {
                 crate::tr!("composer.steer_queued").into_owned()
             } else {
                 crate::tr!("composer.steer_unsupported_tooltip", agent = agent).into_owned()
             };
+            let countdown = message.fire_at_unix_secs.map(|fire_at| {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                format_countdown(fire_at.saturating_sub(now))
+            });
             strip = strip.child(
                 h_flex()
                     .flex_none()
@@ -1741,14 +1918,24 @@ impl Composer {
                             .text_color(cx.theme().foreground)
                             .child(truncate_queued(&message.text)),
                     )
+                    .when_some(countdown, |row, countdown| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(countdown),
+                        )
+                    })
                     .child(
                         Button::new(("queue-steer", id as usize))
                             .ghost()
                             .xsmall()
                             .icon(IconName::ArrowUp)
-                            // A provider that can't steer must not offer the
-                            // gesture — the tooltip explains why.
-                            .disabled(!can_steer)
+                            // Scheduled rows always support send-now: the
+                            // runtime removes the deadline and uses the normal
+                            // send/queue path even when native steering is absent.
+                            .disabled(!scheduled && !can_steer)
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace_store.update(cx, |store, _cx| {
@@ -4545,6 +4732,7 @@ fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike as _;
 
     #[test]
     fn bmp_and_tiff_transcode_to_decodable_png() {
@@ -4666,6 +4854,77 @@ mod tests {
         );
         assert_eq!(strip_orchestrate_prefix("/orchestrated"), None);
         assert_eq!(strip_orchestrate_prefix("hello /orchestrate"), None);
+    }
+
+    fn local_time(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+    }
+
+    fn parsed_later(text: &str, now: DateTime<Local>) -> (DateTime<Local>, String) {
+        let (timestamp, message) = parse_later(text, now).unwrap().unwrap();
+        (
+            Local.timestamp_opt(timestamp as i64, 0).single().unwrap(),
+            message,
+        )
+    }
+
+    #[test]
+    fn later_parses_wall_clock_as_the_next_strict_local_occurrence() {
+        let now = local_time(2026, 8, 8, 12, 0);
+        let (later_today, message) = parsed_later("/later 23:59 continue here", now);
+        assert_eq!(later_today.date_naive(), now.date_naive());
+        assert_eq!((later_today.hour(), later_today.minute()), (23, 59));
+        assert_eq!(message, "continue here");
+
+        let (tomorrow, message) = parsed_later("/later 5:10 first line\nsecond line", now);
+        assert_eq!(tomorrow.date_naive(), now.date_naive().succ_opt().unwrap());
+        assert_eq!((tomorrow.hour(), tomorrow.minute()), (5, 10));
+        assert_eq!(message, "first line\nsecond line");
+    }
+
+    #[test]
+    fn later_parses_all_relative_duration_units() {
+        let now = local_time(2026, 8, 8, 12, 0);
+        for (command, seconds, message) in [
+            ("/later 5min multi word", 300, "multi word"),
+            ("/later 30s soon", 30, "soon"),
+            ("/later 2h much later", 7_200, "much later"),
+        ] {
+            let (fire_at, parsed_message) = parsed_later(command, now);
+            assert_eq!((fire_at - now).num_seconds(), seconds);
+            assert_eq!(parsed_message, message);
+        }
+    }
+
+    #[test]
+    fn later_reports_usage_errors_and_rejects_lookalikes() {
+        let now = local_time(2026, 8, 8, 12, 0);
+        for command in [
+            "/later",
+            "/later 5min",
+            "/later 25:00 x",
+            "/later 5:99 x",
+            "/later abc x",
+        ] {
+            assert!(
+                matches!(parse_later(command, now), Some(Err(_))),
+                "{command}"
+            );
+        }
+        assert_eq!(parse_later("/laters 5min x", now), None);
+    }
+
+    #[test]
+    fn countdown_format_switches_at_one_hour() {
+        assert_eq!(format_countdown(0), "0:00");
+        assert_eq!(format_countdown(5), "0:05");
+        assert_eq!(format_countdown(65), "1:05");
+        assert_eq!(format_countdown(3_599), "59:59");
+        assert_eq!(format_countdown(3_600), "1:00:00");
+        assert_eq!(format_countdown(7_325), "2:02:05");
     }
 
     #[test]

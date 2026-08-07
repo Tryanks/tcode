@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
@@ -340,6 +340,11 @@ pub struct QueuedMessage {
     /// user event continues to record only `text`.
     relay_transcript: Option<String>,
     pub attachments: Vec<Attachment>,
+    /// Earliest wall-clock time at which this turn may dispatch. Scheduled
+    /// messages ride the same in-memory queue as ordinary turns, so v1 keeps a
+    /// parked provider resident while one is pending instead of persisting or
+    /// rehydrating a separate scheduler record.
+    pub not_before: Option<SystemTime>,
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     options: TurnOptions,
@@ -410,6 +415,7 @@ impl From<&str> for QueuedMessage {
             text: text.to_string(),
             relay_transcript: None,
             attachments: Vec::new(),
+            not_before: None,
             options: TurnOptions::default(),
             ultrathink: false,
             context_len: None,
@@ -734,6 +740,35 @@ impl ActiveSession {
             text,
             relay_transcript: None,
             attachments,
+            not_before: None,
+            options,
+            ultrathink,
+            context_len,
+            kind: QueuedMessageKind::User,
+        });
+        id
+    }
+
+    /// Append a delayed user turn while capturing the same per-send settings
+    /// and annotations as an ordinary queued message.
+    fn push_scheduled(
+        &mut self,
+        text: String,
+        attachments: Vec<Attachment>,
+        not_before: SystemTime,
+    ) -> u64 {
+        self.idle_since = None;
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        let options = self.turn_options();
+        let ultrathink = std::mem::take(&mut self.pending_ultrathink);
+        let context_len = std::mem::take(&mut self.pending_context_len);
+        self.queue.push(QueuedMessage {
+            id,
+            text,
+            relay_transcript: None,
+            attachments,
+            not_before: Some(not_before),
             options,
             ultrathink,
             context_len,
@@ -765,6 +800,7 @@ impl ActiveSession {
             text,
             relay_transcript: None,
             attachments: Vec::new(),
+            not_before: None,
             options,
             ultrathink: false,
             context_len: None,
@@ -773,8 +809,9 @@ impl ActiveSession {
         id
     }
 
-    /// Dispatch at most one queued message as an ordinary turn, preserving FIFO
-    /// order. A turn already in flight blocks dispatch for EVERY provider: a
+    /// Dispatch at most one eligible queued message as an ordinary turn. FIFO
+    /// is preserved among eligible entries, while a future scheduled entry may
+    /// be passed by ordinary work. A turn already in flight blocks dispatch for EVERY provider: a
     /// queued message is by definition one that waits for the running turn to
     /// finish. (Steering — the other way to send mid-turn — never goes through
     /// here; see [`AppState::steer`].)
@@ -788,7 +825,13 @@ impl ActiveSession {
         let Runtime::Live(commands) = &self.runtime else {
             return Ok(false);
         };
-        let Some(send) = self.queue.first().cloned() else {
+        let now = SystemTime::now();
+        let Some(send) = self
+            .queue
+            .iter()
+            .find(|message| message.not_before.is_none_or(|time| time <= now))
+            .cloned()
+        else {
             return Ok(false);
         };
         commands
@@ -804,18 +847,22 @@ impl ActiveSession {
         Ok(true)
     }
 
-    /// Commit exactly one queue head after its correlated adapter acceptance.
-    /// Duplicate/stale acknowledgements are harmless and never persist twice.
+    /// Commit exactly one submitted queue entry after its correlated adapter
+    /// acceptance. Eligibility-based dispatch can submit a non-head entry, so
+    /// id correlation—not position—is authoritative. Duplicate/stale
+    /// acknowledgements are harmless and never persist twice.
     fn accept_turn_delivery(&mut self, delivery_id: u64) -> Option<QueuedMessage> {
-        if self.delivery_in_flight != Some(delivery_id)
-            || self.queue.first().map(|message| message.id) != Some(delivery_id)
-        {
+        if self.delivery_in_flight != Some(delivery_id) {
             return None;
         }
+        let position = self
+            .queue
+            .iter()
+            .position(|message| message.id == delivery_id)?;
         self.delivery_in_flight = None;
         self.turn_in_flight = true;
         self.idle_since = None;
-        Some(self.queue.remove(0))
+        Some(self.queue.remove(position))
     }
 
     fn is_starting_generation(&self, generation: u64) -> bool {
@@ -904,6 +951,9 @@ pub struct AppState {
     next_terminal_spawn_id: u64,
     pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
     next_start_generation: u64,
+    /// Invalidates detached scheduled-wake tasks whenever the earliest deadline
+    /// changes; stale timers must never fire or reschedule superseded work.
+    scheduler_generation: u64,
     resident_idle_grace: Duration,
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
@@ -1050,6 +1100,7 @@ impl AppState {
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
+            scheduler_generation: 0,
             resident_idle_grace: RESIDENT_IDLE_GRACE,
             ai_title_generation_enabled: !cfg!(any(test, feature = "test-support")),
             acp_registry: None,
@@ -1414,6 +1465,11 @@ impl AppState {
                 .map(|message| QueuedMessageStatus {
                     id: message.id,
                     text: message.text.clone(),
+                    fire_at_unix_secs: message.not_before.and_then(|time| {
+                        time.duration_since(UNIX_EPOCH)
+                            .ok()
+                            .map(|duration| duration.as_secs())
+                    }),
                 })
                 .collect(),
             review_comment_drafts: self
@@ -1931,7 +1987,7 @@ impl AppState {
                             child.shutdown_to_idle();
                         }
                     } else {
-                        self.drop_background(&thread_id);
+                        self.drop_background(&thread_id, cx);
                     }
                     Ok(serde_json::json!({ "ok": true }))
                 })();
@@ -4017,12 +4073,12 @@ impl AppState {
             // An archived conversation must not leave an off-screen PTY running.
             self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.to_string()));
-            self.drop_background(id);
+            self.drop_background(id, cx);
             self.revoke_preview_registration(id);
         }
         let orchestrators: Vec<_> = ids.iter().map(|id| (*id).to_string()).collect();
         for id in orchestrators {
-            self.close_orchestrator_children(&id);
+            self.close_orchestrator_children(&id, cx);
         }
         let mut changed = Vec::new();
         for meta in &mut self.sessions {
@@ -4160,13 +4216,13 @@ impl AppState {
             self.shutdown_active(cx);
         }
         // Deleting a thread that is working in the background kills it for real.
-        self.drop_background(session_id);
+        self.drop_background(session_id, cx);
         self.terminal_workspaces
             .remove(&ConversationDestination::Thread(session_id.to_string()));
         if self.terminal_preferences.remove(session_id).is_some() {
             self.write_terminal_preferences(cx);
         }
-        self.close_orchestrator_children(session_id);
+        self.close_orchestrator_children(session_id, cx);
         let worktree_remove = meta.as_ref().and_then(|meta| {
             (remove_worktree && meta.worktree.is_some()).then(|| {
                 let worktree = meta.worktree.as_ref().unwrap();
@@ -4737,6 +4793,7 @@ impl AppState {
             }
             self.refresh_git_status(cx);
             self.preview_draft_or_persist_active(cx);
+            self.reschedule_scheduled_wake(cx);
             return;
         }
 
@@ -4782,6 +4839,177 @@ impl AppState {
         let (text, attachments) = self.assemble_user_message(text, attachment_paths);
         self.send_turn_assembled(text, attachments, cx);
         self.clear_consumed_draft_context(cx);
+    }
+
+    /// Schedule an in-memory user turn for this session. It captures the same
+    /// provider options and composer context as an immediate send, but remains
+    /// invisible to the persisted transcript until provider acceptance.
+    pub fn schedule_turn(
+        &mut self,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+        fire_at_unix_secs: u64,
+        cx: &mut HostCx,
+    ) {
+        let not_before = UNIX_EPOCH + Duration::from_secs(fire_at_unix_secs);
+        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
+        if self.relay_confirmation().is_some() {
+            log::warn!("scheduled send deferred because a conversation relay needs confirmation");
+            return;
+        }
+
+        let commit_draft = self.active.as_ref().is_some_and(|active| {
+            active.draft && !matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. })
+        });
+        if commit_draft && let Err(err) = self.commit_draft(cx) {
+            self.report_error(
+                RuntimeError::PersistSession {
+                    error: err.to_string(),
+                },
+                cx,
+            );
+            return;
+        }
+
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active.push_scheduled(text, attachments, not_before);
+        let should_start = matches!(active.runtime, Runtime::Idle)
+            && !(active.draft
+                && matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. }));
+        if should_start {
+            // Starting now keeps the in-memory session parkable/resident across
+            // navigation. Eligibility prevents the future turn from being sent
+            // when provider startup completes.
+            self.ensure_started(cx);
+        }
+        self.clear_consumed_draft_context(cx);
+        self.emit_active_session_status(cx);
+        cx.notify();
+        self.reschedule_scheduled_wake(cx);
+    }
+
+    /// Replace the detached scheduler wake with one for the earliest deadline
+    /// across active and parked sessions. The generation check makes every
+    /// superseded timer harmless without needing cancellation support.
+    fn reschedule_scheduled_wake(&mut self, cx: &mut HostCx) {
+        self.scheduler_generation = self.scheduler_generation.wrapping_add(1);
+        let generation = self.scheduler_generation;
+        let earliest = self
+            .active
+            .iter()
+            .chain(self.background.values())
+            .flat_map(|session| {
+                session
+                    .queue
+                    .iter()
+                    .filter_map(|message| message.not_before)
+            })
+            .min();
+        let Some(fire_at) = earliest else {
+            return;
+        };
+        let delay = fire_at
+            .duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            smol::Timer::after(delay).await;
+            host_cx.enqueue(move |state, cx| {
+                if state.scheduler_generation != generation {
+                    return;
+                }
+                state.fire_due_scheduled(cx);
+            });
+        });
+    }
+
+    /// Promote every due scheduled entry back through the ordinary send path.
+    /// Active messages are removed first so draft/worktree/restart policy is
+    /// centralized in `send_turn_assembled`; parked messages instead clear the
+    /// deadline in place to preserve their captured options before dispatch.
+    fn fire_due_scheduled(&mut self, cx: &mut HostCx) {
+        let now = SystemTime::now();
+        let active_due: Vec<u64> = self
+            .active
+            .iter()
+            .flat_map(|active| active.queue.iter())
+            .filter(|message| message.not_before.is_some_and(|time| time <= now))
+            .map(|message| message.id)
+            .collect();
+        for id in active_due {
+            let message = self
+                .active
+                .as_mut()
+                .and_then(|active| active.take_queued(id));
+            let Some(message) = message else {
+                continue;
+            };
+            if let Some(active) = self.active.as_mut() {
+                active.pending_ultrathink = message.ultrathink;
+            }
+            self.send_turn_assembled(message.text, message.attachments, cx);
+        }
+
+        let parked_ids: Vec<String> = self.background.keys().cloned().collect();
+        for session_id in parked_ids {
+            let mut had_due = false;
+            if let Some(parked) = self.background.get_mut(&session_id) {
+                for message in &mut parked.queue {
+                    if message.not_before.is_some_and(|time| time <= now) {
+                        // Parked turns cannot re-enter the active-only send
+                        // pipeline. Clearing in place makes the captured turn
+                        // options eligible without reconstructing the entry.
+                        message.not_before = None;
+                        had_due = true;
+                    }
+                }
+            }
+            if !had_due {
+                continue;
+            }
+
+            let (settings_changed, restart_deferred, is_live, has_queue) = self
+                .background
+                .get(&session_id)
+                .map(|parked| {
+                    (
+                        parked.launch_settings_changed_while_live(),
+                        parked.background_task_count > 0,
+                        matches!(parked.runtime, Runtime::Live(_)),
+                        !parked.queue.is_empty(),
+                    )
+                })
+                .unwrap_or((false, false, false, false));
+            if settings_changed {
+                if restart_deferred {
+                    log::info!(
+                        "parked session {session_id}: deferring scheduled-send settings restart"
+                    );
+                } else {
+                    if let Some(parked) = self.background.get_mut(&session_id) {
+                        parked.shutdown_to_idle();
+                    }
+                    self.ensure_session_started(&session_id, cx);
+                }
+            } else if is_live {
+                if self
+                    .background
+                    .get_mut(&session_id)
+                    .is_some_and(|parked| parked.dispatch_next_pending().is_err())
+                {
+                    log::warn!(
+                        "parked session {session_id}: scheduled dispatch failed (process gone)"
+                    );
+                }
+            } else if has_queue {
+                self.ensure_session_started(&session_id, cx);
+            }
+            self.emit_session_status(&session_id, cx);
+        }
+        cx.notify();
+        self.reschedule_scheduled_wake(cx);
     }
 
     /// Deterministic queue mutation for cross-crate replica consistency tests.
@@ -4977,8 +5205,8 @@ impl AppState {
         cx.notify();
     }
 
-    /// Submit the queue head when the live provider can accept a turn. The head
-    /// remains queued until the adapter emits its correlated `TurnAccepted`;
+    /// Submit the first eligible queue entry when the live provider can accept
+    /// a turn. It remains queued until the adapter emits its correlated `TurnAccepted`;
     /// only that provider-boundary acknowledgement persists the user bubble.
     fn dispatch_next_queued(&mut self, _cx: &mut HostCx) -> Result<bool, ()> {
         let Some(active) = self.active.as_ref() else {
@@ -4990,7 +5218,7 @@ impl AppState {
         self.active.as_mut().ok_or(())?.dispatch_next_pending()
     }
 
-    /// Finalize one submitted queue head. Queue-id correlation makes duplicate
+    /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
     /// acceptance events idempotent, including after a provider close.
     fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut HostCx) {
         let is_active = self.active_session_id() == Some(session_id);
@@ -5389,6 +5617,7 @@ impl AppState {
         // message captured its own at queue time — re-arm so it rides along.
         active.pending_ultrathink = message.ultrathink;
         self.steer_assembled(message.text, message.attachments, cx);
+        self.reschedule_scheduled_wake(cx);
     }
 
     /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
@@ -5400,6 +5629,7 @@ impl AppState {
         }
         self.emit_active_session_status(cx);
         cx.notify();
+        self.reschedule_scheduled_wake(cx);
     }
 
     pub fn interrupt(&mut self, cx: &mut HostCx) {
@@ -6285,7 +6515,7 @@ impl AppState {
         if let AgentEvent::SessionClosed { reason } = &event {
             self.pending_native_rewinds.remove(session_id);
             self.sessions_awaiting_approval.remove(session_id);
-            self.close_orchestrator_children(session_id);
+            self.close_orchestrator_children(session_id, cx);
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
                 // A parked session's process died on its own. Record the close,
@@ -6845,6 +7075,7 @@ impl AppState {
                 active.idle_since = None;
             }
             self.background.insert(session_id.clone(), active);
+            self.reschedule_scheduled_wake(cx);
             if !has_work {
                 self.mark_resident_idle(&session_id, cx);
             }
@@ -6891,7 +7122,7 @@ impl AppState {
         };
         if let Some(oldest) = oldest {
             log::info!("evicting idle resident {oldest}");
-            self.drop_background(&oldest);
+            self.drop_background(&oldest, cx);
         }
 
         let session_id = session_id.to_string();
@@ -6908,7 +7139,7 @@ impl AppState {
                         && session.background_task_count == 0
                 }) && !state.pending_native_rewinds.contains_key(&session_id);
                 if still_idle {
-                    state.drop_background(&session_id);
+                    state.drop_background(&session_id, cx);
                     cx.notify();
                 }
             });
@@ -6916,7 +7147,7 @@ impl AppState {
     }
 
     /// Shut down and forget a parked session (archive/delete paths).
-    fn drop_background(&mut self, session_id: &str) {
+    fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
         self.sessions_awaiting_approval.remove(session_id);
         self.pending_native_rewinds.remove(session_id);
         if let Some(parked) = self.background.remove(session_id)
@@ -6924,9 +7155,10 @@ impl AppState {
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
         }
+        self.reschedule_scheduled_wake(cx);
     }
 
-    fn close_orchestrator_children(&mut self, parent_id: &str) {
+    fn close_orchestrator_children(&mut self, parent_id: &str, cx: &mut HostCx) {
         let child_ids: Vec<_> = self
             .sessions
             .iter()
@@ -6934,7 +7166,7 @@ impl AppState {
             .map(|meta| meta.id.clone())
             .collect();
         for child_id in child_ids {
-            self.drop_background(&child_id);
+            self.drop_background(&child_id, cx);
             self.revoke_preview_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
@@ -10275,6 +10507,106 @@ mod tests {
         };
         active.accept_turn_delivery(second_delivery).unwrap();
         assert!(active.queue.is_empty());
+    }
+
+    #[test]
+    fn future_scheduled_head_does_not_block_ordinary_dispatch_or_acceptance() {
+        let (commands, receiver) = smol::channel::unbounded();
+        let mut active = live_session(ProviderKind::Codex, commands);
+        let scheduled_id = active.push_scheduled(
+            "later".into(),
+            Vec::new(),
+            SystemTime::now() + Duration::from_secs(3_600),
+        );
+        let ordinary_id = active.push_queued("now".into(), Vec::new());
+
+        assert_eq!(active.dispatch_next_pending(), Ok(true));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SessionCommand::SendTurn {
+                delivery_id,
+                text,
+                ..
+            }) if delivery_id == ordinary_id && text == "now"
+        ));
+        let accepted = active.accept_turn_delivery(ordinary_id).unwrap();
+        assert_eq!(accepted.text, "now");
+        assert_eq!(active.queue.len(), 1);
+        assert_eq!(active.queue[0].id, scheduled_id);
+    }
+
+    #[test]
+    fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-scheduled-status-test");
+        let store = (*test_store).clone();
+        let state = cx.new_entity(|_| AppState::new(store));
+        let (commands, receiver) = smol::channel::unbounded();
+        let fire_at = now_secs() + 3_600;
+
+        state.host_update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "scheduled-active".into();
+            state.active = Some(active);
+            state.schedule_turn("scheduled".into(), Vec::new(), fire_at, cx);
+
+            let status = state.session_status_snapshot("scheduled-active").unwrap();
+            assert_eq!(status.queued_messages.len(), 1);
+            assert_eq!(status.queued_messages[0].fire_at_unix_secs, Some(fire_at));
+            let scheduled_id = status.queued_messages[0].id;
+
+            state.steer_queued(scheduled_id, cx);
+            let status = state.session_status_snapshot("scheduled-active").unwrap();
+            assert_eq!(status.queued_messages.len(), 1);
+            assert_eq!(status.queued_messages[0].fire_at_unix_secs, None);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::SendTurn { .. })
+            ));
+
+            let active = state.active.as_mut().unwrap();
+            active.delivery_in_flight = None;
+            active.turn_in_flight = false;
+            active.queue.clear();
+            let drop_id = active.push_scheduled(
+                "drop me".into(),
+                Vec::new(),
+                SystemTime::now() + Duration::from_secs(7_200),
+            );
+            state.drop_queued(drop_id, cx);
+            assert!(state.active.as_ref().unwrap().queue.is_empty());
+        });
+    }
+
+    #[test]
+    fn due_scheduled_message_reenters_the_ordinary_send_path() {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-scheduled-fire-test");
+        let store = (*test_store).clone();
+        let state = cx.new_entity(|_| AppState::new(store));
+        let (commands, receiver) = smol::channel::unbounded();
+
+        state.host_update(cx, |state, cx| {
+            let mut active = live_session(ProviderKind::Codex, commands);
+            active.meta.id = "due-active".into();
+            active.push_scheduled(
+                "due now".into(),
+                Vec::new(),
+                SystemTime::now() - Duration::from_secs(1),
+            );
+            state.active = Some(active);
+
+            state.fire_due_scheduled(cx);
+
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(active.queue.len(), 1);
+            assert_eq!(active.queue[0].text, "due now");
+            assert_eq!(active.queue[0].not_before, None);
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(SessionCommand::SendTurn { text, .. }) if text == "due now"
+            ));
+        });
     }
 
     #[test]

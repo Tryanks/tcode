@@ -597,6 +597,11 @@ fn dispatch_command(
             text,
             attachment_paths,
         } => app.send_turn(text, attachment_paths, cx),
+        Command::ScheduleTurn {
+            text,
+            attachment_paths,
+            fire_at_unix_secs,
+        } => app.schedule_turn(text, attachment_paths, fire_at_unix_secs, cx),
         Command::ConfirmRelayAndSend {
             text,
             attachment_paths,
