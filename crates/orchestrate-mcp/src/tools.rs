@@ -27,6 +27,10 @@ struct DispatchParams {
     brief: String,
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    archive_on_complete: Option<bool>,
+    #[serde(default)]
+    result_max_chars: Option<u32>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StatusParams {
@@ -41,6 +45,10 @@ struct SendParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ThreadParams {
     thread_id: String,
+}
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ArchiveParams {
+    thread_ids: Vec<String>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ApproveParams {
@@ -85,6 +93,8 @@ impl OrchestrateTools {
                 title: p.title,
                 brief: p.brief,
                 cwd: p.cwd,
+                archive_on_complete: p.archive_on_complete,
+                result_max_chars: p.result_max_chars,
             })
             .await)
     }
@@ -140,6 +150,21 @@ impl OrchestrateTools {
             .run(OrchestrateOp::Cancel {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
+            })
+            .await)
+    }
+
+    #[tool(
+        description = "Archive a batch of this session's child threads by id. Archived threads vanish from the user's sidebar but are fully recoverable in Settings → Archived Threads, and their transcripts remain readable via status/result. Archiving a running child shuts it down; cancel first for a clean stop."
+    )]
+    async fn archive(
+        &self,
+        Parameters(p): Parameters<ArchiveParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .run(OrchestrateOp::Archive {
+                parent_id: self.parent_id.clone(),
+                thread_ids: p.thread_ids,
             })
             .await)
     }
@@ -247,7 +272,9 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["approve", "cancel", "dispatch", "result", "send", "status"]
+            [
+                "approve", "archive", "cancel", "dispatch", "result", "send", "status"
+            ]
         );
     }
 }

@@ -117,6 +117,12 @@ pub struct SessionMeta {
     /// Whether this session receives the tcode_orchestrate MCP registration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub orchestrate_enabled: bool,
+    /// Whether to archive this child after its terminal callback is delivered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archive_on_complete: bool,
+    /// Maximum inline result characters for this child's terminal callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_max_chars: Option<u32>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -143,6 +149,8 @@ impl SessionMeta {
             acp_agent_id: None,
             parent_session_id: None,
             orchestrate_enabled: false,
+            archive_on_complete: false,
+            result_max_chars: None,
             created_at: now,
             updated_at: now,
         }
