@@ -1689,6 +1689,8 @@ impl AppState {
         title: String,
         cwd: Option<PathBuf>,
         brief: String,
+        archive_on_complete: bool,
+        result_max_chars: Option<u32>,
         cx: &mut HostCx,
     ) -> Result<String, String> {
         let parent = self
@@ -1703,6 +1705,8 @@ impl AppState {
             profile_id,
             approval_mode,
             cwd,
+            archive_on_complete,
+            result_max_chars,
         );
         meta.title = title;
         self.enqueue_store_write(
@@ -1762,6 +1766,8 @@ impl AppState {
                 title,
                 brief,
                 cwd,
+                archive_on_complete,
+                result_max_chars,
             } => {
                 let resolved = (|| {
                     let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
@@ -1798,6 +1804,8 @@ impl AppState {
                             title,
                             None,
                             brief,
+                            archive_on_complete.unwrap_or(false),
+                            result_max_chars,
                             cx,
                         )
                         .map(|id| serde_json::json!({ "thread_id": id }));
@@ -1840,6 +1848,8 @@ impl AppState {
                                     title,
                                     Some(cwd),
                                     brief,
+                                    archive_on_complete.unwrap_or(false),
+                                    result_max_chars,
                                     cx,
                                 )
                             })
@@ -1924,6 +1934,35 @@ impl AppState {
                         self.drop_background(&thread_id);
                     }
                     Ok(serde_json::json!({ "ok": true }))
+                })();
+                let _ = reply.try_send(result);
+            }
+            OrchestrateOp::Archive {
+                parent_id,
+                thread_ids,
+            } => {
+                let result = (|| {
+                    if thread_ids.is_empty() {
+                        return Err("thread_ids must not be empty".into());
+                    }
+                    let invalid: Vec<_> = thread_ids
+                        .iter()
+                        .filter(|thread_id| self.require_child(&parent_id, thread_id).is_err())
+                        .cloned()
+                        .collect();
+                    if !invalid.is_empty() {
+                        return Err(format!(
+                            "unknown threads or not children of this parent: {}",
+                            invalid.join(", ")
+                        ));
+                    }
+                    self.archive_session_ids(&thread_ids, now_secs(), cx);
+                    cx.notify();
+                    Ok(serde_json::json!({
+                        "ok": true,
+                        "archived": thread_ids.len(),
+                        "thread_ids": thread_ids,
+                    }))
                 })();
                 let _ = reply.try_send(result);
             }
@@ -2209,6 +2248,7 @@ impl AppState {
             "title": meta.title,
             "provider": provider_name(meta.provider),
             "state": state,
+            "archived": meta.archived_at.is_some(),
             "waiting_approval": waiting_approval,
             "approval_request_id": approval_request_id,
             "last_output_tail": tail_chars(&final_message, 600),
@@ -5057,6 +5097,8 @@ impl AppState {
         let child_id = child_id.to_string();
         let parent_id = child.parent_session_id.clone().unwrap();
         let title = child.title;
+        let archive_on_complete = child.archive_on_complete;
+        let result_max_chars = child.result_max_chars;
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
@@ -5082,9 +5124,13 @@ impl AppState {
                     status,
                     &final_assistant_message(&timeline),
                     timeline.usage.as_ref(),
+                    result_max_chars,
                 );
-                state.callback_last_turn.insert(child_id, turn);
+                state.callback_last_turn.insert(child_id.clone(), turn);
                 state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+                if archive_on_complete {
+                    state.archive_session_ids(&[child_id], now_secs(), cx);
+                }
             });
         });
     }
@@ -7114,6 +7160,7 @@ fn provider_name(provider: ProviderKind) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the MCP dispatch schema
 fn build_child_meta(
     parent: &SessionMeta,
     provider: ProviderKind,
@@ -7122,12 +7169,16 @@ fn build_child_meta(
     profile_id: Option<String>,
     approval_mode: ApprovalMode,
     cwd: PathBuf,
+    archive_on_complete: bool,
+    result_max_chars: Option<u32>,
 ) -> SessionMeta {
     let mut meta = SessionMeta::new(provider, cwd, model);
     meta.project_id = parent.project_id.clone();
     meta.parent_session_id = Some(parent.id.clone());
     meta.profile_id = profile_id;
     meta.approval_mode = approval_mode;
+    meta.archive_on_complete = archive_on_complete;
+    meta.result_max_chars = result_max_chars;
     if let Some(effort) = effort {
         meta.option_selections.push(OptionSelection {
             id: "reasoningEffort".into(),
@@ -7217,6 +7268,7 @@ fn assemble_callback_text(
     status: TurnStatus,
     final_message: &str,
     usage: Option<&agent::TokenUsage>,
+    max_chars: Option<u32>,
 ) -> String {
     let state = match status {
         TurnStatus::Completed => "completed",
@@ -7248,12 +7300,13 @@ fn assemble_callback_text(
         "(no assistant output)".to_string()
     } else {
         let count = final_message.chars().count();
-        if count <= 1200 {
+        let cap = max_chars.unwrap_or(1200) as usize;
+        if cap == 0 || count <= cap {
             final_message.to_string()
         } else {
             format!(
                 "Final output tail ({count} chars total — call result {child_id} for the full report):\n{}",
-                tail_chars(final_message, 600)
+                tail_chars(final_message, 600.min(cap))
             )
         }
     };
@@ -9377,12 +9430,16 @@ mod tests {
             Some("work-codex".into()),
             ApprovalMode::AutoAcceptEdits,
             PathBuf::from("/p/sub"),
+            true,
+            Some(2400),
         );
         assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(child.project_id.as_deref(), Some("project"));
         assert_eq!(child.model.as_deref(), Some("gpt-test"));
         assert_eq!(child.profile_id.as_deref(), Some("work-codex"));
         assert_eq!(child.approval_mode, ApprovalMode::AutoAcceptEdits);
+        assert!(child.archive_on_complete);
+        assert_eq!(child.result_max_chars, Some(2400));
         assert_eq!(child.option_selections.len(), 1);
         assert_eq!(child.option_selections[0].id, "reasoningEffort");
         assert_eq!(child.option_selections[0].value, serde_json::json!("high"));
@@ -9390,12 +9447,13 @@ mod tests {
 
     #[test]
     fn callback_text_is_a_compact_digest_with_usage() {
-        let text = assemble_callback_text("child", "Title", TurnStatus::Completed, "done", None);
+        let text =
+            assemble_callback_text("child", "Title", TurnStatus::Completed, "done", None, None);
         assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
         assert!(text.ends_with("\ndone"));
         assert!(!text.contains("tokens:"));
         assert!(
-            assemble_callback_text("child", "Title", TurnStatus::Completed, "", None,)
+            assemble_callback_text("child", "Title", TurnStatus::Completed, "", None, None)
                 .ends_with("\n(no assistant output)")
         );
 
@@ -9405,11 +9463,36 @@ mod tests {
             TurnStatus::Completed,
             &"x".repeat(5000),
             None,
+            None,
         );
         assert!(long.contains(
             "Final output tail (5000 chars total — call result child for the full report):"
         ));
         assert_eq!(long.lines().last().unwrap().chars().count(), 600);
+
+        let unlimited = assemble_callback_text(
+            "child",
+            "Title",
+            TurnStatus::Completed,
+            &"x".repeat(5000),
+            None,
+            Some(0),
+        );
+        assert_eq!(unlimited.lines().last().unwrap().chars().count(), 5000);
+        assert!(!unlimited.contains("call result"));
+
+        let capped = assemble_callback_text(
+            "child",
+            "Title",
+            TurnStatus::Completed,
+            &"x".repeat(5000),
+            None,
+            Some(300),
+        );
+        assert!(capped.contains(
+            "Final output tail (5000 chars total — call result child for the full report):"
+        ));
+        assert_eq!(capped.lines().last().unwrap().chars().count(), 300);
 
         let usage = agent::TokenUsage {
             input_tokens: Some(100),
@@ -9424,10 +9507,124 @@ mod tests {
             TurnStatus::Interrupted,
             "done",
             Some(&usage),
+            None,
         );
         assert!(failed.starts_with("[orchestrate] thread child (\"Title\") failed. tokens:"));
         assert!(failed.ends_with("\ndone"));
         assert!(failed.contains("tokens: input 100 (+25 cached), output 40, total 165."));
+    }
+
+    #[test]
+    fn terminal_callback_archives_only_when_requested() {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-orchestrate-callback-archive-test");
+        let store = (*test_store).clone();
+        let state = cx.new_entity(|_| AppState::new(store));
+        let (parent_commands, _parent_receiver) = smol::channel::unbounded();
+
+        state.host_update(cx, |state, cx| {
+            let mut parent = live_session(ProviderKind::Codex, parent_commands);
+            parent.meta.id = "parent".into();
+            parent.turn_in_flight = true;
+            state.background.insert(parent.meta.id.clone(), parent);
+
+            for (id, archive_on_complete) in [("auto", true), ("keep", false)] {
+                let (commands, _receiver) = smol::channel::unbounded();
+                let mut child = live_session(ProviderKind::Codex, commands);
+                child.meta.id = id.into();
+                child.meta.parent_session_id = Some("parent".into());
+                child.meta.archive_on_complete = archive_on_complete;
+                child.turn_in_flight = true;
+                state.sessions.push(child.meta.clone());
+                state.background.insert(child.meta.id.clone(), child);
+
+                state.on_event(id, persisted_assistant_event("done"), cx);
+                state.on_event(
+                    id,
+                    AgentEvent::TurnCompleted {
+                        turn_id: format!("turn-{id}"),
+                        status: TurnStatus::Completed,
+                        usage: None,
+                    },
+                    cx,
+                );
+            }
+        });
+
+        cx.run_until_parked();
+
+        state.read_with(cx, |state, _| {
+            assert!(
+                state.find_meta("auto").unwrap().archived_at.is_some(),
+                "archive_on_complete child should be archived after callback delivery"
+            );
+            assert!(
+                state.find_meta("keep").unwrap().archived_at.is_none(),
+                "control child should remain unarchived"
+            );
+        });
+    }
+
+    #[test]
+    fn orchestrate_archive_is_batch_atomic_and_parent_scoped() {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-orchestrate-archive-op-test");
+        let store = (*test_store).clone();
+        let state = cx.new_entity(|_| AppState::new(store));
+
+        state.host_update(cx, |state, cx| {
+            for (id, parent_id) in [
+                ("child-a", "parent"),
+                ("child-b", "parent"),
+                ("foreign", "other-parent"),
+            ] {
+                let mut meta =
+                    SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
+                meta.id = id.into();
+                meta.parent_session_id = Some(parent_id.into());
+                state.sessions.push(meta);
+            }
+
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Archive {
+                    parent_id: "parent".into(),
+                    thread_ids: vec!["child-a".into(), "missing".into(), "foreign".into()],
+                },
+                reply,
+                cx,
+            );
+            let error = response.try_recv().unwrap().unwrap_err();
+            assert!(error.contains("missing"));
+            assert!(error.contains("foreign"));
+            assert!(state.find_meta("child-a").unwrap().archived_at.is_none());
+            assert!(state.find_meta("child-b").unwrap().archived_at.is_none());
+
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Archive {
+                    parent_id: "parent".into(),
+                    thread_ids: vec!["child-a".into(), "child-b".into()],
+                },
+                reply,
+                cx,
+            );
+            assert_eq!(
+                response.try_recv().unwrap().unwrap(),
+                serde_json::json!({
+                    "ok": true,
+                    "archived": 2,
+                    "thread_ids": ["child-a", "child-b"],
+                })
+            );
+            assert!(state.find_meta("child-a").unwrap().archived_at.is_some());
+            assert!(state.find_meta("child-b").unwrap().archived_at.is_some());
+            let archived = state.find_meta("child-a").unwrap();
+            assert_eq!(
+                state.child_status_json(&archived, &Timeline::default())["archived"],
+                true
+            );
+        });
     }
 
     #[test]
@@ -12139,6 +12336,8 @@ mod tests {
                     title: "Child".into(),
                     brief: "Inspect the workspace".into(),
                     cwd: Some(missing.to_string_lossy().into_owned()),
+                    archive_on_complete: None,
+                    result_max_chars: None,
                 },
                 reply,
                 cx,

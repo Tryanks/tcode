@@ -16,6 +16,8 @@ pub enum OrchestrateOp {
         title: String,
         brief: String,
         cwd: Option<String>,
+        archive_on_complete: Option<bool>,
+        result_max_chars: Option<u32>,
     },
     Status {
         parent_id: String,
@@ -33,6 +35,10 @@ pub enum OrchestrateOp {
     Cancel {
         parent_id: String,
         thread_id: String,
+    },
+    Archive {
+        parent_id: String,
+        thread_ids: Vec<String>,
     },
     Approve {
         parent_id: String,
