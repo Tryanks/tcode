@@ -8545,7 +8545,6 @@ name = "tcode-ui"
 version = "0.1.0"
 dependencies = [
  "agent",
- "async-channel",
  "base64 0.23.0",
  "block2 0.6.2",
  "chrono",

@@ -370,7 +370,7 @@ impl ImportProgress {
 
     fn start(
         &mut self,
-        receiver: async_channel::Receiver<ExternalImportUpdate>,
+        receiver: smol::channel::Receiver<ExternalImportUpdate>,
         total: usize,
         current_tool: String,
         cx: &mut Context<Self>,

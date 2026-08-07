@@ -1032,7 +1032,7 @@ impl WorkspaceStore {
     /// reverse-RPC affordance documented by [`HostHandle::take_preview_requests`].
     pub fn take_preview_requests(
         &mut self,
-    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
+    ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
         self.host.take_preview_requests()
     }
 
@@ -1214,7 +1214,7 @@ impl WorkspaceStore {
         project_id: &str,
         threads: Vec<ExternalThread>,
         cx: &mut App,
-    ) -> Task<Result<Option<async_channel::Receiver<ExternalImportUpdate>>, String>> {
+    ) -> Task<Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, String>> {
         let host = self.host.clone();
         let project_id = project_id.to_string();
         cx.spawn(async move |_| {

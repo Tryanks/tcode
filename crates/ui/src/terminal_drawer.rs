@@ -76,7 +76,7 @@ struct GridGeometry {
 }
 
 struct TerminalEventSubscription {
-    receiver: async_channel::Receiver<TermEvent>,
+    receiver: smol::channel::Receiver<TermEvent>,
     _task: Task<()>,
 }
 

@@ -21,7 +21,6 @@ chrono = "0.4"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-async-channel = "2"
 smol = "2"
 rushdown = "0.18.0"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
