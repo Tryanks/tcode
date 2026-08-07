@@ -113,60 +113,44 @@ pub fn redact_email(email: &str) -> String {
     format!("{head}{local_mask}@{domain_mask}")
 }
 
-/// The exact per-provider probe messages T3 shows for a missing CLI (§3).
-pub fn missing_cli_message(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_missing").into_owned(),
-        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.probe.claude_missing").into_owned(),
-        ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_missing").into_owned(),
-        ProviderKind::OpenCode => tcode_i18n::tr!("providers.probe.opencode_missing").into_owned(),
-        ProviderKind::Acp => String::new(),
-    }
-}
-
-/// The message shown when the CLI is present but its version command failed.
-pub fn failed_cli_message(provider: ProviderKind) -> String {
-    tcode_i18n::tr!(
-        "providers.probe.failed_run",
-        provider = provider_label(provider)
-    )
-    .into_owned()
-}
-
-/// The message shown when the CLI ran but its auth state could not be read.
-pub fn indeterminate_auth_message(provider: ProviderKind) -> String {
-    tcode_i18n::tr!(
-        "providers.probe.indeterminate_auth",
-        provider = provider_label(provider)
-    )
-    .into_owned()
-}
-
-/// The message shown when the CLI is signed out.
-pub fn unauthenticated_message(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_signed_out").into_owned(),
-        ProviderKind::ClaudeCode => {
-            tcode_i18n::tr!("providers.probe.claude_signed_out").into_owned()
-        }
-        ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_signed_out").into_owned(),
-        ProviderKind::OpenCode => {
-            tcode_i18n::tr!("providers.probe.opencode_signed_out").into_owned()
-        }
-        ProviderKind::Acp => String::new(),
-    }
-}
-
 /// Translate a core-owned semantic probe diagnostic into app-localized copy.
 pub fn probe_diagnostic_message(
     provider: ProviderKind,
     diagnostic: ProviderProbeDiagnostic,
 ) -> String {
     match diagnostic {
-        ProviderProbeDiagnostic::MissingCli => missing_cli_message(provider),
-        ProviderProbeDiagnostic::FailedCli => failed_cli_message(provider),
-        ProviderProbeDiagnostic::Unauthenticated => unauthenticated_message(provider),
-        ProviderProbeDiagnostic::IndeterminateAuth => indeterminate_auth_message(provider),
+        ProviderProbeDiagnostic::MissingCli => match provider {
+            ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_missing").into_owned(),
+            ProviderKind::ClaudeCode => {
+                tcode_i18n::tr!("providers.probe.claude_missing").into_owned()
+            }
+            ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_missing").into_owned(),
+            ProviderKind::OpenCode => {
+                tcode_i18n::tr!("providers.probe.opencode_missing").into_owned()
+            }
+            ProviderKind::Acp => String::new(),
+        },
+        ProviderProbeDiagnostic::FailedCli => tcode_i18n::tr!(
+            "providers.probe.failed_run",
+            provider = provider_label(provider)
+        )
+        .into_owned(),
+        ProviderProbeDiagnostic::Unauthenticated => match provider {
+            ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_signed_out").into_owned(),
+            ProviderKind::ClaudeCode => {
+                tcode_i18n::tr!("providers.probe.claude_signed_out").into_owned()
+            }
+            ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_signed_out").into_owned(),
+            ProviderKind::OpenCode => {
+                tcode_i18n::tr!("providers.probe.opencode_signed_out").into_owned()
+            }
+            ProviderKind::Acp => String::new(),
+        },
+        ProviderProbeDiagnostic::IndeterminateAuth => tcode_i18n::tr!(
+            "providers.probe.indeterminate_auth",
+            provider = provider_label(provider)
+        )
+        .into_owned(),
     }
 }
 

@@ -383,10 +383,7 @@ impl ProviderDialog {
 
     fn add_custom_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.custom_model.read(cx).value().to_string();
-        let catalog = self
-            .store
-            .read(cx)
-            .provider_profile_model_catalog(&self.profile_id, cx);
+        let catalog = self.store.read(cx).profile_catalog(&self.profile_id, cx);
         let mut draft = self
             .store
             .read(cx)

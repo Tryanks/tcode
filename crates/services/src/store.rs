@@ -347,12 +347,7 @@ fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
     }
 }
 
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use tcode_core::project::now_secs;
 
 /// Current wall-clock time in unix milliseconds (used for event envelopes).
 pub fn now_millis() -> u64 {

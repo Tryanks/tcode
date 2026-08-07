@@ -202,7 +202,7 @@ mod native {
 
         fn routed_key(&mut self, session_id: &str, cx: &Context<Self>) -> String {
             let active_key = self.active_key(cx);
-            let active_session_id = self.store.read(cx).preview_active_session_id(cx);
+            let active_session_id = self.store.read(cx).active_session_id(cx);
             preview_key_for_session(
                 session_id,
                 active_session_id.as_deref(),
@@ -816,8 +816,7 @@ mod native {
 
             let visible = {
                 let window_state = self.window_state.read(cx);
-                if self.store.read(cx).preview_active_session_id(cx).as_deref() != Some(session_id)
-                {
+                if self.store.read(cx).active_session_id(cx).as_deref() != Some(session_id) {
                     let _ = reply.try_send(Err(
                         "preview is not visible; the user is viewing another conversation".into(),
                     ));

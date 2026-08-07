@@ -172,7 +172,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let toasts = cx.new(|_| ToastCenter::new());
+        let toasts = cx.new(|_| ToastCenter::default());
         window.set_window_title(&workspace_store.read(cx).shell_window_title(cx));
         let subscription = cx.observe_in(&workspace_store, window, move |_, store, window, cx| {
             window.set_window_title(&store.read(cx).shell_window_title(cx));
@@ -355,7 +355,7 @@ impl AppShell {
 }
 
 fn toast_spec(kind: ToastKind, title: String, detail: Option<String>) -> ToastSpec {
-    let spec = if matches!(kind, ToastKind::Loading { progress: None }) {
+    let spec = if matches!(kind, ToastKind::Loading) {
         ToastSpec::loading(title)
     } else {
         ToastSpec::new(kind, title)

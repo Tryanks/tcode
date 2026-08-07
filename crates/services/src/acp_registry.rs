@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use agent::{AcpLaunch, HIDDEN_ACP_AGENT_IDS};
 use serde::{Deserialize, Serialize};
@@ -183,13 +183,6 @@ fn cache_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CACHE_FILE)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
-}
-
 /// The cached index, whatever its age (`None` when there is no readable cache).
 pub fn cached(data_dir: &Path) -> Option<Registry> {
     let bytes = std::fs::read(cache_path(data_dir)).ok()?;
@@ -206,7 +199,7 @@ pub fn cache_is_fresh(data_dir: &Path) -> bool {
     let Ok(cached) = serde_json::from_slice::<CachedRegistry>(&bytes) else {
         return false;
     };
-    now_secs().saturating_sub(cached.fetched_at) < CACHE_TTL.as_secs()
+    tcode_core::project::now_secs().saturating_sub(cached.fetched_at) < CACHE_TTL.as_secs()
 }
 
 /// The registry, served from cache while fresh and re-fetched otherwise.
@@ -240,7 +233,7 @@ pub fn load(data_dir: &Path) -> Result<Registry, RegistryError> {
 fn write_cache(data_dir: &Path, registry: &Registry) -> std::io::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let cached = CachedRegistry {
-        fetched_at: now_secs(),
+        fetched_at: tcode_core::project::now_secs(),
         registry: registry.clone(),
     };
     let tmp = cache_path(data_dir).with_extension("tmp");
@@ -766,7 +759,8 @@ mod tests {
         let path = cache_path(&dir);
         let mut stale: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        stale["fetched_at"] = serde_json::json!(now_secs() - CACHE_TTL.as_secs() - 1);
+        stale["fetched_at"] =
+            serde_json::json!(tcode_core::project::now_secs() - CACHE_TTL.as_secs() - 1);
         std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
         assert!(!cache_is_fresh(&dir));
         assert_eq!(cached(&dir).unwrap().agents.len(), 7);

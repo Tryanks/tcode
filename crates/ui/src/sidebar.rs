@@ -386,11 +386,9 @@ impl SessionsSidebar {
         let project_ids = store.read(cx).project_ids(cx);
         let mut sweeps = Vec::with_capacity(project_ids.len());
         for project_id in project_ids {
-            sweeps.push(WorkspaceStore::command_for(
-                &store,
-                Command::AutoArchiveSweep { project_id },
-                cx,
-            ));
+            sweeps.push(store.update(cx, |store, cx| {
+                store.command(Command::AutoArchiveSweep { project_id }, cx)
+            }));
         }
         cx.spawn(async move |sidebar, cx| {
             let mut archived = 0;
@@ -408,7 +406,7 @@ impl SessionsSidebar {
                 }
             }
             let _ = sidebar.update(cx, |sidebar, cx| {
-                let settings = sidebar.store.read(cx).sidebar_settings(cx);
+                let settings = sidebar.store.read(cx).settings(cx);
                 sidebar.startup_archive_dialog =
                     (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
                         (
@@ -458,20 +456,21 @@ impl SessionsSidebar {
         } else {
             self.auto_archive_notice = None;
             let (notice_shown, days, keep) = {
-                let settings = self.store.read(cx).sidebar_settings(cx);
+                let settings = self.store.read(cx).settings(cx);
                 (
                     settings.auto_archive_notice_shown,
                     settings.auto_archive_max_idle_days.max(1),
                     settings.auto_archive_keep_count.max(1),
                 )
             };
-            let sweep = WorkspaceStore::command_for(
-                &self.store,
-                Command::AutoArchiveSweep {
-                    project_id: project_id.to_string(),
-                },
-                cx,
-            );
+            let sweep = self.store.update(cx, |store, cx| {
+                store.command(
+                    Command::AutoArchiveSweep {
+                        project_id: project_id.to_string(),
+                    },
+                    cx,
+                )
+            });
             self.expanded_groups.insert(project_id.to_string());
             let project_id = project_id.to_string();
             cx.spawn_in(window, async move |sidebar, cx| {
@@ -509,7 +508,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut settings = self.store.read(cx).sidebar_settings(cx);
+        let mut settings = self.store.read(cx).settings(cx);
         settings.auto_archive_notice_shown = true;
         self.store.update(cx, |store, cx| {
             store.dispatch(Command::UpdateSettings { settings }, cx);
@@ -838,7 +837,7 @@ impl SessionsSidebar {
             return;
         }
         let session_id = session_id.to_string();
-        if store.read(cx).sidebar_settings(cx).skip_delete_confirmation {
+        if store.read(cx).settings(cx).skip_delete_confirmation {
             store.update(cx, |store, cx| {
                 store.dispatch(
                     Command::ArchiveSession {
@@ -892,7 +891,7 @@ impl SessionsSidebar {
     ) {
         let store = self.store.clone();
         let session_id = session_id.to_string();
-        let skip = store.read(cx).sidebar_settings(cx).skip_delete_confirmation;
+        let skip = store.read(cx).settings(cx).skip_delete_confirmation;
         if skip {
             proceed_delete(store, session_id, window, cx);
             return;
@@ -1019,7 +1018,7 @@ impl SessionsSidebar {
             .icon(IconName::LayoutDashboard)
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let mut settings = this.store.read(cx).sidebar_settings(cx);
+                let mut settings = this.store.read(cx).settings(cx);
                 settings.sidebar_layout = match layout {
                     SidebarLayout::Flat => SidebarLayout::Grouped,
                     SidebarLayout::Grouped => SidebarLayout::Flat,

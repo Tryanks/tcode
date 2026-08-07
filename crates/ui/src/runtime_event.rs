@@ -204,7 +204,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         ),
         RuntimeToast::GitStarted { operation, action } => (
             RuntimeToastDisposition::Start(*operation),
-            ToastKind::Loading { progress: None },
+            ToastKind::Loading,
             git_action_toast_titles(*action).0,
             None,
             None,
@@ -243,7 +243,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         ),
         RuntimeToast::AcpInstallStarted { operation, name } => (
             RuntimeToastDisposition::Start(*operation),
-            ToastKind::Loading { progress: None },
+            ToastKind::Loading,
             tcode_i18n::tr!("providers.acp.installing", name = name).into_owned(),
             None,
             None,
@@ -431,7 +431,7 @@ mod tests {
                             presented.disposition,
                             RuntimeToastDisposition::Start(*operation)
                         );
-                        assert_eq!(presented.kind, ToastKind::Loading { progress: None });
+                        assert_eq!(presented.kind, ToastKind::Loading);
                     }
                     RuntimeToast::GitSucceeded { operation, .. }
                     | RuntimeToast::AcpInstallSucceeded { operation, .. } => {

@@ -55,7 +55,7 @@ impl OrchestrateSettingsPanel {
     pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let generic_value = store
             .read(cx)
-            .orchestrate_editor_settings(cx)
+            .settings(cx)
             .orchestrate
             .generic_identity
             .clone();
@@ -120,7 +120,7 @@ impl OrchestrateSettingsPanel {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut settings = self.store.read(cx).orchestrate_editor_settings(cx);
+        let mut settings = self.store.read(cx).settings(cx);
         mutate(&mut settings);
         self.store.update(cx, |store, cx| {
             store.dispatch(Command::UpdateSettings { settings }, cx)
@@ -140,11 +140,7 @@ impl OrchestrateSettingsPanel {
         self.input_subscriptions.truncate(1);
         self.identity_rows.clear();
         self.child_rows.clear();
-        let orchestrate = self
-            .store
-            .read(cx)
-            .orchestrate_editor_settings(cx)
-            .orchestrate;
+        let orchestrate = self.store.read(cx).settings(cx).orchestrate;
 
         for entry in orchestrate.model_identities {
             let identity = cx.new(|cx| {
@@ -292,7 +288,7 @@ impl OrchestrateSettingsPanel {
         let identity = self
             .store
             .read(cx)
-            .orchestrate_editor_settings(cx)
+            .settings(cx)
             .orchestrate
             .generic_identity
             .clone();
@@ -442,7 +438,7 @@ impl OrchestrateSettingsPanel {
     }
 
     fn reset_child_definition(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = self.store.read(cx).orchestrate_editor_settings(cx);
+        let settings = self.store.read(cx).settings(cx);
         let Some(entry) = settings.orchestrate.child_models.get(index) else {
             return;
         };
@@ -550,12 +546,7 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self
-            .store
-            .read(cx)
-            .orchestrate_editor_settings(cx)
-            .orchestrate
-            .child_approval;
+        let selected = self.store.read(cx).settings(cx).orchestrate.child_approval;
         let selected_label = match selected {
             ChildApprovalMode::Orchestrator => {
                 tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
@@ -861,11 +852,7 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
-        let settings = self
-            .store
-            .read(cx)
-            .orchestrate_editor_settings(cx)
-            .orchestrate;
+        let settings = self.store.read(cx).settings(cx).orchestrate;
         let mut section = v_flex().w_full().gap_3().child(self.section_heading(
             tcode_i18n::tr!("orchestrate.children.title"),
             tcode_i18n::tr!("orchestrate.children.description"),

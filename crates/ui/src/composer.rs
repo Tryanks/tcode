@@ -3602,7 +3602,7 @@ fn render_model_pane(
     // user-created profiles whose switch is on. Each is its own rail.
     let profile_ids: Vec<String> = {
         let store = store_entity.read(cx);
-        let profiles = store.enabled_provider_profiles(cx);
+        let profiles = store.enabled_profiles();
         PICKER_PROVIDER_KINDS
             .into_iter()
             .flat_map(|kind| {

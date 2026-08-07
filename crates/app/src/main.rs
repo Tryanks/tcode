@@ -289,26 +289,17 @@ fn main() {
         .nth(1);
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
     let mut host_services = HostServices::default();
-    match preview_mcp::start() {
-        Ok(server) => {
-            log::info!("preview MCP server listening at {}", server.url);
-            host_services.preview = Some(server);
+    match mcp_host::Host::bind() {
+        Ok(mut mcp_host) => {
+            host_services.preview = Some(preview_mcp::start(&mut mcp_host));
+            host_services.orchestrate = Some(orchestrate_mcp::start(&mut mcp_host));
+            host_services.computer_use = Some(computer_use_mcp::start(&mut mcp_host));
+            if let Err(error) = mcp_host.start() {
+                log::warn!("MCP host failed to start: {error}");
+                host_services = HostServices::default();
+            }
         }
-        Err(err) => log::warn!("preview MCP server failed to start: {err}"),
-    }
-    match orchestrate_mcp::start() {
-        Ok(server) => {
-            log::info!("orchestrate MCP server listening at {}", server.url);
-            host_services.orchestrate = Some(server);
-        }
-        Err(err) => log::warn!("orchestrate MCP server failed to start: {err}"),
-    }
-    match computer_use_mcp::start() {
-        Ok(server) => {
-            log::info!("computer-use MCP server listening at {}", server.url);
-            host_services.computer_use = Some(server);
-        }
-        Err(err) => log::warn!("computer-use MCP server failed to start: {err}"),
+        Err(error) => log::warn!("MCP host failed to bind: {error}"),
     }
     let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
 
@@ -358,7 +349,7 @@ fn main() {
 
             let workspace_store =
                 cx.new(|cx| tcode_ui::store::WorkspaceStore::new(host.clone(), cx));
-            let initial_settings = workspace_store.read(cx).sidebar_settings(cx);
+            let initial_settings = workspace_store.read(cx).settings(cx);
             let sidebar_collapsed = initial_settings.sidebar_collapsed;
             let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
@@ -482,7 +473,7 @@ fn main() {
                         let workspace_store = workspace_store.clone();
                         let window_state = window_state.clone();
                         move |window, cx| {
-                            match theme_store.read(cx).settings_page_settings(cx).theme_mode {
+                            match theme_store.read(cx).settings(cx).theme_mode {
                                 settings::ThemeMode::Light => {
                                     Theme::change(ComponentThemeMode::Light, Some(window), cx)
                                 }

@@ -21,7 +21,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,
-    popover::Popover,
     tooltip::Tooltip,
     v_flex,
 };
@@ -1196,10 +1195,7 @@ impl ChatView {
             .disabled(disabled);
         let workspace_store = self.workspace_store.clone();
         Some(
-            Popover::new(("rewind-menu", turn))
-                // T3 overlay contour (shadow_xl at the 14px overlay radius).
-                .rounded(crate::material::radius_overlay())
-                .shadow_xl()
+            crate::material::overlay_popover(("rewind-menu", turn))
                 .anchor(Anchor::TopRight)
                 .trigger(trigger)
                 .content(move |_state, _window, cx| {
@@ -1724,7 +1720,7 @@ impl ChatView {
                 tcode_i18n::tr!("chat.copy")
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                cx.write_to_clipboard(copy_payload(text.as_ref()));
+                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
                 this.mark_copied(mark.clone(), cx);
             }))
     }
@@ -2284,7 +2280,12 @@ impl ChatView {
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .child(dir.clone()),
                             )
-                            .child(diff_counts(dir_add, dir_del, cx)),
+                            .child(diff_counts_colored(
+                                dir_add,
+                                dir_del,
+                                cx.theme().success,
+                                cx.theme().danger,
+                            )),
                     );
                 }
                 for file in files {
@@ -2323,7 +2324,12 @@ impl ChatView {
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .child(file.name),
                         )
-                        .child(diff_counts(file.added, file.deleted, cx)),
+                        .child(diff_counts_colored(
+                            file.added,
+                            file.deleted,
+                            cx.theme().success,
+                            cx.theme().danger,
+                        )),
                     );
                 }
             }
@@ -2769,10 +2775,7 @@ impl ChatView {
         // ChatView entity (the popover content runs at App level, not in a view
         // context, so `cx.listener` is unavailable here).
         let chat = cx.entity();
-        let chevron = Popover::new("git-menu")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        let chevron = crate::material::overlay_popover("git-menu")
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("git-menu-trigger")
@@ -2900,10 +2903,7 @@ impl ChatView {
         let main_cwd = cwd.clone();
         let menu_cwd = cwd;
 
-        let chevron = Popover::new("open-menu")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        let chevron = crate::material::overlay_popover("open-menu")
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("open-menu-trigger")
@@ -2960,7 +2960,7 @@ impl ChatView {
                                 .into(),
                         )
                         .on_click(move |_, window, cx| {
-                            reveal_in_file_manager(&reveal_cwd, cx);
+                            cx.reveal_path(&reveal_cwd);
                             p2.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
                     )
@@ -3116,7 +3116,7 @@ impl ChatView {
                                 .flex_none()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(crate::sidebar::humanize_ago(
+                                .child(crate::time::humanize_ago(
                                     now_secs().saturating_sub(last_activity),
                                 )),
                         )
@@ -3337,13 +3337,6 @@ impl Render for ChatView {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The clipboard payload of a message's Copy action: the message's **raw text**
-/// (the markdown source a message was written in / streamed as), never the
-/// rendered document the timeline draws. See `copy_puts_raw_text_on_the_clipboard`.
-fn copy_payload(text: &str) -> ClipboardItem {
-    ClipboardItem::new_string(text.to_string())
-}
-
 /// The localized state word for a callback disclosure row (`completed` /
 /// `failed`), falling back to the raw provider word for anything unexpected.
 fn localized_callback_state(state: &str) -> Cow<'static, str> {
@@ -3427,12 +3420,6 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
             cx,
         );
     }
-}
-
-/// Reveal `cwd` in the platform's file manager (Finder / Explorer / the XDG
-/// file manager). gpui does the platform dispatch, so no shell-out is needed.
-fn reveal_in_file_manager(cwd: &Path, cx: &mut App) {
-    cx.reveal_path(cwd);
 }
 
 /// Leading icon for a Work Log activity row, keyed on the item's status.
@@ -3806,10 +3793,6 @@ fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>
     groups
 }
 
-fn diff_counts(added: u32, deleted: u32, cx: &Context<ChatView>) -> AnyElement {
-    diff_counts_colored(added, deleted, cx.theme().success, cx.theme().danger).into_any_element()
-}
-
 /// The `+N -N` pair, `flex_none` so it never gives ground to a long path.
 fn diff_counts_colored(added: u32, deleted: u32, added_color: Hsla, deleted_color: Hsla) -> Div {
     h_flex()
@@ -3896,34 +3879,25 @@ fn file_edit_row(row: &LiveEditRow, style: &FileEditRowStyle) -> Div {
 /// targets — unlike the hand-rolled `localtime_r` FFI it replaces, whose `tm`
 /// layout was UB on 32-bit and which fell back to a UTC clock on Windows.
 fn format_local_time(unix_ms: u64) -> String {
-    use chrono::{Local, TimeZone as _, Timelike as _};
+    use chrono::{Local, TimeZone as _};
 
-    let Some(local) = Local.timestamp_millis_opt(unix_ms as i64).single() else {
-        return String::new();
-    };
-    twelve_hour(local.hour() as i32, local.minute() as i32)
-}
-
-fn twelve_hour(hour24: i32, minute: i32) -> String {
-    let (hour12, meridiem) = match hour24 {
-        0 => (12, "AM"),
-        1..=11 => (hour24, "AM"),
-        12 => (12, "PM"),
-        _ => (hour24 - 12, "PM"),
-    };
-    format!("{hour12}:{minute:02} {meridiem}")
+    Local
+        .timestamp_millis_opt(unix_ms as i64)
+        .single()
+        .map(|time| time.format("%-I:%M %p").to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         ChatView, FileEditRowStyle, ListSync, LiveEditRow, MdState, MdSync, Segment, WorkLogCounts,
-        copy_payload, diff_stats, displayed_error_text, file_edit_row, finished_work_log_label,
-        format_duration, format_span, index_turns, list_sync, live_edit_counts, live_edit_rows,
-        md_sync, plain_text_as_markdown, previous_logs_toggle_label, segment_entries,
-        start_hub_projects, timeline_overdraw, turn_time_clauses, turn_time_footer,
-        turn_time_parts, turn_work_log_summary, work_log_auto_expands, work_log_counts,
-        work_log_row_entries, work_log_summary,
+        diff_stats, displayed_error_text, file_edit_row, finished_work_log_label, format_duration,
+        format_span, index_turns, list_sync, live_edit_counts, live_edit_rows, md_sync,
+        plain_text_as_markdown, previous_logs_toggle_label, segment_entries, start_hub_projects,
+        timeline_overdraw, turn_time_clauses, turn_time_footer, turn_time_parts,
+        turn_work_log_summary, work_log_auto_expands, work_log_counts, work_log_row_entries,
+        work_log_summary,
     };
     use crate::markdown::MarkdownState;
     use crate::window_state::WindowState;
@@ -5111,7 +5085,7 @@ This begins after the hard break."#;
         cx.update(gpui_component::init);
         let raw = "Done — **bold**, `code` and:\n\n- one\n- two\n";
 
-        let payload = copy_payload(raw);
+        let payload = gpui::ClipboardItem::new_string(raw.to_string());
         assert_eq!(payload.text().as_deref(), Some(raw));
 
         // The rendered document is a different (lossy) string; copying it would

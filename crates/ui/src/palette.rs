@@ -28,7 +28,7 @@ use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
 use crate::store::WorkspaceStore;
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
 
 /// Score `text` against a fuzzy `query` (case-insensitive subsequence match).
@@ -74,19 +74,6 @@ enum Action {
     OpenThread {
         session_id: String,
     },
-}
-
-/// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
-fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
 }
 
 /// One rendered palette row.
@@ -209,7 +196,7 @@ impl CommandPalette {
                 ));
             }
         };
-        for group in store.palette_groups(cx) {
+        for group in store.grouped_sessions(cx) {
             push_action(
                 tcode_i18n::tr!("palette.new_thread", project = group.project.name).into_owned(),
                 IconName::Plus,
@@ -262,7 +249,7 @@ impl CommandPalette {
         // Threads (fuzzy over titles) — suppressed in `>`-actions-only mode.
         if !actions_only {
             let mut threads: Vec<(i32, Item)> = Vec::new();
-            for group in store.palette_groups(cx) {
+            for group in store.grouped_sessions(cx) {
                 for meta in &group.sessions {
                     if let Some(score) = fuzzy_score(&query, &meta.title) {
                         threads.push((
@@ -324,7 +311,7 @@ impl CommandPalette {
                     ThemeMode::Dark
                 };
                 self.store.update(cx, |store, cx| {
-                    let mut settings = store.palette_settings(cx);
+                    let mut settings = store.settings(cx);
                     settings.theme_mode = next;
                     store.dispatch(Command::UpdateSettings { settings }, cx);
                 });

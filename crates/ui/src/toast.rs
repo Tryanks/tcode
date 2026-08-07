@@ -25,20 +25,19 @@ use gpui_component::{
 /// Opaque handle to a pushed toast, used to update or dismiss it in place.
 pub type ToastId = u64;
 
-/// The visual/semantic kind of a toast. `Loading` optionally carries a 0.0–1.0
-/// progress fraction (rendered as a thin bar); the rest are terminal.
+/// The visual/semantic kind of a toast. `Loading` is the only non-terminal kind.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ToastKind {
     Success,
     Info,
     Warning,
     Error,
-    Loading { progress: Option<f32> },
+    Loading,
 }
 
 impl ToastKind {
     fn is_terminal(self) -> bool {
-        !matches!(self, ToastKind::Loading { .. })
+        !matches!(self, ToastKind::Loading)
     }
 
     fn icon(self) -> IconName {
@@ -47,7 +46,7 @@ impl ToastKind {
             ToastKind::Info => IconName::Info,
             ToastKind::Warning => IconName::TriangleAlert,
             ToastKind::Error => IconName::CircleX,
-            ToastKind::Loading { .. } => IconName::LoaderCircle,
+            ToastKind::Loading => IconName::LoaderCircle,
         }
     }
 }
@@ -81,9 +80,6 @@ pub struct ToastSpec {
     /// Optional secondary/expandable body (e.g. a command's failure output).
     pub detail: Option<SharedString>,
     pub actions: Vec<ToastAction>,
-    /// Auto-dismiss when the toast reaches a terminal, non-error state. Errors
-    /// persist so the user can read/copy the detail.
-    pub auto_dismiss: bool,
 }
 
 impl ToastSpec {
@@ -93,12 +89,11 @@ impl ToastSpec {
             title: title.into(),
             detail: None,
             actions: Vec::new(),
-            auto_dismiss: true,
         }
     }
 
     pub fn loading(title: impl Into<SharedString>) -> Self {
-        Self::new(ToastKind::Loading { progress: None }, title)
+        Self::new(ToastKind::Loading, title)
     }
 
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
@@ -113,7 +108,6 @@ struct Toast {
     title: SharedString,
     detail: Option<SharedString>,
     actions: Vec<ToastAction>,
-    auto_dismiss: bool,
     expanded: bool,
 }
 
@@ -134,10 +128,6 @@ impl Default for ToastCenter {
 }
 
 impl ToastCenter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Push a new toast, returning its id for later in-place updates.
     pub fn push(&mut self, spec: ToastSpec, cx: &mut Context<Self>) -> ToastId {
         let id = self.next_id;
@@ -148,10 +138,9 @@ impl ToastCenter {
             title: spec.title,
             detail: spec.detail,
             actions: spec.actions,
-            auto_dismiss: spec.auto_dismiss,
             expanded: false,
         });
-        self.arm_auto_dismiss(id, spec.kind, spec.auto_dismiss, cx);
+        self.arm_auto_dismiss(id, spec.kind, cx);
         cx.notify();
         id
     }
@@ -167,16 +156,15 @@ impl ToastCenter {
         detail: Option<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        let auto_dismiss = if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
+        if let Some(toast) = self.toasts.iter_mut().find(|t| t.id == id) {
             toast.kind = kind;
             toast.title = title.into();
             toast.detail = detail;
             toast.actions.clear();
-            toast.auto_dismiss
         } else {
             return;
-        };
-        self.arm_auto_dismiss(id, kind, auto_dismiss, cx);
+        }
+        self.arm_auto_dismiss(id, kind, cx);
         cx.notify();
     }
 
@@ -202,14 +190,8 @@ impl ToastCenter {
     }
 
     /// Arm an auto-dismiss timer when `kind` is a terminal, non-error state.
-    fn arm_auto_dismiss(
-        &self,
-        id: ToastId,
-        kind: ToastKind,
-        auto_dismiss: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !auto_dismiss || !kind.is_terminal() || matches!(kind, ToastKind::Error) {
+    fn arm_auto_dismiss(&self, id: ToastId, kind: ToastKind, cx: &mut Context<Self>) {
+        if !kind.is_terminal() || matches!(kind, ToastKind::Error) {
             return;
         }
         let millis = match kind {
@@ -232,9 +214,7 @@ impl ToastCenter {
     fn accent(kind: ToastKind, cx: &App) -> (gpui::Hsla, gpui::Hsla) {
         match kind {
             ToastKind::Success => (cx.theme().success, cx.theme().success_foreground),
-            ToastKind::Info | ToastKind::Loading { .. } => {
-                (cx.theme().info, cx.theme().info_foreground)
-            }
+            ToastKind::Info | ToastKind::Loading => (cx.theme().info, cx.theme().info_foreground),
             ToastKind::Warning => (cx.theme().warning, cx.theme().warning_foreground),
             ToastKind::Error => (cx.theme().danger, cx.theme().danger_foreground),
         }
@@ -277,28 +257,6 @@ impl ToastCenter {
         }
 
         let mut card = v_flex().flex_1().min_w_0().p_3().gap_2().child(header);
-
-        // Progress bar for loading toasts with a known fraction.
-        if let ToastKind::Loading {
-            progress: Some(fraction),
-        } = toast.kind
-        {
-            let pct = fraction.clamp(0., 1.) * 100.;
-            card = card.child(
-                div()
-                    .w_full()
-                    .h(px(4.))
-                    .rounded_full()
-                    .bg(cx.theme().muted)
-                    .child(
-                        div()
-                            .h_full()
-                            .rounded_full()
-                            .bg(accent)
-                            .w(gpui::relative(pct / 100.)),
-                    ),
-            );
-        }
 
         // Expandable detail body ("Show details" / "Hide details").
         if let Some(detail) = toast.detail.clone() {

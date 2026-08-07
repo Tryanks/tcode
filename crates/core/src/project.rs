@@ -453,7 +453,7 @@ pub fn migrate_index(mut file: IndexFile) -> IndexFile {
     file
 }
 
-fn now_secs() -> u64 {
+pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())

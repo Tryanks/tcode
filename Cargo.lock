@@ -1428,6 +1428,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
  "log",
+ "mcp-host",
  "objc2-foundation 0.3.2",
  "rmcp",
  "schemars 1.2.2",
@@ -4826,6 +4827,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-host"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "axum",
+ "log",
+ "rmcp",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5758,14 +5771,13 @@ name = "orchestrate-mcp"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "axum",
  "log",
+ "mcp-host",
  "rmcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -6308,14 +6320,13 @@ name = "preview-mcp"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "axum",
  "log",
+ "mcp-host",
  "rmcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -8450,6 +8461,7 @@ dependencies = [
  "gpui-component",
  "gpui_platform",
  "log",
+ "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
  "smol",

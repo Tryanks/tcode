@@ -447,7 +447,7 @@ impl WorkspaceStore {
         }
     }
 
-    fn all_provider_profiles(&self) -> Vec<ResolvedProfile> {
+    pub fn all_provider_profiles(&self) -> Vec<ResolvedProfile> {
         let mut profiles = Vec::new();
         for kind in [
             agent::ProviderKind::Codex,
@@ -460,14 +460,14 @@ impl WorkspaceStore {
         profiles
     }
 
-    fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
+    pub fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
         self.all_provider_profiles()
             .into_iter()
             .filter(|profile| profile.settings.enabled)
             .collect()
     }
 
-    fn profile_catalog(&self, profile_id: &str, _cx: &App) -> Vec<agent::ModelSpec> {
+    pub fn profile_catalog(&self, profile_id: &str, _cx: &App) -> Vec<agent::ModelSpec> {
         if Settings::is_builtin_profile_id(profile_id) {
             let kind = self
                 .settings_replica
@@ -497,15 +497,6 @@ impl WorkspaceStore {
         cx: &mut App,
     ) -> Task<Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>> {
         let host = self.host.clone();
-        cx.spawn(async move |_| host.command(command).await)
-    }
-
-    pub fn command_for(
-        store: &Entity<Self>,
-        command: Command,
-        cx: &mut App,
-    ) -> Task<Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>> {
-        let host = store.read(cx).host.clone();
         #[cfg(test)]
         {
             let result = smol::block_on(host.command(command));
@@ -828,11 +819,7 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn palette_groups(&self, cx: &App) -> Vec<ProjectGroup> {
-        self.grouped_sessions(cx)
-    }
-
-    pub fn palette_settings(&self, _cx: &App) -> Settings {
+    pub fn settings(&self, _cx: &App) -> Settings {
         self.settings_replica.clone()
     }
 
@@ -979,22 +966,6 @@ impl WorkspaceStore {
         self.index_replica.0.clone()
     }
 
-    pub fn sidebar_settings(&self, _cx: &App) -> Settings {
-        self.settings_replica.clone()
-    }
-
-    pub fn orchestrate_editor_settings(&self, _cx: &App) -> Settings {
-        self.settings_replica.clone()
-    }
-
-    pub fn settings_page_settings(&self, _cx: &App) -> Settings {
-        self.settings_replica.clone()
-    }
-
-    pub fn settings_provider_profiles(&self, _cx: &App) -> Vec<ResolvedProfile> {
-        self.all_provider_profiles()
-    }
-
     pub fn settings_installed_acp_agents(
         &self,
         _cx: &App,
@@ -1049,10 +1020,6 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn preview_active_session_id(&self, cx: &App) -> Option<String> {
-        self.active_session_id(cx)
-    }
-
     pub fn preview_panel_showing(&self, _cx: &App) -> bool {
         self.active_conversation_ui()
             .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
@@ -1072,10 +1039,6 @@ impl WorkspaceStore {
         _cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
         self.host.take_preview_requests()
-    }
-
-    pub fn enabled_provider_profiles(&self, _cx: &App) -> Vec<ResolvedProfile> {
-        self.enabled_profiles()
     }
 
     pub fn provider_profile_kind(&self, profile_id: &str, _cx: &App) -> agent::ProviderKind {
@@ -1173,14 +1136,6 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
-    pub fn provider_profile_model_catalog(
-        &self,
-        profile_id: &str,
-        cx: &App,
-    ) -> Vec<agent::ModelSpec> {
-        self.profile_catalog(profile_id, cx)
-    }
-
     pub fn provider_dialog_models(
         &self,
         profile_id: &str,
@@ -1255,14 +1210,6 @@ impl WorkspaceStore {
             .iter()
             .find(|project| project.id == project_id)
             .map(|project| project.root.clone())
-    }
-
-    pub fn project_id_for_root(&self, root: &std::path::Path, _cx: &App) -> Option<String> {
-        self.index_replica
-            .1
-            .iter()
-            .find(|project| project.root == root)
-            .map(|project| project.id.clone())
     }
 
     pub fn scan_external_history(&self, cx: &mut App) -> Task<Vec<RecentDir>> {
@@ -2020,17 +1967,6 @@ impl WorkspaceStore {
         .unwrap_or_default()
     }
 
-    pub fn archived_session_count(&self, project_id: Option<&str>, _cx: &App) -> usize {
-        self.index_replica
-            .0
-            .iter()
-            .filter(|meta| {
-                meta.archived_at.is_some()
-                    && project_id.is_none_or(|id| meta.project_id.as_deref() == Some(id))
-            })
-            .count()
-    }
-
     pub fn worktree_orphaned_by_delete(&self, session_id: &str, _cx: &App) -> Option<WorktreeInfo> {
         let meta = self
             .index_replica
@@ -2299,7 +2235,7 @@ mod tests {
                 session_id: seed_session_id.clone(),
             },
         );
-        let mut settings = workspace.read_with(cx, |store, cx| store.settings_page_settings(cx));
+        let mut settings = workspace.read_with(cx, |store, cx| store.settings(cx));
         settings.word_wrap_diffs = !settings.word_wrap_diffs;
         let expected_word_wrap = settings.word_wrap_diffs;
         command(&host, Command::UpdateSettings { settings });

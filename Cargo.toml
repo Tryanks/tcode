@@ -7,6 +7,7 @@ members = [
     "crates/services",
     "crates/runtime",
     "crates/term",
+    "crates/mcp-host",
     "crates/preview-mcp",
     "crates/orchestrate-mcp",
     "crates/computer-use-mcp",

@@ -14,7 +14,6 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    popover::Popover,
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -128,7 +127,7 @@ impl ProviderModelPicker {
         let mut options = Vec::new();
         // Only enabled profiles are offered for new selections; a disabled
         // profile stays configurable in Settings but never reaches the picker.
-        for profile in self.store.read(cx).enabled_provider_profiles(cx) {
+        for profile in self.store.read(cx).enabled_profiles() {
             let catalog = self.store.read(cx).provider_model_catalog(profile.kind, cx);
             let profile_id =
                 (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
@@ -220,19 +219,14 @@ impl ProviderModelPicker {
 impl Render for ProviderModelPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker = cx.entity();
-        Popover::new(self.popover_id)
-            // T3 overlay contour: one panel surface (popover fill + hairline +
-            // shadow_xl at the 14px overlay radius). The pane content is transparent
-            // so the popup reads as a single card, matching the composer picker.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover(self.popover_id)
             .trigger(self.trigger(cx))
             .content(move |_, _, cx| {
                 let (options, profiles, selected_profile, selected, excluded) = {
                     let picker = picker.read(cx);
                     (
                         picker.options(cx),
-                        picker.store.read(cx).enabled_provider_profiles(cx),
+                        picker.store.read(cx).enabled_profiles(),
                         picker.selected_profile.clone(),
                         picker.selected.clone(),
                         picker.excluded.clone(),

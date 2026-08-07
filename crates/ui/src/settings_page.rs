@@ -138,7 +138,7 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let title_generation = store.read(cx).settings_page_settings(cx).title_generation;
+        let title_generation = store.read(cx).settings(cx).title_generation;
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(
                 store.clone(),
@@ -152,11 +152,7 @@ impl SettingsPage {
         });
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| {
-                let selection = this
-                    .store
-                    .read(cx)
-                    .settings_page_settings(cx)
-                    .title_generation;
+                let selection = this.store.read(cx).settings(cx).title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
@@ -194,7 +190,7 @@ impl SettingsPage {
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
         let debug_acp_dialog_pending = window_state.read(cx).debug_acp_dialog;
-        let settings = store.read(cx).settings_page_settings(cx);
+        let settings = store.read(cx).settings(cx);
         let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -299,7 +295,7 @@ impl SettingsPage {
     /// (Re)build the provider cards from current settings — also used after
     /// "Restore defaults", which invalidates the cards' cached settings.
     fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
-        let profiles = self.store.read(cx).settings_provider_profiles(cx);
+        let profiles = self.store.read(cx).all_provider_profiles();
         self.provider_cards = profiles
             .into_iter()
             .map(|profile| {
@@ -351,7 +347,7 @@ impl SettingsPage {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut settings = self.store.read(cx).settings_page_settings(cx);
+        let mut settings = self.store.read(cx).settings(cx);
         mutate(&mut settings);
         self.store.update(cx, |store, cx| {
             store.dispatch(Command::UpdateSettings { settings }, cx)
@@ -628,7 +624,7 @@ impl SettingsPage {
                         let home_url = page
                             .store
                             .read(cx)
-                            .settings_page_settings(cx)
+                            .settings(cx)
                             .browser
                             .home_url
                             .clone()
@@ -675,7 +671,7 @@ impl SettingsPage {
     }
 
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings(cx);
         // One mega-group on empty paper reads generic. Split the rows into three
         // semantic groups (System-Settings rhythm): 20-24px between groups, each
         // under an 11px caption.
@@ -761,7 +757,7 @@ impl SettingsPage {
         let current_ids: Vec<String> = self
             .store
             .read(cx)
-            .settings_provider_profiles(cx)
+            .all_provider_profiles()
             .into_iter()
             .map(|profile| profile.id)
             .collect();
@@ -849,7 +845,7 @@ impl SettingsPage {
     /// Unarchive + Delete-permanently controls (Group A).
     fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.store.read(cx).archived_groups(cx);
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings(cx);
         let days = settings.auto_archive_max_idle_days.max(1);
         let keep = settings.auto_archive_keep_count.max(1);
         let controls = v_flex()
@@ -1035,7 +1031,7 @@ impl SettingsPage {
     // -- Computer Use & Browser pages --------------------------------------
 
     fn render_computer_use(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings(cx);
         let rows = vec![
             self.toggle_row(
                 "cu-enabled",
@@ -1072,7 +1068,7 @@ impl SettingsPage {
     }
 
     fn render_browser(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings(cx);
         let rows = vec![
             self.toggle_row(
                 "browser-enabled",

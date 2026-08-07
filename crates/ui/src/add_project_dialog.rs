@@ -18,7 +18,7 @@ use gpui_component::{
 };
 
 use crate::store::WorkspaceStore;
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use tcode_protocol::{Command, ExternalThread, RecentDir, SourceTool};
 use tcode_runtime::ui_facade::ExternalImportUpdate;
 
@@ -533,18 +533,6 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
     })
     .collect::<Vec<_>>()
     .join(" · ")
-}
-
-fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
 }
 
 #[cfg(test)]
