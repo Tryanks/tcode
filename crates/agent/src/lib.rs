@@ -17,6 +17,7 @@ mod subagent_tail;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use smol::channel::{Receiver, Sender};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,8 +110,67 @@ pub enum AcpLaunch {
 
 /// Provider-shaped opaque state needed to resume a session later
 /// (Codex: `{"thread_id": ...}`; Claude/pi/OpenCode use their native ids).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResumeCursor(pub serde_json::Value);
+
+impl ResumeCursor {
+    pub(crate) fn str_field(&self, keys: &[&str]) -> Option<&str> {
+        keys.iter()
+            .find_map(|key| self.0.get(*key).and_then(serde_json::Value::as_str))
+    }
+}
+
+pub(crate) fn processed_tokens(usage: TokenUsage) -> u64 {
+    usage.used_tokens.unwrap_or_else(|| {
+        usage
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(usage.output_tokens.unwrap_or(0))
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
+    })
+}
+
+pub(crate) fn start_mapped_turn(
+    prefix: &str,
+    counter: &mut u64,
+    current: &mut Option<String>,
+    usage: &mut Option<TokenUsage>,
+    failed: &mut bool,
+) -> Vec<AgentEvent> {
+    if current.is_some() {
+        return Vec::new();
+    }
+    *counter += 1;
+    let turn_id = format!("{prefix}-turn-{counter}");
+    *current = Some(turn_id.clone());
+    *usage = None;
+    *failed = false;
+    vec![AgentEvent::TurnStarted { turn_id }]
+}
+
+pub(crate) fn complete_mapped_turn(
+    current: &mut Option<String>,
+    interrupted: &mut bool,
+    failed: bool,
+    usage: Option<TokenUsage>,
+) -> Vec<AgentEvent> {
+    let Some(turn_id) = current.take() else {
+        return Vec::new();
+    };
+    let status = if *interrupted {
+        TurnStatus::Interrupted
+    } else if failed {
+        TurnStatus::Failed
+    } else {
+        TurnStatus::Completed
+    };
+    *interrupted = false;
+    vec![AgentEvent::TurnCompleted {
+        turn_id,
+        status,
+        usage,
+    }]
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionOptions {
@@ -133,17 +193,8 @@ pub struct SessionOptions {
     /// Build (default) vs Plan interaction mode. Codex applies this per turn via
     /// `collaborationMode`; Claude via `--permission-mode plan` / restore.
     pub interaction_mode: InteractionMode,
-    /// The in-process preview MCP server to register with this session, if it
-    /// came up. Each provider injects it at spawn time (Claude: `--mcp-config`;
-    /// Codex: `-c mcp_servers.tcode_preview=…`) so the agent can drive the
-    /// embedded preview browser. `None` = don't register any preview tooling.
-    pub mcp_server: Option<McpRegistration>,
-    /// The tcode orchestrator MCP server, scoped to this parent session by its
-    /// bearer token. Only orchestrate-enabled sessions receive it.
-    pub orchestrate_server: Option<McpRegistration>,
-    /// The process-wide computer-use MCP server. The runtime supplies it only
-    /// when the global computer-use setting is enabled.
-    pub computer_use_server: Option<McpRegistration>,
+    /// Enabled tcode HTTP MCP servers to register with this session.
+    pub mcp_servers: Vec<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
     /// into the child's environment, plus the home-directory override. See
     /// [`LaunchEnv`].
@@ -212,19 +263,6 @@ impl McpRegistration {
     pub const SERVER_NAME_ORCHESTRATE: &'static str = "tcode_orchestrate";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
 
-    /// Claude Code `--mcp-config` JSON: a single `mcpServers` map entry for an
-    /// HTTP server carrying the bearer token as an `Authorization` header.
-    /// Verified shape for `claude` 2.1.x (`.mcp.json` `type: "http"`).
-    pub fn claude_mcp_entry(&self) -> serde_json::Value {
-        serde_json::json!({
-                    "type": "http",
-                    "url": self.url,
-                    "headers": {
-                        "Authorization": format!("Bearer {}", self.bearer_token),
-                    }
-        })
-    }
-
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
     /// rides in `http_headers.Authorization` instead (verified against
@@ -246,13 +284,24 @@ pub fn claude_mcp_config_json<'a>(
 ) -> String {
     let servers: serde_json::Map<String, serde_json::Value> = registrations
         .into_iter()
-        .map(|registration| (registration.name.clone(), registration.claude_mcp_entry()))
+        .map(|registration| {
+            (
+                registration.name.clone(),
+                serde_json::json!({
+                    "type": "http",
+                    "url": registration.url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", registration.bearer_token),
+                    }
+                }),
+            )
+        })
         .collect();
     serde_json::json!({ "mcpServers": servers }).to_string()
 }
 
 /// One model a provider offers, with its selectable options (T3-style descriptors).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
     pub id: String, // provider-native id sent on the wire
     pub display_name: String,
@@ -260,7 +309,7 @@ pub struct ModelSpec {
     pub options: Vec<OptionDescriptor>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OptionDescriptor {
     Select {
@@ -276,7 +325,7 @@ pub enum OptionDescriptor {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectOption {
     pub value: String,
     pub label: String,
@@ -412,10 +461,24 @@ pub struct OptionSelection {
     pub value: serde_json::Value,
 } // string or bool
 
+fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
+        .and_then(|selection| selection.value.as_str().map(str::to_owned))
+}
+
+fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
+        .and_then(|selection| selection.value.as_bool())
+}
+
 /// A structured question the agent asks the user (Claude `AskUserQuestion`,
 /// Codex `item/tool/requestUserInput`). Rendered as a multiple-choice (or
 /// free-text) prompt; answers ride back through [`SessionCommand::RespondUserInput`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputQuestion {
     /// The answer key. Claude: the complete question text (the SDK indexes
     /// answers by question text). Codex: the native question id.
@@ -428,7 +491,7 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputOption {
     pub label: String,
     pub description: String,
@@ -534,16 +597,40 @@ pub enum ApprovalMode {
     FullAccess,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum AgentError {
-    #[error("failed to spawn provider process: {0}")]
     Spawn(String),
-    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("provider reported error: {0}")]
     Provider(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(message) => {
+                write!(formatter, "failed to spawn provider process: {message}")
+            }
+            Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
+            Self::Provider(message) => write!(formatter, "provider reported error: {message}"),
+            Self::Io(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for AgentError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// Commands the UI sends into a live session's actor loop.
@@ -618,8 +705,38 @@ pub enum SessionCommand {
 /// Dropping both channels (or sending `Shutdown`) tears the child process down.
 pub struct SessionHandle {
     pub provider: ProviderKind,
-    pub commands: async_channel::Sender<SessionCommand>,
-    pub events: async_channel::Receiver<AgentEvent>,
+    pub commands: Sender<SessionCommand>,
+    pub events: Receiver<AgentEvent>,
+}
+
+async fn spawn_session<F, Fut>(
+    provider: ProviderKind,
+    opts: SessionOptions,
+    actor: F,
+    exited_message: &'static str,
+) -> Result<SessionHandle, AgentError>
+where
+    F: FnOnce(
+        SessionOptions,
+        Receiver<SessionCommand>,
+        Sender<AgentEvent>,
+        Sender<Result<(), AgentError>>,
+    ) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (commands, command_rx) = smol::channel::unbounded();
+    let (event_tx, events) = smol::channel::unbounded();
+    let (ready_tx, ready) = smol::channel::bounded(1);
+    smol::spawn(actor(opts, command_rx, event_tx, ready_tx)).detach();
+    ready
+        .recv()
+        .await
+        .map_err(|_| AgentError::Protocol(exited_message.into()))??;
+    Ok(SessionHandle {
+        provider,
+        commands,
+        events,
+    })
 }
 
 /// Start a new (or resumed) session with the given provider.
@@ -651,7 +768,7 @@ pub enum PlanResolution {
     Dismissed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// A tcode-level handoff between providers. This is never emitted by an
@@ -829,7 +946,7 @@ pub enum AgentEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub step: String,
     pub status: PlanStepStatus,
@@ -901,7 +1018,7 @@ pub enum ItemStatus {
     Declined,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadItem {
     /// Provider-scoped stable id; deltas and later lifecycle events reference it.
     pub id: String,
@@ -911,7 +1028,7 @@ pub struct ThreadItem {
     pub content: ItemContent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemContent {
     UserMessage {
@@ -970,7 +1087,7 @@ pub enum ItemContent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
     pub kind: FileChangeKind,
@@ -1072,7 +1189,7 @@ pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, Str
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
@@ -1086,7 +1203,7 @@ pub struct ApprovalRequest {
 }
 
 /// One choice offered by an ACP agent's permission request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalOption {
     /// Opaque id echoed back in [`ApprovalDecision::Option`].
     pub id: String,
@@ -1104,7 +1221,7 @@ pub enum ApprovalOptionKind {
     RejectAlways,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalKind {
     ExecCommand {
@@ -1145,7 +1262,7 @@ pub enum ApprovalDecision {
     Option(String),
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
@@ -1162,6 +1279,44 @@ pub struct TokenUsage {
     pub cost_usd: Option<f64>,
     /// Provider-reported turn duration, in milliseconds.
     pub duration_ms: Option<u64>,
+}
+
+impl TokenUsage {
+    fn merge(&mut self, usage: Self) {
+        self.input_tokens = add_token_counts(self.input_tokens, usage.input_tokens);
+        self.cached_input_tokens =
+            add_token_counts(self.cached_input_tokens, usage.cached_input_tokens);
+        self.output_tokens = add_token_counts(self.output_tokens, usage.output_tokens);
+        self.used_tokens = add_token_counts(self.used_tokens, usage.used_tokens);
+        self.context_window = match (self.context_window, usage.context_window) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (left, right) => left.or(right),
+        };
+        self.total_processed_tokens = usage.total_processed_tokens;
+        self.cost_usd = match (self.cost_usd, usage.cost_usd) {
+            (None, None) => None,
+            (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
+        };
+        self.duration_ms = match (self.duration_ms, usage.duration_ms) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (left, right) => left.or(right),
+        };
+    }
+}
+
+fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
+    }
+}
+
+fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
+    })
 }
 
 #[cfg(test)]
@@ -1420,69 +1575,6 @@ mod resolve_binary_tests {
                 .iter()
                 .any(|ext| ext.eq_ignore_ascii_case(".CMD"))
         );
-    }
-}
-
-#[cfg(test)]
-mod pathext_logic_tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    /// The PATHEXT candidate order (and the bare-name fallback) is pure logic:
-    /// assert it on every OS, independent of filesystem case rules.
-    #[test]
-    fn pathext_candidates_are_tried_in_order_then_the_bare_name() {
-        let pathext: Vec<String> = [".COM", ".EXE", ".BAT", ".CMD"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            candidate_names("codex", &pathext),
-            vec![
-                "codex.COM".to_string(),
-                "codex.EXE".to_string(),
-                "codex.BAT".to_string(),
-                "codex.CMD".to_string(),
-                "codex".to_string(),
-            ]
-        );
-    }
-
-    /// A name that already carries an extension is used as-is (no PATHEXT sweep).
-    #[test]
-    fn an_explicit_extension_is_not_expanded() {
-        let pathext: Vec<String> = vec![".EXE".to_string(), ".CMD".to_string()];
-        assert_eq!(
-            candidate_names("claude.cmd", &pathext),
-            vec!["claude.cmd".to_string()]
-        );
-    }
-
-    /// Exact-case fixtures, so the search behaves identically on a
-    /// case-sensitive filesystem: the first PATHEXT hit wins.
-    #[test]
-    fn first_matching_candidate_wins_on_any_filesystem() {
-        let dir = std::env::temp_dir().join(format!("tcode-pathext-{}", uuid_like()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("tool.CMD"), "").unwrap();
-        std::fs::write(dir.join("tool.EXE"), "").unwrap();
-        let pathext: Vec<String> = vec![".EXE".to_string(), ".CMD".to_string()];
-        let found = find_in_dirs([dir.clone()], "tool", &pathext, |p: &std::path::Path| {
-            p.is_file()
-        });
-        assert_eq!(
-            found.and_then(|p: PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned())),
-            Some("tool.EXE".to_string())
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    fn uuid_like() -> u128 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
     }
 }
 

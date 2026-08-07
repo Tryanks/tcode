@@ -3,42 +3,19 @@
 //! the current value at call time instead of capturing one at startup.
 
 use std::sync::RwLock;
+use tcode_core::settings::ComputerUseSettings;
+pub use tcode_core::settings::ImageMode;
 
-/// When observations include a screenshot alongside the outline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ImageMode {
-    /// Screenshot only when the accessibility outline looks too sparse to act on.
-    #[default]
-    Auto,
-    Always,
-    Never,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComputerUseConfig {
-    /// When false the tools are observe-only: `act_ui` rejects every action.
-    pub allow_input: bool,
-    pub image_mode: ImageMode,
-}
-
-impl Default for ComputerUseConfig {
-    fn default() -> Self {
-        Self {
-            allow_input: true,
-            image_mode: ImageMode::Auto,
-        }
-    }
-}
-
-static CONFIG: RwLock<ComputerUseConfig> = RwLock::new(ComputerUseConfig {
+static CONFIG: RwLock<ComputerUseSettings> = RwLock::new(ComputerUseSettings {
+    enabled: false,
     allow_input: true,
     image_mode: ImageMode::Auto,
 });
 
-pub fn set(config: ComputerUseConfig) {
+pub fn set(config: ComputerUseSettings) {
     *CONFIG.write().unwrap() = config;
 }
 
-pub fn get() -> ComputerUseConfig {
-    *CONFIG.read().unwrap()
+pub fn get() -> ComputerUseSettings {
+    CONFIG.read().unwrap().clone()
 }

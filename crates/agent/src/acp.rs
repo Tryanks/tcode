@@ -11,7 +11,7 @@
 //! that cross the thread boundary — exactly like `claude.rs` / `codex.rs`.
 
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -24,11 +24,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
-use async_channel::{Receiver, Sender};
-use futures_lite::{
-    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, StreamExt as _, future,
-};
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
+use smol::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
+use smol::prelude::*;
 
 use crate::{
     AcpAgent, AcpLaunch, AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode,
@@ -60,6 +60,29 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 type AcpConnection = sdk::ConnectionTo<sdk::Agent>;
 
+macro_rules! request_handler {
+    ($client:expr, $request:ty, $method:ident) => {{
+        let client = $client.clone();
+        async move |args: $request, responder, connection| {
+            let client = client.clone();
+            connection
+                .spawn(async move { responder.respond_with_result(client.$method(args).await) })?;
+            Ok(())
+        }
+    }};
+    ($client:expr, $request:ty, $method:ident, connection) => {{
+        let client = $client.clone();
+        async move |args: $request, responder, connection| {
+            let client = client.clone();
+            let task_connection = connection.clone();
+            connection.spawn(async move {
+                responder.respond_with_result(client.$method(args, &task_connection).await)
+            })?;
+            Ok(())
+        }
+    }};
+}
+
 /// Start (or resume) a session with an ACP agent.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
@@ -67,9 +90,9 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             "session fork is not supported for this provider".into(),
         ));
     }
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
+    let (commands_tx, commands_rx) = smol::channel::unbounded();
+    let (events_tx, events_rx) = smol::channel::unbounded();
+    let (ready_tx, ready_rx) = smol::channel::bounded(1);
 
     // Keep each ACP connection and all of its callbacks on one dedicated
     // executor thread. The 1.2 SDK requires Send handlers internally, but the
@@ -79,7 +102,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .spawn(move || {
             let executor = Rc::new(smol::LocalExecutor::new());
             let task = run_actor(executor.clone(), opts, commands_rx, events_tx, ready_tx);
-            futures_lite::future::block_on(executor.run(task));
+            smol::block_on(executor.run(task));
         })
         .map_err(|err| {
             AgentError::Spawn(format!("could not start the ACP session thread: {err}"))
@@ -104,7 +127,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 ///
 /// `Npx` becomes `npm exec --yes -- <package> <args…>` (the registry's own
 /// contract, and what zed runs); `Binary` / `Custom` run as given.
-pub fn launch_command(launch: &AcpLaunch) -> Result<(PathBuf, Vec<String>), AgentError> {
+fn launch_command(launch: &AcpLaunch) -> Result<(PathBuf, Vec<String>), AgentError> {
     match launch {
         AcpLaunch::Npx { package, args, .. } => {
             let npm = crate::resolve_binary(None, "npm")?;
@@ -125,15 +148,6 @@ pub fn launch_command(launch: &AcpLaunch) -> Result<(PathBuf, Vec<String>), Agen
     }
 }
 
-/// Environment pairs baked into the launch recipe (the registry's `env`).
-fn recipe_env(launch: &AcpLaunch) -> &[(String, String)] {
-    match launch {
-        AcpLaunch::Npx { env, .. }
-        | AcpLaunch::Binary { env, .. }
-        | AcpLaunch::Custom { env, .. } => env,
-    }
-}
-
 fn spawn_agent(
     agent: &AcpAgent,
     opts: &SessionOptions,
@@ -148,7 +162,12 @@ fn spawn_agent(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     // Recipe env first, the user's configured env last (the user always wins).
-    for (key, value) in recipe_env(&agent.launch) {
+    let recipe_env = match &agent.launch {
+        AcpLaunch::Npx { env, .. }
+        | AcpLaunch::Binary { env, .. }
+        | AcpLaunch::Custom { env, .. } => env,
+    };
+    for (key, value) in recipe_env {
         cmd.env(key, value);
     }
     for (key, value) in opts.launch_env.pairs(ProviderKind::Acp) {
@@ -173,30 +192,18 @@ fn spawn_agent(
 /// to the SDK transport. The 1.2 `ByteStreams` component treats a clean EOF as
 /// a completed input stream, so observing it here preserves tcode's immediate
 /// `SessionClosed` behavior instead of leaving the command loop waiting.
-struct ObservedReader<R> {
-    inner: R,
+struct ObservedReader {
+    inner: smol::process::ChildStdout,
     done: Sender<String>,
-    reported: bool,
 }
 
-impl<R> ObservedReader<R> {
-    fn new(inner: R, done: Sender<String>) -> Self {
-        Self {
-            inner,
-            done,
-            reported: false,
-        }
-    }
-
-    fn report(&mut self, reason: String) {
-        if !self.reported {
-            self.reported = true;
-            let _ = self.done.try_send(reason);
-        }
+impl ObservedReader {
+    fn new(inner: smol::process::ChildStdout, done: Sender<String>) -> Self {
+        Self { inner, done }
     }
 }
 
-impl<R: AsyncRead + Unpin> AsyncRead for ObservedReader<R> {
+impl AsyncRead for ObservedReader {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -204,11 +211,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for ObservedReader<R> {
     ) -> Poll<io::Result<usize>> {
         match Pin::new(&mut self.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(0)) => {
-                self.report("the ACP agent closed its stdio".to_string());
+                let _ = self
+                    .done
+                    .try_send("the ACP agent closed its stdio".to_string());
                 Poll::Ready(Ok(0))
             }
             Poll::Ready(Err(err)) => {
-                self.report(format!("ACP transport error: {err}"));
+                let _ = self.done.try_send(format!("ACP transport error: {err}"));
                 Poll::Ready(Err(err))
             }
             other => other,
@@ -244,13 +253,9 @@ impl<W> ObservedWriter<W> {
     fn finish_line(&mut self) {
         let is_prompt = serde_json::from_slice::<Value>(&self.line)
             .ok()
-            .and_then(|message| {
-                message
-                    .get("method")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .is_some_and(|method| method == "session/prompt");
+            .is_some_and(|message| {
+                message.get("method").and_then(Value::as_str) == Some("session/prompt")
+            });
         self.line.clear();
         if !is_prompt {
             return;
@@ -325,19 +330,15 @@ async fn run_actor(
 
     // The agent's stderr is its log channel: keep the tail so a startup failure
     // can be reported in the agent's own words.
-    let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_tail = crate::process::StderrTail::default();
     executor
         .spawn({
             let tail = stderr_tail.clone();
             let id = agent.id.clone();
             async move {
-                let mut lines = futures_lite::io::BufReader::new(stderr).lines();
+                let mut lines = smol::io::BufReader::new(stderr).lines();
                 while let Some(Ok(line)) = lines.next().await {
                     log::debug!("acp[{id}] stderr: {line}");
-                    let mut tail = tail.lock().unwrap();
-                    if tail.len() == 20 {
-                        tail.remove(0);
-                    }
                     tail.push(line);
                 }
             }
@@ -348,9 +349,8 @@ async fn run_actor(
     let client = AcpClient {
         events: events.clone(),
         state: state.clone(),
-        cwd: opts.cwd.clone(),
     };
-    let (io_done_tx, io_done) = async_channel::bounded::<String>(1);
+    let (io_done_tx, io_done) = smol::channel::bounded::<String>(1);
     let pending_deliveries = Arc::new(Mutex::new(VecDeque::new()));
     let transport = sdk::ByteStreams::new(
         ObservedWriter::new(stdin, pending_deliveries.clone(), events.clone()),
@@ -370,110 +370,44 @@ async fn run_actor(
             sdk::on_receive_notification!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::RequestPermissionRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.request_permission(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(client, acp::RequestPermissionRequest, request_permission),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::ReadTextFileRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.read_text_file(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(client, acp::ReadTextFileRequest, read_text_file),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::WriteTextFileRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.write_text_file(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(client, acp::WriteTextFileRequest, write_text_file),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::CreateTerminalRequest, responder, connection| {
-                    let client = client.clone();
-                    let task_connection = connection.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(
-                            client.create_terminal(args, &task_connection).await,
-                        )
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(
+                client,
+                acp::CreateTerminalRequest,
+                create_terminal,
+                connection
+            ),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::TerminalOutputRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.terminal_output(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(client, acp::TerminalOutputRequest, terminal_output),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::WaitForTerminalExitRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.wait_for_terminal_exit(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(
+                client,
+                acp::WaitForTerminalExitRequest,
+                wait_for_terminal_exit
+            ),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::KillTerminalRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.kill_terminal(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(client, acp::KillTerminalRequest, kill_terminal),
             sdk::on_receive_request!(),
         )
         .on_receive_request(
-            {
-                let client = client.clone();
-                async move |args: acp::ReleaseTerminalRequest, responder, connection| {
-                    let client = client.clone();
-                    connection.spawn(async move {
-                        responder.respond_with_result(client.release_terminal(args).await)
-                    })?;
-                    Ok(())
-                }
-            },
+            request_handler!(client, acp::ReleaseTerminalRequest, release_terminal),
             sdk::on_receive_request!(),
         )
         .connect_with(transport, {
@@ -507,13 +441,8 @@ async fn run_actor(
 
     if !session_started.load(Ordering::Acquire) {
         if let Err(err) = connection_result {
-            let tail = stderr_tail.lock().unwrap().join("\n");
             let message = format!("ACP transport error: {}", describe(&err));
-            let message = if tail.trim().is_empty() {
-                message
-            } else {
-                format!("{message}\n{tail}")
-            };
+            let message = stderr_tail.append_to(message, "\n");
             let _ = ready.send(Err(AgentError::Protocol(message))).await;
         }
         return;
@@ -523,14 +452,7 @@ async fn run_actor(
         Ok(reason) => reason,
         Err(err) => Some(format!("ACP transport error: {}", describe(&err))),
     };
-    let close_reason = close_reason.map(|reason| {
-        let tail = stderr_tail.lock().unwrap().join("\n");
-        if tail.trim().is_empty() {
-            reason
-        } else {
-            format!("{reason}\nstderr:\n{tail}")
-        }
-    });
+    let close_reason = close_reason.map(|reason| stderr_tail.append_to(reason, "\nstderr:\n"));
     let _ = events
         .send(AgentEvent::SessionClosed {
             reason: close_reason,
@@ -548,7 +470,7 @@ async fn connected_actor(
     events: &Sender<AgentEvent>,
     ready: &Sender<Result<(), AgentError>>,
     state: &Arc<Mutex<State>>,
-    stderr_tail: &Arc<Mutex<Vec<String>>>,
+    stderr_tail: &crate::process::StderrTail,
     io_done: &Receiver<String>,
     session_started: &AtomicBool,
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
@@ -573,23 +495,17 @@ async fn connected_actor(
     let session = match startup {
         Startup::Handshake(Ok(session)) => session,
         Startup::Handshake(Err(err)) => {
-            let tail = stderr_tail.lock().unwrap().join("\n");
-            let err = match (&err, tail.trim().is_empty()) {
-                (AgentError::Protocol(message), false) => {
-                    AgentError::Protocol(format!("{message}\n{tail}"))
+            let err = match err {
+                AgentError::Protocol(message) => {
+                    AgentError::Protocol(stderr_tail.append_to(message, "\n"))
                 }
-                _ => err,
+                other => other,
             };
             let _ = ready.send(Err(err)).await;
             return Ok(None);
         }
         Startup::Io(reason) => {
-            let tail = stderr_tail.lock().unwrap().join("\n");
-            let message = if tail.trim().is_empty() {
-                reason
-            } else {
-                format!("{reason}\n{tail}")
-            };
+            let message = stderr_tail.append_to(reason, "\n");
             let _ = ready.send(Err(AgentError::Protocol(message))).await;
             return Ok(None);
         }
@@ -605,19 +521,19 @@ async fn connected_actor(
             model: session.model.clone(),
         })
         .await;
-    emit_provider_options(state, events).await;
+    emit_provider_options(state, events, false).await;
     if ready.send(Ok(())).await.is_err() {
         return Ok(None);
     }
     session_started.store(true, Ordering::Release);
 
-    let (turn_tx, turn_done) = async_channel::unbounded::<TurnOutcome>();
+    let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
     let mut turn_id: Option<String> = None;
     let mut turn_seq: u64 = 0;
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
             Turn(TurnOutcome),
             Io(String),
         }
@@ -656,7 +572,9 @@ async fn connected_actor(
                 .await;
             }
             Input::Turn(outcome) => {
-                let id = turn_id.take().unwrap_or_else(|| outcome.turn_id.clone());
+                let id = turn_id
+                    .take()
+                    .expect("turn outcome requires an active turn");
                 finish_turn(state, events, &id, outcome).await;
             }
             Input::Io(reason) => break Some(reason),
@@ -683,7 +601,6 @@ struct Session {
 }
 
 struct TurnOutcome {
-    turn_id: String,
     result: Result<acp::PromptResponse, acp::Error>,
 }
 
@@ -746,14 +663,7 @@ async fn handshake(
     let caps = init.agent_capabilities.clone();
     // Capability gate: tcode's MCP servers are loopback streamable-HTTP
     // endpoints, so they may only be offered to agents that speak MCP over HTTP.
-    let registrations: Vec<_> = [
-        &opts.mcp_server,
-        &opts.orchestrate_server,
-        &opts.computer_use_server,
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let registrations: Vec<_> = opts.mcp_servers.iter().collect();
     let mcp_servers = mcp_servers(&registrations, &caps);
     if !registrations.is_empty() && mcp_servers.is_empty() {
         log::info!(
@@ -776,110 +686,80 @@ async fn handshake(
         .map(str::to_string)
         .filter(|_| caps.load_session);
 
-    let (session_id, mut modes, config_options) =
-        match resumed {
-            Some(session_id) => {
-                // `session/load` replays the whole conversation as `session/update`
-                // notifications. Our JSONL log is the authoritative history and the
-                // UI has already folded it, so the replay is swallowed (see
-                // `State::replaying`); we only want the session live again.
-                state.lock().unwrap().replaying = true;
-                let session_id = acp::SessionId::new(session_id);
-                let loaded = connection
-                    .send_request(
-                        acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
-                            .mcp_servers(mcp_servers.clone()),
-                    )
-                    .block_task()
-                    .await;
-                state.lock().unwrap().replaying = false;
-                match loaded {
-                    Ok(loaded) => (session_id, loaded.modes, loaded.config_options),
-                    Err(err) => {
-                        log::warn!(
-                            "acp[{}]: session/load failed ({}); starting a fresh session",
-                            agent.id,
-                            describe(&err)
-                        );
-                        let _ = events
-                        .send(AgentEvent::Warning { message: format!(
-                            "{} could not resume the previous conversation; starting a new one",
-                            agent.name
-                        ) })
-                        .await;
-                        let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
-                        (new.session_id, new.modes, new.config_options)
-                    }
-                }
-            }
-            None => {
-                let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
-                (new.session_id, new.modes, new.config_options)
-            }
-        };
-
-    let wants_plan = opts.approval_mode == ApprovalMode::ReadOnly
-        || opts.interaction_mode == InteractionMode::Plan;
-    let target_mode = modes.as_ref().and_then(|modes| {
-        if wants_plan {
-            acp_plan_mode(modes)
-        } else if acp_plan_mode(modes).as_ref() == Some(&modes.current_mode_id) {
-            first_non_plan_mode(modes)
-        } else {
-            None
-        }
-    });
-    if let Some(target_mode) = target_mode
-        && modes
-            .as_ref()
-            .is_some_and(|modes| modes.current_mode_id != target_mode)
-    {
-        match connection
-            .send_request(acp::SetSessionModeRequest::new(
-                session_id.clone(),
-                target_mode.clone(),
-            ))
+    let mut loaded_session = None;
+    if let Some(session_id) = resumed {
+        // `session/load` replays the whole conversation as `session/update`
+        // notifications. Our JSONL log is the authoritative history and the
+        // UI has already folded it, so the replay is swallowed (see
+        // `State::replaying`); we only want the session live again.
+        state.lock().unwrap().replaying = true;
+        let session_id = acp::SessionId::new(session_id);
+        let loaded = connection
+            .send_request(
+                acp::LoadSessionRequest::new(session_id.clone(), opts.cwd.clone())
+                    .mcp_servers(mcp_servers.clone()),
+            )
             .block_task()
-            .await
-        {
-            Ok(_) => modes.as_mut().unwrap().current_mode_id = target_mode,
+            .await;
+        state.lock().unwrap().replaying = false;
+        match loaded {
+            Ok(loaded) => {
+                loaded_session = Some((session_id, loaded.modes, loaded.config_options));
+            }
             Err(err) => {
-                // ACP has no provider-independent permission policy. If an
-                // advertised mode cannot be selected, retain the agent's
-                // current mode and let the pushed option correct the chip.
+                log::warn!(
+                    "acp[{}]: session/load failed ({}); starting a fresh session",
+                    agent.id,
+                    describe(&err)
+                );
                 let _ = events
                     .send(AgentEvent::Warning {
                         message: format!(
-                            "{} could not enter the requested interaction mode: {}",
-                            agent.name,
-                            describe(&err)
+                            "{} could not resume the previous conversation; starting a new one",
+                            agent.name
                         ),
                     })
                     .await;
             }
         }
-    } else if wants_plan
-        && modes
-            .as_ref()
-            .is_none_or(|modes| acp_plan_mode(modes).is_none())
-    {
-        let _ = events
-            .send(AgentEvent::Warning {
-                message: format!(
-                    "{} does not advertise a Plan mode; the mode switch was not applied.",
-                    agent.name
-                ),
-            })
-            .await;
     }
+    let (session_id, modes, config_options) = match loaded_session {
+        Some(session) => session,
+        None => {
+            let new = new_session(connection, agent, opts, &mcp_servers, &init).await?;
+            (new.session_id, new.modes, new.config_options)
+        }
+    };
 
-    let model = config_options.as_deref().and_then(current_model);
+    let wants_plan = opts.approval_mode == ApprovalMode::ReadOnly
+        || opts.interaction_mode == InteractionMode::Plan;
     {
         let mut state = state.lock().unwrap();
-        state.session_id = Some(session_id.clone());
         state.ingest_modes(modes.as_ref());
         state.options.ingest(None, config_options.as_deref());
     }
+    let should_apply_mode = wants_plan
+        || state
+            .lock()
+            .unwrap()
+            .modes
+            .as_ref()
+            .is_some_and(|modes| acp_plan_mode(modes).as_ref() == Some(&modes.current_mode_id));
+    if should_apply_mode {
+        apply_interaction_mode(
+            if wants_plan {
+                InteractionMode::Plan
+            } else {
+                InteractionMode::Build
+            },
+            state,
+            events,
+            connection,
+            &session_id,
+        )
+        .await;
+    }
+    let model = state.lock().unwrap().options.current_model();
 
     Ok(Session {
         session_id,
@@ -925,7 +805,9 @@ async fn new_session(
             let Some(method) = preferred_auth_method(&init.auth_methods) else {
                 return Err(AgentError::Provider(auth_hint(agent, init)));
             };
-            let method_id = auth_method_id(&method);
+            let Some(method_id) = auth_method_id(&method) else {
+                return Err(AgentError::Provider(auth_hint(agent, init)));
+            };
             log::info!(
                 "acp[{}]: session/new needs auth; trying method `{}`",
                 agent.id,
@@ -996,21 +878,25 @@ fn preferred_auth_method(methods: &[acp::AuthMethod]) -> Option<acp::AuthMethod>
     methods
         .iter()
         .find(|method| matches!(method, acp::AuthMethod::EnvVar(_)))
-        .or_else(|| methods.first())
+        .or_else(|| {
+            methods
+                .iter()
+                .find(|method| auth_method_id(method).is_some())
+        })
         .cloned()
 }
 
-fn auth_method_id(method: &acp::AuthMethod) -> acp::AuthMethodId {
+fn auth_method_id(method: &acp::AuthMethod) -> Option<acp::AuthMethodId> {
     match method {
-        acp::AuthMethod::Agent(method) => method.id.clone(),
-        acp::AuthMethod::EnvVar(method) => method.id.clone(),
-        acp::AuthMethod::Terminal(method) => method.id.clone(),
-        _ => acp::AuthMethodId::new("default"),
+        acp::AuthMethod::Agent(method) => Some(method.id.clone()),
+        acp::AuthMethod::EnvVar(method) => Some(method.id.clone()),
+        acp::AuthMethod::Terminal(method) => Some(method.id.clone()),
+        _ => None,
     }
 }
 
 /// The message shown when an agent demands credentials we cannot supply.
-pub(crate) fn auth_hint(agent: &AcpAgent, init: &acp::InitializeResponse) -> String {
+fn auth_hint(agent: &AcpAgent, init: &acp::InitializeResponse) -> String {
     let methods: Vec<String> = init
         .auth_methods
         .iter()
@@ -1053,7 +939,7 @@ fn describe(err: &acp::Error) -> String {
 }
 
 /// The `mcpServers` array for `session/new`, gated on `mcpCapabilities.http`.
-pub(crate) fn mcp_servers(
+fn mcp_servers(
     registrations: &[&McpRegistration],
     caps: &acp::AgentCapabilities,
 ) -> Vec<acp::McpServer> {
@@ -1086,38 +972,13 @@ async fn handle_command(
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
 ) {
     match command {
-        // ACP has no steering method at all (`session/prompt` is one request per
-        // turn; only `session/cancel` interrupts). The app gates the steer button
-        // off for ACP sessions and queues instead — this arm exists so a stray
-        // command cannot hang the turn.
-        SessionCommand::Steer { .. } => {
-            log::warn!("acp: steering is not part of the protocol; ignoring");
-            let _ = events
-                .send(AgentEvent::Warning {
-                    message: "This agent cannot be steered (ACP has no steering method); \
-                     send the message after the turn finishes."
-                        .into(),
-                })
-                .await;
-        }
+        SessionCommand::Steer { .. } => {}
         SessionCommand::SendTurn {
             delivery_id,
             text,
             attachments,
             ..
         } => {
-            if turn_id.is_some() {
-                // ACP has no steering: one `session/prompt` per turn. The app
-                // queues turns, so this should not happen.
-                let _ = events
-                    .send(AgentEvent::Warning {
-                        message:
-                        "a turn is already running; ACP agents cannot take a second prompt mid-turn"
-                            .into(),
-                     })
-                    .await;
-                return;
-            }
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
             *turn_id = Some(id.clone());
@@ -1140,12 +1001,7 @@ async fn handle_command(
             executor
                 .spawn(async move {
                     let result = request.block_task().await;
-                    let _ = turn_tx
-                        .send(TurnOutcome {
-                            turn_id: id,
-                            result,
-                        })
-                        .await;
+                    let _ = turn_tx.send(TurnOutcome { result }).await;
                 })
                 .detach();
         }
@@ -1161,7 +1017,7 @@ async fn handle_command(
                 .unwrap()
                 .approvals
                 .drain()
-                .map(|(_, responder)| responder)
+                .map(|(_, (responder, _))| responder)
                 .collect();
             for responder in pending {
                 let _ = responder
@@ -1177,18 +1033,11 @@ async fn handle_command(
             request_id,
             decision,
         } => {
-            let responder = state.lock().unwrap().approvals.remove(&request_id);
-            let Some(responder) = responder else {
+            let approval = state.lock().unwrap().approvals.remove(&request_id);
+            let Some((responder, options)) = approval else {
                 log::warn!("acp: no pending approval {request_id}");
                 return;
             };
-            let options = state
-                .lock()
-                .unwrap()
-                .approval_options
-                .get(&request_id)
-                .cloned()
-                .unwrap_or_default();
             let outcome = match approval_outcome(&decision, &options) {
                 Some(outcome) => outcome,
                 None => {
@@ -1203,7 +1052,6 @@ async fn handle_command(
                 }
             };
             let _ = responder.send(outcome).await;
-            state.lock().unwrap().approval_options.remove(&request_id);
             let _ = events
                 .send(AgentEvent::ApprovalResolved {
                     request_id,
@@ -1231,7 +1079,7 @@ async fn handle_command(
                             state.options.select(&id, value);
                         }
                     }
-                    emit_provider_options(state, events).await;
+                    emit_provider_options(state, events, false).await;
                 }
                 Err(err) => {
                     let _ = events
@@ -1256,16 +1104,7 @@ async fn handle_command(
                 .await;
         }
         SessionCommand::SetInteractionMode(mode) => {
-            apply_interaction_mode(mode, state, events, |mode_id| async move {
-                connection
-                    .send_request(acp::SetSessionModeRequest::new(
-                        session.session_id.clone(),
-                        mode_id,
-                    ))
-                    .block_task()
-                    .await
-            })
-            .await;
+            apply_interaction_mode(mode, state, events, connection, &session.session_id).await;
         }
         SessionCommand::Rewind {
             checkpoint_id,
@@ -1324,44 +1163,43 @@ async fn set_option(
     }
 }
 
-async fn apply_interaction_mode<F, Fut>(
+async fn apply_interaction_mode(
     mode: InteractionMode,
     state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
-    set_mode: F,
-) where
-    F: FnOnce(acp::SessionModeId) -> Fut,
-    Fut: Future<Output = Result<acp::SetSessionModeResponse, acp::Error>>,
-{
-    let target = {
-        let state = state.lock().unwrap();
-        match mode {
-            InteractionMode::Plan => state.modes.as_ref().and_then(acp_plan_mode),
-            InteractionMode::Build => state.build_mode(),
-        }
-    };
+    connection: &AcpConnection,
+    session_id: &acp::SessionId,
+) {
+    let target = interaction_mode_target(mode, &state.lock().unwrap());
     let Some(target) = target else {
-        let mode_name = match mode {
-            InteractionMode::Plan => "Plan",
-            InteractionMode::Build => "Build",
-        };
-        let _ = events
-            .send(AgentEvent::Warning {
-                message: format!(
-                    "This agent does not advertise a {mode_name} mode; the mode switch was not applied."
-                ),
-            })
-            .await;
+        let _ = events.send(missing_mode_warning(mode)).await;
         // Republish the actual selection so the runtime rolls back its
         // optimistic Build/Plan toggle instead of leaving a lying chip.
-        emit_provider_options_even_if_empty(state, events).await;
+        emit_provider_options(state, events, true).await;
         return;
     };
 
-    match set_mode(target.clone()).await {
+    if state
+        .lock()
+        .unwrap()
+        .modes
+        .as_ref()
+        .is_some_and(|modes| modes.current_mode_id == target)
+    {
+        return;
+    }
+
+    match connection
+        .send_request(acp::SetSessionModeRequest::new(
+            session_id.clone(),
+            target.clone(),
+        ))
+        .block_task()
+        .await
+    {
         Ok(_) => {
             state.lock().unwrap().select_mode(target);
-            emit_provider_options(state, events).await;
+            emit_provider_options(state, events, false).await;
         }
         Err(err) => {
             let _ = events
@@ -1369,8 +1207,27 @@ async fn apply_interaction_mode<F, Fut>(
                     message: format!("could not switch this agent's mode: {}", describe(&err)),
                 })
                 .await;
-            emit_provider_options_even_if_empty(state, events).await;
+            emit_provider_options(state, events, true).await;
         }
+    }
+}
+
+fn interaction_mode_target(mode: InteractionMode, state: &State) -> Option<acp::SessionModeId> {
+    match mode {
+        InteractionMode::Plan => state.modes.as_ref().and_then(acp_plan_mode),
+        InteractionMode::Build => state.build_mode(),
+    }
+}
+
+fn missing_mode_warning(mode: InteractionMode) -> AgentEvent {
+    let mode_name = match mode {
+        InteractionMode::Plan => "Plan",
+        InteractionMode::Build => "Build",
+    };
+    AgentEvent::Warning {
+        message: format!(
+            "This agent does not advertise a {mode_name} mode; the mode switch was not applied."
+        ),
     }
 }
 
@@ -1499,36 +1356,20 @@ fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<acp::ContentBloc
     blocks
 }
 
-async fn emit_provider_options(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) {
-    let (descriptors, selections) = {
-        let state = state.lock().unwrap();
-        (state.options.descriptors(), state.options.selections())
-    };
-    if descriptors.is_empty() {
-        return;
-    }
-    let _ = events
-        .send(AgentEvent::ProviderOptions {
-            descriptors,
-            selections,
-        })
-        .await;
-}
-
-async fn emit_provider_options_even_if_empty(
+async fn emit_provider_options(
     state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
+    emit_empty: bool,
 ) {
-    let (descriptors, selections) = {
-        let state = state.lock().unwrap();
-        (state.options.descriptors(), state.options.selections())
-    };
-    let _ = events
-        .send(AgentEvent::ProviderOptions {
-            descriptors,
-            selections,
-        })
-        .await;
+    let event = state.lock().unwrap().provider_options();
+    if matches!(
+        &event,
+        AgentEvent::ProviderOptions { descriptors, .. } if descriptors.is_empty()
+    ) && !emit_empty
+    {
+        return;
+    }
+    let _ = events.send(event).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1538,7 +1379,7 @@ async fn emit_provider_options_even_if_empty(
 /// Where a canonical option id came from, so `SetOption` routes to the right
 /// ACP method.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum OptionOrigin {
+enum OptionOrigin {
     Mode,
     Config(acp::SessionConfigId),
 }
@@ -1546,10 +1387,14 @@ pub(crate) enum OptionOrigin {
 /// The agent's self-described modes and config options, mapped onto our
 /// [`OptionDescriptor`]s (which the composer's traits picker already renders).
 #[derive(Default)]
-pub(crate) struct OptionRegistry {
-    descriptors: Vec<OptionDescriptor>,
-    selections: Vec<OptionSelection>,
-    origins: HashMap<String, OptionOrigin>,
+struct OptionRegistry {
+    records: Vec<OptionRecord>,
+}
+
+struct OptionRecord {
+    descriptor: OptionDescriptor,
+    selection: OptionSelection,
+    origin: OptionOrigin,
 }
 
 impl OptionRegistry {
@@ -1590,9 +1435,14 @@ impl OptionRegistry {
             match &option.kind {
                 acp::SessionConfigKind::Select(select) => {
                     let options = match &select.options {
-                        acp::SessionConfigSelectOptions::Ungrouped(flat) => {
-                            flat.iter().map(select_option).collect()
-                        }
+                        acp::SessionConfigSelectOptions::Ungrouped(flat) => flat
+                            .iter()
+                            .map(|option| SelectOption {
+                                value: option.value.0.to_string(),
+                                label: option.name.clone(),
+                                description: option.description.clone(),
+                            })
+                            .collect(),
                         acp::SessionConfigSelectOptions::Grouped(groups) => groups
                             .iter()
                             .flat_map(|group| {
@@ -1633,60 +1483,45 @@ impl OptionRegistry {
     fn upsert(&mut self, descriptor: OptionDescriptor, origin: OptionOrigin, value: Value) {
         let id = descriptor_id(&descriptor).to_string();
         match self
-            .descriptors
+            .records
             .iter_mut()
-            .find(|existing| descriptor_id(existing) == id)
+            .find(|record| record.selection.id == id)
         {
-            Some(existing) => *existing = descriptor,
-            None => self.descriptors.push(descriptor),
-        }
-        self.origins.insert(id.clone(), origin);
-        self.select(&id, value);
-    }
-
-    fn select(&mut self, id: &str, value: Value) {
-        match self.selections.iter_mut().find(|s| s.id == id) {
-            Some(selection) => selection.value = value,
-            None => self.selections.push(OptionSelection {
-                id: id.to_string(),
-                value,
+            Some(record) => {
+                record.descriptor = descriptor;
+                record.selection.value = value;
+                record.origin = origin;
+            }
+            None => self.records.push(OptionRecord {
+                descriptor,
+                selection: OptionSelection { id, value },
+                origin,
             }),
         }
     }
 
+    fn select(&mut self, id: &str, value: Value) {
+        if let Some(record) = self
+            .records
+            .iter_mut()
+            .find(|record| record.selection.id == id)
+        {
+            record.selection.value = value;
+        }
+    }
+
     fn origin(&self, id: &str) -> Option<OptionOrigin> {
-        self.origins.get(id).cloned()
+        self.records
+            .iter()
+            .find(|record| record.selection.id == id)
+            .map(|record| record.origin.clone())
     }
 
-    fn descriptors(&self) -> Vec<OptionDescriptor> {
-        self.descriptors.clone()
-    }
-
-    fn selections(&self) -> Vec<OptionSelection> {
-        self.selections.clone()
-    }
-}
-
-fn current_model(options: &[acp::SessionConfigOption]) -> Option<String> {
-    options.iter().find_map(|option| {
-        if !matches!(
-            option.category,
-            Some(acp::SessionConfigOptionCategory::Model)
-        ) {
-            return None;
-        }
-        match &option.kind {
-            acp::SessionConfigKind::Select(select) => Some(select.current_value.0.to_string()),
-            _ => None,
-        }
-    })
-}
-
-fn select_option(option: &acp::SessionConfigSelectOption) -> SelectOption {
-    SelectOption {
-        value: option.value.0.to_string(),
-        label: option.name.clone(),
-        description: option.description.clone(),
+    fn current_model(&self) -> Option<String> {
+        self.records
+            .iter()
+            .find(|record| record.selection.id == MODEL_OPTION_ID)
+            .and_then(|record| record.selection.value.as_str().map(str::to_string))
     }
 }
 
@@ -1717,16 +1552,14 @@ struct TextStream {
     text: String,
 }
 
-pub(crate) struct State {
+struct State {
     cwd: PathBuf,
-    session_id: Option<acp::SessionId>,
     turn: Option<String>,
     /// True while `session/load` replays history we already have on disk.
     replaying: bool,
     tools: HashMap<String, ToolState>,
     text: Option<TextStream>,
-    approvals: HashMap<String, Sender<acp::RequestPermissionOutcome>>,
-    approval_options: HashMap<String, Vec<ApprovalOption>>,
+    approvals: HashMap<String, (Sender<acp::RequestPermissionOutcome>, Vec<ApprovalOption>)>,
     approval_seq: u64,
     text_seq: u64,
     terminal_seq: u64,
@@ -1741,13 +1574,11 @@ impl State {
     fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
-            session_id: None,
             turn: None,
             replaying: false,
             tools: HashMap::new(),
             text: None,
             approvals: HashMap::new(),
-            approval_options: HashMap::new(),
             approval_seq: 0,
             text_seq: 0,
             terminal_seq: 0,
@@ -1792,6 +1623,23 @@ impl State {
         self.previous_non_plan_mode
             .clone()
             .or_else(|| first_non_plan_mode(modes))
+    }
+
+    fn provider_options(&self) -> AgentEvent {
+        AgentEvent::ProviderOptions {
+            descriptors: self
+                .options
+                .records
+                .iter()
+                .map(|record| record.descriptor.clone())
+                .collect(),
+            selections: self
+                .options
+                .records
+                .iter()
+                .map(|record| record.selection.clone())
+                .collect(),
+        }
     }
 
     /// Close the open text block, emitting its final `ItemCompleted`.
@@ -1843,7 +1691,7 @@ impl State {
     /// Map one `session/update` onto canonical events, merging our tool-call and
     /// option state along the way. Pure w.r.t. the outside world — this is the
     /// function the mapping tests drive.
-    pub(crate) fn apply_update(&mut self, update: acp::SessionUpdate) -> Vec<AgentEvent> {
+    fn apply_update(&mut self, update: acp::SessionUpdate) -> Vec<AgentEvent> {
         match update {
             // The app synthesizes the canonical user message at send time;
             // rendering the agent's echo of it would double it.
@@ -1947,17 +1795,11 @@ impl State {
             }
             acp::SessionUpdate::CurrentModeUpdate(update) => {
                 self.select_mode(update.current_mode_id.clone());
-                vec![AgentEvent::ProviderOptions {
-                    descriptors: self.options.descriptors(),
-                    selections: self.options.selections(),
-                }]
+                vec![self.provider_options()]
             }
             acp::SessionUpdate::ConfigOptionUpdate(update) => {
                 self.options.ingest(None, Some(&update.config_options));
-                vec![AgentEvent::ProviderOptions {
-                    descriptors: self.options.descriptors(),
-                    selections: self.options.selections(),
-                }]
+                vec![self.provider_options()]
             }
             acp::SessionUpdate::UsageUpdate(usage) => {
                 let usage = TokenUsage {
@@ -2190,20 +2032,21 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
     if old_lines.is_empty() {
         out.push_str("--- /dev/null\n");
     } else {
-        out.push_str(&format!("--- a/{path}\n"));
+        let _ = writeln!(out, "--- a/{path}");
     }
     if new_lines.is_empty() {
         out.push_str("+++ /dev/null\n");
     } else {
-        out.push_str(&format!("+++ b/{path}\n"));
+        let _ = writeln!(out, "+++ b/{path}");
     }
-    out.push_str(&format!(
-        "@@ -{},{} +{},{} @@\n",
+    let _ = writeln!(
+        out,
+        "@@ -{},{} +{},{} @@",
         usize::from(!old_lines.is_empty()),
         old_lines.len(),
         usize::from(!new_lines.is_empty()),
         new_lines.len()
-    ));
+    );
     // Trim the common prefix/suffix so the (very common) single-line edit does
     // not render as a whole-file rewrite.
     let prefix = old_lines
@@ -2220,16 +2063,16 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
         .min(old_lines.len() - prefix)
         .min(new_lines.len() - prefix);
     for line in &old_lines[..prefix] {
-        out.push_str(&format!(" {line}\n"));
+        let _ = writeln!(out, " {line}");
     }
     for line in &old_lines[prefix..old_lines.len() - suffix] {
-        out.push_str(&format!("-{line}\n"));
+        let _ = writeln!(out, "-{line}");
     }
     for line in &new_lines[prefix..new_lines.len() - suffix] {
-        out.push_str(&format!("+{line}\n"));
+        let _ = writeln!(out, "+{line}");
     }
     for line in &old_lines[old_lines.len() - suffix..] {
-        out.push_str(&format!(" {line}\n"));
+        let _ = writeln!(out, " {line}");
     }
     out
 }
@@ -2270,7 +2113,7 @@ fn content_text(block: &acp::ContentBlock) -> String {
 }
 
 /// The approval an agent's `session/request_permission` becomes.
-pub(crate) fn approval_request(
+fn approval_request(
     id: String,
     turn_id: Option<String>,
     tool: &acp::ToolCallUpdate,
@@ -2325,20 +2168,19 @@ pub(crate) fn approval_request(
         id,
         turn_id,
         kind: approval_kind,
-        options: options.iter().map(map_permission_option).collect(),
-    }
-}
-
-fn map_permission_option(option: &acp::PermissionOption) -> ApprovalOption {
-    ApprovalOption {
-        id: option.option_id.0.to_string(),
-        label: option.name.clone(),
-        kind: match option.kind {
-            acp::PermissionOptionKind::AllowOnce => ApprovalOptionKind::AllowOnce,
-            acp::PermissionOptionKind::AllowAlways => ApprovalOptionKind::AllowAlways,
-            acp::PermissionOptionKind::RejectAlways => ApprovalOptionKind::RejectAlways,
-            _ => ApprovalOptionKind::RejectOnce,
-        },
+        options: options
+            .iter()
+            .map(|option| ApprovalOption {
+                id: option.option_id.0.to_string(),
+                label: option.name.clone(),
+                kind: match option.kind {
+                    acp::PermissionOptionKind::AllowOnce => ApprovalOptionKind::AllowOnce,
+                    acp::PermissionOptionKind::AllowAlways => ApprovalOptionKind::AllowAlways,
+                    acp::PermissionOptionKind::RejectAlways => ApprovalOptionKind::RejectAlways,
+                    _ => ApprovalOptionKind::RejectOnce,
+                },
+            })
+            .collect(),
     }
 }
 
@@ -2350,7 +2192,6 @@ fn map_permission_option(option: &acp::PermissionOption) -> ApprovalOption {
 struct AcpClient {
     events: Sender<AgentEvent>,
     state: Arc<Mutex<State>>,
-    cwd: PathBuf,
 }
 
 impl AcpClient {
@@ -2381,13 +2222,12 @@ impl AcpClient {
             )
         };
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);
-        let (responder, decided) = async_channel::bounded(1);
+        let (responder, decided) = smol::channel::bounded(1);
         {
             let mut state = self.state.lock().unwrap();
-            state.approvals.insert(request_id.clone(), responder);
             state
-                .approval_options
-                .insert(request_id.clone(), request.options.clone());
+                .approvals
+                .insert(request_id.clone(), (responder, request.options.clone()));
             // Keep the tool card in step with what we are asking about.
             let id = args.tool_call.tool_call_id.0.to_string();
             let entry = state.tools.entry(id).or_default();
@@ -2410,10 +2250,7 @@ impl AcpClient {
             .recv()
             .await
             .unwrap_or(acp::RequestPermissionOutcome::Cancelled);
-        let mut state = self.state.lock().unwrap();
-        state.approvals.remove(&request_id);
-        state.approval_options.remove(&request_id);
-        drop(state);
+        self.state.lock().unwrap().approvals.remove(&request_id);
         Ok(acp::RequestPermissionResponse::new(outcome))
     }
 
@@ -2464,7 +2301,7 @@ impl AcpClient {
     ) -> Result<acp::CreateTerminalResponse, acp::Error> {
         let cwd = match &args.cwd {
             Some(cwd) => self.state.lock().unwrap().resolve_path(cwd)?,
-            None => self.cwd.clone(),
+            None => self.state.lock().unwrap().cwd.clone(),
         };
         let terminal = Terminal::spawn(
             connection,
@@ -2588,7 +2425,7 @@ impl Terminal {
             .map_err(|err| acp::Error::new(-32603, format!("could not run `{command}`: {err}")))?;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let (done_tx, done) = async_channel::bounded::<()>(1);
+        let (done_tx, done) = smol::channel::bounded::<()>(1);
 
         let terminal = Arc::new(Terminal {
             child: Mutex::new(child),
@@ -2599,7 +2436,7 @@ impl Terminal {
         });
 
         // stdout and stderr interleave into one buffer, as they do in a terminal.
-        let streams: [Box<dyn futures_lite::AsyncRead + Unpin + Send>; 2] =
+        let streams: [Box<dyn smol::io::AsyncRead + Unpin + Send>; 2] =
             [Box::new(stdout), Box::new(stderr)];
         for stream in streams {
             connection.spawn({
@@ -2650,11 +2487,11 @@ impl Terminal {
         let limit = limit as usize;
         if output.len() > limit {
             // Keep the tail (what ACP asks for), cutting on a char boundary.
-            let cut = output.len() - limit;
-            let cut = (cut..output.len())
-                .find(|index| output.is_char_boundary(*index))
-                .unwrap_or(output.len());
-            *output = output[cut..].to_string();
+            let mut cut = output.len() - limit;
+            while !output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            output.drain(..cut);
             *self.truncated.lock().unwrap() = true;
         }
     }
@@ -2705,98 +2542,46 @@ mod tests {
     }
 
     #[test]
-    fn set_interaction_mode_plan_issues_the_advertised_mode_request() {
-        smol::block_on(async {
-            let state = Arc::new(Mutex::new(state()));
-            state
-                .lock()
-                .unwrap()
-                .ingest_modes(Some(&modes("build", &["build", "plan"])));
-            let (events, _) = async_channel::unbounded();
-            let requested = Arc::new(Mutex::new(Vec::new()));
-
-            apply_interaction_mode(InteractionMode::Plan, &state, &events, {
-                let requested = requested.clone();
-                move |mode| async move {
-                    requested.lock().unwrap().push(mode.0.to_string());
-                    Ok(acp::SetSessionModeResponse::new())
-                }
-            })
-            .await;
-
-            assert_eq!(*requested.lock().unwrap(), vec!["plan"]);
-        });
+    fn interaction_mode_plan_targets_the_advertised_mode() {
+        let mut state = state();
+        state.ingest_modes(Some(&modes("build", &["build", "plan"])));
+        assert_eq!(
+            interaction_mode_target(InteractionMode::Plan, &state),
+            Some(acp::SessionModeId::new("plan"))
+        );
     }
 
     #[test]
-    fn set_interaction_mode_build_restores_the_previous_non_plan_mode() {
-        smol::block_on(async {
-            let state = Arc::new(Mutex::new(state()));
-            state
-                .lock()
-                .unwrap()
-                .ingest_modes(Some(&modes("review", &["review", "build", "plan"])));
-            let (events, _) = async_channel::unbounded();
-            let requested = Arc::new(Mutex::new(Vec::new()));
-
-            apply_interaction_mode(InteractionMode::Plan, &state, &events, {
-                let requested = requested.clone();
-                move |mode| async move {
-                    requested.lock().unwrap().push(mode.0.to_string());
-                    Ok(acp::SetSessionModeResponse::new())
-                }
-            })
-            .await;
-            apply_interaction_mode(InteractionMode::Build, &state, &events, {
-                let requested = requested.clone();
-                move |mode| async move {
-                    requested.lock().unwrap().push(mode.0.to_string());
-                    Ok(acp::SetSessionModeResponse::new())
-                }
-            })
-            .await;
-
-            assert_eq!(*requested.lock().unwrap(), vec!["plan", "review"]);
-        });
+    fn interaction_mode_build_restores_the_previous_non_plan_mode() {
+        let mut state = state();
+        state.ingest_modes(Some(&modes("review", &["review", "build", "plan"])));
+        state.select_mode(acp::SessionModeId::new("plan"));
+        assert_eq!(
+            interaction_mode_target(InteractionMode::Build, &state),
+            Some(acp::SessionModeId::new("review"))
+        );
     }
 
     #[test]
-    fn set_interaction_mode_plan_without_advertised_plan_warns() {
-        smol::block_on(async {
-            let state = Arc::new(Mutex::new(state()));
-            state
-                .lock()
-                .unwrap()
-                .ingest_modes(Some(&modes("build", &["build", "review"])));
-            let (events, received) = async_channel::unbounded();
-            let requested = Arc::new(Mutex::new(Vec::new()));
-
-            apply_interaction_mode(InteractionMode::Plan, &state, &events, {
-                let requested = requested.clone();
-                move |mode| async move {
-                    requested.lock().unwrap().push(mode.0.to_string());
-                    Ok(acp::SetSessionModeResponse::new())
-                }
-            })
-            .await;
-
-            assert!(requested.lock().unwrap().is_empty());
-            assert!(matches!(
-                received.recv().await.unwrap(),
-                AgentEvent::Warning { message }
-                    if message.contains("does not advertise a Plan mode")
-            ));
-        });
+    fn interaction_mode_plan_without_advertised_plan_warns() {
+        let mut state = state();
+        state.ingest_modes(Some(&modes("build", &["build", "review"])));
+        assert_eq!(interaction_mode_target(InteractionMode::Plan, &state), None);
+        assert!(matches!(
+            missing_mode_warning(InteractionMode::Plan),
+            AgentEvent::Warning { message }
+                if message.contains("does not advertise a Plan mode")
+        ));
     }
 
     #[test]
     fn prompt_acceptance_follows_the_complete_stdio_write() {
         smol::block_on(async {
-            use futures_lite::AsyncWriteExt as _;
+            use smol::prelude::*;
 
             let pending = Arc::new(Mutex::new(VecDeque::from([41])));
-            let (events, received) = async_channel::unbounded();
-            let inner = futures_lite::io::Cursor::new(Vec::new());
+            let (events, received) = smol::channel::unbounded();
+            let inner = smol::io::Cursor::new(Vec::new());
             let mut writer = ObservedWriter::new(inner, pending.clone(), events);
 
             writer
@@ -3318,9 +3103,14 @@ mod tests {
         ]))
         .unwrap();
         state.options.ingest(Some(&modes), Some(&config));
-        assert_eq!(current_model(&config), Some("sonnet".to_string()));
+        assert_eq!(state.options.current_model(), Some("sonnet".to_string()));
 
-        let descriptors = state.options.descriptors();
+        let descriptors: Vec<_> = state
+            .options
+            .records
+            .iter()
+            .map(|record| record.descriptor.clone())
+            .collect();
         let ids: Vec<&str> = descriptors.iter().map(descriptor_id).collect();
         assert_eq!(
             ids,
@@ -3348,7 +3138,12 @@ mod tests {
             }
         ));
 
-        let selections = state.options.selections();
+        let selections: Vec<_> = state
+            .options
+            .records
+            .iter()
+            .map(|record| record.selection.clone())
+            .collect();
         assert_eq!(selections[0].value, json!("build"));
         assert_eq!(selections[1].value, json!("sonnet"));
         assert_eq!(selections[2].value, json!("medium"));

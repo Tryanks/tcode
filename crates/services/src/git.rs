@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use agent::{FileChange, FileChangeKind};
 use tcode_core::git::{GitAction, GitStatus, parse_status};
+pub use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
 
 const MAX_RAW_DIFF_BYTES: usize = 200 * 1024;
 const MAX_FILE_TEXT_BYTES: u64 = 512 * 1024;
@@ -28,30 +29,6 @@ fn branch_diff_args(merge_base: &str, ignore_whitespace: bool) -> Vec<String> {
     }
     args.push("--".into());
     args
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GitDiffScope {
-    WorkingTree,
-    Branch,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GitFileText {
-    /// Full base-side file text; None for created/untracked files or when unloadable.
-    pub old: Option<String>,
-    /// Full new-side file text; None for deleted files or when unloadable.
-    pub new: Option<String>,
-}
-
-#[derive(Default, Debug, Clone)]
-pub struct GitDiffResult {
-    pub changes: Vec<FileChange>,
-    pub texts: Vec<GitFileText>,
-    pub truncated: bool,
-    pub error: Option<String>,
-    pub branches: Vec<String>,
-    pub default_base: Option<String>,
 }
 
 struct ParsedFileChange {
@@ -228,6 +205,8 @@ fn load_file_texts(
                         .as_deref()
                         .and_then(|path| read_git_text(cwd, "HEAD", path)),
                 },
+                GitDiffScope::Unknown => GitFileText::default(),
+                _ => GitFileText::default(),
             }
         })
         .collect()
@@ -242,14 +221,7 @@ fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
     let mut branches = git_output(cwd, &args)
         .ok()
         .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+        .map(|output| parse_branch_list(&String::from_utf8_lossy(&output.stdout)))
         .unwrap_or_default();
     let origin_args = vec![
         "symbolic-ref".into(),
@@ -313,6 +285,22 @@ pub fn load_git_diff(
             let args = branch_diff_args(&merge_base, ignore_whitespace);
             base_revision = Some(merge_base);
             args
+        }
+        GitDiffScope::Unknown => {
+            return GitDiffResult {
+                error: Some("unknown git diff scope".into()),
+                branches,
+                default_base,
+                ..GitDiffResult::default()
+            };
+        }
+        _ => {
+            return GitDiffResult {
+                error: Some("unsupported git diff scope".into()),
+                branches,
+                default_base,
+                ..GitDiffResult::default()
+            };
         }
     };
     let output = match git_output(cwd, &args) {

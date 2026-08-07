@@ -287,9 +287,9 @@ fn import_is_idempotent_and_replays_into_timeline() {
     let timeline = Timeline::fold_events(store.read_events(&meta.id));
     assert!(!timeline.entries.is_empty());
     assert!(timeline.entries.iter().any(
-        |entry| matches!(&entry.content, EntryContent::User { text, .. } if text == "Imported question")
+        |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "Imported question")
     ));
-    assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "Imported answer")));
+    assert!(timeline.entries.iter().any(|entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Imported answer")));
 }
 
 #[test]

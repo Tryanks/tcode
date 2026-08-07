@@ -25,7 +25,7 @@ use tcode_runtime::app::ProjectGroup;
 
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, WorkspaceStore};
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 
@@ -45,9 +45,9 @@ const THREADS_COLLAPSED_LIMIT: usize = 6;
 fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static, str>> {
     (total > THREADS_COLLAPSED_LIMIT).then(|| {
         if expanded {
-            tcode_i18n::tr!("sidebar.show_less")
+            crate::tr!("sidebar.show_less")
         } else {
-            tcode_i18n::tr!("sidebar.show_more")
+            crate::tr!("sidebar.show_more")
         }
     })
 }
@@ -89,7 +89,7 @@ fn child_count_badge(
             cx.theme().muted_foreground
         })
         .tooltip(move |window, cx| {
-            Tooltip::new(tcode_i18n::tr!("sidebar.child_threads", count = total).into_owned())
+            Tooltip::new(crate::tr!("sidebar.child_threads", count = total).into_owned())
                 .build(window, cx)
         })
         .child(label)
@@ -114,6 +114,31 @@ struct ThreadRenderState {
     show_unread: bool,
     direct_children: usize,
     active_direct_children: usize,
+}
+
+struct ThreadRowState {
+    session_id: String,
+    row_key: String,
+    waiting_for_approval: bool,
+    waiting_for_input: bool,
+    is_worktree: bool,
+    is_child: bool,
+    show_unread: bool,
+    direct_children: usize,
+    active_direct_children: usize,
+    children_collapsed: bool,
+    renaming: Option<Entity<InputState>>,
+    menu_can_fork: bool,
+}
+
+impl ThreadRowState {
+    fn has_direct_children(&self) -> bool {
+        self.direct_children > 0
+    }
+
+    fn waiting(&self) -> bool {
+        self.waiting_for_approval || self.waiting_for_input
+    }
 }
 
 fn derive_thread_render_state(
@@ -358,14 +383,12 @@ impl SessionsSidebar {
         // Launch sweep: the same auto-archive pass expanding a thread list
         // runs, applied to every project up front so stale threads are gone
         // before the first paint (and before the fold state is seeded below).
-        let project_ids = store.read(cx).project_ids(cx);
+        let project_ids = store.read(cx).project_ids();
         let mut sweeps = Vec::with_capacity(project_ids.len());
         for project_id in project_ids {
-            sweeps.push(WorkspaceStore::command_for(
-                &store,
-                Command::AutoArchiveSweep { project_id },
-                cx,
-            ));
+            sweeps.push(store.update(cx, |store, cx| {
+                store.command(Command::AutoArchiveSweep { project_id }, cx)
+            }));
         }
         cx.spawn(async move |sidebar, cx| {
             let mut archived = 0;
@@ -383,7 +406,7 @@ impl SessionsSidebar {
                 }
             }
             let _ = sidebar.update(cx, |sidebar, cx| {
-                let settings = sidebar.store.read(cx).sidebar_settings(cx);
+                let settings = sidebar.store.read(cx).settings();
                 sidebar.startup_archive_dialog =
                     (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
                         (
@@ -397,8 +420,8 @@ impl SessionsSidebar {
         })
         .detach();
         let collapsed_parents = {
-            let sessions = store.read(cx).sidebar_sessions(cx);
-            let active_id = store.read(cx).active_session_id(cx);
+            let sessions = store.read(cx).sidebar_sessions();
+            let active_id = store.read(cx).active_session_id();
             initial_collapsed_parents(&sessions, active_id.as_deref())
         };
         Self {
@@ -418,7 +441,7 @@ impl SessionsSidebar {
 
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        WorkspaceStore::open_add_project_dialog(self.store.clone(), window, cx);
+        crate::add_project_dialog::open(self.store.clone(), window, cx);
     }
 
     fn toggle_group(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -433,20 +456,21 @@ impl SessionsSidebar {
         } else {
             self.auto_archive_notice = None;
             let (notice_shown, days, keep) = {
-                let settings = self.store.read(cx).sidebar_settings(cx);
+                let settings = self.store.read(cx).settings();
                 (
                     settings.auto_archive_notice_shown,
                     settings.auto_archive_max_idle_days.max(1),
                     settings.auto_archive_keep_count.max(1),
                 )
             };
-            let sweep = WorkspaceStore::command_for(
-                &self.store,
-                Command::AutoArchiveSweep {
-                    project_id: project_id.to_string(),
-                },
-                cx,
-            );
+            let sweep = self.store.update(cx, |store, cx| {
+                store.command(
+                    Command::AutoArchiveSweep {
+                        project_id: project_id.to_string(),
+                    },
+                    cx,
+                )
+            });
             self.expanded_groups.insert(project_id.to_string());
             let project_id = project_id.to_string();
             cx.spawn_in(window, async move |sidebar, cx| {
@@ -484,18 +508,18 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut settings = self.store.read(cx).sidebar_settings(cx);
+        let mut settings = self.store.read(cx).settings();
         settings.auto_archive_notice_shown = true;
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::UpdateSettings { settings }, cx);
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::UpdateSettings { settings });
         });
         let window_state = self.window_state.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let alert = alert.bg(cx.theme().popover);
             let window_state = window_state.clone();
             alert
-                .title(tcode_i18n::tr!("sidebar.auto_archive_dialog.title"))
-                .description(tcode_i18n::tr!(
+                .title(crate::tr!("sidebar.auto_archive_dialog.title"))
+                .description(crate::tr!(
                     "sidebar.auto_archive_dialog.body",
                     count = count,
                     days = days,
@@ -503,13 +527,13 @@ impl SessionsSidebar {
                 ))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text(tcode_i18n::tr!("sidebar.auto_archive_dialog.open_settings"))
-                        .cancel_text(tcode_i18n::tr!("sidebar.auto_archive_dialog.got_it"))
+                        .ok_text(crate::tr!("sidebar.auto_archive_dialog.open_settings"))
+                        .cancel_text(crate::tr!("sidebar.auto_archive_dialog.got_it"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
                     window_state.update(cx, |state, cx| {
-                        state.debug_settings_section = Some("archived".into());
+                        state.pending_settings_section = Some("archived".into());
                         state.open_settings(cx);
                     });
                     true
@@ -538,20 +562,17 @@ impl SessionsSidebar {
         let Some(project) = self
             .store
             .read(cx)
-            .projects(cx)
+            .projects()
             .into_iter()
             .find(|project| project.id == action.0)
         else {
             return;
         };
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::StartDraft {
-                    project_id: project.id,
-                    cwd: project.root,
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::StartDraft {
+                project_id: project.id,
+                cwd: project.root,
+            });
         });
     }
 
@@ -560,7 +581,7 @@ impl SessionsSidebar {
         let title = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == session_id)
             .map(|m| m.title.clone())
@@ -588,35 +609,32 @@ impl SessionsSidebar {
     }
 
     fn on_fork(&mut self, action: &ThreadFork, window: &mut Window, cx: &mut Context<Self>) {
-        let refusal = match self.store.read(cx).fork_availability(&action.0, cx) {
+        let refusal = match self.store.read(cx).fork_availability(&action.0) {
             ForkAvailability::Available => None,
             ForkAvailability::Unsupported => {
-                Some(tcode_i18n::tr!("sidebar.fork_unsupported").into_owned())
+                Some(crate::tr!("sidebar.fork_unsupported").into_owned())
             }
-            ForkAvailability::Empty => Some(tcode_i18n::tr!("sidebar.fork_empty").into_owned()),
-            ForkAvailability::Running => Some(tcode_i18n::tr!("sidebar.fork_running").into_owned()),
+            ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
+            ForkAvailability::Running => Some(crate::tr!("sidebar.fork_running").into_owned()),
         };
         if let Some(message) = refusal {
             window.push_notification(Notification::error(message), cx);
             return;
         }
         let id = action.0.clone();
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::ForkThread { id }, cx);
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::ForkThread { id });
         });
     }
 
     fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.renaming.take() {
             let value = state.input.read(cx).value().to_string();
-            self.store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::RenameSession {
-                        session_id: state.session_id,
-                        title: value,
-                    },
-                    cx,
-                );
+            self.store.update(cx, |store, _cx| {
+                store.dispatch(Command::RenameSession {
+                    session_id: state.session_id,
+                    title: value,
+                });
             });
             cx.notify();
         }
@@ -635,8 +653,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         let id = action.0.clone();
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::MarkSessionUnread { session_id: id }, cx);
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::MarkSessionUnread { session_id: id });
         });
     }
 
@@ -649,7 +667,7 @@ impl SessionsSidebar {
         if let Some(meta) = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == action.0)
         {
@@ -667,7 +685,7 @@ impl SessionsSidebar {
         let title = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == id)
             .map(|m| m.title.clone())
@@ -680,7 +698,7 @@ impl SessionsSidebar {
         let title = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == id)
             .map(|m| m.title.clone())
@@ -697,12 +715,12 @@ impl SessionsSidebar {
         let store = self.store.clone();
         let session_ids: Vec<String> = store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .filter(|meta| {
                 meta.project_id.as_deref() == Some(action.0.as_str())
                     && meta.archived_at.is_none()
-                    && !store.read(cx).turn_running_for(&meta.id, cx)
+                    && !store.read(cx).turn_running_for(&meta.id)
             })
             .map(|meta| meta.id.clone())
             .collect();
@@ -715,27 +733,21 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_ids = session_ids.clone();
             alert
-                .title(tcode_i18n::tr!("sidebar.archive_all_title"))
-                .description(tcode_i18n::tr!(
-                    "sidebar.archive_all_description",
-                    count = count
-                ))
+                .title(crate::tr!("sidebar.archive_all_title"))
+                .description(crate::tr!("sidebar.archive_all_description", count = count))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.archive_all_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.archive_all_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
+                    store.update(cx, |store, _cx| {
                         for session_id in &session_ids {
-                            store.dispatch(
-                                Command::ArchiveSession {
-                                    session_id: session_id.clone(),
-                                },
-                                cx,
-                            );
+                            store.dispatch(Command::ArchiveSession {
+                                session_id: session_id.clone(),
+                            });
                         }
                     });
                     true
@@ -751,7 +763,7 @@ impl SessionsSidebar {
     ) {
         let store = self.store.clone();
         let project_id = action.0.clone();
-        let Some((project_name, count)) = store.read(cx).project_summary(&project_id, cx) else {
+        let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
             return;
         };
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -759,29 +771,26 @@ impl SessionsSidebar {
             let store = store.clone();
             let project_id = project_id.clone();
             alert
-                .title(tcode_i18n::tr!(
+                .title(crate::tr!(
                     "sidebar.remove_project_title",
                     project = project_name.clone()
                 ))
-                .description(tcode_i18n::tr!(
+                .description(crate::tr!(
                     "sidebar.remove_project_description",
                     count = count
                 ))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.remove_project_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.remove_project_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::DeleteProject {
-                                project_id: project_id.clone(),
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::DeleteProject {
+                            project_id: project_id.clone(),
+                        });
                     });
                     true
                 })
@@ -794,7 +803,7 @@ impl SessionsSidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(root) = self.store.read(cx).project_root(&action.0, cx) {
+        if let Some(root) = self.store.read(cx).project_root(&action.0) {
             cx.reveal_path(&root);
         }
     }
@@ -809,18 +818,15 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
-        if store.read(cx).turn_running_for(session_id, cx) {
+        if store.read(cx).turn_running_for(session_id) {
             return;
         }
         let session_id = session_id.to_string();
-        if store.read(cx).sidebar_settings(cx).skip_delete_confirmation {
-            store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::ArchiveSession {
-                        session_id: session_id.clone(),
-                    },
-                    cx,
-                );
+        if store.read(cx).settings().skip_delete_confirmation {
+            store.update(cx, |store, _cx| {
+                store.dispatch(Command::ArchiveSession {
+                    session_id: session_id.clone(),
+                });
             });
             return;
         }
@@ -830,26 +836,20 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(tcode_i18n::tr!("sidebar.archive_title"))
-                .description(tcode_i18n::tr!(
-                    "sidebar.archive_description",
-                    title = title
-                ))
+                .title(crate::tr!("sidebar.archive_title"))
+                .description(crate::tr!("sidebar.archive_description", title = title))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.archive_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.archive_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::ArchiveSession {
-                                session_id: session_id.clone(),
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::ArchiveSession {
+                            session_id: session_id.clone(),
+                        });
                     });
                     true
                 })
@@ -867,7 +867,7 @@ impl SessionsSidebar {
     ) {
         let store = self.store.clone();
         let session_id = session_id.to_string();
-        let skip = store.read(cx).sidebar_settings(cx).skip_delete_confirmation;
+        let skip = store.read(cx).settings().skip_delete_confirmation;
         if skip {
             proceed_delete(store, session_id, window, cx);
             return;
@@ -878,16 +878,13 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(tcode_i18n::tr!(
-                    "sidebar.delete_title",
-                    title = title.clone()
-                ))
-                .description(tcode_i18n::tr!("sidebar.delete_description"))
+                .title(crate::tr!("sidebar.delete_title", title = title.clone()))
+                .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.delete_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.delete_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
@@ -942,7 +939,7 @@ impl SessionsSidebar {
                 h_flex(),
                 "sidebar-search",
                 Role::Button,
-                tcode_i18n::tr!("sidebar.search"),
+                crate::tr!("sidebar.search"),
                 cx,
             )
             .h(px(32.))
@@ -966,7 +963,7 @@ impl SessionsSidebar {
                     .flex_1()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("sidebar.search")),
+                    .child(crate::tr!("sidebar.search")),
             )
             .child(
                 div()
@@ -984,8 +981,8 @@ impl SessionsSidebar {
 
     fn render_layout_toggle(&self, layout: SidebarLayout, cx: &mut Context<Self>) -> Button {
         let tooltip = match layout {
-            SidebarLayout::Flat => tcode_i18n::tr!("sidebar.layout_grouped"),
-            SidebarLayout::Grouped => tcode_i18n::tr!("sidebar.layout_flat"),
+            SidebarLayout::Flat => crate::tr!("sidebar.layout_grouped"),
+            SidebarLayout::Grouped => crate::tr!("sidebar.layout_flat"),
         };
         Button::new("toggle-sidebar-layout")
             .ghost()
@@ -994,19 +991,19 @@ impl SessionsSidebar {
             .icon(IconName::LayoutDashboard)
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let mut settings = this.store.read(cx).sidebar_settings(cx);
+                let mut settings = this.store.read(cx).settings();
                 settings.sidebar_layout = match layout {
                     SidebarLayout::Flat => SidebarLayout::Grouped,
                     SidebarLayout::Grouped => SidebarLayout::Flat,
                 };
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(Command::UpdateSettings { settings }, cx);
+                this.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::UpdateSettings { settings });
                 });
             }))
     }
 
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort(cx));
+        let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort());
         h_flex()
             .flex_none()
             .h(px(28.))
@@ -1019,7 +1016,7 @@ impl SessionsSidebar {
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
                     // Small-caps section label; `to_uppercase` is a no-op on CJK.
-                    .child(tcode_i18n::tr!("sidebar.projects").to_uppercase()),
+                    .child(crate::tr!("sidebar.projects").to_uppercase()),
             )
             .child(
                 h_flex()
@@ -1030,10 +1027,10 @@ impl SessionsSidebar {
                             .xsmall()
                             .compact()
                             .icon(IconName::SortAscending)
-                            .tooltip(tcode_i18n::tr!("sidebar.sort", mode = sort_label))
+                            .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(Command::CycleProjectSort, cx);
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::CycleProjectSort);
                                 });
                             })),
                     )
@@ -1048,7 +1045,7 @@ impl SessionsSidebar {
                                     .path("icons/folder-plus.svg")
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .tooltip(tcode_i18n::tr!("sidebar.add_project"))
+                            .tooltip(crate::tr!("sidebar.add_project"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
@@ -1057,7 +1054,7 @@ impl SessionsSidebar {
     }
 
     fn render_flat_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let projects = self.store.read(cx).projects(cx);
+        let projects = self.store.read(cx).projects();
         let active_filter = self.project_filter.clone();
         let filter_icon_color = if active_filter.is_some() {
             cx.theme().primary
@@ -1071,10 +1068,10 @@ impl SessionsSidebar {
             .xsmall()
             .compact()
             .icon(Icon::new(IconName::Folder).text_color(filter_icon_color))
-            .tooltip(tcode_i18n::tr!("sidebar.filter_project"))
+            .tooltip(crate::tr!("sidebar.filter_project"))
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu.menu_with_check(
-                    tcode_i18n::tr!("sidebar.all_projects").into_owned(),
+                    crate::tr!("sidebar.all_projects").into_owned(),
                     filter_for_menu.is_none(),
                     Box::new(FilterProject(String::new())),
                 );
@@ -1101,16 +1098,13 @@ impl SessionsSidebar {
                 .xsmall()
                 .compact()
                 .icon(IconName::Plus)
-                .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
+                .tooltip(crate::tr!("sidebar.create_thread"))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::StartDraft {
-                                project_id: project_id.clone(),
-                                cwd: cwd.clone(),
-                            },
-                            cx,
-                        );
+                    this.store.update(cx, |store, _cx| {
+                        store.dispatch(Command::StartDraft {
+                            project_id: project_id.clone(),
+                            cwd: cwd.clone(),
+                        });
                     });
                 }))
                 .into_any_element()
@@ -1121,7 +1115,7 @@ impl SessionsSidebar {
                 .xsmall()
                 .compact()
                 .icon(IconName::Plus)
-                .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
+                .tooltip(crate::tr!("sidebar.create_thread"))
                 .dropdown_menu(move |menu, _window, _cx| {
                     let mut menu = menu;
                     for project in &draft_projects {
@@ -1146,7 +1140,7 @@ impl SessionsSidebar {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("sidebar.threads").to_uppercase()),
+                    .child(crate::tr!("sidebar.threads").to_uppercase()),
             )
             .child(
                 h_flex()
@@ -1164,7 +1158,7 @@ impl SessionsSidebar {
                                     .path("icons/folder-plus.svg")
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .tooltip(tcode_i18n::tr!("sidebar.add_project"))
+                            .tooltip(crate::tr!("sidebar.add_project"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
@@ -1179,10 +1173,9 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let project_id = group.project.id.clone();
-        let collapsed = self.store.read(cx).is_project_collapsed(&project_id, cx);
+        let collapsed = self.store.read(cx).is_project_collapsed(&project_id);
         let has_unread = group.sessions.iter().any(|meta| {
-            meta.parent_session_id.is_none()
-                && self.store.read(cx).session_unread(meta.id.as_str(), cx)
+            meta.parent_session_id.is_none() && self.store.read(cx).session_unread(meta.id.as_str())
         });
         let group_key = format!("group-{project_id}");
 
@@ -1202,10 +1195,10 @@ impl SessionsSidebar {
         let can_archive = group
             .sessions
             .iter()
-            .any(|meta| !self.store.read(cx).turn_running_for(&meta.id, cx));
+            .any(|meta| !self.store.read(cx).turn_running_for(&meta.id));
 
         let header_label =
-            tcode_i18n::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
+            crate::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
         let header = crate::material::accessible_clickable(
             h_flex(),
             gpui::SharedString::from(format!("project-header-{project_id}")),
@@ -1223,13 +1216,10 @@ impl SessionsSidebar {
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().sidebar_accent))
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::ToggleProjectCollapsed {
-                        project_id: header_toggle_id.clone(),
-                    },
-                    cx,
-                );
+            this.store.update(cx, |store, _cx| {
+                store.dispatch(Command::ToggleProjectCollapsed {
+                    project_id: header_toggle_id.clone(),
+                });
             });
         }))
         .child(
@@ -1268,7 +1258,7 @@ impl SessionsSidebar {
                 h_flex(),
                 gpui::SharedString::from(format!("new-thread-{project_id}")),
                 Role::Button,
-                tcode_i18n::tr!("sidebar.create_thread"),
+                crate::tr!("sidebar.create_thread"),
                 cx,
             )
             .size_5()
@@ -1285,15 +1275,14 @@ impl SessionsSidebar {
             .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
             .tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.create_thread").into_owned())
-                    .build(window, cx)
+                Tooltip::new(crate::tr!("sidebar.create_thread").into_owned()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 let cwd = plus_cwd.clone();
                 let project_id = plus_project_id.clone();
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(Command::StartDraft { project_id, cwd }, cx);
+                this.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::StartDraft { project_id, cwd });
                 });
             }))
             .child(
@@ -1307,9 +1296,9 @@ impl SessionsSidebar {
                 .flex_none()
                 .child(header.context_menu(move |menu, _window, _cx| {
                     let id = menu_project_id.clone();
-                    let delete_label = tcode_i18n::tr!("sidebar.remove_project").into_owned();
+                    let delete_label = crate::tr!("sidebar.remove_project").into_owned();
                     menu.menu_with_enable(
-                        tcode_i18n::tr!("sidebar.archive_all").into_owned(),
+                        crate::tr!("sidebar.archive_all").into_owned(),
                         Box::new(ProjectArchiveAll(id.clone())),
                         can_archive,
                     )
@@ -1320,7 +1309,7 @@ impl SessionsSidebar {
                             .child(delete_label.clone())
                     })
                     .menu(
-                        tcode_i18n::tr!("sidebar.reveal_project").into_owned(),
+                        crate::tr!("sidebar.reveal_project").into_owned(),
                         Box::new(ProjectReveal(id)),
                     )
                 }));
@@ -1330,7 +1319,7 @@ impl SessionsSidebar {
                 let is_active = active_id == Some(meta.id.as_str());
                 // "Working" covers parked sessions too — a thread that keeps
                 // running in the background keeps its green dot.
-                let working = self.store.read(cx).turn_running_for(&meta.id, cx);
+                let working = self.store.read(cx).turn_running_for(&meta.id);
                 container = container.child(self.render_thread(meta, is_active, working, cx));
             }
             if let Some(toggle_label) = thread_list_toggle_label(total, expanded) {
@@ -1362,7 +1351,7 @@ impl SessionsSidebar {
                     .as_ref()
                     .filter(|(notice_project, _)| notice_project == &project_id)
             {
-                let label = tcode_i18n::tr!("sidebar.auto_archived", count = *count);
+                let label = crate::tr!("sidebar.auto_archived", count = *count);
                 let window_state = self.window_state.clone();
                 container = container.child(
                     crate::material::accessible_clickable(
@@ -1380,7 +1369,7 @@ impl SessionsSidebar {
                     .hover(|s| s.text_color(cx.theme().sidebar_foreground))
                     .on_click(move |_, _, cx| {
                         window_state.update(cx, |state, cx| {
-                            state.debug_settings_section = Some("archived".into());
+                            state.pending_settings_section = Some("archived".into());
                             state.open_settings(cx);
                         });
                     })
@@ -1392,6 +1381,203 @@ impl SessionsSidebar {
         container
     }
 
+    fn thread_row_state(
+        &self,
+        meta: &SessionMeta,
+        sessions: &[SessionMeta],
+        row_key: String,
+        working: bool,
+        cx: &mut Context<Self>,
+    ) -> ThreadRowState {
+        let session_id = meta.id.clone();
+        let unread = self.store.read(cx).session_unread(&session_id);
+        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id);
+        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id);
+        let render_state = derive_thread_render_state(meta, sessions, unread, working, |id| {
+            self.store.read(cx).turn_running_for(id)
+        });
+        ThreadRowState {
+            children_collapsed: self.collapsed_parents.contains(&session_id),
+            renaming: self
+                .renaming
+                .as_ref()
+                .filter(|rename| rename.session_id == session_id)
+                .map(|rename| rename.input.clone()),
+            session_id,
+            row_key,
+            waiting_for_approval,
+            waiting_for_input,
+            is_worktree: meta.worktree.is_some(),
+            is_child: render_state.is_child,
+            show_unread: render_state.show_unread,
+            direct_children: render_state.direct_children,
+            active_direct_children: render_state.active_direct_children,
+            menu_can_fork: meta.provider.supports_fork(),
+        }
+    }
+
+    fn thread_clickable_row(
+        &self,
+        base: gpui::Div,
+        row_id: gpui::SharedString,
+        meta: &SessionMeta,
+        state: &ThreadRowState,
+        is_active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let session_id = state.session_id.clone();
+        let has_direct_children = state.has_direct_children();
+        crate::material::accessible_clickable(
+            base,
+            row_id,
+            Role::Button,
+            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
+            cx,
+        )
+        .aria_selected(is_active)
+        .when(has_direct_children, |row| {
+            row.aria_expanded(!state.children_collapsed)
+        })
+        .group(state.row_key.clone())
+        .cursor_pointer()
+        .when(is_active, |row| row.bg(cx.theme().list_active))
+        .when(!is_active, |row| {
+            row.hover(|row| row.bg(cx.theme().sidebar_accent))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let session_id = session_id.clone();
+            toggle_parent_for_row_click(
+                &mut this.collapsed_parents,
+                &session_id,
+                is_active,
+                has_direct_children,
+            );
+            this.store.update(cx, |store, _cx| {
+                store.dispatch(Command::SelectSession {
+                    session_id: session_id.clone(),
+                });
+            });
+            cx.notify();
+        }))
+        .when(state.waiting_for_approval, |row| {
+            row.tooltip(|window, cx| {
+                Tooltip::new(crate::tr!("sidebar.waiting_approval_tooltip").into_owned())
+                    .build(window, cx)
+            })
+        })
+        .when(
+            state.waiting_for_input && !state.waiting_for_approval,
+            |row| {
+                row.tooltip(|window, cx| {
+                    Tooltip::new(crate::tr!("sidebar.waiting_input_tooltip").into_owned())
+                        .build(window, cx)
+                })
+            },
+        )
+    }
+
+    fn thread_title_or_input(
+        &self,
+        meta: &SessionMeta,
+        state: &ThreadRowState,
+        emphasize_unread: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if let Some(input) = &state.renaming {
+            div()
+                .flex_1()
+                .min_w_0()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
+                .child(Input::new(input).small())
+                .into_any_element()
+        } else {
+            truncated_sidebar_label()
+                .text_size(px(13.))
+                .text_color(cx.theme().sidebar_foreground)
+                .when(emphasize_unread && state.show_unread, |title| {
+                    title.font_semibold()
+                })
+                .child(meta.title.clone())
+                .into_any_element()
+        }
+    }
+
+    fn thread_status_badge(
+        state: &ThreadRowState,
+        working: bool,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (color, label) = if state.waiting_for_approval {
+            (cx.theme().warning, crate::tr!("sidebar.waiting_approval"))
+        } else if state.waiting_for_input {
+            (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
+        } else if working {
+            (cx.theme().success, crate::tr!("sidebar.working"))
+        } else {
+            return None;
+        };
+        Some(
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .child(div().size(px(6.)).rounded_full().bg(color))
+                .child(
+                    div()
+                        .whitespace_nowrap()
+                        .text_size(px(11.))
+                        .text_color(color)
+                        .child(label),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn thread_context_menu(
+        row: gpui::Stateful<gpui::Div>,
+        session_id: String,
+        running: bool,
+        can_fork: bool,
+    ) -> gpui::AnyElement {
+        row.context_menu(move |menu, _window, _cx| {
+            let id = session_id.clone();
+            menu.menu(
+                crate::tr!("sidebar.ctx_rename").into_owned(),
+                Box::new(ThreadRename(id.clone())),
+            )
+            .when(can_fork, |menu| {
+                menu.menu(
+                    crate::tr!("sidebar.ctx_fork").into_owned(),
+                    Box::new(ThreadFork(id.clone())),
+                )
+            })
+            .menu(
+                crate::tr!("sidebar.ctx_mark_unread").into_owned(),
+                Box::new(ThreadMarkUnread(id.clone())),
+            )
+            .separator()
+            .menu(
+                crate::tr!("sidebar.ctx_copy_path").into_owned(),
+                Box::new(ThreadCopyPath(id.clone())),
+            )
+            .menu(
+                crate::tr!("sidebar.ctx_copy_id").into_owned(),
+                Box::new(ThreadCopyId(id.clone())),
+            )
+            .separator()
+            .menu_with_enable(
+                crate::tr!("sidebar.archive").into_owned(),
+                Box::new(ThreadArchive(id.clone())),
+                !running,
+            )
+            .menu(
+                crate::tr!("sidebar.ctx_delete").into_owned(),
+                Box::new(ThreadDelete(id.clone())),
+            )
+        })
+        .into_any_element()
+    }
+
     fn render_thread(
         &self,
         meta: &SessionMeta,
@@ -1399,175 +1585,63 @@ impl SessionsSidebar {
         working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let session_id = meta.id.clone();
-        let row_key = format!("thread-{session_id}");
-        let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
-        let unread = self.store.read(cx).session_unread(&session_id, cx);
-        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
-        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
-        let is_worktree = meta.worktree.is_some();
-        let render_state = {
-            let sessions = self.store.read(cx).sidebar_sessions(cx);
-            derive_thread_render_state(meta, &sessions, unread, working, |id| {
-                self.store.read(cx).turn_running_for(id, cx)
-            })
-        };
-        let is_child = render_state.is_child;
-        let show_unread = render_state.show_unread;
-        let direct_children = render_state.direct_children;
-        let active_direct_children = render_state.active_direct_children;
-        let has_direct_children = direct_children > 0;
-        let children_collapsed = self.collapsed_parents.contains(&session_id);
+        let sessions = self.store.read(cx).sidebar_sessions();
+        let state =
+            self.thread_row_state(meta, &sessions, format!("thread-{}", meta.id), working, cx);
+        let session_id = state.session_id.clone();
+        let row_key = state.row_key.clone();
+        let is_worktree = state.is_worktree;
+        let is_child = state.is_child;
+        let show_unread = state.show_unread;
+        let direct_children = state.direct_children;
+        let active_direct_children = state.active_direct_children;
+        let has_direct_children = state.has_direct_children();
+        let children_collapsed = state.children_collapsed;
 
-        // Inline rename takes over the whole row's content area.
-        let renaming = self
-            .renaming
-            .as_ref()
-            .filter(|r| r.session_id == session_id)
-            .map(|r| r.input.clone());
-
-        // Menu-builder captures.
-        let menu_id = session_id.clone();
-        let menu_running = working;
-        let menu_can_fork = meta.provider.supports_fork();
-
-        let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
-        let row = crate::material::accessible_clickable(
-            h_flex(),
-            gpui::SharedString::from(format!("thread-row-{session_id}")),
-            Role::Button,
-            row_label,
-            cx,
-        )
-        .aria_selected(is_active)
-        .when(has_direct_children, |row| {
-            row.aria_expanded(!children_collapsed)
-        })
-        .group(row_key.clone())
-        .h(px(30.))
-        .items_center()
-        .gap_2()
-        .pl(px(if is_child { 42. } else { 30. }))
-        .pr_2()
-        // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(is_active, |s| s.bg(cx.theme().list_active))
-        .when(!is_active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-        .on_click(cx.listener({
-            let session_id = session_id.clone();
-            move |this, _, _, cx| {
-                let session_id = session_id.clone();
-                toggle_parent_for_row_click(
-                    &mut this.collapsed_parents,
-                    &session_id,
-                    is_active,
-                    has_direct_children,
-                );
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::SelectSession {
-                            session_id: session_id.clone(),
-                        },
-                        cx,
-                    );
-                });
-                cx.notify();
-            }
-        }))
-        .when(waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        })
-        .when(waiting_for_input && !waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        })
-        .when(waiting_for_approval, |row| {
-            row.child(
-                h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_approval")),
-                    ),
+        let row = self
+            .thread_clickable_row(
+                h_flex(),
+                gpui::SharedString::from(format!("thread-row-{session_id}")),
+                meta,
+                &state,
+                is_active,
+                cx,
             )
-        })
-        .when(waiting_for_input && !waiting_for_approval, |row| {
-            row.child(
-                h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_input")),
-                    ),
+            .h(px(30.))
+            .items_center()
+            .gap_2()
+            .pl(px(if is_child { 42. } else { 30. }))
+            .pr_2()
+            // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
+            .rounded(px(6.))
+            .when_some(
+                Self::thread_status_badge(&state, working, cx),
+                |row, badge| row.child(badge),
             )
-        })
-        .when(
-            working && !waiting_for_approval && !waiting_for_input,
-            |row| {
+            .when(is_child, |row| {
                 row.child(
-                    h_flex()
+                    div()
                         .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().success)
-                                .child(tcode_i18n::tr!("sidebar.working")),
-                        ),
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("↳"),
                 )
-            },
-        )
-        .when(is_child, |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("↳"),
-            )
-        });
+            });
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         // The fold chevron trails the title, right before the child-count
         // badge, so the title keeps the row's full leading width.
-        let row = if let Some(input) = renaming {
-            row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                    .child(Input::new(&input).small()),
-            )
-            .when(has_direct_children, |row| {
-                row.child(collapse_chevron(children_collapsed, cx))
-                    .child(child_count_badge(
-                        &session_id,
-                        direct_children,
-                        active_direct_children,
-                        cx,
-                    ))
-            })
+        let row = if state.renaming.is_some() {
+            row.child(self.thread_title_or_input(meta, &state, false, cx))
+                .when(has_direct_children, |row| {
+                    row.child(collapse_chevron(children_collapsed, cx))
+                        .child(child_count_badge(
+                            &session_id,
+                            direct_children,
+                            active_direct_children,
+                            cx,
+                        ))
+                })
         } else {
             row.when(show_unread, |row| {
                 row.child(
@@ -1586,12 +1660,7 @@ impl SessionsSidebar {
                         .text_color(cx.theme().muted_foreground),
                 )
             })
-            .child(
-                truncated_sidebar_label()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(meta.title.clone()),
-            )
+            .child(self.thread_title_or_input(meta, &state, false, cx))
             .when(has_direct_children, |row| {
                 row.child(collapse_chevron(children_collapsed, cx))
                     .child(child_count_badge(
@@ -1602,107 +1671,11 @@ impl SessionsSidebar {
                     ))
             })
             .when(!working, |row| {
-                // Right slot: relative time, replaced by an archive button on
-                // hover. The slot sizes to the time text (no fixed width), so
-                // the title's flexible width runs right up to it.
-                let title = meta.title.clone();
-                let archive_id = session_id.clone();
-                row.child(
-                    div()
-                        .relative()
-                        .flex_none()
-                        .h(px(20.))
-                        .min_w(px(20.))
-                        .child(
-                            h_flex()
-                                .h_full()
-                                .items_center()
-                                .whitespace_nowrap()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .group_hover(row_key.clone(), |s| s.invisible())
-                                .child(ago),
-                        )
-                        .child(
-                            crate::material::accessible_clickable(
-                                h_flex(),
-                                gpui::SharedString::from(format!("archive-thread-{session_id}")),
-                                Role::Button,
-                                tcode_i18n::tr!("sidebar.archive"),
-                                cx,
-                            )
-                            .absolute()
-                            .right_0()
-                            .top_0()
-                            .size_5()
-                            .items_center()
-                            .justify_center()
-                            .rounded(cx.theme().radius * 0.5)
-                            .cursor_pointer()
-                            // Keep the archived action registered as a tab stop;
-                            // the icon reveals only when the button itself is
-                            // focused (`in_focus` would pin it visible while the
-                            // click-focused row stays selected).
-                            .opacity(0.)
-                            .group_hover(row_key.clone(), |s| s.opacity(1.))
-                            .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
-                            .hover(|s| s.bg(cx.theme().sidebar_accent))
-                            .tooltip(|window, cx| {
-                                Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.archive_thread(&archive_id, &title, window, cx);
-                            }))
-                            .child(
-                                Icon::empty()
-                                    .path("icons/archive.svg")
-                                    .xsmall()
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                        ),
-                )
+                row.child(self.render_flat_thread_right_slot(meta, &row_key, false, true, cx))
             })
         };
 
-        row.context_menu(move |menu, _window, _cx| {
-            let id = menu_id.clone();
-            menu.menu(
-                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
-                Box::new(ThreadRename(id.clone())),
-            )
-            .when(menu_can_fork, |menu| {
-                menu.menu(
-                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
-                    Box::new(ThreadFork(id.clone())),
-                )
-            })
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
-                Box::new(ThreadMarkUnread(id.clone())),
-            )
-            .separator()
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
-                Box::new(ThreadCopyPath(id.clone())),
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
-                Box::new(ThreadCopyId(id.clone())),
-            )
-            .separator()
-            .menu_with_enable(
-                tcode_i18n::tr!("sidebar.archive").into_owned(),
-                Box::new(ThreadArchive(id.clone())),
-                !menu_running,
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
-                Box::new(ThreadDelete(id.clone())),
-            )
-        })
-        .into_any_element()
+        Self::thread_context_menu(row, session_id, working, state.menu_can_fork)
     }
 
     fn render_flat_thread_right_slot(
@@ -1745,7 +1718,7 @@ impl SessionsSidebar {
                         h_flex(),
                         gpui::SharedString::from(format!("archive-flat-thread-{session_id}")),
                         Role::Button,
-                        tcode_i18n::tr!("sidebar.archive"),
+                        crate::tr!("sidebar.archive"),
                         cx,
                     )
                     .absolute()
@@ -1761,8 +1734,7 @@ impl SessionsSidebar {
                     .focus(|button| button.opacity(1.).bg(cx.theme().sidebar_accent))
                     .hover(|button| button.bg(cx.theme().sidebar_accent))
                     .tooltip(|window, cx| {
-                        Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
-                            .build(window, cx)
+                        Tooltip::new(crate::tr!("sidebar.archive").into_owned()).build(window, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
@@ -1787,155 +1759,51 @@ impl SessionsSidebar {
         working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let session_id = meta.id.clone();
-        let row_key = format!("flat-thread-{session_id}");
-        let unread = self.store.read(cx).session_unread(&session_id, cx);
-        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
-        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
-        let waiting = waiting_for_approval || waiting_for_input;
-        let render_state = derive_thread_render_state(meta, sessions, unread, working, |id| {
-            self.store.read(cx).turn_running_for(id, cx)
-        });
-        let is_child = render_state.is_child;
-        let show_unread = render_state.show_unread;
-        let direct_children = render_state.direct_children;
-        let active_direct_children = render_state.active_direct_children;
-        let has_direct_children = direct_children > 0;
-        let children_collapsed = self.collapsed_parents.contains(&session_id);
-        let renaming = self
-            .renaming
-            .as_ref()
-            .filter(|rename| rename.session_id == session_id)
-            .map(|rename| rename.input.clone());
-
-        let menu_id = session_id.clone();
-        let menu_running = working;
-        let menu_can_fork = meta.provider.supports_fork();
-        let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
-        let row = crate::material::accessible_clickable(
-            if is_child { h_flex() } else { v_flex() },
-            gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
-            Role::Button,
-            row_label,
+        let state = self.thread_row_state(
+            meta,
+            sessions,
+            format!("flat-thread-{}", meta.id),
+            working,
             cx,
-        )
-        .aria_selected(is_active)
-        .when(has_direct_children, |row| {
-            row.aria_expanded(!children_collapsed)
-        })
-        .group(row_key.clone())
-        .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
-        .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
-        .px_2()
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(is_active, |row| row.bg(cx.theme().list_active))
-        .when(!is_active, |row| {
-            row.hover(|row| row.bg(cx.theme().sidebar_accent))
-        })
-        .on_click(cx.listener({
-            let session_id = session_id.clone();
-            move |this, _, _, cx| {
-                let session_id = session_id.clone();
-                toggle_parent_for_row_click(
-                    &mut this.collapsed_parents,
-                    &session_id,
-                    is_active,
-                    has_direct_children,
-                );
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::SelectSession {
-                            session_id: session_id.clone(),
-                        },
-                        cx,
-                    );
-                });
-                cx.notify();
-            }
-        }))
-        .when(waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        })
-        .when(waiting_for_input && !waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        });
+        );
+        let session_id = state.session_id.clone();
+        let row_key = state.row_key.clone();
+        let waiting_for_approval = state.waiting_for_approval;
+        let waiting_for_input = state.waiting_for_input;
+        let waiting = state.waiting();
+        let is_child = state.is_child;
+        let show_unread = state.show_unread;
+        let direct_children = state.direct_children;
+        let active_direct_children = state.active_direct_children;
+        let has_direct_children = state.has_direct_children();
+        let children_collapsed = state.children_collapsed;
+
+        let row = self
+            .thread_clickable_row(
+                if state.is_child { h_flex() } else { v_flex() },
+                gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
+                meta,
+                &state,
+                is_active,
+                cx,
+            )
+            .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
+            .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
+            .px_2()
+            .rounded(px(6.));
 
         let row = if is_child {
-            let title_or_input = if let Some(input) = renaming {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                    .child(Input::new(&input).small())
-                    .into_any_element()
-            } else {
-                truncated_sidebar_label()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(meta.title.clone())
-                    .into_any_element()
-            };
+            let title_or_input = self.thread_title_or_input(meta, &state, false, cx);
             row.child(
                 h_flex()
                     .w_full()
                     .min_w_0()
                     .items_center()
                     .gap_2()
-                    .when(waiting_for_approval, |line| {
-                        line.child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
-                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().warning)
-                                        .child(tcode_i18n::tr!("sidebar.waiting_approval")),
-                                ),
-                        )
-                    })
-                    .when(waiting_for_input && !waiting_for_approval, |line| {
-                        line.child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
-                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().warning)
-                                        .child(tcode_i18n::tr!("sidebar.waiting_input")),
-                                ),
-                        )
-                    })
-                    .when(working && !waiting, |line| {
-                        line.child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
-                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().success)
-                                        .child(tcode_i18n::tr!("sidebar.working")),
-                                ),
-                        )
-                    })
+                    .when_some(
+                        Self::thread_status_badge(&state, working, cx),
+                        |line, badge| line.child(badge),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -1961,21 +1829,7 @@ impl SessionsSidebar {
                     }),
             )
         } else {
-            let title_or_input = if let Some(input) = renaming {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                    .child(Input::new(&input).small())
-                    .into_any_element()
-            } else {
-                truncated_sidebar_label()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .when(show_unread, |title| title.font_semibold())
-                    .child(meta.title.clone())
-                    .into_any_element()
-            };
+            let title_or_input = self.thread_title_or_input(meta, &state, true, cx);
             let line_one = h_flex()
                 .w_full()
                 .min_w_0()
@@ -2024,7 +1878,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_approval")),
+                            .child(crate::tr!("sidebar.waiting_approval")),
                     )
                 })
                 .when(waiting_for_input && !waiting_for_approval, |line| {
@@ -2032,7 +1886,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_input")),
+                            .child(crate::tr!("sidebar.waiting_input")),
                     )
                 })
                 .when(working && !waiting, |line| {
@@ -2040,7 +1894,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .text_color(cx.theme().success)
-                            .child(tcode_i18n::tr!("sidebar.working")),
+                            .child(crate::tr!("sidebar.working")),
                     )
                 })
                 .when((waiting || working) && has_project, |line| {
@@ -2078,43 +1932,7 @@ impl SessionsSidebar {
             row.child(line_one).child(line_two)
         };
 
-        row.context_menu(move |menu, _window, _cx| {
-            let id = menu_id.clone();
-            menu.menu(
-                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
-                Box::new(ThreadRename(id.clone())),
-            )
-            .when(menu_can_fork, |menu| {
-                menu.menu(
-                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
-                    Box::new(ThreadFork(id.clone())),
-                )
-            })
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
-                Box::new(ThreadMarkUnread(id.clone())),
-            )
-            .separator()
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
-                Box::new(ThreadCopyPath(id.clone())),
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
-                Box::new(ThreadCopyId(id.clone())),
-            )
-            .separator()
-            .menu_with_enable(
-                tcode_i18n::tr!("sidebar.archive").into_owned(),
-                Box::new(ThreadArchive(id.clone())),
-                !menu_running,
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
-                Box::new(ThreadDelete(id.clone())),
-            )
-        })
-        .into_any_element()
+        Self::thread_context_menu(row, session_id, working, state.menu_can_fork)
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2126,7 +1944,7 @@ impl SessionsSidebar {
                     h_flex(),
                     "sidebar-settings",
                     Role::Button,
-                    tcode_i18n::tr!("settings.title"),
+                    crate::tr!("settings.title"),
                     cx,
                 )
                 .h(px(40.))
@@ -2148,7 +1966,7 @@ impl SessionsSidebar {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().sidebar_foreground)
-                        .child(tcode_i18n::tr!("settings.title")),
+                        .child(crate::tr!("settings.title")),
                 ),
             )
     }
@@ -2161,16 +1979,13 @@ fn proceed_delete(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    let orphan = store.read(cx).worktree_orphaned_by_delete(&session_id, cx);
+    let orphan = store.read(cx).worktree_orphaned_by_delete(&session_id);
     let Some(worktree) = orphan else {
-        store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::DeleteSession {
-                    session_id,
-                    remove_worktree: false,
-                },
-                cx,
-            );
+        store.update(cx, |store, _cx| {
+            store.dispatch(Command::DeleteSession {
+                session_id,
+                remove_worktree: false,
+            });
         });
         return;
     };
@@ -2183,39 +1998,33 @@ fn proceed_delete(
         let keep = session_id.clone();
         let store_remove = store.clone();
         alert
-            .title(tcode_i18n::tr!("sidebar.worktree_cleanup_title"))
-            .description(tcode_i18n::tr!(
+            .title(crate::tr!("sidebar.worktree_cleanup_title"))
+            .description(crate::tr!(
                 "sidebar.worktree_cleanup_description",
                 path = path.clone()
             ))
             .button_props(
                 DialogButtonProps::default()
                     .ok_variant(ButtonVariant::Danger)
-                    .ok_text(tcode_i18n::tr!("sidebar.worktree_cleanup_remove"))
-                    .cancel_text(tcode_i18n::tr!("sidebar.worktree_cleanup_keep"))
+                    .ok_text(crate::tr!("sidebar.worktree_cleanup_remove"))
+                    .cancel_text(crate::tr!("sidebar.worktree_cleanup_keep"))
                     .show_cancel(true),
             )
             .on_ok(move |_, _, cx| {
-                store_remove.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::DeleteSession {
-                            session_id: remove.clone(),
-                            remove_worktree: true,
-                        },
-                        cx,
-                    );
+                store_remove.update(cx, |store, _cx| {
+                    store.dispatch(Command::DeleteSession {
+                        session_id: remove.clone(),
+                        remove_worktree: true,
+                    });
                 });
                 true
             })
             .on_cancel(move |_, _, cx| {
-                store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::DeleteSession {
-                            session_id: keep.clone(),
-                            remove_worktree: false,
-                        },
-                        cx,
-                    );
+                store.update(cx, |store, _cx| {
+                    store.dispatch(Command::DeleteSession {
+                        session_id: keep.clone(),
+                        remove_worktree: false,
+                    });
                 });
                 true
             })
@@ -2231,11 +2040,11 @@ impl Render for SessionsSidebar {
                 this.show_auto_archive_dialog(count, days, keep, window, cx);
             });
         }
-        let layout = self.store.read(cx).sidebar_layout(cx);
-        let active_id = self.store.read(cx).active_session_id(cx);
+        let layout = self.store.read(cx).sidebar_layout();
+        let active_id = self.store.read(cx).active_session_id();
         let (header, list_content) = match layout {
             SidebarLayout::Grouped => {
-                let groups = self.store.read(cx).grouped_sessions(cx);
+                let groups = self.store.read(cx).grouped_sessions();
                 let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
                 if groups.is_empty() {
                     list_content = list_content.child(
@@ -2244,7 +2053,7 @@ impl Render for SessionsSidebar {
                             .py_3()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("sidebar.empty")),
+                            .child(crate::tr!("sidebar.empty")),
                     );
                 } else {
                     for group in &groups {
@@ -2258,26 +2067,26 @@ impl Render for SessionsSidebar {
                 )
             }
             SidebarLayout::Flat => {
-                let sessions = self.store.read(cx).flat_sessions(cx);
-                let projects = self.store.read(cx).projects(cx);
+                let sessions = self.store.read(cx).flat_sessions();
+                let projects = self.store.read(cx).projects();
                 let visible = flat_visible_threads(
                     &sessions,
                     &self.collapsed_parents,
                     self.project_filter.as_deref(),
                     |id| {
-                        self.store.read(cx).pending_approval_for(id, cx)
-                            || self.store.read(cx).pending_user_input_for(id, cx)
+                        self.store.read(cx).pending_approval_for(id)
+                            || self.store.read(cx).pending_user_input_for(id)
                     },
-                    |id| self.store.read(cx).turn_running_for(id, cx),
+                    |id| self.store.read(cx).turn_running_for(id),
                 );
                 let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
                 if visible.is_empty() {
                     // An active project filter can empty the list while threads
                     // exist; that state gets its own hint, not the no-projects one.
                     let hint = if sessions.is_empty() {
-                        tcode_i18n::tr!("sidebar.empty")
+                        crate::tr!("sidebar.empty")
                     } else {
-                        tcode_i18n::tr!("sidebar.filter_empty")
+                        crate::tr!("sidebar.filter_empty")
                     };
                     list_content = list_content.child(
                         div()
@@ -2296,7 +2105,7 @@ impl Render for SessionsSidebar {
                                 .map(|project| project.name.clone())
                         });
                         let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                        let working = self.store.read(cx).turn_running_for(&meta.id, cx);
+                        let working = self.store.read(cx).turn_running_for(&meta.id);
                         list_content = list_content.child(self.render_flat_thread(
                             meta,
                             &sessions,
@@ -2347,18 +2156,6 @@ impl Render for SessionsSidebar {
 // ---------------------------------------------------------------------------
 // Relative-time humanizer
 // ---------------------------------------------------------------------------
-
-pub(crate) fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2489,7 +2286,7 @@ mod tests {
     #[test]
     fn oversized_thread_list_keeps_its_toggle_after_expanding() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
 
         assert_eq!(thread_list_toggle_label(6, false), None);
         assert_eq!(

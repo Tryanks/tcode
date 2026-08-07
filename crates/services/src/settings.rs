@@ -4,10 +4,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(test)]
 use agent::ProviderKind;
+use tcode_core::settings::Settings;
+#[cfg(test)]
+use tcode_core::settings::provider_key;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ProjectSort, ProviderSettings, SidebarLayout, ThemeMode};
-use tcode_core::settings::{Settings, provider_key};
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -49,27 +52,11 @@ impl SettingsStore {
             .unwrap_or_default()
     }
 
-    /// The sensitive env values for one provider (used only when spawning).
-    pub fn provider_secrets(&self, provider: ProviderKind) -> BTreeMap<String, String> {
-        self.profile_secrets(provider_key(provider))
-    }
-
     /// The sensitive env values for one profile id. Built-in profiles use their
     /// [`provider_key`] as id, so this also covers them; user-created profiles
     /// are keyed by their slug id.
     pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
         self.load_secrets().remove(profile_id).unwrap_or_default()
-    }
-
-    /// Store (`Some`) or clear (`None`) one provider secret. Written 0600 and
-    /// never returned to the settings UI.
-    pub fn set_secret(
-        &self,
-        provider: ProviderKind,
-        name: &str,
-        value: Option<&str>,
-    ) -> std::io::Result<()> {
-        self.set_profile_secret(provider_key(provider), name, value)
     }
 
     /// Store (`Some`) or clear (`None`) one profile secret, by profile id.
@@ -282,8 +269,8 @@ mod tests {
         }];
         store.save(&settings).unwrap();
         store
-            .set_secret(
-                ProviderKind::ClaudeCode,
+            .set_profile_secret(
+                provider_key(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 Some("sk-live"),
             )
@@ -301,12 +288,12 @@ mod tests {
         assert!(env[0].value.is_empty());
 
         // The value is only reachable through the secrets store, which is 0600.
-        let secrets = store.provider_secrets(ProviderKind::ClaudeCode);
+        let secrets = store.profile_secrets("claude");
         assert_eq!(
             secrets.get("ANTHROPIC_API_KEY").map(String::as_str),
             Some("sk-live")
         );
-        assert!(store.provider_secrets(ProviderKind::Codex).is_empty());
+        assert!(store.profile_secrets("codex").is_empty());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -319,9 +306,13 @@ mod tests {
 
         // Clearing removes the entry (and the now-empty provider bucket).
         store
-            .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", None)
+            .set_profile_secret(
+                provider_key(ProviderKind::ClaudeCode),
+                "ANTHROPIC_API_KEY",
+                None,
+            )
             .unwrap();
-        assert!(store.provider_secrets(ProviderKind::ClaudeCode).is_empty());
+        assert!(store.profile_secrets("claude").is_empty());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -338,8 +329,8 @@ mod tests {
             .set_profile_secret("klaude-kode", "ANTHROPIC_API_KEY", Some("sk-kimi-xyz"))
             .unwrap();
         store
-            .set_secret(
-                ProviderKind::ClaudeCode,
+            .set_profile_secret(
+                provider_key(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 Some("sk-official"),
             )
@@ -352,14 +343,7 @@ mod tests {
                 .map(String::as_str),
             Some("sk-kimi-xyz")
         );
-        // Built-in profile id == provider_key, reachable both ways.
-        assert_eq!(
-            store
-                .provider_secrets(ProviderKind::ClaudeCode)
-                .get("ANTHROPIC_API_KEY")
-                .map(String::as_str),
-            Some("sk-official")
-        );
+        // Built-in profile id == provider_key.
         assert_eq!(
             store
                 .profile_secrets("claude")
@@ -373,7 +357,7 @@ mod tests {
         assert!(store.profile_secrets("klaude-kode").is_empty());
         assert_eq!(
             store
-                .provider_secrets(ProviderKind::ClaudeCode)
+                .profile_secrets("claude")
                 .get("ANTHROPIC_API_KEY")
                 .map(String::as_str),
             Some("sk-official")

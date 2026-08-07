@@ -1,28 +1,25 @@
 //! Provider model presentation with core-owned semantics and localized copy.
 
 pub use tcode_core::provider_models::{
-    MAX_SLUG_LEN, ModelCapability, ResolvedModel, SlugError, picker_models, resolve_models,
-    validate_slug,
+    MAX_SLUG_LEN, ModelCapability, ResolvedModel, SlugError, validate_slug,
 };
 
 pub fn model_capability_label(capability: ModelCapability) -> String {
     match capability {
-        ModelCapability::FastMode => tcode_i18n::tr!("providers.models.cap_fast").into_owned(),
-        ModelCapability::Thinking => tcode_i18n::tr!("providers.models.cap_thinking").into_owned(),
-        ModelCapability::Reasoning => {
-            tcode_i18n::tr!("providers.models.cap_reasoning").into_owned()
-        }
+        ModelCapability::FastMode => crate::tr!("providers.models.cap_fast").into_owned(),
+        ModelCapability::Thinking => crate::tr!("providers.models.cap_thinking").into_owned(),
+        ModelCapability::Reasoning => crate::tr!("providers.models.cap_reasoning").into_owned(),
     }
 }
 
 pub fn slug_error_message(error: &SlugError) -> String {
     match error {
-        SlugError::Empty => tcode_i18n::tr!("providers.models.err_empty").into_owned(),
-        SlugError::AlreadyBuiltIn => tcode_i18n::tr!("providers.models.err_builtin").into_owned(),
+        SlugError::Empty => crate::tr!("providers.models.err_empty").into_owned(),
+        SlugError::AlreadyBuiltIn => crate::tr!("providers.models.err_builtin").into_owned(),
         SlugError::TooLong => {
-            tcode_i18n::tr!("providers.models.err_too_long", limit = MAX_SLUG_LEN).into_owned()
+            crate::tr!("providers.models.err_too_long", limit = MAX_SLUG_LEN).into_owned()
         }
-        SlugError::AlreadySaved => tcode_i18n::tr!("providers.models.err_saved").into_owned(),
+        SlugError::AlreadySaved => crate::tr!("providers.models.err_saved").into_owned(),
     }
 }
 

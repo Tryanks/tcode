@@ -6,6 +6,8 @@
 //! description on the left, a control on the right), matching reference shots
 //! 40-settings.png / 41-settings-connections.png.
 
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -17,7 +19,6 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
-    popover::Popover,
     switch::Switch,
     v_flex,
 };
@@ -36,7 +37,7 @@ use crate::settings::{
 };
 use crate::shell::Quit;
 use crate::store::WorkspaceStore;
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
@@ -63,6 +64,15 @@ enum Section {
     Archived,
 }
 
+#[derive(Clone)]
+struct SelectRowOption<T> {
+    value: T,
+    id: SharedString,
+    label: SharedString,
+    description: Option<SharedString>,
+    selected: bool,
+}
+
 /// Apply a settings theme mode to the live window (shared with the palette's
 /// "Toggle theme" action).
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
@@ -71,10 +81,6 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
         ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, Some(window), cx),
         ThemeMode::System => Theme::sync_system_appearance(Some(window), cx),
     }
-}
-
-fn apply_toggle_value(settings: &mut Settings, checked: bool, mutate: fn(&mut Settings, bool)) {
-    mutate(settings, !checked);
 }
 
 pub struct SettingsPage {
@@ -90,7 +96,6 @@ pub struct SettingsPage {
     title_model_picker: Entity<ProviderModelPicker>,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
-    debug_acp_dialog_pending: bool,
     section: Section,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: Entity<InputState>,
@@ -111,7 +116,7 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> Option<Section> {
         window_state
-            .update(cx, |state, _| state.debug_settings_section.take())
+            .update(cx, |state, _| state.pending_settings_section.take())
             .map(|section| match section.as_str() {
                 "providers" => Section::Providers,
                 "browser" => Section::Browser,
@@ -128,7 +133,7 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let title_generation = store.read(cx).settings_page_settings(cx).title_generation;
+        let title_generation = store.read(cx).settings().title_generation;
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(
                 store.clone(),
@@ -142,11 +147,7 @@ impl SettingsPage {
         });
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| {
-                let selection = this
-                    .store
-                    .read(cx)
-                    .settings_page_settings(cx)
-                    .title_generation;
+                let selection = this.store.read(cx).settings().title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
@@ -177,18 +178,17 @@ impl SettingsPage {
             }),
         ];
 
-        // Consume launch-time screenshot/relaunch requests through the same
+        // Consume relaunch and in-app navigation requests through the same
         // channel used by in-app Settings links.
         let section = Self::take_requested_section(&window_state, cx).unwrap_or(Section::General);
-        let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window_state.clone(), window, cx));
+        let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        let debug_acp_dialog_pending = window_state.read(cx).debug_acp_dialog;
-        let settings = store.read(cx).settings_page_settings(cx);
+        let settings = store.read(cx).settings();
         let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(tcode_i18n::tr!("browser.home_url.placeholder"))
+                .placeholder(crate::tr!("browser.home_url.placeholder"))
                 .default_value(home_url_value)
         });
         let auto_archive_idle_input = cx.new(|cx| {
@@ -211,7 +211,6 @@ impl SettingsPage {
             orchestrate_panel,
             title_model_picker,
             acp_cards: Vec::new(),
-            debug_acp_dialog_pending,
             section,
             home_url_input: home_url_input.clone(),
             auto_archive_idle_input: auto_archive_idle_input.clone(),
@@ -289,7 +288,7 @@ impl SettingsPage {
     /// (Re)build the provider cards from current settings — also used after
     /// "Restore defaults", which invalidates the cards' cached settings.
     fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
-        let profiles = self.store.read(cx).settings_provider_profiles(cx);
+        let profiles = self.store.read(cx).all_provider_profiles();
         self.provider_cards = profiles
             .into_iter()
             .map(|profile| {
@@ -305,7 +304,7 @@ impl SettingsPage {
     /// Reconcile card entities by installed id, preserving editors for agents
     /// that were not installed or removed since the previous render.
     fn sync_acp_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents(cx);
+        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents();
         let mut old = std::mem::take(&mut self.acp_cards);
         self.acp_cards = installed
             .into_iter()
@@ -335,16 +334,16 @@ impl SettingsPage {
                 // glass canvas, which lets the page bleed through.
                 .bg(cx.theme().popover)
                 .shadow_xl()
-                .title(tcode_i18n::tr!("providers.acp.add_agent").into_owned())
+                .title(crate::tr!("providers.acp.add_agent").into_owned())
                 .content(move |content, _, _| content.h(px(456.)).child(panel.clone()))
         });
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut settings = self.store.read(cx).settings_page_settings(cx);
+        let mut settings = self.store.read(cx).settings();
         mutate(&mut settings);
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::UpdateSettings { settings }, cx)
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::UpdateSettings { settings })
         });
     }
 
@@ -426,7 +425,7 @@ impl SettingsPage {
                 v_flex()
                     .id("settings-nav-tabs")
                     .role(Role::TabList)
-                    .aria_label(tcode_i18n::tr!("settings.title"))
+                    .aria_label(crate::tr!("settings.title"))
                     .flex_1()
                     .min_h_0()
                     .px_2()
@@ -435,7 +434,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-general",
                         IconName::Settings,
-                        tcode_i18n::tr!("settings.general").into_owned().into(),
+                        crate::tr!("settings.general").into_owned().into(),
                         Section::General,
                         cx,
                     ))
@@ -443,7 +442,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-providers",
                         IconName::Bot,
-                        tcode_i18n::tr!("settings.providers").into_owned().into(),
+                        crate::tr!("settings.providers").into_owned().into(),
                         Section::Providers,
                         cx,
                     ))
@@ -451,7 +450,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-browser",
                         IconName::Globe,
-                        tcode_i18n::tr!("settings.browser").into_owned().into(),
+                        crate::tr!("settings.browser").into_owned().into(),
                         Section::Browser,
                         cx,
                     ))
@@ -459,7 +458,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-computer-use",
                         IconName::LayoutDashboard,
-                        tcode_i18n::tr!("settings.computer_use").into_owned().into(),
+                        crate::tr!("settings.computer_use").into_owned().into(),
                         Section::ComputerUse,
                         cx,
                     ))
@@ -467,7 +466,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-orchestrate",
                         IconName::Map,
-                        tcode_i18n::tr!("settings.orchestrate").into_owned().into(),
+                        crate::tr!("settings.orchestrate").into_owned().into(),
                         Section::Orchestrate,
                         cx,
                     ))
@@ -475,7 +474,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-archived",
                         IconName::Inbox,
-                        tcode_i18n::tr!("settings.archived").into_owned().into(),
+                        crate::tr!("settings.archived").into_owned().into(),
                         Section::Archived,
                         cx,
                     )),
@@ -486,7 +485,7 @@ impl SettingsPage {
                         gpui_component::h_flex(),
                         "settings-back",
                         Role::Button,
-                        tcode_i18n::tr!("settings.back"),
+                        crate::tr!("settings.back"),
                         cx,
                     )
                     // Mirror the main sidebar footer (the "Settings" entry that
@@ -504,7 +503,7 @@ impl SettingsPage {
                             .size_4()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(tcode_i18n::tr!("settings.back"))
+                    .child(crate::tr!("settings.back"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.window_state
                             .update(cx, |state, cx| state.close_settings(cx));
@@ -523,7 +522,7 @@ impl SettingsPage {
         // below), so the cluster is placed out of flow at the strip's right edge
         // and the column reserves matching trailing room for it — its actions
         // therefore end left of the buttons rather than under them.
-        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state(cx);
+        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
             self.window_state.read(cx).route,
@@ -562,14 +561,14 @@ impl SettingsPage {
                         .flex_1()
                         .text_size(px(15.))
                         .font_medium()
-                        .child(tcode_i18n::tr!("settings.title")),
+                        .child(crate::tr!("settings.title")),
                 ))
                 .child(
                     Button::new("restore-defaults")
                         .outline()
                         .small()
                         .icon(IconName::Undo)
-                        .label(tcode_i18n::tr!("settings.restore"))
+                        .label(crate::tr!("settings.restore"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_restore(window, cx);
                         })),
@@ -595,18 +594,18 @@ impl SettingsPage {
             let store = store.clone();
             let page = page.clone();
             alert
-                .title(tcode_i18n::tr!("settings.restore_title"))
-                .description(tcode_i18n::tr!("settings.restore_description"))
+                .title(crate::tr!("settings.restore_title"))
+                .description(crate::tr!("settings.restore_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("settings.restore"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("settings.restore"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(Command::ResetSettings, cx);
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::ResetSettings);
                     });
                     // The profile set may have changed; rebuild the rows.
                     page.update(cx, |page, cx| page.build_provider_cards(cx));
@@ -618,7 +617,7 @@ impl SettingsPage {
                         let home_url = page
                             .store
                             .read(cx)
-                            .settings_page_settings(cx)
+                            .settings()
                             .browser
                             .home_url
                             .clone()
@@ -665,7 +664,7 @@ impl SettingsPage {
     }
 
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings();
         // One mega-group on empty paper reads generic. Split the rows into three
         // semantic groups (System-Settings rhythm): 20-24px between groups, each
         // under an 11px caption.
@@ -677,16 +676,16 @@ impl SettingsPage {
             self.title_generation_row(cx),
             self.toggle_row(
                 "delete-confirm",
-                tcode_i18n::tr!("settings.delete_confirmation.title"),
-                tcode_i18n::tr!("settings.delete_confirmation.description"),
+                crate::tr!("settings.delete_confirmation.title"),
+                crate::tr!("settings.delete_confirmation.description"),
                 !settings.skip_delete_confirmation,
                 cx,
                 |s, checked| s.skip_delete_confirmation = !checked,
             ),
             self.toggle_row(
                 "auto-open-task-panel",
-                tcode_i18n::tr!("settings.auto_open_task_panel.title"),
-                tcode_i18n::tr!("settings.auto_open_task_panel.description"),
+                crate::tr!("settings.auto_open_task_panel.title"),
+                crate::tr!("settings.auto_open_task_panel.description"),
                 settings.auto_open_task_panel,
                 cx,
                 |s, checked| s.auto_open_task_panel = checked,
@@ -695,16 +694,16 @@ impl SettingsPage {
         let workspace = vec![
             self.toggle_row(
                 "word-wrap",
-                tcode_i18n::tr!("settings.word_wrap.title"),
-                tcode_i18n::tr!("settings.word_wrap.description"),
+                crate::tr!("settings.word_wrap.title"),
+                crate::tr!("settings.word_wrap.description"),
                 settings.word_wrap_diffs,
                 cx,
                 |s, checked| s.word_wrap_diffs = checked,
             ),
             self.toggle_row(
                 "provider-update-checks",
-                tcode_i18n::tr!("settings.provider_updates.title"),
-                tcode_i18n::tr!("settings.provider_updates.description"),
+                crate::tr!("settings.provider_updates.title"),
+                crate::tr!("settings.provider_updates.description"),
                 // Stored inverted: checked = enabled.
                 !settings.provider_update_checks_disabled,
                 cx,
@@ -715,17 +714,17 @@ impl SettingsPage {
             .gap(px(24.))
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("settings.appearance_section"), cx))
+                    .child(self.section_label(crate::tr!("settings.appearance_section"), cx))
                     .child(self.grouped_plain(appearance, cx)),
             )
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("settings.conversation_section"), cx))
+                    .child(self.section_label(crate::tr!("settings.conversation_section"), cx))
                     .child(self.grouped_plain(conversation, cx)),
             )
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("settings.workspace_section"), cx))
+                    .child(self.section_label(crate::tr!("settings.workspace_section"), cx))
                     .child(self.grouped_plain(workspace, cx)),
             )
     }
@@ -733,8 +732,8 @@ impl SettingsPage {
     fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
         self.row_frame(cx)
             .child(self.row_labels(
-                tcode_i18n::tr!("settings.title_generation.title"),
-                tcode_i18n::tr!("settings.title_generation.description"),
+                crate::tr!("settings.title_generation.title"),
+                crate::tr!("settings.title_generation.description"),
                 cx,
             ))
             .child(self.title_model_picker.clone())
@@ -751,7 +750,7 @@ impl SettingsPage {
         let current_ids: Vec<String> = self
             .store
             .read(cx)
-            .settings_provider_profiles(cx)
+            .all_provider_profiles()
             .into_iter()
             .map(|profile| profile.id)
             .collect();
@@ -763,8 +762,8 @@ impl SettingsPage {
         if current_ids != card_ids {
             self.build_provider_cards(cx);
         }
-        let checked_at = self.store.read(cx).providers_checked_at(cx);
-        let checking = self.store.read(cx).providers_checking(cx);
+        let checked_at = self.store.read(cx).providers_checked_at();
+        let checking = self.store.read(cx).providers_checking();
         let muted = cx.theme().muted_foreground;
 
         let mut header = gpui_component::h_flex()
@@ -778,7 +777,7 @@ impl SettingsPage {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("settings.providers_section")),
+                    .child(crate::tr!("settings.providers_section")),
             );
         if let Some(checked_at) = checked_at {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
@@ -786,7 +785,7 @@ impl SettingsPage {
                 div()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("providers.checked", when = ago).into_owned()),
+                    .child(crate::tr!("providers.checked", when = ago).into_owned()),
             );
         }
         header = header.child(
@@ -794,7 +793,7 @@ impl SettingsPage {
                 .outline()
                 .xsmall()
                 .icon(IconName::Plus)
-                .label(tcode_i18n::tr!("providers.acp.add_agent").into_owned())
+                .label(crate::tr!("providers.acp.add_agent").into_owned())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_acp_dialog(window, cx);
                 })),
@@ -805,11 +804,11 @@ impl SettingsPage {
                 .xsmall()
                 .loading(checking)
                 .icon(Icon::empty().path("icons/rotate-ccw.svg"))
-                .tooltip(tcode_i18n::tr!("providers.refresh"))
+                .tooltip(crate::tr!("providers.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.store.update(cx, |store, cx| {
-                        store.dispatch(Command::RefreshProviderStatus, cx);
-                        store.dispatch(Command::CheckProviderVersions, cx);
+                    this.store.update(cx, |store, _cx| {
+                        store.dispatch(Command::RefreshProviderStatus);
+                        store.dispatch(Command::CheckProviderVersions);
                     });
                 })),
         );
@@ -826,7 +825,7 @@ impl SettingsPage {
             .w_full()
             .gap_3()
             .child(header)
-            .child(self.grouped(provider_rows, cx));
+            .child(crate::material::grouped(provider_rows, cx));
         // ACP agent cards keep their own component styling (defined outside this
         // file); they sit beneath the native providers in the same section.
         for (_, card) in &self.acp_cards {
@@ -838,18 +837,18 @@ impl SettingsPage {
     /// Archived Threads: archived sessions grouped by project, each with
     /// Unarchive + Delete-permanently controls (Group A).
     fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let groups = self.store.read(cx).archived_groups(cx);
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let groups = self.store.read(cx).archived_groups();
+        let settings = self.store.read(cx).settings();
         let days = settings.auto_archive_max_idle_days.max(1);
         let keep = settings.auto_archive_keep_count.max(1);
         let controls = v_flex()
-            .child(self.section_label(tcode_i18n::tr!("settings.auto_archive.section"), cx))
+            .child(self.section_label(crate::tr!("settings.auto_archive.section"), cx))
             .child(self.grouped_plain(
                 vec![
                     self.toggle_row(
                         "auto-archive",
-                        tcode_i18n::tr!("settings.auto_archive.title"),
-                        tcode_i18n::tr!(
+                        crate::tr!("settings.auto_archive.title"),
+                        crate::tr!(
                             "settings.auto_archive.description",
                             days = days,
                             keep = keep
@@ -860,8 +859,8 @@ impl SettingsPage {
                     ),
                     self.row_frame(cx)
                         .child(self.row_labels(
-                            tcode_i18n::tr!("settings.auto_archive.idle_days"),
-                            tcode_i18n::tr!("settings.auto_archive.idle_days_description"),
+                            crate::tr!("settings.auto_archive.idle_days"),
+                            crate::tr!("settings.auto_archive.idle_days_description"),
                             cx,
                         ))
                         .child(
@@ -872,8 +871,8 @@ impl SettingsPage {
                         .into_any_element(),
                     self.row_frame(cx)
                         .child(self.row_labels(
-                            tcode_i18n::tr!("settings.auto_archive.keep_count"),
-                            tcode_i18n::tr!("settings.auto_archive.keep_count_description"),
+                            crate::tr!("settings.auto_archive.keep_count"),
+                            crate::tr!("settings.auto_archive.keep_count_description"),
                             cx,
                         ))
                         .child(
@@ -890,7 +889,7 @@ impl SettingsPage {
             return v_flex()
                 .gap(px(20.))
                 .child(controls)
-                .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx))
+                .child(self.section_label(crate::tr!("settings.archived_section"), cx))
                 .child(
                     v_flex()
                         .py(px(48.))
@@ -900,13 +899,13 @@ impl SettingsPage {
                             div()
                                 .text_size(px(15.))
                                 .font_medium()
-                                .child(tcode_i18n::tr!("settings.archived_empty")),
+                                .child(crate::tr!("settings.archived_empty")),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(tcode_i18n::tr!("settings.archived_empty_desc")),
+                                .child(crate::tr!("settings.archived_empty_desc")),
                         ),
                 );
         }
@@ -917,7 +916,7 @@ impl SettingsPage {
         let mut col = v_flex()
             .gap(px(20.))
             .child(controls)
-            .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx));
+            .child(self.section_label(crate::tr!("settings.archived_section"), cx));
         for group in groups {
             let mut rows: Vec<AnyElement> = Vec::new();
             for meta in &group.sessions {
@@ -927,8 +926,8 @@ impl SettingsPage {
                 let created_when = humanize_ago(now.saturating_sub(meta.created_at));
                 let desc = format!(
                     "{} · {}",
-                    tcode_i18n::tr!("settings.archived_at", when = archived_when),
-                    tcode_i18n::tr!("settings.archived_created", when = created_when),
+                    crate::tr!("settings.archived_at", when = archived_when),
+                    crate::tr!("settings.archived_created", when = created_when),
                 );
                 let id_unarchive = meta.id.clone();
                 let id_delete = meta.id.clone();
@@ -944,14 +943,13 @@ impl SettingsPage {
                                     Button::new(("unarchive", key))
                                         .outline()
                                         .small()
-                                        .label(tcode_i18n::tr!("settings.unarchive"))
+                                        .label(crate::tr!("settings.unarchive"))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let id = id_unarchive.clone();
-                                            this.store.update(cx, |store, cx| {
-                                                store.dispatch(
-                                                    Command::UnarchiveSession { session_id: id },
-                                                    cx,
-                                                );
+                                            this.store.update(cx, |store, _cx| {
+                                                store.dispatch(Command::UnarchiveSession {
+                                                    session_id: id,
+                                                });
                                             });
                                         })),
                                 )
@@ -959,7 +957,7 @@ impl SettingsPage {
                                     Button::new(("delete-perm", key))
                                         .danger()
                                         .small()
-                                        .label(tcode_i18n::tr!("settings.delete_permanently"))
+                                        .label(crate::tr!("settings.delete_permanently"))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.confirm_delete_archived(
                                                 &id_delete, &title, window, cx,
@@ -995,27 +993,21 @@ impl SettingsPage {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(tcode_i18n::tr!(
-                    "sidebar.delete_title",
-                    title = title.clone()
-                ))
-                .description(tcode_i18n::tr!("sidebar.delete_description"))
+                .title(crate::tr!("sidebar.delete_title", title = title.clone()))
+                .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("settings.delete_permanently"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("settings.delete_permanently"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::DeleteSession {
-                                session_id: session_id.clone(),
-                                remove_worktree: false,
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::DeleteSession {
+                            session_id: session_id.clone(),
+                            remove_worktree: false,
+                        });
                     });
                     true
                 })
@@ -1025,12 +1017,12 @@ impl SettingsPage {
     // -- Computer Use & Browser pages --------------------------------------
 
     fn render_computer_use(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings();
         let rows = vec![
             self.toggle_row(
                 "cu-enabled",
-                tcode_i18n::tr!("computer_use.enable.title"),
-                tcode_i18n::tr!("computer_use.enable.description"),
+                crate::tr!("computer_use.enable.title"),
+                crate::tr!("computer_use.enable.description"),
                 settings.computer_use.enabled,
                 cx,
                 |s, checked| s.computer_use.enabled = checked,
@@ -1038,8 +1030,8 @@ impl SettingsPage {
             self.image_mode_row(settings.computer_use.image_mode, cx),
             self.toggle_row(
                 "cu-allow-input",
-                tcode_i18n::tr!("computer_use.allow_input.title"),
-                tcode_i18n::tr!("computer_use.allow_input.description"),
+                crate::tr!("computer_use.allow_input.title"),
+                crate::tr!("computer_use.allow_input.description"),
                 settings.computer_use.allow_input,
                 cx,
                 |s, checked| s.computer_use.allow_input = checked,
@@ -1049,7 +1041,7 @@ impl SettingsPage {
             .gap(px(24.))
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("computer_use.section"), cx))
+                    .child(self.section_label(crate::tr!("computer_use.section"), cx))
                     .child(self.grouped_plain(rows, cx)),
             )
             .child(self.permissions_group(
@@ -1062,12 +1054,12 @@ impl SettingsPage {
     }
 
     fn render_browser(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings_page_settings(cx);
+        let settings = self.store.read(cx).settings();
         let rows = vec![
             self.toggle_row(
                 "browser-enabled",
-                tcode_i18n::tr!("browser.enable.title"),
-                tcode_i18n::tr!("browser.enable.description"),
+                crate::tr!("browser.enable.title"),
+                crate::tr!("browser.enable.description"),
                 settings.browser.enabled,
                 cx,
                 |s, checked| s.browser.enabled = checked,
@@ -1075,8 +1067,8 @@ impl SettingsPage {
             self.home_url_row(cx),
             self.toggle_row(
                 "browser-allow-eval",
-                tcode_i18n::tr!("browser.allow_evaluate.title"),
-                tcode_i18n::tr!("browser.allow_evaluate.description"),
+                crate::tr!("browser.allow_evaluate.title"),
+                crate::tr!("browser.allow_evaluate.description"),
                 settings.browser.allow_evaluate,
                 cx,
                 |s, checked| s.browser.allow_evaluate = checked,
@@ -1084,7 +1076,7 @@ impl SettingsPage {
         ];
         v_flex().gap(px(24.)).child(
             v_flex()
-                .child(self.section_label(tcode_i18n::tr!("browser.section"), cx))
+                .child(self.section_label(crate::tr!("browser.section"), cx))
                 .child(self.grouped_plain(rows, cx)),
         )
     }
@@ -1092,8 +1084,8 @@ impl SettingsPage {
     fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
         self.row_frame(cx)
             .child(self.row_labels(
-                tcode_i18n::tr!("browser.home_url.title"),
-                tcode_i18n::tr!("browser.home_url.description"),
+                crate::tr!("browser.home_url.title"),
+                crate::tr!("browser.home_url.description"),
                 cx,
             ))
             .child(
@@ -1108,121 +1100,71 @@ impl SettingsPage {
 
     fn image_mode_row(&self, mode: ImageMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
-            ImageMode::Auto => tcode_i18n::tr!("computer_use.image_mode.auto"),
-            ImageMode::Always => tcode_i18n::tr!("computer_use.image_mode.always"),
-            ImageMode::Never => tcode_i18n::tr!("computer_use.image_mode.never"),
+            ImageMode::Auto => crate::tr!("computer_use.image_mode.auto"),
+            ImageMode::Always => crate::tr!("computer_use.image_mode.always"),
+            ImageMode::Never => crate::tr!("computer_use.image_mode.never"),
         };
-        let trigger = self.dropdown_trigger("cu-image-mode-dropdown", label, cx);
-        let this = cx.entity();
-        let dropdown = Popover::new("cu-image-mode-popover")
-            // T3 overlay contour: one panel surface (popover fill + hairline +
-            // shadow_xl at the 14px overlay radius). The content stays transparent
-            // so the popup is a single card, not a card nested in the panel.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                let this = this.clone();
-                let option = |m: ImageMode,
-                              label_key: &'static str,
-                              desc_key: &'static str,
-                              this: &Entity<SettingsPage>,
-                              cx: &mut Context<gpui_component::popover::PopoverState>|
-                 -> AnyElement {
-                    let this = this.clone();
-                    let popover = cx.entity();
-                    crate::material::accessible_clickable(
-                        gpui_component::h_flex(),
-                        label_key,
-                        Role::MenuItem,
-                        tcode_i18n::tr!(label_key),
-                        cx,
-                    )
-                    .aria_selected(m == mode)
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .gap_2()
-                    .items_start()
-                    .rounded(crate::material::radius_button())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_0p5()
-                            .child(div().text_size(px(13.)).child(tcode_i18n::tr!(label_key)))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(tcode_i18n::tr!(desc_key)),
-                            ),
-                    )
-                    .when(m == mode, |d| d.child(Icon::new(IconName::Check).xsmall()))
-                    .on_click(move |_, window, cx| {
-                        this.update(cx, |page, cx| {
-                            page.update_settings(|s| s.computer_use.image_mode = m, cx);
-                        });
-                        popover.update(cx, |st, cx| st.dismiss(window, cx));
-                    })
-                    .into_any_element()
-                };
-                v_flex()
-                    .id("cu-image-mode-menu")
-                    .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("computer_use.image_mode.title"))
-                    .p_1()
-                    .min_w(px(260.))
-                    .gap_0p5()
-                    .child(option(
-                        ImageMode::Auto,
-                        "computer_use.image_mode.auto",
-                        "computer_use.image_mode.auto_desc",
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ImageMode::Always,
-                        "computer_use.image_mode.always",
-                        "computer_use.image_mode.always_desc",
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ImageMode::Never,
-                        "computer_use.image_mode.never",
-                        "computer_use.image_mode.never_desc",
-                        &this,
-                        cx,
-                    ))
-            });
-        self.row_frame(cx)
-            .child(self.row_labels(
-                tcode_i18n::tr!("computer_use.image_mode.title"),
-                tcode_i18n::tr!("computer_use.image_mode.description"),
-                cx,
-            ))
-            .child(dropdown)
-            .into_any_element()
+        let option = |value, label_key: &'static str, desc_key: &'static str| SelectRowOption {
+            value,
+            id: label_key.into(),
+            label: crate::tr!(label_key).into_owned().into(),
+            description: Some(crate::tr!(desc_key).into_owned().into()),
+            selected: value == mode,
+        };
+        self.select_row(
+            "cu-image-mode-dropdown",
+            "cu-image-mode-popover",
+            "cu-image-mode-menu",
+            260.,
+            crate::tr!("computer_use.image_mode.title")
+                .into_owned()
+                .into(),
+            crate::tr!("computer_use.image_mode.description")
+                .into_owned()
+                .into(),
+            label.into_owned().into(),
+            vec![
+                option(
+                    ImageMode::Auto,
+                    "computer_use.image_mode.auto",
+                    "computer_use.image_mode.auto_desc",
+                ),
+                option(
+                    ImageMode::Always,
+                    "computer_use.image_mode.always",
+                    "computer_use.image_mode.always_desc",
+                ),
+                option(
+                    ImageMode::Never,
+                    "computer_use.image_mode.never",
+                    "computer_use.image_mode.never_desc",
+                ),
+            ],
+            |mode, page, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.update_settings(|settings| settings.computer_use.image_mode = mode, cx)
+                })
+            },
+            cx,
+        )
     }
 
     /// The Computer Use "System permissions" group. Non-macOS platforms have
     /// no TCC, so it shows a quiet note instead.
     fn permissions_group(&self, kinds: &[PermissionKind], cx: &mut Context<Self>) -> AnyElement {
-        let col = v_flex()
-            .child(self.section_label(tcode_i18n::tr!("computer_use.permissions_section"), cx));
+        let col =
+            v_flex().child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
         if !cfg!(target_os = "macos") {
             return col
                 .child(
-                    self.group(cx).child(
+                    crate::material::group(cx).child(
                         div()
                             .w_full()
                             .px_3()
                             .py_3()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("permissions.unsupported")),
+                            .child(crate::tr!("permissions.unsupported")),
                     ),
                 )
                 .into_any_element();
@@ -1270,7 +1212,7 @@ impl SettingsPage {
                     Button::new(grant_id)
                         .outline()
                         .small()
-                        .label(tcode_i18n::tr!("permissions.grant"))
+                        .label(crate::tr!("permissions.grant"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.grant_permission(kind, cx);
                         })),
@@ -1279,14 +1221,14 @@ impl SettingsPage {
                     Button::new(recheck_id)
                         .ghost()
                         .small()
-                        .label(tcode_i18n::tr!("permissions.recheck"))
+                        .label(crate::tr!("permissions.recheck"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.recheck_permissions(cx);
                         })),
                 );
         }
         self.row_frame(cx)
-            .child(self.row_labels(tcode_i18n::tr!(name_key), tcode_i18n::tr!(why_key), cx))
+            .child(self.row_labels(crate::tr!(name_key), crate::tr!(why_key), cx))
             .child(controls)
             .into_any_element()
     }
@@ -1296,13 +1238,13 @@ impl SettingsPage {
             (
                 cx.theme().success.opacity(0.12),
                 cx.theme().success_foreground,
-                tcode_i18n::tr!("permissions.granted"),
+                crate::tr!("permissions.granted"),
             )
         } else {
             (
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
-                tcode_i18n::tr!("permissions.missing"),
+                crate::tr!("permissions.missing"),
             )
         };
         crate::material::semantic_chip(label, bg, fg).into_any_element()
@@ -1326,13 +1268,13 @@ impl SettingsPage {
                 div()
                     .flex_1()
                     .text_size(px(13.))
-                    .child(tcode_i18n::tr!("permissions.restart_banner")),
+                    .child(crate::tr!("permissions.restart_banner")),
             )
             .child(
                 Button::new("perm-relaunch")
                     .outline()
                     .small()
-                    .label(tcode_i18n::tr!("permissions.relaunch"))
+                    .label(crate::tr!("permissions.relaunch"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.relaunch(window, cx);
                     })),
@@ -1344,13 +1286,10 @@ impl SettingsPage {
     /// the matching System Settings pane. The marker must be written *first*:
     /// macOS may quit tcode from its own "Quit & Reopen" dialog.
     fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::WriteRelaunchMarker {
-                    reopen_settings: "computer_use".into(),
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::WriteRelaunchMarker {
+                reopen_settings: "computer_use".into(),
+            });
         });
         let _ = request(kind);
         open_settings_pane(kind);
@@ -1373,13 +1312,10 @@ impl SettingsPage {
     }
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::WriteRelaunchMarker {
-                    reopen_settings: "computer_use".into(),
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::WriteRelaunchMarker {
+                reopen_settings: "computer_use".into(),
+            });
         });
         if let Err(err) = relaunch_app() {
             log::warn!("failed to relaunch tcode: {err}");
@@ -1404,45 +1340,11 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// One grouped-list container: a floating card on the paper plane, in
-    /// chat's composer-console idiom — popover fill, a hairline border,
-    /// card-radius corners and a soft shadow so it reads as lifted, not a flat
-    /// System-Settings box (docs/visual-redesign.md §5.5, 2026-07 revision).
-    fn group(&self, cx: &Context<Self>) -> gpui::Div {
-        crate::material::floating_card(v_flex().w_full(), cx).overflow_hidden()
-    }
-
-    /// Faint inset hairline between two rows — flush right, indented past the
-    /// row's left padding, and dropped to 60% so it whispers rather than rules.
-    /// Only dense lists (Providers) use it; sparse surfaces separate with air.
-    fn row_divider(&self, cx: &Context<Self>) -> AnyElement {
-        div()
-            .w_full()
-            .pl_3()
-            .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6)))
-            .into_any_element()
-    }
-
-    /// Assemble rows into a group with faint inset hairlines between neighbours
-    /// (never after the last) — for dense lists where rows need a visible
-    /// boundary.
-    fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
-        let mut group = self.group(cx);
-        let last = rows.len().saturating_sub(1);
-        for (index, row) in rows.into_iter().enumerate() {
-            group = group.child(row);
-            if index != last {
-                group = group.child(self.row_divider(cx));
-            }
-        }
-        group
-    }
-
     /// Assemble rows into a group with NO dividers — chat separates content
     /// with breathing room, not rules. The default for sparse settings surfaces
     /// (General, Browser, Computer Use, Archived, permissions).
     fn grouped_plain(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
-        let mut group = self.group(cx);
+        let mut group = crate::material::group(cx);
         for row in rows {
             group = group.child(row);
         }
@@ -1518,15 +1420,12 @@ impl SettingsPage {
                 {
                     window.prevent_default();
                     cx.stop_propagation();
-                    this.update_settings(
-                        |settings| apply_toggle_value(settings, checked, mutate),
-                        cx,
-                    );
+                    this.update_settings(|settings| mutate(settings, !checked), cx);
                 }
             }),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.update_settings(|settings| apply_toggle_value(settings, checked, mutate), cx);
+            this.update_settings(|settings| mutate(settings, !checked), cx);
         }))
         .child(self.row_labels(title, desc, cx))
         // gpui-component 0315556's Switch is still mouse-only. It is
@@ -1562,188 +1461,179 @@ impl SettingsPage {
         )
     }
 
-    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
-        let label = match mode {
-            ThemeMode::System => tcode_i18n::tr!("settings.theme.system"),
-            ThemeMode::Light => tcode_i18n::tr!("settings.theme.light"),
-            ThemeMode::Dark => tcode_i18n::tr!("settings.theme.dark"),
-        };
-        let trigger = self.dropdown_trigger("theme-dropdown", label, cx);
-
-        let this = cx.entity();
-        let dropdown = Popover::new("theme-popover")
-            // Single panel surface at the 14px overlay radius (see image_mode_row).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+    #[allow(clippy::too_many_arguments)]
+    fn select_row<T: Clone + 'static>(
+        &self,
+        trigger_id: &'static str,
+        popover_id: &'static str,
+        menu_id: &'static str,
+        menu_width: f32,
+        title: SharedString,
+        description: SharedString,
+        selected_label: SharedString,
+        options: Vec<SelectRowOption<T>>,
+        on_select: impl Fn(T, &Entity<SettingsPage>, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let trigger = self.dropdown_trigger(trigger_id, selected_label, cx);
+        let page = cx.entity();
+        let on_select = Rc::new(on_select);
+        let menu_label = title.clone();
+        let dropdown = crate::material::overlay_popover(popover_id)
             .trigger(trigger)
             .content(move |_, _, cx| {
-                let this = this.clone();
-                let option = |mode: ThemeMode,
-                              id: &'static str,
-                              label: SharedString,
-                              selected: bool,
-                              this: &Entity<SettingsPage>,
-                              cx: &mut Context<gpui_component::popover::PopoverState>|
-                 -> AnyElement {
-                    let this = this.clone();
-                    let popover = cx.entity();
-                    crate::material::accessible_clickable(
-                        gpui_component::h_flex(),
-                        id,
-                        Role::MenuItem,
-                        label.clone(),
-                        cx,
-                    )
-                    .aria_selected(selected)
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .items_center()
-                    .rounded(crate::material::radius_button())
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .child(div().flex_1().child(label.clone()))
-                    .when(selected, |d| d.child(Icon::new(IconName::Check).xsmall()))
-                    .on_click(move |_, window, cx| {
-                        this.update(cx, |page, cx| {
-                            page.update_settings(|s| s.theme_mode = mode, cx);
-                        });
-                        apply_theme(mode, window, cx);
-                        popover.update(cx, |st, cx| st.dismiss(window, cx));
-                    })
-                    .into_any_element()
-                };
                 v_flex()
-                    .id("theme-options-menu")
+                    .id(menu_id)
                     .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("settings.theme.title"))
+                    .aria_label(menu_label.clone())
                     .p_1()
-                    .min_w(px(160.))
+                    .min_w(px(menu_width))
                     .gap_0p5()
-                    .child(option(
-                        ThemeMode::System,
-                        "theme-option-system",
-                        tcode_i18n::tr!("settings.theme.system").into_owned().into(),
-                        mode == ThemeMode::System,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Light,
-                        "theme-option-light",
-                        tcode_i18n::tr!("settings.theme.light").into_owned().into(),
-                        mode == ThemeMode::Light,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Dark,
-                        "theme-option-dark",
-                        tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
-                        mode == ThemeMode::Dark,
-                        &this,
-                        cx,
-                    ))
+                    .children(options.clone().into_iter().map(|option| {
+                        let page = page.clone();
+                        let popover = cx.entity();
+                        let on_select = on_select.clone();
+                        let label = option.label.clone();
+                        let item = crate::material::accessible_clickable(
+                            gpui_component::h_flex(),
+                            option.id,
+                            Role::MenuItem,
+                            label.clone(),
+                            cx,
+                        )
+                        .aria_selected(option.selected)
+                        .w_full()
+                        .px_2()
+                        .gap_2()
+                        .rounded(crate::material::radius_button())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent));
+                        let item = if let Some(description) = option.description {
+                            item.py_1p5().items_start().child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(div().text_size(px(13.)).child(label))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(description),
+                                    ),
+                            )
+                        } else {
+                            item.py_1()
+                                .items_center()
+                                .text_size(px(13.))
+                                .child(div().flex_1().child(label))
+                        };
+                        item.when(option.selected, |item| {
+                            item.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click(move |_, window, cx| {
+                            on_select(option.value.clone(), &page, window, cx);
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        })
+                    }))
             });
 
         self.row_frame(cx)
-            .child(self.row_labels(
-                tcode_i18n::tr!("settings.theme.title"),
-                tcode_i18n::tr!("settings.theme.description"),
-                cx,
-            ))
+            .child(self.row_labels(title, description, cx))
             .child(dropdown)
             .into_any_element()
+    }
+
+    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
+        let label = match mode {
+            ThemeMode::System => crate::tr!("settings.theme.system"),
+            ThemeMode::Light => crate::tr!("settings.theme.light"),
+            ThemeMode::Dark => crate::tr!("settings.theme.dark"),
+        };
+        let option = |value, id: &'static str, label_key: &'static str| SelectRowOption {
+            value,
+            id: id.into(),
+            label: crate::tr!(label_key).into_owned().into(),
+            description: None,
+            selected: value == mode,
+        };
+        self.select_row(
+            "theme-dropdown",
+            "theme-popover",
+            "theme-options-menu",
+            160.,
+            crate::tr!("settings.theme.title").into_owned().into(),
+            crate::tr!("settings.theme.description").into_owned().into(),
+            label.into_owned().into(),
+            vec![
+                option(
+                    ThemeMode::System,
+                    "theme-option-system",
+                    "settings.theme.system",
+                ),
+                option(
+                    ThemeMode::Light,
+                    "theme-option-light",
+                    "settings.theme.light",
+                ),
+                option(ThemeMode::Dark, "theme-option-dark", "settings.theme.dark"),
+            ],
+            |mode, page, window, cx| {
+                page.update(cx, |page, cx| {
+                    page.update_settings(|settings| settings.theme_mode = mode, cx)
+                });
+                apply_theme(mode, window, cx);
+            },
+            cx,
+        )
     }
 
     fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let selected = language.map(str::to_owned);
         let label = match language {
-            Some(LANGUAGE_ENGLISH) => tcode_i18n::tr!("settings.language.english"),
-            Some(LANGUAGE_SIMPLIFIED_CHINESE) => tcode_i18n::tr!("settings.language.chinese"),
-            _ => tcode_i18n::tr!("settings.language.system"),
+            Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
+            Some(LANGUAGE_SIMPLIFIED_CHINESE) => crate::tr!("settings.language.chinese"),
+            _ => crate::tr!("settings.language.system"),
         };
-        let trigger = self.dropdown_trigger("language-dropdown", label, cx);
-        let page = cx.entity();
-        let dropdown = Popover::new("language-popover")
-            // Single panel surface at the 14px overlay radius (see image_mode_row).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                let option =
-                    |value: Option<&'static str>,
-                     key: &'static str,
-                     cx: &mut Context<gpui_component::popover::PopoverState>| {
-                        let page = page.clone();
-                        let popover = cx.entity();
-                        let is_selected = selected.as_deref() == value;
-                        crate::material::accessible_clickable(
-                            gpui_component::h_flex(),
-                            key,
-                            Role::MenuItem,
-                            tcode_i18n::tr!(key),
-                            cx,
-                        )
-                        .aria_selected(is_selected)
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .items_center()
-                        .rounded(crate::material::radius_button())
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().accent))
-                        .child(div().flex_1().child(tcode_i18n::tr!(key)))
-                        .when(is_selected, |d| {
-                            d.child(Icon::new(IconName::Check).xsmall())
-                        })
-                        .on_click(move |_, window, cx| {
-                            page.update(cx, |page, cx| {
-                                page.update_settings(|s| s.language = value.map(str::to_owned), cx)
-                            });
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        })
-                    };
-                v_flex()
-                    .id("language-options-menu")
-                    .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("settings.language.title"))
-                    .p_1()
-                    .min_w(px(160.))
-                    .gap_0p5()
-                    .child(option(None, "settings.language.system", cx))
-                    .child(option(
-                        Some(LANGUAGE_ENGLISH),
-                        "settings.language.english",
+        let option = |value, key: &'static str| SelectRowOption {
+            value,
+            id: key.into(),
+            label: crate::tr!(key).into_owned().into(),
+            description: None,
+            selected: selected.as_deref() == value,
+        };
+        self.select_row(
+            "language-dropdown",
+            "language-popover",
+            "language-options-menu",
+            160.,
+            crate::tr!("settings.language.title").into_owned().into(),
+            crate::tr!("settings.language.description")
+                .into_owned()
+                .into(),
+            label.into_owned().into(),
+            vec![
+                option(None, "settings.language.system"),
+                option(Some(LANGUAGE_ENGLISH), "settings.language.english"),
+                option(
+                    Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                    "settings.language.chinese",
+                ),
+            ],
+            |language, page, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.update_settings(
+                        |settings| settings.language = language.map(str::to_owned),
                         cx,
-                    ))
-                    .child(option(
-                        Some(LANGUAGE_SIMPLIFIED_CHINESE),
-                        "settings.language.chinese",
-                        cx,
-                    ))
-            });
-        self.row_frame(cx)
-            .child(self.row_labels(
-                tcode_i18n::tr!("settings.language.title"),
-                tcode_i18n::tr!("settings.language.description"),
-                cx,
-            ))
-            .child(dropdown)
-            .into_any_element()
+                    )
+                })
+            },
+            cx,
+        )
     }
 }
 
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.debug_acp_dialog_pending {
-            self.debug_acp_dialog_pending = false;
-            self.open_acp_dialog(window, cx);
-        }
         // No opaque full-page fill: the nav must sit on the same translucent
         // glass canvas the chat sidebar does (its `sidebar` token shows the
         // T0 blur through its own translucency), so navigating chat↔settings
@@ -1764,42 +1654,5 @@ impl Render for SettingsPage {
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
             )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Compact relative-time humanizer for the Archived Threads list.
-fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accessible_toggle_activation_applies_the_inverse_setting_value() {
-        let mut settings = Settings::default();
-
-        apply_toggle_value(&mut settings, false, |settings, value| {
-            settings.word_wrap_diffs = value;
-        });
-        assert!(settings.word_wrap_diffs);
-
-        apply_toggle_value(&mut settings, true, |settings, value| {
-            settings.word_wrap_diffs = value;
-        });
-        assert!(!settings.word_wrap_diffs);
     }
 }

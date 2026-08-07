@@ -39,62 +39,60 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                     message.clone()
                 }
                 RuntimeError::PersistSettings { error } => {
-                    tcode_i18n::tr!("errors.persist_settings", error = error).into_owned()
+                    crate::tr!("errors.persist_settings", error = error).into_owned()
                 }
                 RuntimeError::UpdateUnknown { provider } => {
-                    tcode_i18n::tr!("errors.update_unknown", provider = provider.display_name())
+                    crate::tr!("errors.update_unknown", provider = provider.display_name())
                         .into_owned()
                 }
                 RuntimeError::UpdateFailed { provider } => {
-                    tcode_i18n::tr!("errors.update_failed", provider = provider.display_name())
+                    crate::tr!("errors.update_failed", provider = provider.display_name())
                         .into_owned()
                 }
                 RuntimeError::TerminalStart { error } => {
-                    tcode_i18n::tr!("errors.terminal_start", error = error).into_owned()
+                    crate::tr!("errors.terminal_start", error = error).into_owned()
                 }
                 RuntimeError::TerminalRestart { error } => {
-                    tcode_i18n::tr!("errors.terminal_restart", error = error).into_owned()
+                    crate::tr!("errors.terminal_restart", error = error).into_owned()
                 }
                 RuntimeError::PersistProject { error } => {
-                    tcode_i18n::tr!("errors.persist_project", error = error).into_owned()
+                    crate::tr!("errors.persist_project", error = error).into_owned()
                 }
                 RuntimeError::WorktreeRemove { error } => {
-                    tcode_i18n::tr!("errors.worktree_remove", error = error).into_owned()
+                    crate::tr!("errors.worktree_remove", error = error).into_owned()
                 }
                 RuntimeError::DeleteSession { error } => {
-                    tcode_i18n::tr!("errors.delete_session", error = error).into_owned()
+                    crate::tr!("errors.delete_session", error = error).into_owned()
                 }
                 RuntimeError::DeleteProject { error } => {
-                    tcode_i18n::tr!("errors.delete_project", error = error).into_owned()
+                    crate::tr!("errors.delete_project", error = error).into_owned()
                 }
-                RuntimeError::NativeRewindBlocked => {
-                    tcode_i18n::tr!("chat.rewind_blocked").into_owned()
-                }
+                RuntimeError::NativeRewindBlocked => crate::tr!("chat.rewind_blocked").into_owned(),
                 RuntimeError::PersistEvent { error } => {
-                    tcode_i18n::tr!("errors.persist_event", error = error).into_owned()
+                    crate::tr!("errors.persist_event", error = error).into_owned()
                 }
                 RuntimeError::WorktreeAdd { error } => {
-                    tcode_i18n::tr!("errors.worktree_add", error = error).into_owned()
+                    crate::tr!("errors.worktree_add", error = error).into_owned()
                 }
                 RuntimeError::PersistSession { error } => {
-                    tcode_i18n::tr!("errors.persist_session", error = error).into_owned()
+                    crate::tr!("errors.persist_session", error = error).into_owned()
                 }
-                RuntimeError::ProcessGone => tcode_i18n::tr!("errors.process_gone").into_owned(),
+                RuntimeError::ProcessGone => crate::tr!("errors.process_gone").into_owned(),
                 RuntimeError::SteerUnsupported { agent } => {
-                    tcode_i18n::tr!("composer.steer_unsupported", agent = agent).into_owned()
+                    crate::tr!("composer.steer_unsupported", agent = agent).into_owned()
                 }
-                RuntimeError::DirtyTree => tcode_i18n::tr!("notice.dirty_tree").into_owned(),
+                RuntimeError::DirtyTree => crate::tr!("notice.dirty_tree").into_owned(),
                 RuntimeError::ProviderStart { error } => {
-                    tcode_i18n::tr!("errors.provider_start", error = error).into_owned()
+                    crate::tr!("errors.provider_start", error = error).into_owned()
                 }
                 RuntimeError::ProviderClosed {
                     reason: Some(reason),
-                } => tcode_i18n::tr!("errors.provider_closed_reason", reason = reason).into_owned(),
+                } => crate::tr!("errors.provider_closed_reason", reason = reason).into_owned(),
                 RuntimeError::ProviderClosed { reason: None } => {
-                    tcode_i18n::tr!("errors.provider_closed").into_owned()
+                    crate::tr!("errors.provider_closed").into_owned()
                 }
                 RuntimeError::PersistSessionIndex { error } => {
-                    tcode_i18n::tr!("errors.persist_session_index", error = error).into_owned()
+                    crate::tr!("errors.persist_session_index", error = error).into_owned()
                 }
                 _ => format!("Unknown runtime error: {error:?}"),
             };
@@ -103,35 +101,35 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
         RuntimeEvent::Notice(notice) => {
             let message = match notice {
                 RuntimeNotice::ProviderMessage(message) => message.clone(),
-                RuntimeNotice::UpdateAvailable { provider, version } => tcode_i18n::tr!(
+                RuntimeNotice::UpdateAvailable { provider, version } => crate::tr!(
                     "notice.update_available",
                     provider = provider.display_name(),
                     version = version
                 )
                 .into_owned(),
-                RuntimeNotice::UpdatingProvider { provider } => tcode_i18n::tr!(
+                RuntimeNotice::UpdatingProvider { provider } => crate::tr!(
                     "notice.updating_provider",
                     provider = provider.display_name()
                 )
                 .into_owned(),
                 RuntimeNotice::UpdateDone { provider } => {
-                    tcode_i18n::tr!("notice.update_done", provider = provider.display_name())
+                    crate::tr!("notice.update_done", provider = provider.display_name())
                         .into_owned()
                 }
                 RuntimeNotice::NativeRewindCompleted { mode } => match mode {
-                    RewindMode::Files => tcode_i18n::tr!("chat.rewind_files_done").into_owned(),
+                    RewindMode::Files => crate::tr!("chat.rewind_files_done").into_owned(),
                     RewindMode::Conversation => {
-                        tcode_i18n::tr!("chat.rewind_conversation_done").into_owned()
+                        crate::tr!("chat.rewind_conversation_done").into_owned()
                     }
                     RewindMode::FilesAndConversation => {
-                        tcode_i18n::tr!("chat.rewind_all_done").into_owned()
+                        crate::tr!("chat.rewind_all_done").into_owned()
                     }
                 },
                 RuntimeNotice::PlanSaved { file } => {
-                    tcode_i18n::tr!("plan.saved_workspace", file = file).into_owned()
+                    crate::tr!("plan.saved_workspace", file = file).into_owned()
                 }
                 RuntimeNotice::SwitchedBranch { branch } => {
-                    tcode_i18n::tr!("notice.switched_branch", branch = branch).into_owned()
+                    crate::tr!("notice.switched_branch", branch = branch).into_owned()
                 }
                 _ => format!("Unknown runtime notice: {notice:?}"),
             };
@@ -167,28 +165,28 @@ pub(super) struct PresentedRuntimeToast {
 fn git_action_toast_titles(action: GitAction) -> (String, String) {
     match action {
         GitAction::Commit => (
-            tcode_i18n::tr!("git.toast.committing").into_owned(),
-            tcode_i18n::tr!("git.toast.committed").into_owned(),
+            crate::tr!("git.toast.committing").into_owned(),
+            crate::tr!("git.toast.committed").into_owned(),
         ),
         GitAction::CommitPush => (
-            tcode_i18n::tr!("git.toast.committing_pushing").into_owned(),
-            tcode_i18n::tr!("git.toast.committed_pushed").into_owned(),
+            crate::tr!("git.toast.committing_pushing").into_owned(),
+            crate::tr!("git.toast.committed_pushed").into_owned(),
         ),
         GitAction::Push => (
-            tcode_i18n::tr!("git.toast.pushing").into_owned(),
-            tcode_i18n::tr!("git.toast.pushed").into_owned(),
+            crate::tr!("git.toast.pushing").into_owned(),
+            crate::tr!("git.toast.pushed").into_owned(),
         ),
         GitAction::Pull => (
-            tcode_i18n::tr!("git.toast.pulling").into_owned(),
-            tcode_i18n::tr!("git.toast.pulled").into_owned(),
+            crate::tr!("git.toast.pulling").into_owned(),
+            crate::tr!("git.toast.pulled").into_owned(),
         ),
         GitAction::PublishBranch => (
-            tcode_i18n::tr!("git.toast.publishing").into_owned(),
-            tcode_i18n::tr!("git.toast.published").into_owned(),
+            crate::tr!("git.toast.publishing").into_owned(),
+            crate::tr!("git.toast.published").into_owned(),
         ),
         GitAction::InitializeGit => (
-            tcode_i18n::tr!("git.toast.initializing").into_owned(),
-            tcode_i18n::tr!("git.toast.initialized").into_owned(),
+            crate::tr!("git.toast.initializing").into_owned(),
+            crate::tr!("git.toast.initialized").into_owned(),
         ),
     }
 }
@@ -198,13 +196,13 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         RuntimeToast::GitBusy => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
-            tcode_i18n::tr!("git.toast.busy").into_owned(),
+            crate::tr!("git.toast.busy").into_owned(),
             None,
             None,
         ),
         RuntimeToast::GitStarted { operation, action } => (
             RuntimeToastDisposition::Start(*operation),
-            ToastKind::Loading { progress: None },
+            ToastKind::Loading,
             git_action_toast_titles(*action).0,
             None,
             None,
@@ -223,7 +221,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         } => (
             RuntimeToastDisposition::Finish(*operation),
             ToastKind::Error,
-            tcode_i18n::tr!("git.toast.failed").into_owned(),
+            crate::tr!("git.toast.failed").into_owned(),
             Some(detail.clone()),
             Some(retry.clone()),
         ),
@@ -237,21 +235,21 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         RuntimeToast::CommitMessageFailed { detail } => (
             RuntimeToastDisposition::Push,
             ToastKind::Error,
-            tcode_i18n::tr!("git.toast.failed").into_owned(),
+            crate::tr!("git.toast.failed").into_owned(),
             Some(detail.clone()),
             None,
         ),
         RuntimeToast::AcpInstallStarted { operation, name } => (
             RuntimeToastDisposition::Start(*operation),
-            ToastKind::Loading { progress: None },
-            tcode_i18n::tr!("providers.acp.installing", name = name).into_owned(),
+            ToastKind::Loading,
+            crate::tr!("providers.acp.installing", name = name).into_owned(),
             None,
             None,
         ),
         RuntimeToast::AcpInstallSucceeded { operation, name } => (
             RuntimeToastDisposition::Finish(*operation),
             ToastKind::Success,
-            tcode_i18n::tr!("providers.acp.installed_toast", name = name).into_owned(),
+            crate::tr!("providers.acp.installed_toast", name = name).into_owned(),
             None,
             None,
         ),
@@ -262,7 +260,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         } => (
             RuntimeToastDisposition::Finish(*operation),
             ToastKind::Error,
-            tcode_i18n::tr!("providers.acp.install_failed", name = name).into_owned(),
+            crate::tr!("providers.acp.install_failed", name = name).into_owned(),
             Some(detail.clone()),
             None,
         ),
@@ -294,14 +292,14 @@ mod tests {
     fn locale_effect_is_applied_only_at_ui_boundary() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         apply_runtime_effect(&RuntimeEffect::ApplyLocale {
-            language: Some(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE.to_string()),
+            language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.to_string()),
         });
-        let chinese = tcode_i18n::tr!("chat.new_thread").into_owned();
+        let chinese = crate::tr!("chat.new_thread").into_owned();
 
         apply_runtime_effect(&RuntimeEffect::ApplyLocale {
-            language: Some(tcode_i18n::LANGUAGE_ENGLISH.to_string()),
+            language: Some(crate::LANGUAGE_ENGLISH.to_string()),
         });
-        let english = tcode_i18n::tr!("chat.new_thread").into_owned();
+        let english = crate::tr!("chat.new_thread").into_owned();
 
         assert_eq!(chinese, "新建对话");
         assert_eq!(english, "New thread");
@@ -406,11 +404,8 @@ mod tests {
             },
         ];
 
-        for locale in [
-            tcode_i18n::LANGUAGE_ENGLISH,
-            tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE,
-        ] {
-            tcode_i18n::set_locale(locale);
+        for locale in [crate::LANGUAGE_ENGLISH, crate::LANGUAGE_SIMPLIFIED_CHINESE] {
+            crate::set_locale(locale);
             for error in &errors {
                 let presented = present_runtime_event(&RuntimeEvent::Error(error.clone()));
                 assert_eq!(presented.severity, RuntimeEventSeverity::Error);
@@ -431,7 +426,7 @@ mod tests {
                             presented.disposition,
                             RuntimeToastDisposition::Start(*operation)
                         );
-                        assert_eq!(presented.kind, ToastKind::Loading { progress: None });
+                        assert_eq!(presented.kind, ToastKind::Loading);
                     }
                     RuntimeToast::GitSucceeded { operation, .. }
                     | RuntimeToast::AcpInstallSucceeded { operation, .. } => {
@@ -468,33 +463,33 @@ mod tests {
             let title_pairs = [
                 (
                     GitAction::Commit,
-                    tcode_i18n::tr!("git.toast.committing").into_owned(),
-                    tcode_i18n::tr!("git.toast.committed").into_owned(),
+                    crate::tr!("git.toast.committing").into_owned(),
+                    crate::tr!("git.toast.committed").into_owned(),
                 ),
                 (
                     GitAction::CommitPush,
-                    tcode_i18n::tr!("git.toast.committing_pushing").into_owned(),
-                    tcode_i18n::tr!("git.toast.committed_pushed").into_owned(),
+                    crate::tr!("git.toast.committing_pushing").into_owned(),
+                    crate::tr!("git.toast.committed_pushed").into_owned(),
                 ),
                 (
                     GitAction::Push,
-                    tcode_i18n::tr!("git.toast.pushing").into_owned(),
-                    tcode_i18n::tr!("git.toast.pushed").into_owned(),
+                    crate::tr!("git.toast.pushing").into_owned(),
+                    crate::tr!("git.toast.pushed").into_owned(),
                 ),
                 (
                     GitAction::Pull,
-                    tcode_i18n::tr!("git.toast.pulling").into_owned(),
-                    tcode_i18n::tr!("git.toast.pulled").into_owned(),
+                    crate::tr!("git.toast.pulling").into_owned(),
+                    crate::tr!("git.toast.pulled").into_owned(),
                 ),
                 (
                     GitAction::PublishBranch,
-                    tcode_i18n::tr!("git.toast.publishing").into_owned(),
-                    tcode_i18n::tr!("git.toast.published").into_owned(),
+                    crate::tr!("git.toast.publishing").into_owned(),
+                    crate::tr!("git.toast.published").into_owned(),
                 ),
                 (
                     GitAction::InitializeGit,
-                    tcode_i18n::tr!("git.toast.initializing").into_owned(),
-                    tcode_i18n::tr!("git.toast.initialized").into_owned(),
+                    crate::tr!("git.toast.initializing").into_owned(),
+                    crate::tr!("git.toast.initialized").into_owned(),
                 ),
             ];
             for (index, (action, started, succeeded)) in title_pairs.into_iter().enumerate() {
@@ -568,6 +563,6 @@ mod tests {
             );
         }
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 }

@@ -9,21 +9,24 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 
-use async_channel::{Receiver, Sender};
-use futures_lite::future;
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
 
+#[cfg(test)]
+use crate::TurnStatus;
+use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
     ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
+    ThreadItem, TokenUsage, UserInputOption, UserInputQuestion,
 };
 
 const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
-const STDERR_TAIL_LINES: usize = 20;
-const SETTLED_MIN_VERSION: (u32, u32, u32) = (0, 80, 4);
+const PLAN_MODE_WARNING: &str =
+    "pi RPC has no native Plan interaction mode; this session is running in Build mode";
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
@@ -31,35 +34,20 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             "session fork is not supported for this provider".into(),
         ));
     }
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
-    smol::spawn(run_actor(opts, commands_rx, events_tx, ready_tx)).detach();
-    ready_rx.recv().await.map_err(|_| {
-        AgentError::Protocol("pi actor exited before reporting startup status".into())
-    })??;
-    Ok(SessionHandle {
-        provider: ProviderKind::Pi,
-        commands: commands_tx,
-        events: events_rx,
-    })
+    crate::spawn_session(
+        ProviderKind::Pi,
+        opts,
+        run_actor,
+        "pi actor exited before reporting startup status",
+    )
+    .await
 }
 
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (sender, receiver) = async_channel::bounded(1);
-    std::thread::Builder::new()
-        .name("pi-model-discovery".into())
-        .spawn(move || {
-            let result = list_models_blocking(binary_path.as_deref(), &launch_env);
-            let _ = sender.send_blocking(result);
-        })
-        .map_err(|err| AgentError::Spawn(format!("spawning pi model discovery: {err}")))?;
-    receiver.recv().await.map_err(|_| {
-        AgentError::Protocol("pi model discovery worker exited without a result".into())
-    })?
+    smol::unblock(move || list_models_blocking(binary_path.as_deref(), &launch_env)).await
 }
 
 fn list_models_blocking(
@@ -99,9 +87,9 @@ fn list_models_blocking(
     let mut current = None;
     let mut thinking_level = None;
     let mut catalog = None;
-    let mut reader = BufReader::new(stdout);
+    let mut lines = BufReader::new(stdout).lines();
     while current.is_none() || catalog.is_none() {
-        let line = read_lf_record(&mut reader)?.ok_or_else(|| {
+        let line = lines.next().transpose()?.ok_or_else(|| {
             AgentError::Protocol("pi closed stdout during model discovery".into())
         })?;
         let message: Value = serde_json::from_str(&line)
@@ -170,7 +158,7 @@ fn map_model(
                 .into_iter()
                 .map(|level| SelectOption {
                     value: level.into(),
-                    label: thinking_label(level).into(),
+                    label: thinking_label(level),
                     description: None,
                 })
                 .collect(),
@@ -189,17 +177,15 @@ fn map_model(
     })
 }
 
-fn thinking_label(level: &str) -> &'static str {
-    match level {
-        "off" => "Off",
-        "minimal" => "Minimal",
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        _ => "Custom",
+fn thinking_label(level: &str) -> String {
+    if level == "xhigh" {
+        return "Extra High".into();
     }
+    let mut characters = level.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_default()
 }
 
 fn model_wire_id(model: Option<&Value>) -> Option<String> {
@@ -235,8 +221,6 @@ async fn run_actor(
     } else {
         None
     };
-    let supports_settled =
-        pi_version(&binary, &opts.launch_env).is_some_and(|version| version >= SETTLED_MIN_VERSION);
     let mut cmd = crate::process::command(&binary);
     // Profile arguments are applied first. The transport, optional permission
     // extension, resume target, and read-only tool set are tcode-owned and go
@@ -307,18 +291,16 @@ async fn run_actor(
             return;
         }
     };
-    let (line_tx, line_rx) = async_channel::unbounded();
-    let _ = std::thread::Builder::new()
-        .name("pi-rpc-stdout".into())
-        .spawn(move || read_pi_stdout(stdout, line_tx));
-    let stderr_tail = spawn_stderr_reader(stderr, "pi-rpc-stderr");
+    let (line_rx, _) = spawn_line_reader(stdout, "pi-rpc-stdout", None, true);
+    let stderr_tail = crate::process::StderrTail::default();
+    let _ = stderr_tail.spawn(stderr, "pi-rpc-stderr", "pi");
 
     let mut actor = PiActor {
         child,
         stdin,
         lines: line_rx,
         events,
-        mapper: PiMapper::new(supports_settled),
+        mapper: PiMapper::new(),
         next_request: 1,
         approval_mode: opts.approval_mode,
         pending_approvals: HashMap::new(),
@@ -331,17 +313,15 @@ async fn run_actor(
     let startup = actor.initialize().await;
     if let Err(err) = startup {
         actor.stop();
-        let details = actor.describe_failure(err.to_string());
+        let details = actor.stderr_tail.append_to(err.to_string(), "\nstderr:\n");
         let _ = ready.send(Err(AgentError::Provider(details))).await;
         return;
     }
     if opts.interaction_mode == InteractionMode::Plan {
         actor
             .emit(AgentEvent::Warning {
-                message:
-                "pi RPC has no native Plan interaction mode; this session is running in Build mode"
-                    .into(),
-             })
+                message: PLAN_MODE_WARNING.into(),
+            })
             .await;
     }
     let unattached = unattached_servers(&opts);
@@ -362,8 +342,8 @@ async fn run_actor(
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
-            Output(Result<ChildOutput, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
+            Output(Result<ChildOutput, smol::channel::RecvError>),
         }
         let input = future::race(async { Input::Command(commands.recv().await) }, async {
             Input::Output(actor.lines.recv().await)
@@ -401,7 +381,7 @@ async fn run_actor(
         }
     };
     actor.stop();
-    let reason = close_reason.map(|base| actor.describe_failure(base));
+    let reason = close_reason.map(|base| actor.stderr_tail.append_to(base, "\nstderr:\n"));
     let _ = actor
         .events
         .send(AgentEvent::SessionClosed { reason })
@@ -424,7 +404,7 @@ struct PiActor {
     /// acknowledging the stdin write.
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
-    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_tail: crate::process::StderrTail,
 }
 
 impl PiActor {
@@ -721,9 +701,7 @@ impl PiActor {
                 .await;
                 Ok(())
             }
-            SessionCommand::SetOption { id, value }
-                if matches!(id.as_str(), "reasoningEffort" | "thinkingLevel") =>
-            {
+            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
                 let Some(level) = value.as_str() else {
                     return Ok(());
                 };
@@ -746,7 +724,7 @@ impl PiActor {
             SessionCommand::SetInteractionMode(mode) => {
                 if mode == InteractionMode::Plan {
                     self.emit(AgentEvent::Warning {
-                        message: "pi RPC has no native Plan interaction mode".into(),
+                        message: PLAN_MODE_WARNING.into(),
                     })
                     .await;
                 }
@@ -804,28 +782,16 @@ impl PiActor {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-
-    fn describe_failure(&self, base: String) -> String {
-        let tail = self.stderr_tail.lock().unwrap().join("\n");
-        if tail.trim().is_empty() {
-            base
-        } else {
-            format!("{base}\nstderr:\n{tail}")
-        }
-    }
 }
 
-pub(crate) struct PiMapper {
-    supports_settled: bool,
+struct PiMapper {
     turn_counter: u64,
     current_turn: Option<String>,
-    turn_usage: TokenUsage,
-    has_usage: bool,
+    turn_usage: Option<TokenUsage>,
     cumulative_processed: u64,
     interrupt_pending: bool,
     failed: bool,
     tool_items: HashMap<String, PiTool>,
-    usage_messages: HashSet<String>,
     finalized_messages: HashSet<String>,
 }
 
@@ -837,35 +803,23 @@ struct PiTool {
 }
 
 impl PiMapper {
-    pub(crate) fn new(supports_settled: bool) -> Self {
+    fn new() -> Self {
         Self {
-            supports_settled,
             turn_counter: 0,
             current_turn: None,
-            turn_usage: TokenUsage::default(),
-            has_usage: false,
+            turn_usage: None,
             cumulative_processed: 0,
             interrupt_pending: false,
             failed: false,
             tool_items: HashMap::new(),
-            usage_messages: HashSet::new(),
             finalized_messages: HashSet::new(),
         }
     }
 
-    pub(crate) fn on_message(&mut self, message: &Value) -> Vec<AgentEvent> {
+    fn on_message(&mut self, message: &Value) -> Vec<AgentEvent> {
         match message.get("type").and_then(Value::as_str).unwrap_or("") {
             "agent_start" => self.start_turn(),
             "agent_settled" => self.complete_turn(),
-            "agent_end"
-                if !self.supports_settled
-                    && !message
-                        .get("willRetry")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false) =>
-            {
-                self.complete_turn()
-            }
             "message_update" => self.message_update(message),
             "message_end" => self.message_end(message),
             // Current pi emits both message_end and turn_end. Treat turn_end as
@@ -913,9 +867,9 @@ impl PiMapper {
             "auto_retry_start" => vec![AgentEvent::Warning {
                 message: format!(
                     "pi retry {}/{} in {} ms: {}",
-                    number(message.get("attempt")).unwrap_or(0),
-                    number(message.get("maxAttempts")).unwrap_or(0),
-                    number(message.get("delayMs")).unwrap_or(0),
+                    crate::json_u64(message.get("attempt")).unwrap_or(0),
+                    crate::json_u64(message.get("maxAttempts")).unwrap_or(0),
+                    crate::json_u64(message.get("delayMs")).unwrap_or(0),
                     message
                         .get("errorMessage")
                         .and_then(Value::as_str)
@@ -957,35 +911,22 @@ impl PiMapper {
     }
 
     fn start_turn(&mut self) -> Vec<AgentEvent> {
-        if self.current_turn.is_some() {
-            return Vec::new();
-        }
-        self.turn_counter += 1;
-        let turn_id = format!("pi-turn-{}", self.turn_counter);
-        self.current_turn = Some(turn_id.clone());
-        self.turn_usage = TokenUsage::default();
-        self.has_usage = false;
-        self.failed = false;
-        vec![AgentEvent::TurnStarted { turn_id }]
+        crate::start_mapped_turn(
+            "pi",
+            &mut self.turn_counter,
+            &mut self.current_turn,
+            &mut self.turn_usage,
+            &mut self.failed,
+        )
     }
 
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
-        let Some(turn_id) = self.current_turn.take() else {
-            return Vec::new();
-        };
-        let status = if self.interrupt_pending {
-            TurnStatus::Interrupted
-        } else if self.failed {
-            TurnStatus::Failed
-        } else {
-            TurnStatus::Completed
-        };
-        self.interrupt_pending = false;
-        vec![AgentEvent::TurnCompleted {
-            turn_id,
-            status,
-            usage: self.has_usage.then_some(self.turn_usage),
-        }]
+        crate::complete_mapped_turn(
+            &mut self.current_turn,
+            &mut self.interrupt_pending,
+            self.failed,
+            self.turn_usage,
+        )
     }
 
     fn message_update(&mut self, message: &Value) -> Vec<AgentEvent> {
@@ -1046,7 +987,7 @@ impl PiMapper {
         if delta.is_empty() {
             return Vec::new();
         }
-        let index = number(event.get("contentIndex")).unwrap_or(0);
+        let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
         let message_id = assistant_message_id(message.get("message").unwrap_or(&Value::Null));
         vec![AgentEvent::Delta {
             item_id: format!("{message_id}:{index}"),
@@ -1126,23 +1067,14 @@ impl PiMapper {
                         }
                     }
                 }
-                if self.usage_messages.insert(id)
-                    && let Some(usage) = map_usage(message.get("usage"))
-                {
-                    let processed = usage.used_tokens.unwrap_or_else(|| {
-                        usage
-                            .input_tokens
-                            .unwrap_or(0)
-                            .saturating_add(usage.output_tokens.unwrap_or(0))
-                            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
-                    });
+                if first_finalization && let Some(usage) = map_usage(message.get("usage")) {
+                    let processed = crate::processed_tokens(usage);
                     self.cumulative_processed = self.cumulative_processed.saturating_add(processed);
                     let usage = TokenUsage {
                         total_processed_tokens: Some(self.cumulative_processed),
                         ..usage
                     };
-                    merge_usage(&mut self.turn_usage, usage);
-                    self.has_usage = true;
+                    self.turn_usage.get_or_insert_default().merge(usage);
                     events.push(AgentEvent::TokenUsage(usage));
                 }
                 if message.get("stopReason").and_then(Value::as_str) == Some("error") {
@@ -1405,13 +1337,6 @@ fn extension_dialog_question(message: &Value) -> Option<(String, UserInputQuesti
     ))
 }
 
-fn extension_dialog_response(id: &str, answer: Option<&str>) -> Value {
-    match answer {
-        Some(value) => json!({"type":"extension_ui_response","id":id,"value":value}),
-        None => json!({"type":"extension_ui_response","id":id,"cancelled":true}),
-    }
-}
-
 fn take_extension_dialog_response(
     pending_dialogs: &mut HashSet<String>,
     request_id: &str,
@@ -1420,10 +1345,10 @@ fn take_extension_dialog_response(
     if !pending_dialogs.remove(request_id) {
         return None;
     }
-    Some(extension_dialog_response(
-        request_id,
-        answers.get(request_id).and_then(Value::as_str),
-    ))
+    Some(match answers.get(request_id).and_then(Value::as_str) {
+        Some(value) => json!({"type":"extension_ui_response","id":request_id,"value":value}),
+        None => json!({"type":"extension_ui_response","id":request_id,"cancelled":true}),
+    })
 }
 
 fn cancel_pending_dialogs(
@@ -1458,49 +1383,22 @@ fn assistant_message_id(message: &Value) -> String {
         .unwrap_or_else(|| {
             format!(
                 "pi-assistant-{}",
-                number(message.get("timestamp")).unwrap_or(0)
+                crate::json_u64(message.get("timestamp")).unwrap_or(0)
             )
         })
 }
 
 fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
     let usage = usage?;
-    let input = number(usage.get("input"));
-    let output = number(usage.get("output"));
-    let cache_read = number(usage.get("cacheRead"));
+    let input = crate::json_u64(usage.get("input"));
+    let output = crate::json_u64(usage.get("output"));
+    let cache_read = crate::json_u64(usage.get("cacheRead"));
     (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
         input_tokens: input,
         cached_input_tokens: cache_read,
         output_tokens: output,
-        used_tokens: number(usage.get("totalTokens")),
-        context_window: None,
-        total_processed_tokens: None,
-        cost_usd: None,
-        duration_ms: None,
-    })
-}
-
-fn merge_usage(total: &mut TokenUsage, usage: TokenUsage) {
-    total.input_tokens = add_options(total.input_tokens, usage.input_tokens);
-    total.cached_input_tokens = add_options(total.cached_input_tokens, usage.cached_input_tokens);
-    total.output_tokens = add_options(total.output_tokens, usage.output_tokens);
-    total.used_tokens = add_options(total.used_tokens, usage.used_tokens);
-    total.context_window = usage.context_window.or(total.context_window);
-    total.total_processed_tokens = usage.total_processed_tokens;
-}
-
-fn add_options(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
-    }
-}
-
-fn number(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
+        used_tokens: crate::json_u64(usage.get("totalTokens")),
+        ..Default::default()
     })
 }
 
@@ -1554,17 +1452,12 @@ fn map_commands(response: &Value) -> Vec<ProviderCommand> {
 fn selected_thinking(selections: &[OptionSelection]) -> Option<&str> {
     selections
         .iter()
-        .find(|selection| matches!(selection.id.as_str(), "reasoningEffort" | "thinkingLevel"))
+        .find(|selection| selection.id == "reasoningEffort")
         .and_then(|selection| selection.value.as_str())
 }
 
 fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
-    let cursor = resume.as_ref()?;
-    cursor
-        .0
-        .get("session_file")
-        .or_else(|| cursor.0.get("session_id"))
-        .and_then(Value::as_str)
+    resume.as_ref()?.str_field(&["session_file", "session_id"])
 }
 
 fn pi_approval_mode(mode: ApprovalMode) -> &'static str {
@@ -1591,14 +1484,24 @@ fn gate_required(mode: ApprovalMode) -> bool {
 /// Naming them beats a blanket notice: the person reading it wants to know
 /// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
-    let mut unattached = Vec::new();
-    if opts.orchestrate_server.is_some() {
-        unattached.push("orchestration");
-    }
-    if opts.computer_use_server.is_some() {
-        unattached.push("computer-use");
-    }
-    unattached
+    [
+        (
+            crate::McpRegistration::SERVER_NAME_ORCHESTRATE,
+            "orchestration",
+        ),
+        (
+            crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
+            "computer-use",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(server_name, label)| {
+        opts.mcp_servers
+            .iter()
+            .any(|server| server.name == server_name)
+            .then_some(label)
+    })
+    .collect()
 }
 
 fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
@@ -1613,41 +1516,13 @@ fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
         "tcode-permissions-{}.ts",
         env!("CARGO_PKG_VERSION")
     ));
-    let current = std::fs::read_to_string(&path).ok();
-    if current.as_deref() != Some(PERMISSION_EXTENSION) {
-        std::fs::write(&path, PERMISSION_EXTENSION)?;
-    }
+    std::fs::write(&path, PERMISSION_EXTENSION)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(path)
-}
-
-fn pi_version(binary: &Path, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
-    let mut command = crate::process::command(binary);
-    command.arg("--version");
-    for (key, value) in launch_env.pairs(ProviderKind::Pi) {
-        command.env(key, value);
-    }
-    let output = command.output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_version(&text)
-}
-
-fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
-    let token = text.split_whitespace().find(|token| token.contains('.'))?;
-    let mut parts = token.trim_start_matches('v').split('.');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts
-            .next()
-            .and_then(|part| part.split(['-', '+']).next())?
-            .parse()
-            .ok()?,
-    ))
 }
 
 fn ensure_success(message: &Value) -> Result<(), AgentError> {
@@ -1681,80 +1556,7 @@ fn response_error(message: &Value) -> String {
 }
 
 fn send_json(writer: &mut impl Write, value: &Value) -> Result<(), AgentError> {
-    serde_json::to_writer(&mut *writer, value)
-        .map_err(|err| AgentError::Protocol(format!("serializing pi request: {err}")))?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
-    Ok(())
-}
-
-enum ChildOutput {
-    Line(String),
-    Eof,
-    Error(String),
-}
-
-fn read_pi_stdout(stdout: impl std::io::Read, sender: Sender<ChildOutput>) {
-    let mut reader = BufReader::new(stdout);
-    loop {
-        match read_lf_record(&mut reader) {
-            Ok(Some(line)) => {
-                if !line.trim().is_empty() && sender.send_blocking(ChildOutput::Line(line)).is_err()
-                {
-                    return;
-                }
-            }
-            Ok(None) => {
-                let _ = sender.send_blocking(ChildOutput::Eof);
-                return;
-            }
-            Err(err) => {
-                let _ = sender.send_blocking(ChildOutput::Error(err.to_string()));
-                return;
-            }
-        }
-    }
-}
-
-fn read_lf_record(reader: &mut impl BufRead) -> Result<Option<String>, AgentError> {
-    let mut bytes = Vec::new();
-    let count = reader.read_until(b'\n', &mut bytes)?;
-    if count == 0 {
-        return Ok(None);
-    }
-    if bytes.last() != Some(&b'\n') {
-        return Err(AgentError::Protocol(
-            "pi stdout ended with an unterminated JSONL record".into(),
-        ));
-    }
-    bytes.pop();
-    if bytes.last() == Some(&b'\r') {
-        bytes.pop();
-    }
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|err| AgentError::Protocol(format!("pi stdout was not UTF-8: {err}")))
-}
-
-fn spawn_stderr_reader(
-    stderr: impl std::io::Read + Send + 'static,
-    name: &str,
-) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-    let tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let capture = tail.clone();
-    let _ = std::thread::Builder::new()
-        .name(name.into())
-        .spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log::debug!("pi: {line}");
-                let mut tail = capture.lock().unwrap();
-                if tail.len() == STDERR_TAIL_LINES {
-                    tail.remove(0);
-                }
-                tail.push(line);
-            }
-        });
-    tail
+    write_json(writer, value, Some("serializing pi request"))
 }
 
 #[cfg(test)]
@@ -2000,7 +1802,7 @@ mod tests {
 
     #[test]
     fn maps_recorded_rpc_fixture() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         let mut events = Vec::new();
         for line in include_str!("../tests/fixtures/pi/rpc_events.jsonl").lines() {
             let message: Value = serde_json::from_str(line).unwrap();
@@ -2064,7 +1866,7 @@ mod tests {
 
     #[test]
     fn multi_message_turn_sums_used_tokens() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         mapper.on_message(&json!({"type":"agent_start"}));
         mapper.on_message(&json!({
             "type":"message_end",
@@ -2090,7 +1892,7 @@ mod tests {
 
     #[test]
     fn displayed_custom_messages_become_work_log_items() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         let plain = mapper.on_message(&json!({
             "type":"message_end",
             "message":{
@@ -2133,7 +1935,7 @@ mod tests {
 
     #[test]
     fn hidden_or_empty_custom_messages_are_ignored() {
-        let mut mapper = PiMapper::new(true);
+        let mut mapper = PiMapper::new();
         for message in [
             json!({"role":"custom","content":"hidden","display":false}),
             json!({"role":"custom","content":"implicit hidden"}),
@@ -2148,23 +1950,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pi_uses_agent_end_fallback() {
-        let mut mapper = PiMapper::new(false);
-        mapper.on_message(&json!({"type":"agent_start"}));
-        assert!(matches!(
-            mapper
-                .on_message(&json!({"type":"agent_end","willRetry":false}))
-                .as_slice(),
-            [AgentEvent::TurnCompleted { .. }]
-        ));
-    }
-
-    #[test]
     fn lf_reader_preserves_unicode_line_separators() {
         let bytes = b"{\"text\":\"a\xE2\x80\xA8b\"}\n";
-        let mut reader = BufReader::new(bytes.as_slice());
-        let record = read_lf_record(&mut reader).unwrap().unwrap();
+        let mut lines = BufReader::new(bytes.as_slice()).lines();
+        let record = lines.next().unwrap().unwrap();
         assert!(record.contains('\u{2028}'));
-        assert!(read_lf_record(&mut reader).unwrap().is_none());
+        assert!(lines.next().is_none());
     }
 }

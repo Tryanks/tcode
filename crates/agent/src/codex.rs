@@ -2,25 +2,28 @@
 //! by `codex app-server`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::BufWriter;
+#[cfg(test)]
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 
-use async_channel::{Receiver, Sender};
-use futures_lite::future;
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
 
+use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
     SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
-    UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
+    UserInputOption, UserInputQuestion, file_changes_from_unified_diff, selection_str,
 };
 
 mod developer_instructions;
-use developer_instructions::{default_mode_instructions, plan_mode_instructions};
+use developer_instructions::{DEFAULT_MODE_INSTRUCTIONS, PLAN_MODE_INSTRUCTIONS};
 
 /// Fallback model slug for `collaborationMode.settings.model` when the session
 /// has no resolved model yet (mirrors T3's `DEFAULT_MODEL`).
@@ -54,20 +57,13 @@ fn approval_knobs(mode: ApprovalMode) -> (&'static str, &'static str) {
 
 /// Starts an app-server process and waits until its thread is ready.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
-
-    smol::spawn(run_actor(opts, commands_rx, events_tx, ready_tx)).detach();
-    ready_rx.recv().await.map_err(|_| {
-        AgentError::Protocol("codex actor exited before reporting startup status".into())
-    })??;
-
-    Ok(SessionHandle {
-        provider: ProviderKind::Codex,
-        commands: commands_tx,
-        events: events_rx,
-    })
+    crate::spawn_session(
+        ProviderKind::Codex,
+        opts,
+        run_actor,
+        "codex actor exited before reporting startup status",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -90,16 +86,15 @@ pub async fn list_models(
     let status = result
         .is_err()
         .then(|| settle_child_exit(&mut child))
-        .flatten()
-        .or_else(|| child.try_wait().ok().flatten());
+        .flatten();
     stop_child(&mut child, stdin);
     result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
 }
 
-async fn collect_models(
+async fn initialize(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
-) -> Result<Vec<ModelSpec>, AgentError> {
+) -> Result<(), AgentError> {
     send_json(
         stdin,
         &json!({
@@ -112,7 +107,14 @@ async fn collect_models(
         }),
     )?;
     wait_for_response(lines, 1).await?;
-    send_json(stdin, &json!({ "method": "initialized" }))?;
+    send_json(stdin, &json!({ "method": "initialized" }))
+}
+
+async fn collect_models(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+) -> Result<Vec<ModelSpec>, AgentError> {
+    initialize(stdin, lines).await?;
 
     let mut models = Vec::new();
     let mut cursor: Option<String> = None;
@@ -210,12 +212,12 @@ fn map_model(model: &Value) -> Option<ModelSpec> {
 
     let tiers = service_tiers(model);
     if !tiers.is_empty() {
-        let catalog_default = model
+        let default_value = model
             .get("defaultServiceTier")
             .and_then(Value::as_str)
             .filter(|d| tiers.iter().any(|t| t.value == *d))
-            .map(str::to_owned);
-        let default_value = catalog_default.unwrap_or_else(|| "default".into());
+            .map(str::to_owned)
+            .unwrap_or_else(|| "default".into());
         let mut select_options = Vec::with_capacity(tiers.len() + 1);
         select_options.push(SelectOption {
             value: "default".into(),
@@ -290,11 +292,7 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
 
 /// `gpt…` → `GPT…`, and capitalize the letter after each hyphen (T3 transform).
 fn codex_display_name(raw: &str) -> String {
-    let base = if raw
-        .get(..3)
-        .map(|p| p.eq_ignore_ascii_case("gpt"))
-        .unwrap_or(false)
-    {
+    let base = if raw.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("gpt")) {
         format!("GPT{}", &raw[3..])
     } else {
         raw.to_owned()
@@ -327,38 +325,14 @@ fn reasoning_effort_label(effort: &str) -> String {
     .to_owned()
 }
 
-/// Read a string option value from the session's selections.
-fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_str().map(str::to_owned))
-}
-
-fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_bool())
-}
-
 /// Selected reasoning effort (option id `reasoningEffort`).
 fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "reasoningEffort")
 }
 
-/// Selected service tier (option id `serviceTier`), with the legacy
-/// `fastMode: true` → `fast` fallback (T3 `getCodexServiceTierOptionValue`).
+/// Selected service tier (option id `serviceTier`).
 fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
-    selection_str(selections, "serviceTier").or_else(|| {
-        (selection_bool(selections, "fastMode") == Some(true)).then(|| "fast".to_owned())
-    })
-}
-
-enum ChildOutput {
-    Line(String),
-    Eof,
-    Error(String),
+    selection_str(selections, "serviceTier")
 }
 
 enum PendingRequest {
@@ -402,7 +376,7 @@ struct Actor {
     interaction_mode: InteractionMode,
     /// Session reasoning effort (`reasoningEffort` selection), if any.
     effort: Option<String>,
-    /// Session service tier (`serviceTier` selection / legacy fastMode), if any.
+    /// Session service tier (`serviceTier` selection), if any.
     service_tier: Option<String>,
     next_id: i64,
     pending_requests: HashMap<i64, PendingRequest>,
@@ -433,11 +407,7 @@ async fn run_actor(
     ready: Sender<Result<(), AgentError>>,
 ) {
     // Register tcode's enabled streamable-HTTP MCP servers via `-c` overrides.
-    let mut extra_args = mcp_args(
-        opts.mcp_server.as_ref(),
-        opts.orchestrate_server.as_ref(),
-        opts.computer_use_server.as_ref(),
-    );
+    let mut extra_args = mcp_args(&opts.mcp_servers);
     // Any additional launch arguments configured for this provider.
     extra_args.extend(opts.extra_args.iter().cloned());
     let (mut child, mut stdin, lines, mut stderr_tail) =
@@ -510,8 +480,8 @@ async fn run_actor(
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
-            Output(Result<ChildOutput, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
+            Output(Result<ChildOutput, smol::channel::RecvError>),
         }
         let input = future::race(async { Input::Command(commands.recv().await) }, async {
             Input::Output(actor.lines.recv().await)
@@ -568,50 +538,11 @@ async fn run_actor(
         .ok();
 }
 
-fn mcp_args(
-    preview: Option<&crate::McpRegistration>,
-    orchestrate: Option<&crate::McpRegistration>,
-    computer_use: Option<&crate::McpRegistration>,
-) -> Vec<String> {
-    [preview, orchestrate, computer_use]
-        .into_iter()
-        .flatten()
+fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
+    registrations
+        .iter()
         .flat_map(|mcp| ["-c".to_string(), mcp.codex_config_override()])
         .collect()
-}
-
-/// Rolling tail of the child's stderr. Once the process dies its own last
-/// words are the only diagnostics there are, so they are folded into the
-/// startup / exit errors shown to the user.
-struct StderrTail {
-    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// Joined before reading the tail so the reader has drained the pipe.
-    /// `None` after the tail has been read once.
-    reader: Option<std::thread::JoinHandle<()>>,
-}
-
-const STDERR_TAIL_LINES: usize = 20;
-
-impl StderrTail {
-    /// The captured stderr tail, complete up to the child's death. Call only
-    /// after the child has exited (or been killed): that closes the pipe and
-    /// ends the reader. The wait is bounded because a grandchild that
-    /// inherited the pipe keeps it open past the child's death, and an
-    /// unconditional join would hang teardown on it.
-    fn text(&mut self) -> String {
-        if let Some(reader) = self.reader.take() {
-            for _ in 0..50 {
-                if reader.is_finished() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            if reader.is_finished() {
-                let _ = reader.join();
-            }
-        }
-        self.lines.lock().unwrap().join("\n")
-    }
 }
 
 /// Append the child's exit status and captured stderr to a process-death
@@ -626,11 +557,7 @@ fn describe_child_failure(
     if let Some(status) = status {
         message.push_str(&format!(" ({status})"));
     }
-    let tail = stderr_tail.text();
-    if !tail.trim().is_empty() {
-        message.push_str(&format!("\nstderr:\n{tail}"));
-    }
-    message
+    stderr_tail.append_to(message, "\nstderr:\n")
 }
 
 /// Fold the child's death into a startup error. Protocol errors and I/O
@@ -704,50 +631,17 @@ fn spawn_server(
         .stderr
         .take()
         .ok_or_else(|| AgentError::Spawn("missing child stderr".into()))?;
-    let (tx, rx) = async_channel::unbounded();
-
-    std::thread::Builder::new()
-        .name("codex-app-server-stdout".into())
-        .spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send_blocking(ChildOutput::Line(line)).is_err() {
-                            return;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = tx.send_blocking(ChildOutput::Error(format!(
-                            "failed reading codex stdout: {err}"
-                        )));
-                        return;
-                    }
-                }
-            }
-            let _ = tx.send_blocking(ChildOutput::Eof);
-        })
+    let (rx, reader) = spawn_line_reader(
+        stdout,
+        "codex-app-server-stdout",
+        Some("failed reading codex stdout"),
+        false,
+    );
+    reader.map_err(|err| AgentError::Spawn(err.to_string()))?;
+    let stderr_tail = StderrTail::default();
+    stderr_tail
+        .spawn(stderr, "codex-app-server-stderr", "codex app-server")
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
-    let stderr_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let stderr_reader = std::thread::Builder::new()
-        .name("codex-app-server-stderr".into())
-        .spawn({
-            let lines = stderr_lines.clone();
-            move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    log::debug!("codex app-server: {line}");
-                    let mut lines = lines.lock().unwrap();
-                    if lines.len() == STDERR_TAIL_LINES {
-                        lines.remove(0);
-                    }
-                    lines.push(line);
-                }
-            }
-        })
-        .map_err(|err| AgentError::Spawn(err.to_string()))?;
-    let stderr_tail = StderrTail {
-        lines: stderr_lines,
-        reader: Some(stderr_reader),
-    };
     Ok((child, stdin, rx, stderr_tail))
 }
 
@@ -756,19 +650,7 @@ async fn initialize_and_open_thread(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
 ) -> Result<(String, Option<String>, i64, Vec<ProviderCommand>), AgentError> {
-    send_json(
-        stdin,
-        &json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": { "name": "tcode", "title": "tcode", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "experimentalApi": true }
-            }
-        }),
-    )?;
-    wait_for_response(lines, 1).await?;
-    send_json(stdin, &json!({ "method": "initialized" }))?;
+    initialize(stdin, lines).await?;
 
     let cwd = opts.cwd.to_string_lossy();
     let (approval_policy, sandbox) = approval_knobs(opts.approval_mode);
@@ -832,13 +714,9 @@ fn resume_request(
     approval_policy: &str,
     sandbox: &str,
 ) -> Result<(&'static str, Value), AgentError> {
-    let thread_id = resume
-        .0
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
-        })?;
+    let thread_id = resume.str_field(&["thread_id"]).ok_or_else(|| {
+        AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
+    })?;
     Ok((
         if fork { "thread/fork" } else { "thread/resume" },
         json!({
@@ -908,20 +786,12 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
 }
 
 /// Resolve the Codex data home exactly as the spawned provider sees it: the
-/// dedicated home override wins, then an explicit environment row, then the
-/// inherited process variables, finally `$HOME/.codex`.
+/// dedicated home override wins, then the inherited process variables, finally
+/// `$HOME/.codex`.
 fn codex_home(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .home
         .clone()
-        .or_else(|| {
-            launch_env
-                .env
-                .iter()
-                .rev()
-                .find(|(key, _)| key == "CODEX_HOME")
-                .map(|(_, value)| PathBuf::from(value))
-        })
         .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
 }
@@ -1024,20 +894,16 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
     }
 }
 
-fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), AgentError> {
-    serde_json::to_writer(&mut *stdin, value)
-        .map_err(|err| AgentError::Protocol(err.to_string()))?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()?;
-    Ok(())
-}
-
 fn stop_child(child: &mut Child, stdin: BufWriter<ChildStdin>) {
     drop(stdin);
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
     }
     let _ = child.wait();
+}
+
+fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), AgentError> {
+    write_json(stdin, value, None)
 }
 
 /// Wait briefly for a child that has already closed stdout to become waitable.
@@ -1106,8 +972,8 @@ impl Actor {
             InteractionMode::Plan => "plan",
         };
         let developer_instructions = match mode {
-            InteractionMode::Plan => plan_mode_instructions(),
-            InteractionMode::Build => default_mode_instructions(),
+            InteractionMode::Plan => PLAN_MODE_INSTRUCTIONS,
+            InteractionMode::Build => DEFAULT_MODE_INSTRUCTIONS,
         };
         let model = self
             .model
@@ -1213,7 +1079,7 @@ impl Actor {
                     let mut wire_answers = serde_json::Map::new();
                     for (qid, value) in &answers {
                         wire_answers
-                            .insert(qid.clone(), json!({ "answers": answer_strings(value) }));
+                            .insert(qid.clone(), json!({ "answers": strings(Some(value)) }));
                     }
                     send_json(
                         &mut self.stdin,
@@ -1557,12 +1423,7 @@ impl Actor {
                 .await;
             }
             "turn/diff/updated" => {
-                let turn_id = params
-                    .get("turnId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| self.active_turn.clone())
-                    .unwrap_or_default();
+                let turn_id = notification_turn_id(params, &self.active_turn).unwrap_or_default();
                 let diff = params
                     .get("diff")
                     .and_then(Value::as_str)
@@ -1586,34 +1447,29 @@ impl Actor {
             }
             "item/started" | "item/updated" | "item/completed" => {
                 let item_value = params.get("item");
-                // Proposed-plan item (`ThreadItem::Plan { id, text }`): a
-                // completed plan item is the finalized `<proposed_plan>` block.
-                if item_value
-                    .and_then(|i| i.get("type"))
+                match item_value
+                    .and_then(|item| item.get("type"))
                     .and_then(Value::as_str)
-                    == Some("plan")
                 {
-                    if method == "item/completed"
-                        && let Some(item) = item_value
-                    {
-                        let markdown = string_field(item, "text");
-                        let item_id = string_field(item, "id");
-                        self.emit(AgentEvent::ProposedPlan { item_id, markdown })
+                    Some("plan") => {
+                        if method == "item/completed"
+                            && let Some(item) = item_value
+                        {
+                            self.emit(AgentEvent::ProposedPlan {
+                                item_id: string_field(item, "id"),
+                                markdown: string_field(item, "text"),
+                            })
                             .await;
+                        }
+                        return;
                     }
-                    return;
-                }
-                // Context-compaction marker item (`type: "contextCompaction"`):
-                // surface the "Context compacted" work-log row once, on completion.
-                if item_value
-                    .and_then(|i| i.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("contextCompaction")
-                {
-                    if method == "item/completed" {
-                        self.emit(AgentEvent::ContextCompacted).await;
+                    Some("contextCompaction") => {
+                        if method == "item/completed" {
+                            self.emit(AgentEvent::ContextCompacted).await;
+                        }
+                        return;
                     }
-                    return;
+                    _ => {}
                 }
                 if let Some(mut item) = item_value.and_then(map_item) {
                     if let Some(subagent) = self.subagents.get(&item.id) {
@@ -1657,11 +1513,7 @@ impl Actor {
                 }
             }
             "turn/plan/updated" => {
-                let turn_id = params
-                    .get("turnId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| self.active_turn.clone());
+                let turn_id = notification_turn_id(params, &self.active_turn);
                 let explanation = params
                     .get("explanation")
                     .and_then(Value::as_str)
@@ -1831,24 +1683,16 @@ impl Actor {
     /// Settle every outstanding native user-input request and MCP elicitation
     /// on teardown, replying with the protocol's empty/cancel outcome.
     async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let pending: Vec<(String, Value)> = self.user_inputs.drain().collect();
-        for (request_id, rpc_id) in pending {
-            let _ = send_json(
-                &mut self.stdin,
-                &json!({ "id": rpc_id, "result": { "answers": {} } }),
-            );
-            self.emit(AgentEvent::UserInputResolved {
-                request_id,
-                answers: serde_json::Map::new(),
-            })
-            .await;
-        }
-        let elicitations: Vec<(String, PendingElicitation)> = self.elicitations.drain().collect();
-        for (request_id, pending) in elicitations {
-            let _ = send_json(
-                &mut self.stdin,
-                &json!({ "id": pending.rpc_id, "result": { "action": "cancel" } }),
-            );
+        let mut pending = self
+            .user_inputs
+            .drain()
+            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
+            .collect::<Vec<_>>();
+        pending.extend(self.elicitations.drain().map(|(request_id, pending)| {
+            (request_id, pending.rpc_id, json!({ "action": "cancel" }))
+        }));
+        for (request_id, rpc_id, result) in pending {
+            let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
             self.emit(AgentEvent::UserInputResolved {
                 request_id,
                 answers: serde_json::Map::new(),
@@ -1904,7 +1748,10 @@ fn request_id_string(id: &Value) -> String {
 /// Normalize a canonical answer value into the wire array shape. A single
 /// string becomes a 1-element array; an array of strings is kept; anything
 /// else yields an empty array (S2 §3.2).
-fn answer_strings(value: &Value) -> Vec<String> {
+fn strings(value: Option<&Value>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
     match value {
         Value::String(s) => vec![s.clone()],
         Value::Array(items) => items
@@ -1916,7 +1763,7 @@ fn answer_strings(value: &Value) -> Vec<String> {
 }
 
 fn non_empty_string(value: &Value) -> Option<String> {
-    answer_strings(value)
+    strings(Some(value))
         .into_iter()
         .find(|answer| !answer.is_empty())
 }
@@ -1938,13 +1785,7 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
         };
         let value = match field.kind {
             ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
-            ElicitFieldKind::Enum => non_empty_string(answer).and_then(|answer| {
-                if field.values.is_empty() {
-                    Some(Value::String(answer))
-                } else {
-                    field.values.get(&answer).cloned().map(Value::String)
-                }
-            }),
+            ElicitFieldKind::Enum => elicitation_enum_values(field, answer).into_iter().next(),
             ElicitFieldKind::Number => non_empty_string(answer)
                 .and_then(|answer| answer.parse::<f64>().ok())
                 .and_then(serde_json::Number::from_f64)
@@ -1960,17 +1801,7 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
                 }
             }),
             ElicitFieldKind::MultiEnum => {
-                let values = answer_strings(answer)
-                    .into_iter()
-                    .filter(|answer| !answer.is_empty())
-                    .filter_map(|answer| {
-                        if field.values.is_empty() {
-                            Some(Value::String(answer))
-                        } else {
-                            field.values.get(&answer).cloned().map(Value::String)
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let values = elicitation_enum_values(field, answer);
                 (!values.is_empty()).then_some(Value::Array(values))
             }
             ElicitFieldKind::UrlAck => None,
@@ -1985,6 +1816,20 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
     } else {
         json!({ "action": "accept", "content": content })
     }
+}
+
+fn elicitation_enum_values(field: &ElicitField, answer: &Value) -> Vec<Value> {
+    strings(Some(answer))
+        .into_iter()
+        .filter(|answer| !answer.is_empty())
+        .filter_map(|answer| {
+            if field.values.is_empty() {
+                Some(Value::String(answer))
+            } else {
+                field.values.get(&answer).cloned().map(Value::String)
+            }
+        })
+        .collect()
 }
 
 fn elicit_option(label: &str) -> UserInputOption {
@@ -2002,17 +1847,24 @@ fn schema_text<'a>(schema: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn titled_enum(entries: Option<&Vec<Value>>) -> (Vec<UserInputOption>, HashMap<String, String>) {
+    enum_options(entries.into_iter().flatten().filter_map(|entry| {
+        Some((
+            schema_text(entry, "title")?.to_owned(),
+            entry.get("const").and_then(Value::as_str)?.to_owned(),
+        ))
+    }))
+}
+
+fn enum_options(
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> (Vec<UserInputOption>, HashMap<String, String>) {
     let mut options = Vec::new();
     let mut values = HashMap::new();
-    for entry in entries.into_iter().flatten() {
-        let Some(wire_value) = entry.get("const").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(label) = schema_text(entry, "title") else {
-            continue;
-        };
-        options.push(elicit_option(label));
-        values.insert(label.to_owned(), wire_value.to_owned());
+    for (label, wire_value) in entries {
+        if !label.is_empty() {
+            options.push(elicit_option(&label));
+            values.insert(label, wire_value);
+        }
     }
     (options, values)
 }
@@ -2035,59 +1887,46 @@ fn parse_elicitation_form(
     // declaration-order tests below will catch it.
     for (key, schema) in properties {
         let schema_type = schema.get("type").and_then(Value::as_str);
-        let (kind, options, multi_select, values) = match schema_type {
+        let (kind, options, values) = match schema_type {
             Some("boolean") => (
                 ElicitFieldKind::Boolean,
                 vec![elicit_option("Yes"), elicit_option("No")],
-                false,
                 HashMap::new(),
             ),
             Some("string") if schema.get("oneOf").is_some() => {
                 let (options, values) = titled_enum(schema.get("oneOf").and_then(Value::as_array));
-                (ElicitFieldKind::Enum, options, false, values)
+                (ElicitFieldKind::Enum, options, values)
             }
             Some("string") if schema.get("enum").is_some() => {
                 let wire_values = strings(schema.get("enum"));
                 let names = strings(schema.get("enumNames"));
                 if names.len() == wire_values.len() {
-                    let mut values = HashMap::new();
-                    let options = names
-                        .into_iter()
-                        .zip(wire_values)
-                        .filter_map(|(label, wire_value)| {
-                            if label.is_empty() {
-                                None
-                            } else {
-                                values.insert(label.to_owned(), wire_value.to_owned());
-                                Some(elicit_option(label))
-                            }
-                        })
-                        .collect();
-                    (ElicitFieldKind::Enum, options, false, values)
+                    let (options, values) = enum_options(names.into_iter().zip(wire_values));
+                    (ElicitFieldKind::Enum, options, values)
                 } else {
                     let options = wire_values
                         .into_iter()
                         .filter(|label| !label.is_empty())
-                        .map(elicit_option)
+                        .map(|label| elicit_option(&label))
                         .collect();
-                    (ElicitFieldKind::Enum, options, false, HashMap::new())
+                    (ElicitFieldKind::Enum, options, HashMap::new())
                 }
             }
-            Some("string") => (ElicitFieldKind::Text, Vec::new(), false, HashMap::new()),
-            Some("number") => (ElicitFieldKind::Number, Vec::new(), false, HashMap::new()),
-            Some("integer") => (ElicitFieldKind::Integer, Vec::new(), false, HashMap::new()),
+            Some("string") => (ElicitFieldKind::Text, Vec::new(), HashMap::new()),
+            Some("number") => (ElicitFieldKind::Number, Vec::new(), HashMap::new()),
+            Some("integer") => (ElicitFieldKind::Integer, Vec::new(), HashMap::new()),
             Some("array") if schema.pointer("/items/anyOf").is_some() => {
                 let (options, values) =
                     titled_enum(schema.pointer("/items/anyOf").and_then(Value::as_array));
-                (ElicitFieldKind::MultiEnum, options, true, values)
+                (ElicitFieldKind::MultiEnum, options, values)
             }
             Some("array") if schema.pointer("/items/enum").is_some() => {
                 let options = strings(schema.pointer("/items/enum"))
                     .into_iter()
                     .filter(|label| !label.is_empty())
-                    .map(elicit_option)
+                    .map(|label| elicit_option(&label))
                     .collect();
-                (ElicitFieldKind::MultiEnum, options, true, HashMap::new())
+                (ElicitFieldKind::MultiEnum, options, HashMap::new())
             }
             _ => {
                 log::debug!("codex: dropping unsupported elicitation field {key}");
@@ -2103,7 +1942,7 @@ fn parse_elicitation_form(
             header: format!("{server_name}: {title}"),
             question: question.to_owned(),
             options,
-            multi_select,
+            multi_select: matches!(kind, ElicitFieldKind::MultiEnum),
             prefill: None,
         });
         fields.push(ElicitField {
@@ -2250,23 +2089,24 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .unwrap_or_default(),
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
-        "mcpToolCall" => ItemContent::ToolCall {
-            name: format!(
-                "{}/{}",
-                string_field(item, "server"),
+        "mcpToolCall" | "dynamicToolCall" => ItemContent::ToolCall {
+            name: if provider_kind == "mcpToolCall" {
+                format!(
+                    "{}/{}",
+                    string_field(item, "server"),
+                    string_field(item, "tool")
+                )
+            } else {
                 string_field(item, "tool")
-            ),
+            },
             input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            output: tool_output(item),
-            status: map_status(item.get("status").and_then(Value::as_str)),
-        },
-        "dynamicToolCall" => ItemContent::ToolCall {
-            name: string_field(item, "tool"),
-            input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            output: item
-                .get("contentItems")
-                .filter(|v| !v.is_null())
-                .map(Value::to_string),
+            output: if provider_kind == "mcpToolCall" {
+                tool_output(item)
+            } else {
+                item.get("contentItems")
+                    .filter(|v| !v.is_null())
+                    .map(Value::to_string)
+            },
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
         "webSearch" => ItemContent::WebSearch {
@@ -2285,22 +2125,16 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
 }
 
 fn find_subagent_activity(value: &Value) -> Option<&Value> {
-    if value.get("type").and_then(Value::as_str) == Some("sub_agent_activity") {
-        return Some(value);
-    }
-    match value {
-        Value::Object(fields) => fields.values().find_map(find_subagent_activity),
-        Value::Array(values) => values.iter().find_map(find_subagent_activity),
-        _ => None,
-    }
+    value
+        .pointer("/event/payload")
+        .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity"))
 }
 
 fn item_status(content: &ItemContent) -> ItemStatus {
     match content {
         ItemContent::CommandExecution { status, .. }
         | ItemContent::FileChange { status, .. }
-        | ItemContent::ToolCall { status, .. }
-        | ItemContent::Subagent { status, .. } => *status,
+        | ItemContent::ToolCall { status, .. } => *status,
         _ => ItemStatus::Completed,
     }
 }
@@ -2310,16 +2144,8 @@ fn item_summary(content: &ItemContent) -> Option<String> {
         ItemContent::ToolCall { output, .. } => output
             .as_deref()
             .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")),
-        ItemContent::Subagent { summary, .. } => summary.clone(),
         _ => None,
     }
-}
-
-fn strings(value: Option<&Value>) -> Vec<&str> {
-    value
-        .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default()
 }
 
 fn string_field(value: &Value, field: &str) -> String {
@@ -2328,6 +2154,14 @@ fn string_field(value: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+fn notification_turn_id(params: &Value, active_turn: &Option<String>) -> Option<String> {
+    params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| active_turn.clone())
 }
 
 fn tool_output(item: &Value) -> Option<String> {
@@ -2413,12 +2247,6 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
 }
 
 fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
-    // Read both spellings while app-server versions transition between Rust
-    // protocol names and JSON camelCase.
-    let _from = params
-        .get("fromModel")
-        .or_else(|| params.get("from_model"))
-        .and_then(Value::as_str);
     let to = params
         .get("toModel")
         .or_else(|| params.get("to_model"))
@@ -2465,11 +2293,11 @@ mod tests {
             url: "http://c".into(),
             bearer_token: "c".into(),
         };
-        assert!(mcp_args(None, None, None).is_empty());
-        let one = mcp_args(Some(&preview), None, None);
+        assert!(mcp_args(&[]).is_empty());
+        let one = mcp_args(std::slice::from_ref(&preview));
         assert_eq!(one.len(), 2);
         assert!(one[1].starts_with("mcp_servers.tcode_preview="));
-        let all = mcp_args(Some(&preview), Some(&orchestrate), Some(&computer_use));
+        let all = mcp_args(&[preview, orchestrate, computer_use]);
         assert_eq!(all.len(), 6);
         assert!(all[1].starts_with("mcp_servers.tcode_preview="));
         assert!(all[3].starts_with("mcp_servers.tcode_orchestrate="));
@@ -2485,7 +2313,7 @@ mod tests {
             .unwrap();
         let stdin = BufWriter::new(child.stdin.take().unwrap());
         let stdout = child.stdout.take().unwrap();
-        let (line_tx, line_rx) = async_channel::unbounded();
+        let (line_tx, line_rx) = smol::channel::unbounded();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line_tx.send_blocking(ChildOutput::Line(line)).is_err() {
@@ -2493,7 +2321,7 @@ mod tests {
                 }
             }
         });
-        let (event_tx, event_rx) = async_channel::unbounded();
+        let (event_tx, event_rx) = smol::channel::unbounded();
         (
             Actor {
                 child,
@@ -3155,12 +2983,12 @@ mod tests {
     }
 
     #[test]
-    fn service_tier_falls_back_to_fast_for_legacy_fast_mode() {
+    fn service_tier_uses_explicit_selection_only() {
         let selections = vec![OptionSelection {
             id: "fastMode".into(),
             value: json!(true),
         }];
-        assert_eq!(codex_service_tier(&selections).as_deref(), Some("fast"));
+        assert_eq!(codex_service_tier(&selections), None);
         let explicit = vec![OptionSelection {
             id: "serviceTier".into(),
             value: json!("flex"),

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use agent::{
-    AgentEvent, ApprovalMode, InteractionMode, OptionDescriptor, OptionSelection, ProviderCommand,
+    ApprovalMode, InteractionMode, OptionDescriptor, OptionSelection, ProviderCommand,
     ProviderKind, RewindMode,
 };
 use serde::{Deserialize, Serialize};
@@ -10,22 +10,14 @@ use tcode_core::{
     git::{GitAction, GitStatus},
     project::{Project, SessionMeta, WorktreeInfo},
     provider_status::ProviderSnapshot,
-    session::ReviewComment,
+    session::{ReviewComment, StoredEvent},
     settings::Settings,
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionEventRecord {
-    pub ts: Option<u64>,
-    pub event: AgentEvent,
-}
-
-impl PartialEq for SessionEventRecord {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
+/// Backward-compatible name for the core event record now used directly on
+/// the protocol wire.
+pub type SessionEventRecord = StoredEvent;
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,24 +42,18 @@ pub enum Topic {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub topic: Topic,
     pub seq: u64,
     pub event: ServerEvent,
 }
 
-impl PartialEq for EventEnvelope {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-
 #[non_exhaustive]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
-    SessionEvent(SessionEventRecord),
+    SessionEvent(StoredEvent),
     SessionStatusReplaced(SessionStatus),
     ProvidersReplaced(ProvidersStatus),
     GitStatusReplaced(GitStatusStatus),
@@ -88,7 +74,7 @@ pub enum ServerEvent {
         session_id: String,
         text: String,
     },
-    SessionSnapshot(Vec<SessionEventRecord>),
+    SessionSnapshot(Vec<StoredEvent>),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
     RuntimeSnapshot(RuntimeSnapshot),
@@ -98,7 +84,7 @@ pub enum ServerEvent {
 ///
 /// Provider state changes infrequently and its pieces are consumed together,
 /// so hosts replace this single value after any covered mutation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProvidersStatus {
     pub model_catalogs: HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
@@ -113,12 +99,6 @@ pub struct ProvidersStatus {
     /// Environment-variable names present for each profile. Values never cross
     /// the protocol boundary.
     pub secret_names: HashMap<String, HashSet<String>>,
-}
-
-impl PartialEq for ProvidersStatus {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -153,10 +133,10 @@ pub struct GitStatusStatus {
 
 /// Full, ephemeral runtime status for one session.
 ///
-/// Unlike [`SessionEventRecord`], these values are not derivable by folding the
+/// Unlike [`StoredEvent`], these values are not derivable by folding the
 /// persisted agent event stream. Hosts replace the whole value whenever one of
 /// its fields changes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatus {
     pub session_id: String,
     pub title: String,
@@ -223,40 +203,20 @@ pub struct TerminalContextStatus {
     pub text: String,
 }
 
-impl PartialEq for SessionStatus {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessageStatus {
     pub id: u64,
     pub text: String,
 }
 
-impl PartialEq for ServerEvent {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexSnapshot {
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
 }
 
-impl PartialEq for IndexSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeSnapshot {
-    pub notifications: Vec<RuntimeNotification>,
-}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSnapshot;
 
 /// Protocol-owned mirror of `tcode_runtime::event::RuntimeEvent`.
 #[non_exhaustive]

@@ -115,17 +115,9 @@ pub struct StateStore {
 
 impl Default for StateStore {
     fn default() -> Self {
-        Self::new(OBSERVATION_CAPACITY, OUTPUT_CAPACITY)
-    }
-}
-
-impl StateStore {
-    pub fn new(observation_capacity: usize, output_capacity: usize) -> Self {
-        assert!(observation_capacity > 0);
-        assert!(output_capacity > 0);
         Self {
-            observation_capacity,
-            output_capacity,
+            observation_capacity: OBSERVATION_CAPACITY,
+            output_capacity: OUTPUT_CAPACITY,
             next_state: 1,
             next_output: 1,
             observations: HashMap::new(),
@@ -135,7 +127,9 @@ impl StateStore {
             output_lru: VecDeque::new(),
         }
     }
+}
 
+impl StateStore {
     pub fn insert_observation(
         &mut self,
         root: RootInfo,
@@ -365,23 +359,23 @@ mod tests {
 
     #[test]
     fn lru_evicts_least_recently_used_observation() {
-        let mut store = StateStore::new(2, 4);
+        let mut store = StateStore::default();
         let first = store.insert_observation(root(1), tree("one"), None);
-        let second = store.insert_observation(root(2), tree("two"), None);
+        for window_id in 2..=OBSERVATION_CAPACITY as u32 {
+            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")), None);
+        }
         store.get(&first.state_id).unwrap();
-        let third = store.insert_observation(root(3), tree("three"), None);
+        let newest =
+            store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"), None);
         assert!(store.contains(&first.state_id));
-        assert!(!store.contains(&second.state_id));
-        assert!(store.contains(&third.state_id));
-        assert!(matches!(
-            store.get(&second.state_id),
-            Err(StateError::Evicted(_))
-        ));
+        assert!(!store.contains("S2"));
+        assert!(store.contains(&newest.state_id));
+        assert!(matches!(store.get("S2"), Err(StateError::Evicted(_))));
     }
 
     #[test]
     fn newer_root_epoch_rejects_actions_from_old_state() {
-        let mut store = StateStore::new(8, 4);
+        let mut store = StateStore::default();
         let first = store.insert_observation(root(1), tree("one"), None);
         let second = store.insert_observation(root(1), tree("one changed"), None);
         assert!(matches!(
@@ -393,7 +387,7 @@ mod tests {
 
     #[test]
     fn bounded_output_continuation_round_trips_without_mutation() {
-        let mut store = StateStore::new(2, 4);
+        let mut store = StateStore::default();
         let original = "0123456789abcdef\n".repeat(4_000);
         let visible = store.bound_model_text(Some("S9"), original.clone());
         assert!(visible.len() < 20 * 1024);

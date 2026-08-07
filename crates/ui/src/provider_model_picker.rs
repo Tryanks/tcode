@@ -14,7 +14,6 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    popover::Popover,
     scroll::ScrollableElement as _,
     v_flex,
 };
@@ -128,15 +127,11 @@ impl ProviderModelPicker {
         let mut options = Vec::new();
         // Only enabled profiles are offered for new selections; a disabled
         // profile stays configurable in Settings but never reaches the picker.
-        for profile in self.store.read(cx).enabled_provider_profiles(cx) {
-            let catalog = self.store.read(cx).provider_model_catalog(profile.kind, cx);
+        for profile in self.store.read(cx).enabled_profiles() {
+            let catalog = self.store.read(cx).provider_model_catalog(profile.kind);
             let profile_id =
                 (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
-            for model in self
-                .store
-                .read(cx)
-                .picker_models_for_profile(&profile.id, cx)
-            {
+            for model in self.store.read(cx).picker_models_for_profile(&profile.id) {
                 let effort = catalog
                     .iter()
                     .find(|spec| spec.id == model.id)
@@ -189,7 +184,7 @@ impl ProviderModelPicker {
                         let kind = self
                             .store
                             .read(cx)
-                            .provider_profile_kind(&self.selected_profile, cx);
+                            .provider_profile_kind(&self.selected_profile);
                         (kind, "", None)
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
@@ -220,19 +215,14 @@ impl ProviderModelPicker {
 impl Render for ProviderModelPicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let picker = cx.entity();
-        Popover::new(self.popover_id)
-            // T3 overlay contour: one panel surface (popover fill + hairline +
-            // shadow_xl at the 14px overlay radius). The pane content is transparent
-            // so the popup reads as a single card, matching the composer picker.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover(self.popover_id)
             .trigger(self.trigger(cx))
             .content(move |_, _, cx| {
                 let (options, profiles, selected_profile, selected, excluded) = {
                     let picker = picker.read(cx);
                     (
                         picker.options(cx),
-                        picker.store.read(cx).enabled_provider_profiles(cx),
+                        picker.store.read(cx).enabled_profiles(),
                         picker.selected_profile.clone(),
                         picker.selected.clone(),
                         picker.excluded.clone(),
@@ -264,7 +254,7 @@ impl Render for ProviderModelPicker {
                             .p_4()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("model_picker.no_models")),
+                            .child(crate::tr!("model_picker.no_models")),
                     );
                 } else {
                     for (index, option) in available.into_iter().enumerate() {
@@ -406,7 +396,7 @@ fn tinted_glyph(
     let profile_id = profile_id
         .map(str::to_string)
         .unwrap_or_else(|| Settings::builtin_profile_id(provider).to_string());
-    let accent = store.read(cx).provider_profile_accent(&profile_id, cx);
+    let accent = store.read(cx).provider_profile_accent(&profile_id);
     match accent {
         Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,

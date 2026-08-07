@@ -12,7 +12,7 @@ use gpui::{
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_component::{ActiveTheme as _, StyledExt as _};
+use gpui_component::{ActiveTheme as _, StyledExt as _, popover::Popover, v_flex};
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -67,6 +67,12 @@ pub fn radius_composer() -> Pixels {
     px(16.)
 }
 
+/// A T3 overlay popover: one panel surface at the overlay radius with the
+/// component library's large soft shadow.
+pub fn overlay_popover(id: impl Into<ElementId>) -> Popover {
+    Popover::new(id).rounded(radius_overlay()).shadow_xl()
+}
+
 /// A 1px separator that fades out toward both ends, replacing full-bleed
 /// hairlines inside the paper plane.
 pub fn faded_hairline(cx: &App) -> impl IntoElement {
@@ -88,18 +94,6 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
         )))
 }
 
-/// Primary buttons get a faint top light so they read as physical controls:
-/// a barely-brighter wash over the top of the plain primary fill.
-pub fn primary_button_fill(cx: &App) -> gpui::Background {
-    let base = cx.theme().primary;
-    let lit = base.blend(gpui::white().opacity(0.10));
-    linear_gradient(
-        180.,
-        linear_color_stop(lit, 0.),
-        linear_color_stop(base, 0.6),
-    )
-}
-
 /// Applies the T3 overlay contour: fully opaque fill, hairline border and a
 /// large soft shadow. Radius stays the caller's choice (`radius_overlay`).
 pub fn overlay_contour(el: Div, cx: &App) -> Div {
@@ -109,23 +103,34 @@ pub fn overlay_contour(el: Div, cx: &App) -> Div {
         .shadow_xl()
 }
 
-/// A floating content card in chat's composer-console idiom: fully opaque
-/// `popover` fill, a hairline border, `radius_card` corners and the composer
-/// console's soft `shadow_md`, so the card reads as genuinely lifted off the
-/// T1 paper — the same depth chat's cards carry. This is the group container
-/// every settings surface now wears (docs/visual-redesign.md §5.5, 2026-07
-/// revision), replacing the old flat, shadowless System-Settings box, and it
-/// suits any other on-paper grouping that wants chat's card depth.
-///
-/// The composer field itself deliberately does NOT share this: it keeps the
-/// 16px `radius_composer` and its focus-reactive `input` border, so its inline
-/// spec stays untouched.
-pub fn floating_card(el: Div, cx: &App) -> Div {
-    el.rounded(radius_card())
+/// One grouped-list container shared by settings surfaces.
+pub fn group(cx: &App) -> Div {
+    v_flex()
+        .w_full()
+        .rounded(radius_card())
         .border_1()
         .border_color(cx.theme().border)
         .bg(cx.theme().popover)
         .shadow_md()
+        .overflow_hidden()
+}
+
+/// Assemble rows into a floating group with inset hairlines between them.
+pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
+    let mut group = group(cx);
+    let last = rows.len().saturating_sub(1);
+    for (index, row) in rows.into_iter().enumerate() {
+        group = group.child(row);
+        if index != last {
+            group = group.child(
+                div()
+                    .w_full()
+                    .pl_3()
+                    .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
+            );
+        }
+    }
+    group
 }
 
 /// The sidebar brand wordmark — bold "tcode" + the "DEV" channel pill. The main

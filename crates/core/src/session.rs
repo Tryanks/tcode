@@ -77,11 +77,6 @@ impl ReviewComment {
             format!("{marker}{} to {marker}{}", self.line_start, self.line_end)
         }
     }
-
-    /// The final rendered-row index covered by this comment.
-    pub fn end_index(&self) -> usize {
-        self.end_index
-    }
 }
 
 fn escape_review_attribute(value: &str) -> String {
@@ -135,7 +130,7 @@ pub fn append_review_comments_to_prompt(prompt: &str, comments: &[ReviewComment]
 /// One persisted event, optionally tagged with the wall-clock time (unix ms)
 /// at which it was recorded. Legacy `.jsonl` lines replay with `ts == None`;
 /// envelope lines carry the recorded timestamp.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredEvent {
     pub ts: Option<u64>,
     pub event: AgentEvent,
@@ -193,16 +188,6 @@ pub struct TurnMeta {
     pub provider_duration_ms: Option<u64>,
 }
 
-impl TurnMeta {
-    /// Wall-clock duration of the turn in whole seconds, when both ends known.
-    pub fn duration_secs(&self) -> Option<u64> {
-        match (self.start_ts, self.end_ts) {
-            (Some(start), Some(end)) if end >= start => Some((end - start) / 1000),
-            _ => None,
-        }
-    }
-}
-
 /// How a finished turn's wall clock divided between waiting on tools and
 /// everything else (the model thinking and answering). Millisecond based, and
 /// derived purely from the timestamps already recorded on the event stream, so
@@ -219,39 +204,13 @@ pub struct TurnTiming {
 impl TurnTiming {
     /// Build a breakdown. Tool time is already intersected with the turn's
     /// bounds by [`ToolClock`]; the clamp here is only a last-resort guard that
-    /// keeps `ai_ms() + tool_ms == total_ms` true for hand-built values.
+    /// keeps `tool_ms <= total_ms` true for hand-built values.
     pub fn new(total_ms: u64, tool_ms: u64) -> Self {
         Self {
             total_ms,
             tool_ms: tool_ms.min(total_ms),
         }
     }
-
-    /// The complement of the tool time inside the turn: the model thinking and
-    /// responding, plus any provider overhead between tool calls.
-    pub fn ai_ms(&self) -> u64 {
-        self.total_ms - self.tool_ms
-    }
-
-    /// The three durations in whole seconds. Truncation is absorbed by the AI
-    /// part so the rendered parts still sum to the rendered total.
-    pub fn secs(&self) -> TurnTimingSecs {
-        let total = self.total_ms / 1000;
-        let tools = (self.tool_ms / 1000).min(total);
-        TurnTimingSecs {
-            total,
-            ai: total - tools,
-            tools,
-        }
-    }
-}
-
-/// A [`TurnTiming`] rounded down to whole seconds for display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TurnTimingSecs {
-    pub total: u64,
-    pub ai: u64,
-    pub tools: u64,
 }
 
 /// Running union-of-intervals accounting for the tool-like items of the open
@@ -428,10 +387,14 @@ pub struct TurnChangeSet {
 
 #[derive(Debug, Clone)]
 pub enum EntryContent {
-    User {
+    Item(ItemContent),
+    /// A user message injected into an already-open turn. Provider-originated
+    /// user messages live in [`EntryContent::Item`]; this tcode-only variant
+    /// carries the local delivery state that [`ItemContent`] does not model.
+    Steer {
         text: String,
         /// Delivery state for a message injected into an already-open turn.
-        steering: Option<SteeringStatus>,
+        status: SteeringStatus,
         /// Byte length of an injected context prefix folded into `text` (the
         /// orchestrate guidance + configuration composed ahead of the user's own
         /// words). When present, the UI renders `text[..context_len]` as a
@@ -441,33 +404,6 @@ pub enum EntryContent {
         /// Local paths of the image attachments sent with this message (empty
         /// for text-only messages and for logs predating the field).
         attachments: Vec<String>,
-    },
-    Assistant {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    Command {
-        command: String,
-        output: String,
-        exit_code: Option<i32>,
-        status: ItemStatus,
-    },
-    FileChange {
-        changes: Vec<FileChange>,
-    },
-    Tool {
-        name: String,
-        input: serde_json::Value,
-        output: Option<String>,
-        status: ItemStatus,
-    },
-    Subagent {
-        agent_type: String,
-        description: String,
-        status: ItemStatus,
-        summary: Option<String>,
     },
     Error {
         message: String,
@@ -562,7 +498,6 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    #[allow(dead_code)]
     pub fn children(&self, parent_id: &str) -> &[Arc<TimelineEntry>] {
         self.children.get(parent_id).map_or(&[], Vec::as_slice)
     }
@@ -605,7 +540,8 @@ impl Timeline {
     /// First user message in the timeline, if any (used for session titles).
     pub fn first_user_message(&self) -> Option<&str> {
         self.entries.iter().find_map(|entry| match &entry.content {
-            EntryContent::User { text, .. } => Some(text.as_str()),
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+            | EntryContent::Steer { text, .. } => Some(text.as_str()),
             _ => None,
         })
     }
@@ -1082,7 +1018,9 @@ impl Timeline {
                 return None;
             }
             match &entry.content {
-                EntryContent::FileChange { changes } => Some(changes.as_slice()),
+                EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
+                    Some(changes.as_slice())
+                }
                 _ => None,
             }
         });
@@ -1102,7 +1040,7 @@ impl Timeline {
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
-        let mut incoming = Self::content_from_item(&item.content);
+        let mut incoming = EntryContent::Item(item.content.clone());
         if let Some(parent_id) = &item.parent_item_id {
             let turn = self.ensure_turn(ts);
             let children = self.children.entry(parent_id.clone()).or_default();
@@ -1133,16 +1071,35 @@ impl Timeline {
                 incoming,
             );
         } else {
-            let turn = if matches!(incoming, EntryContent::User { .. }) {
+            let turn = if matches!(
+                incoming,
+                EntryContent::Item(ItemContent::UserMessage { .. })
+            ) {
                 let turn = self.begin_user_turn(ts);
-                if let EntryContent::User { steering, .. } = &mut incoming
-                    && self.entries.iter().any(|entry| {
-                        entry.turn == turn && matches!(entry.content, EntryContent::User { .. })
-                    })
-                {
+                if self.entries.iter().any(|entry| {
+                    entry.turn == turn
+                        && matches!(
+                            entry.content,
+                            EntryContent::Item(ItemContent::UserMessage { .. })
+                                | EntryContent::Steer { .. }
+                        )
+                }) {
                     // Legacy logs represented a steer as a second UserMessage
                     // item. Preserve their historical accepted rendering.
-                    *steering = Some(SteeringStatus::Accepted);
+                    let EntryContent::Item(ItemContent::UserMessage {
+                        text,
+                        context_len,
+                        attachments,
+                    }) = incoming
+                    else {
+                        unreachable!();
+                    };
+                    incoming = EntryContent::Steer {
+                        text,
+                        status: SteeringStatus::Accepted,
+                        context_len,
+                        attachments,
+                    };
                 }
                 turn
             } else {
@@ -1170,9 +1127,9 @@ impl Timeline {
         let turn = self.ensure_turn(ts);
         self.entries.push(Arc::new(TimelineEntry {
             id: request_id.to_owned(),
-            content: EntryContent::User {
+            content: EntryContent::Steer {
                 text: text.to_owned(),
-                steering: Some(SteeringStatus::Pending),
+                status: SteeringStatus::Pending,
                 context_len: None,
                 attachments: attachments.to_vec(),
             },
@@ -1187,8 +1144,8 @@ impl Timeline {
         };
         if !matches!(
             self.entries[position].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Pending),
+            EntryContent::Steer {
+                status: SteeringStatus::Pending,
                 ..
             }
         ) {
@@ -1197,12 +1154,12 @@ impl Timeline {
 
         let mut entry = self.entries.remove(position);
         let current_turn = self.turns.iter().rposition(|turn| turn.running);
-        if let EntryContent::User {
-            steering: steering @ Some(SteeringStatus::Pending),
+        if let EntryContent::Steer {
+            status: status @ SteeringStatus::Pending,
             ..
         } = &mut Arc::make_mut(&mut entry).content
         {
-            *steering = Some(SteeringStatus::Accepted);
+            *status = SteeringStatus::Accepted;
         }
         if let Some(turn) = current_turn {
             Arc::make_mut(&mut entry).turn = turn;
@@ -1210,85 +1167,24 @@ impl Timeline {
         self.entries.push(entry);
     }
 
-    fn content_from_item(content: &ItemContent) -> EntryContent {
-        match content {
-            ItemContent::UserMessage {
-                text,
-                context_len,
-                attachments,
-            } => EntryContent::User {
-                text: text.clone(),
-                steering: None,
-                context_len: *context_len,
-                attachments: attachments.clone(),
-            },
-            ItemContent::AssistantMessage { text } => {
-                EntryContent::Assistant { text: text.clone() }
-            }
-            ItemContent::Reasoning { text } => EntryContent::Reasoning { text: text.clone() },
-            ItemContent::CommandExecution {
-                command,
-                output,
-                exit_code,
-                status,
-            } => EntryContent::Command {
-                command: command.clone(),
-                output: output.clone(),
-                exit_code: *exit_code,
-                status: *status,
-            },
-            ItemContent::FileChange { changes, .. } => EntryContent::FileChange {
-                changes: changes.clone(),
-            },
-            ItemContent::ToolCall {
-                name,
-                input,
-                output,
-                status,
-            } => EntryContent::Tool {
-                name: name.clone(),
-                input: input.clone(),
-                output: output.clone(),
-                status: *status,
-            },
-            ItemContent::Subagent {
-                agent_type,
-                description,
-                status,
-                summary,
-            } => EntryContent::Subagent {
-                agent_type: agent_type.clone(),
-                description: description.clone(),
-                status: *status,
-                summary: summary.clone(),
-            },
-            ItemContent::WebSearch { query } => EntryContent::Tool {
-                name: "web_search".into(),
-                input: serde_json::json!({ "query": query }),
-                output: None,
-                status: ItemStatus::Completed,
-            },
-            ItemContent::Other {
-                provider_kind,
-                summary,
-            } => EntryContent::Tool {
-                name: provider_kind.clone(),
-                input: serde_json::json!({ "summary": summary }),
-                output: None,
-                status: ItemStatus::Completed,
-            },
-        }
-    }
-
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item_id) {
             let entry = Arc::make_mut(entry);
             match (&mut entry.content, kind) {
-                (EntryContent::Assistant { text: existing }, DeltaKind::AssistantText)
-                | (EntryContent::Reasoning { text: existing }, DeltaKind::ReasoningText) => {
+                (
+                    EntryContent::Item(ItemContent::AssistantMessage { text: existing }),
+                    DeltaKind::AssistantText,
+                )
+                | (
+                    EntryContent::Item(ItemContent::Reasoning { text: existing }),
+                    DeltaKind::ReasoningText,
+                ) => {
                     existing.push_str(text);
                 }
-                (EntryContent::Command { output, .. }, DeltaKind::CommandOutput) => {
+                (
+                    EntryContent::Item(ItemContent::CommandExecution { output, .. }),
+                    DeltaKind::CommandOutput,
+                ) => {
                     output.push_str(text);
                 }
                 _ => log::warn!("delta kind {kind:?} does not match item {item_id}"),
@@ -1297,14 +1193,18 @@ impl Timeline {
         }
         // Providers may stream deltas before announcing the item: create lazily.
         let content = match kind {
-            DeltaKind::AssistantText => EntryContent::Assistant { text: text.into() },
-            DeltaKind::ReasoningText => EntryContent::Reasoning { text: text.into() },
-            DeltaKind::CommandOutput => EntryContent::Command {
+            DeltaKind::AssistantText => {
+                EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
+            }
+            DeltaKind::ReasoningText => {
+                EntryContent::Item(ItemContent::Reasoning { text: text.into() })
+            }
+            DeltaKind::CommandOutput => EntryContent::Item(ItemContent::CommandExecution {
                 command: String::new(),
                 output: text.into(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
-            },
+            }),
         };
         let turn = self.ensure_turn(ts);
         self.entries.push(Arc::new(TimelineEntry {
@@ -1394,62 +1294,63 @@ pub fn parse_orchestrate_callback(text: &str) -> Option<OrchestrateCallback> {
 fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
         (
-            EntryContent::User { steering, .. },
-            EntryContent::User {
+            EntryContent::Steer { status, .. },
+            EntryContent::Item(ItemContent::UserMessage {
                 text,
                 context_len,
                 attachments,
-                ..
-            },
-        ) => EntryContent::User {
+            }),
+        ) => EntryContent::Steer {
             text,
-            steering,
+            status,
             context_len,
             attachments,
         },
-        (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
-            EntryContent::Assistant {
-                text: merge_text(old, new),
-            }
-        }
-        (EntryContent::Reasoning { text: old }, EntryContent::Reasoning { text: new }) => {
-            EntryContent::Reasoning {
-                text: merge_text(old, new),
-            }
-        }
         (
-            EntryContent::Command {
+            EntryContent::Item(ItemContent::AssistantMessage { text: old }),
+            EntryContent::Item(ItemContent::AssistantMessage { text: new }),
+        ) => EntryContent::Item(ItemContent::AssistantMessage {
+            text: merge_text(old, new),
+        }),
+        (
+            EntryContent::Item(ItemContent::Reasoning { text: old }),
+            EntryContent::Item(ItemContent::Reasoning { text: new }),
+        ) => EntryContent::Item(ItemContent::Reasoning {
+            text: merge_text(old, new),
+        }),
+        (
+            EntryContent::Item(ItemContent::CommandExecution {
                 output: old_output, ..
-            },
-            EntryContent::Command {
+            }),
+            EntryContent::Item(ItemContent::CommandExecution {
                 command,
                 output,
                 exit_code,
                 status,
-            },
-        ) => EntryContent::Command {
+            }),
+        ) => EntryContent::Item(ItemContent::CommandExecution {
             command,
             output: merge_text(old_output, output),
             exit_code,
             status,
-        },
+        }),
         (
-            EntryContent::Subagent {
+            EntryContent::Item(ItemContent::Subagent {
                 summary: old_summary,
                 ..
-            },
-            EntryContent::Subagent {
+            }),
+            EntryContent::Item(ItemContent::Subagent {
                 agent_type,
                 description,
                 status,
                 summary,
-            },
-        ) => EntryContent::Subagent {
+            }),
+        ) => EntryContent::Item(ItemContent::Subagent {
             agent_type,
             description,
             status,
             summary: summary.or(old_summary),
-        },
+        }),
         (_, incoming) => incoming,
     }
 }
@@ -1524,7 +1425,7 @@ mod tests {
         assert_eq!(timeline.entries[1].turn, timeline.entries[2].turn);
         assert!(matches!(
             &timeline.entries[2].content,
-            EntryContent::User { text, .. } if text == "after"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
         ));
     }
 
@@ -1559,7 +1460,7 @@ mod tests {
         assert_eq!(timeline.entries.len(), 1);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, .. } if text == "prompt 1"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "prompt 1"
         ));
         assert_eq!(
             timeline.turns[0].provider_checkpoint_id.as_deref(),
@@ -1572,7 +1473,7 @@ mod tests {
         assert_eq!(timeline.turns.len(), 2);
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::User { text, .. } if text == "replacement prompt"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "replacement prompt"
         ));
     }
 
@@ -1588,11 +1489,11 @@ mod tests {
         assert!(!Arc::ptr_eq(&timeline.entries[0], &snapshot.entries[0]));
         assert!(matches!(
             &snapshot.entries[0].content,
-            EntryContent::User { text, .. } if text == "before"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "before"
         ));
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, .. } if text == "after"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
         ));
     }
 
@@ -1752,8 +1653,8 @@ mod tests {
         assert!(timeline.turns[0].changes.is_none());
     }
 
-    /// Modeled on crates/agent/tests/fixtures/claude/simple_trace.jsonl:
-    /// session init → streamed text deltas → full assistant message → result.
+    /// Models a Claude-style trace: session init → streamed text deltas → full
+    /// assistant message → result.
     #[test]
     fn fold_simple_claude_style_trace() {
         let events = vec![
@@ -1798,11 +1699,11 @@ mod tests {
         assert_eq!(timeline.entries.len(), 2);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, .. } if text == "hi"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "hi"
         ));
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Assistant { text } if text == "Hi! How can I help you today?"
+            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Hi! How can I help you today?"
         ));
         assert!(!timeline.turn_running);
         assert_eq!(timeline.last_turn_status, Some(TurnStatus::Completed));
@@ -1842,7 +1743,10 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::User { text, steering, .. } => Some((text.as_str(), *steering)),
+                EntryContent::Item(ItemContent::UserMessage { text, .. }) => {
+                    Some((text.as_str(), None))
+                }
+                EntryContent::Steer { text, status, .. } => Some((text.as_str(), Some(*status))),
                 _ => None,
             })
             .collect();
@@ -1876,9 +1780,9 @@ mod tests {
 
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::User {
+            EntryContent::Steer {
                 text,
-                steering: Some(SteeringStatus::Pending),
+                status: SteeringStatus::Pending,
                 ..
             } if text == "change direction"
         ));
@@ -1891,8 +1795,8 @@ mod tests {
         );
         assert!(matches!(
             timeline.entries[1].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Pending),
+            EntryContent::Steer {
+                status: SteeringStatus::Pending,
                 ..
             }
         ));
@@ -1905,8 +1809,8 @@ mod tests {
         timeline.apply_at(None, &accepted);
         assert!(matches!(
             timeline.entries[1].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
@@ -1923,8 +1827,8 @@ mod tests {
         ]);
         assert!(matches!(
             replayed.entries[1].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
@@ -1974,15 +1878,15 @@ mod tests {
         assert_eq!(replayed_ids, live_ids);
         assert!(matches!(
             live.entries[3].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
         assert!(matches!(
             replayed.entries[3].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
@@ -2011,7 +1915,7 @@ mod tests {
             .iter()
             .find(|e| e.id == id)
             .map(|e| match &e.content {
-                EntryContent::Assistant { text } => text.clone(),
+                EntryContent::Item(ItemContent::AssistantMessage { text }) => text.clone(),
                 other => panic!("entry {id} is not assistant text: {other:?}"),
             })
             .unwrap_or_else(|| panic!("no entry {id}"))
@@ -2169,20 +2073,20 @@ mod tests {
         assert_eq!(timeline.entries.len(), 4);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::FileChange { changes }
+            EntryContent::Item(ItemContent::FileChange { changes, .. })
                 if changes.len() == 1 && changes[0].path.ends_with("hello.txt")
         ));
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Assistant { text } if text == "PONG"
+            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "PONG"
         ));
         assert!(matches!(
             &timeline.entries[2].content,
-            EntryContent::Reasoning { text } if text == "Checking"
+            EntryContent::Item(ItemContent::Reasoning { text }) if text == "Checking"
         ));
         assert!(matches!(
             &timeline.entries[3].content,
-            EntryContent::Command { output, .. } if output == "ok\n"
+            EntryContent::Item(ItemContent::CommandExecution { output, .. }) if output == "ok\n"
         ));
         assert_eq!(timeline.usage.unwrap().used_tokens, Some(123));
     }
@@ -2227,7 +2131,7 @@ mod tests {
 
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::Command { command, output, exit_code: Some(0), status: ItemStatus::Completed }
+            EntryContent::Item(ItemContent::CommandExecution { command, output, exit_code: Some(0), status: ItemStatus::Completed })
                 if command == "echo hi" && output == "hi\n"
         ));
     }
@@ -2279,7 +2183,6 @@ mod tests {
         assert_eq!(timeline.turns.len(), 2);
         assert_eq!(timeline.turns[0].start_ts, Some(1_000_500));
         assert_eq!(timeline.turns[0].end_ts, Some(1_005_500));
-        assert_eq!(timeline.turns[0].duration_secs(), Some(5));
         assert_eq!(timeline.turns[0].status, Some(TurnStatus::Completed));
         assert!(!timeline.turns[0].running);
         // Second turn is still running (no TurnCompleted yet).
@@ -2295,7 +2198,7 @@ mod tests {
         let u2 = timeline
             .entries
             .iter()
-            .find(|e| matches!(&e.content, EntryContent::User { text, .. } if text == "second"))
+            .find(|e| matches!(&e.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "second"))
             .unwrap();
         assert_eq!(u2.turn, 1);
 
@@ -2682,13 +2585,13 @@ mod tests {
         assert_eq!(timeline.entries[0].id, "spawn");
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
+            EntryContent::Item(ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. })
                 if summary == "pong"
         ));
         assert_eq!(timeline.children("spawn").len(), 1);
         assert!(matches!(
             &timeline.children("spawn")[0].content,
-            EntryContent::User { text, .. } if text == "ping"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "ping"
         ));
     }
 
@@ -2774,7 +2677,7 @@ mod tests {
         let timeline = Timeline::fold_events([decoded]);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, context_len: Some(8), .. } if text == "PREFIX\n\nvisible"
+            EntryContent::Item(ItemContent::UserMessage { text, context_len: Some(8), .. }) if text == "PREFIX\n\nvisible"
         ));
 
         // …and omitted entirely when absent (skip_serializing_if).
@@ -2791,7 +2694,7 @@ mod tests {
         let timeline = Timeline::fold_events([event]);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, context_len: None, .. } if text == "just words"
+            EntryContent::Item(ItemContent::UserMessage { text, context_len: None, .. }) if text == "just words"
         ));
     }
 
@@ -2930,8 +2833,11 @@ mod tests {
 
         assert_eq!(timing.total_ms, 9_000);
         assert_eq!(timing.tool_ms, 2_000);
-        assert_eq!(timing.ai_ms(), 7_000);
-        assert_eq!(timing.ai_ms() + timing.tool_ms, timing.total_ms);
+        assert_eq!((timing.total_ms - timing.tool_ms), 7_000);
+        assert_eq!(
+            (timing.total_ms - timing.tool_ms) + timing.tool_ms,
+            timing.total_ms
+        );
     }
 
     #[test]
@@ -2954,7 +2860,7 @@ mod tests {
         // the union [1000, 3000] is 2000ms.
         assert_eq!(timing.tool_ms, 2_000);
         assert_eq!(timing.total_ms, 4_000);
-        assert_eq!(timing.ai_ms(), 2_000);
+        assert_eq!((timing.total_ms - timing.tool_ms), 2_000);
     }
 
     #[test]
@@ -2988,7 +2894,7 @@ mod tests {
         .expect("a fully timestamped turn has a breakdown");
 
         assert_eq!(timing.tool_ms, 1_500);
-        assert_eq!(timing.ai_ms(), 3_500);
+        assert_eq!((timing.total_ms - timing.tool_ms), 3_500);
     }
 
     #[test]
@@ -3015,7 +2921,7 @@ mod tests {
 
         assert_eq!(timing.total_ms, 8_000);
         assert_eq!(timing.tool_ms, 0);
-        assert_eq!(timing.ai_ms(), 8_000);
+        assert_eq!((timing.total_ms - timing.tool_ms), 8_000);
     }
 
     #[test]
@@ -3028,7 +2934,7 @@ mod tests {
         .expect("a fully timestamped turn has a breakdown");
 
         assert_eq!(timing.tool_ms, 3_000);
-        assert_eq!(timing.ai_ms(), 1_000);
+        assert_eq!((timing.total_ms - timing.tool_ms), 1_000);
     }
 
     #[test]
@@ -3082,7 +2988,7 @@ mod tests {
 
         assert_eq!(timing.total_ms, 10_000);
         assert_eq!(timing.tool_ms, 2_000);
-        assert_eq!(timing.ai_ms(), 8_000);
+        assert_eq!((timing.total_ms - timing.tool_ms), 8_000);
 
         // A turn that ends before it started yields no breakdown at all.
         let inverted = timing_of(vec![at(9_000, turn_started()), at(1_000, turn_completed())]);
@@ -3107,7 +3013,7 @@ mod tests {
         assert_eq!(timing.total_ms, 4_000);
         assert_eq!(timing.tool_ms, 500);
         // The pre-start second is real AI/idle time and must survive.
-        assert_eq!(timing.ai_ms(), 3_500);
+        assert_eq!((timing.total_ms - timing.tool_ms), 3_500);
     }
 
     #[test]
@@ -3124,7 +3030,7 @@ mod tests {
         assert_eq!(timing.total_ms, 4_000);
         // [1_100, 6_000] intersected with [5_000, 9_000] is 1_000ms, not 4_900.
         assert_eq!(timing.tool_ms, 1_000);
-        assert_eq!(timing.ai_ms(), 3_000);
+        assert_eq!((timing.total_ms - timing.tool_ms), 3_000);
     }
 
     #[test]
@@ -3146,7 +3052,7 @@ mod tests {
 
             assert_eq!(timing.total_ms, 5_000, "{label}");
             assert_eq!(timing.tool_ms, 2_500, "{label}");
-            assert_eq!(timing.ai_ms(), 2_500, "{label}");
+            assert_eq!((timing.total_ms - timing.tool_ms), 2_500, "{label}");
         }
     }
 
@@ -3229,7 +3135,7 @@ mod tests {
             .expect("the reopened turn is fully timestamped");
         assert_eq!(timing.total_ms, 6_000);
         assert_eq!(timing.tool_ms, 0);
-        assert_eq!(timing.ai_ms(), 6_000);
+        assert_eq!((timing.total_ms - timing.tool_ms), 6_000);
     }
 
     #[test]
@@ -3257,7 +3163,6 @@ mod tests {
             at(9_000, turn_completed()),
         ]);
         assert_eq!(timeline.turns[0].start_ts, Some(1_000));
-        assert_eq!(timeline.turns[0].duration_secs(), Some(8));
         assert_eq!(timeline.turns[0].timing, None);
     }
 
@@ -3283,7 +3188,7 @@ mod tests {
         let timing = replayed.turns[0].timing.expect("breakdown");
         assert_eq!(timing.total_ms, 6_000);
         assert_eq!(timing.tool_ms, 2_800);
-        assert_eq!(timing.ai_ms(), 3_200);
+        assert_eq!((timing.total_ms - timing.tool_ms), 3_200);
     }
 
     #[test]
@@ -3303,25 +3208,6 @@ mod tests {
         // The second turn starts from a clean clock — no leakage across turns.
         assert_eq!(timeline.turns[1].timing.unwrap().tool_ms, 0);
         assert_eq!(timeline.turns[1].timing.unwrap().total_ms, 4_000);
-    }
-
-    #[test]
-    fn rendered_second_parts_sum_to_the_rendered_total() {
-        let timing = TurnTiming::new(10_500, 3_600);
-        let secs = timing.secs();
-        assert_eq!((secs.total, secs.ai, secs.tools), (10, 7, 3));
-        assert_eq!(secs.ai + secs.tools, secs.total);
-
-        // Tool time is clamped into the observed total, so the invariant holds
-        // even for a nonsensical accumulation.
-        let clamped = TurnTiming::new(1_000, 5_000);
-        assert_eq!(clamped.tool_ms, 1_000);
-        assert_eq!(clamped.ai_ms(), 0);
-        let clamped_secs = clamped.secs();
-        assert_eq!(
-            (clamped_secs.total, clamped_secs.ai, clamped_secs.tools),
-            (1, 0, 1)
-        );
     }
 
     #[test]
