@@ -37,6 +37,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Enforce process helper boundaries
+        if: runner.os == 'Linux'
+        run: |
+          ! grep -rn "smol::unblock" crates --include="*.rs" \
+            | grep -v "runtime/src/blocking.rs" \
+            | grep -v '^[^:]*:[0-9]*:[[:space:]]*//'
+          ! grep -rn "Command::new(" crates --include="*.rs" \
+            | grep -v -e "crates/services/src/process.rs:" -e "crates/agent/src/process.rs:" \
+            | grep -v '^[^:]*:[0-9]*:[[:space:]]*//'
+
       - name: Disable Windows Defender real-time scanning
         if: runner.os == 'Windows'
         shell: pwsh

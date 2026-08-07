@@ -15,7 +15,7 @@ use tcode_protocol::{
 };
 use tcode_services::store::SessionStore;
 
-use crate::app::{AppState, SmokeMode};
+use crate::app::AppState;
 use crate::blocking::unblock_host;
 use crate::event::HostEvent;
 use crate::host::{HostCx, HostMsg, HostOutput};
@@ -652,9 +652,6 @@ fn dispatch_command(
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
-        Command::SetSmokeMode { auto_approve } => {
-            app.smoke = Some(SmokeMode { auto_approve });
-        }
         Command::CreateSession {
             provider,
             cwd,
@@ -676,11 +673,6 @@ fn dispatch_command(
         }
         Command::OpenLatestSession => app.open_latest_session(cx),
         Command::OpenTerminalPanel => app.open_terminal_panel(cx),
-        Command::OpenTerminalDemo => app.open_terminal_demo(cx),
-        Command::DebugStartProvider => app.debug_start_provider(cx),
-        Command::DebugGitCommit { message } => app.debug_git_commit(message, cx),
-        Command::DebugGitAction { name } => app.debug_git_action(name, cx),
-        Command::DebugGitGenerateMessage => app.debug_git_generate_message(cx),
         Command::ShutdownAllAndFlush => {
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));

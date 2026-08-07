@@ -142,17 +142,10 @@ impl CommandPalette {
         }
     }
 
-    /// Focus the search input (called when the palette opens). `--debug-palette`
-    /// seeds the query so palette states can be screenshotted headlessly.
+    /// Focus the search input when the palette opens.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let seed = self
-            .window_state
-            .read(cx)
-            .debug_palette
-            .clone()
-            .unwrap_or_default();
         self.query.update(cx, |state, cx| {
-            state.set_value(seed, window, cx);
+            state.set_value(String::new(), window, cx);
             state.focus(window, cx);
         });
         self.selected = 0;

@@ -305,7 +305,7 @@ pub struct AcpPanel {
 impl AcpPanel {
     pub fn new(
         store: Entity<WorkspaceStore>,
-        window_state: Entity<WindowState>,
+        _window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -313,9 +313,6 @@ impl AcpPanel {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
         let search = input(&tcode_i18n::tr!("providers.acp.search"), window, cx);
-        if let Some(seed) = window_state.read(cx).debug_acp_search.clone() {
-            search.update(cx, |input, cx| input.set_value(seed, window, cx));
-        }
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&search, |_, _, cx| cx.notify()),

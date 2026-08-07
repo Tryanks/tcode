@@ -531,34 +531,6 @@ impl DiffPanel {
                 });
             }
         }
-        let debug = {
-            let active = self.workspace_store.read(cx).diff_active_state(cx);
-            let window_state = self.window_state.read(cx);
-            active.map(|active| {
-                (
-                    active.session,
-                    window_state.debug_diff_scope.clone(),
-                    window_state.debug_diff_split,
-                )
-            })
-        };
-        if let Some((session, scope, split)) = debug {
-            if !self.scopes.contains_key(&session) {
-                match scope.as_deref() {
-                    Some("working") | Some("working-tree") => {
-                        self.scopes.insert(session.clone(), DiffScope::WorkingTree);
-                    }
-                    Some("branch") => {
-                        self.scopes.insert(session.clone(), DiffScope::Branch);
-                    }
-                    _ => {}
-                }
-            }
-            if split {
-                self.workspace_store
-                    .update(cx, |store, cx| store.set_diff_split(true, cx));
-            }
-        }
         let dark = cx.theme().mode.is_dark();
         let (session, scope, revision, cwd) = {
             let store = self.workspace_store.read(cx);
@@ -663,72 +635,6 @@ impl DiffPanel {
             return false;
         }
         self.apply_pending_file_focus(&session, scope, cx);
-        let debug_comment = self.window_state.read(cx).debug_review_comment
-            && self
-                .workspace_store
-                .read(cx)
-                .with_diff_review_comments(cx, <[_]>::is_empty);
-        if debug_comment
-            && let Some((scope, file, row_index, line, side, text)) =
-                self.cache.as_ref().and_then(|cache| {
-                    cache.files.iter().find_map(|file| {
-                        file.all_rows
-                            .iter()
-                            .enumerate()
-                            .find_map(|(index, row)| match row {
-                                RenderedRow::Code {
-                                    kind,
-                                    old,
-                                    new,
-                                    text,
-                                    ..
-                                } => {
-                                    let (line, side) = match kind {
-                                        RowKind::Removed => ((*old)?, ReviewSide::Old),
-                                        RowKind::Added | RowKind::Context => {
-                                            ((*new)?, ReviewSide::New)
-                                        }
-                                    };
-                                    Some((
-                                        cache.scope,
-                                        file.path.clone(),
-                                        index,
-                                        line,
-                                        side,
-                                        text.clone(),
-                                    ))
-                                }
-                                RenderedRow::Gap(_) => None,
-                            })
-                    })
-                })
-        {
-            let (section_id, section_title) = match scope {
-                DiffScope::Turn(turn) => (format!("turn:{turn}"), format!("Turn {}", turn + 1)),
-                DiffScope::WorkingTree => ("unstaged".into(), "Working tree".into()),
-                DiffScope::Branch => ("branch".into(), "Branch changes".into()),
-            };
-            let marker = if side == ReviewSide::Old { '-' } else { '+' };
-            let excerpt = format!("@@ -{line},1 +{line},1 @@\n{marker}{text}");
-            let comment = ReviewComment::new(
-                file,
-                line,
-                line,
-                side,
-                "Please review this line before sending.".into(),
-                excerpt,
-                section_id,
-                section_title,
-                row_index,
-                row_index,
-            );
-            self.window_state.update(cx, |state, _| {
-                state.debug_review_comment = false;
-            });
-            self.workspace_store.update(cx, |store, cx| {
-                store.dispatch(Command::AddReviewComment { comment }, cx);
-            });
-        }
         self.cache.as_ref().is_some_and(|c| !c.files.is_empty())
     }
 
@@ -920,7 +826,6 @@ impl DiffPanel {
         );
 
         let selector = Popover::new("diff-turn-popover")
-            .default_open(self.window_state.read(cx).debug_diff_scope_menu)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let panel_for = panel.clone();

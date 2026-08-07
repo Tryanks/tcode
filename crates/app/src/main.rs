@@ -2,8 +2,6 @@
 // Debug builds keep the console so `RUST_LOG` output stays visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod smoke;
-
 use std::{borrow::Cow, time::Duration};
 
 use gpui::{
@@ -44,7 +42,7 @@ fn main_window_background() -> WindowBackgroundAppearance {
 
 /// With an opaque window the translucent canvas colors would composite against
 /// black; flatten them to their solid RGB. Keep the literals in sync with
-/// themes/tcode.json (checked by `smoke` builds via debug_assert).
+/// themes/tcode.json (checked by debug builds via debug_assert).
 fn flatten_canvas_for_opaque_window(theme_json: &str) -> String {
     let flattened = theme_json
         .replace("#F2F4F7C7", "#F2F4F7")
@@ -178,115 +176,8 @@ fn main() {
 
     settings::apply_locale(None);
 
-    let smoke_spec = smoke::parse_args();
     // Hidden debug/dev flag: open the most recently updated session on launch.
     let open_latest = std::env::args().any(|arg| arg == "--open-latest");
-    // Hidden debug/dev flag: also open the diff panel on launch (pairs with
-    // --open-latest; lets the diff panel be screenshotted headlessly).
-    let open_diff = std::env::args().any(|arg| arg == "--open-diff");
-    // Hidden debug/dev flag: open the right panel on the Plan/Tasks tab (pairs
-    // with --open-latest; lets the plan panel be screenshotted headlessly).
-    let open_plan = std::env::args().any(|arg| arg == "--open-plan");
-    // Hidden dev flag: open the Preview tab and navigate to the given URL (pairs
-    // with --open-latest) so the preview browser can be screenshotted headlessly.
-    let open_preview = std::env::args()
-        .skip_while(|arg| arg != "--open-preview")
-        .nth(1);
-    // Hidden debug/dev flag: open the active session's terminal drawer. This
-    // implies --open-latest so it is useful by itself for screenshot checks.
-    let open_terminal = std::env::args().any(|arg| arg == "--open-terminal");
-    let terminal_demo = std::env::args().any(|arg| arg == "--terminal-demo");
-    // Hidden debug/dev flags: open the settings page / command palette on
-    // launch so those surfaces can be screenshotted headlessly.
-    let open_settings = std::env::args().any(|arg| arg == "--open-settings");
-    let open_palette = std::env::args().any(|arg| arg == "--open-palette");
-    // Hidden dev flag: open a draft thread for a project (by id or name) so the
-    // draft state can be screenshotted headlessly.
-    let open_draft = std::env::args()
-        .skip_while(|arg| arg != "--open-draft")
-        .nth(1);
-    // Screenshot-only: seed the composer text (drives the @/$// trigger menus)
-    // or inject a pending image (paste/drag-drop cannot be driven headlessly).
-    let debug_compose = std::env::args()
-        .skip_while(|arg| arg != "--debug-compose")
-        .nth(1);
-    let debug_image = std::env::args()
-        .skip_while(|arg| arg != "--debug-image")
-        .nth(1)
-        .map(std::path::PathBuf::from);
-    let debug_diff_scope = std::env::args()
-        .skip_while(|arg| arg != "--debug-diff-scope")
-        .nth(1);
-    let debug_diff_split = std::env::args().any(|arg| arg == "--debug-diff-split");
-    let debug_diff_scope_menu = std::env::args().any(|arg| arg == "--debug-diff-scope-menu");
-    let debug_review_comment = std::env::args().any(|arg| arg == "--debug-review-comment");
-    // Screenshot-only: start the opened session's provider process (without
-    // sending a turn) so provider-supplied state — the `/` and `$` command feed
-    // — is reachable headlessly. Implies --open-latest. Note Claude's CLI only
-    // emits its system-init (carrying `slash_commands`) once it receives a user
-    // message, so use `--debug-send` to populate its command feed.
-    let debug_live = std::env::args().any(|arg| arg == "--debug-live");
-    // Screenshot-only: send one turn on launch (without exiting, unlike --smoke)
-    // so provider state that only arrives with the first message is reachable.
-    let debug_send = std::env::args()
-        .skip_while(|arg| arg != "--debug-send")
-        .nth(1);
-    // Screenshot / E2E only: `--debug-queue "msg1|msg2"` sends each `|`-separated
-    // message through the ordinary `send_turn` path on launch. Because the
-    // provider is still starting, they all land in the queue; the first flushes
-    // when it goes live and the rest stay queued — which both renders the queue
-    // strip for screenshots and exercises the real dispatch-on-completion FIFO
-    // (pair it with `--debug-send` to occupy the provider with a long turn).
-    let debug_queue = std::env::args()
-        .skip_while(|arg| arg != "--debug-queue")
-        .nth(1);
-    // Hidden E2E flag: `--debug-park-after <secs>` switches to a new draft that
-    // many seconds after launch — parking the running session exactly as
-    // clicking "New thread" does. Pair with `--debug-send` to occupy the
-    // session first; watch its JSONL keep growing to prove the parked provider
-    // kept working (the T3-reaper regression check).
-    let debug_park_after = std::env::args()
-        .skip_while(|arg| arg != "--debug-park-after")
-        .nth(1)
-        .and_then(|s| s.parse::<u64>().ok());
-    // Screenshot-only: seed the command palette query (pairs with --open-palette).
-    let debug_palette = std::env::args()
-        .skip_while(|arg| arg != "--debug-palette")
-        .nth(1);
-    // Screenshot-only: open a specific Settings section (pairs with --open-settings).
-    let debug_settings_section = std::env::args()
-        .skip_while(|arg| arg != "--debug-settings-section")
-        .nth(1);
-    // Screenshot-only: seed the ACP marketplace's search box (typing cannot be
-    // driven headlessly), so the filtered list can be captured.
-    let debug_acp_search = std::env::args()
-        .skip_while(|arg| arg != "--debug-acp-search")
-        .nth(1);
-    // Screenshot-only: open the ACP Add agent dialog.
-    let debug_acp_dialog = std::env::args().any(|arg| arg == "--debug-acp-dialog");
-    // Screenshot-only: expand one provider card (pairs with the above).
-    let debug_provider_expanded = std::env::args()
-        .skip_while(|arg| arg != "--debug-provider-expanded")
-        .nth(1);
-    // Screenshot-only: open a deterministic draft rooted at this cwd (so the
-    // `@`-mention walk lists a known repo, independent of the newest session).
-    let debug_cwd = std::env::args()
-        .skip_while(|arg| arg != "--debug-cwd")
-        .nth(1)
-        .map(std::path::PathBuf::from);
-    // Hidden E2E flags: run a real commit (`--debug-git-commit "msg"`) or
-    // generate a commit message (`--debug-git-genmsg`) on the opened session's
-    // repo, so the git flows can be exercised headlessly. Both imply --open-latest.
-    let debug_git_commit = std::env::args()
-        .skip_while(|arg| arg != "--debug-git-commit")
-        .nth(1);
-    let debug_git_genmsg = std::env::args().any(|arg| arg == "--debug-git-genmsg");
-    // Screenshot-only: open the commit dialog on launch.
-    let debug_git_dialog = std::env::args().any(|arg| arg == "--debug-git-dialog");
-    // Hidden E2E flag: run a non-commit quick-action (push|pull|publish|init).
-    let debug_git_action = std::env::args()
-        .skip_while(|arg| arg != "--debug-git-action")
-        .nth(1);
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
     let mut host_services = HostServices::default();
     match mcp_host::Host::bind() {
@@ -357,28 +248,6 @@ fn main() {
                 let window_state = window_state.clone();
                 move |action, cx| handle_quit(action, &workspace_store, &window_state, cx)
             });
-            {
-                let dc = debug_compose.clone();
-                let di = debug_image.clone();
-                let dscope = debug_diff_scope.clone();
-                let dp = debug_palette.clone();
-                let dsec = debug_settings_section.clone();
-                let dacp = debug_acp_search.clone();
-                let dexp = debug_provider_expanded.clone();
-                window_state.update(cx, |state, _| {
-                    state.debug_compose = dc;
-                    state.debug_image = di;
-                    state.debug_diff_scope = dscope;
-                    state.debug_diff_split = debug_diff_split;
-                    state.debug_diff_scope_menu = debug_diff_scope_menu;
-                    state.debug_review_comment = debug_review_comment;
-                    state.debug_palette = dp;
-                    state.debug_settings_section = dsec;
-                    state.debug_acp_search = dacp;
-                    state.debug_acp_dialog = debug_acp_dialog;
-                    state.debug_provider_expanded = dexp;
-                });
-            }
             // Restart continuity: if this launch follows a permission-grant
             // relaunch, reopen the recorded session and Settings page. Runs
             // synchronously before the window (and settings page) is built, so
@@ -387,20 +256,10 @@ fn main() {
                 host.command_blocking(Command::ApplyPendingRelaunch)
             {
                 window_state.update(cx, |state, cx| {
-                    state.debug_settings_section = Some(section);
+                    state.pending_settings_section = Some(section);
                     state.open_settings(cx);
                 });
             }
-            let debug_seed = debug_compose.is_some()
-                || debug_image.is_some()
-                || debug_cwd.is_some()
-                || debug_diff_scope.is_some()
-                || debug_diff_split
-                || debug_diff_scope_menu
-                || debug_review_comment
-                || debug_live
-                || debug_send.is_some()
-                || debug_queue.is_some();
             settings::apply_locale(initial_settings.language.as_deref());
             #[cfg(target_os = "macos")]
             cx.set_menus([gpui::Menu::new("tcode").items([gpui::MenuItem::action(
@@ -496,98 +355,8 @@ fn main() {
                     window.activate_window();
                 });
 
-                if let Some(spec) = smoke_spec {
-                    smoke::drive(spec, host.clone());
-                } else if open_latest
-                    || open_terminal
-                    || terminal_demo
-                    || open_settings
-                    || open_palette
-                    || open_plan
-                    || open_preview.is_some()
-                    || open_draft.is_some()
-                    || debug_seed
-                    || debug_git_commit.is_some()
-                    || debug_git_genmsg
-                    || debug_git_action.is_some()
-                    || debug_git_dialog
-                {
-                    if let Some(cwd) = debug_cwd.clone() {
-                        if let Ok(CommandResponse::ProjectId(Some(project_id))) = host
-                            .command(Command::CreateProject { root: cwd.clone() })
-                            .await
-                        {
-                            let _ = host.dispatch(Command::StartDraft { project_id, cwd });
-                        }
-                    } else if open_latest
-                        || open_terminal
-                        || open_plan
-                        || debug_seed
-                        || terminal_demo
-                        || open_preview.is_some()
-                        || debug_git_commit.is_some()
-                        || debug_git_genmsg
-                        || debug_git_action.is_some()
-                        || debug_git_dialog
-                    {
-                        let _ = host.dispatch(Command::OpenLatestSession);
-                    }
-                    if open_terminal {
-                        let _ = host.dispatch(Command::OpenTerminalPanel);
-                    }
-                    if terminal_demo {
-                        let _ = host.dispatch(Command::OpenTerminalDemo);
-                    }
-                    if let Some(key) = &open_draft
-                        && let Some((project_id, root)) = cx.update(|cx| {
-                            workspace_store
-                                .read(cx)
-                                .project_ids(cx)
-                                .into_iter()
-                                .find_map(|id| {
-                                    let root = workspace_store.read(cx).project_root(&id, cx)?;
-                                    let matches = id == *key
-                                        || root.file_name().is_some_and(|name| {
-                                            name.to_string_lossy() == key.as_str()
-                                        });
-                                    matches.then_some((id, root))
-                                })
-                        })
-                    {
-                        let _ = host.dispatch(Command::StartDraft {
-                            project_id,
-                            cwd: root,
-                        });
-                    }
-                    if let Some(message) = debug_git_commit.clone() {
-                        let _ = host.dispatch(Command::DebugGitCommit { message });
-                    }
-                    if let Some(name) = debug_git_action.clone() {
-                        let _ = host.dispatch(Command::DebugGitAction { name });
-                    }
-                    if debug_git_genmsg {
-                        let _ = host.dispatch(Command::DebugGitGenerateMessage);
-                    }
-                    if debug_live {
-                        let _ = host.dispatch(Command::DebugStartProvider);
-                    }
-                    if let Some(text) = debug_send.clone() {
-                        let _ = host.dispatch(Command::SendTurn {
-                            text,
-                            attachment_paths: Vec::new(),
-                        });
-                    }
-                    if let Some(queued) = debug_queue.clone() {
-                        for message in queued
-                            .split('|')
-                            .filter(|message| !message.trim().is_empty())
-                        {
-                            let _ = host.dispatch(Command::SendTurn {
-                                text: message.trim().to_string(),
-                                attachment_paths: Vec::new(),
-                            });
-                        }
-                    }
+                if open_latest {
+                    let _ = host.dispatch(Command::OpenLatestSession);
                     for _ in 0..100 {
                         if cx.update(|cx| workspace_store.read(cx).active_session_id(cx).is_some())
                         {
@@ -597,55 +366,8 @@ fn main() {
                             .timer(std::time::Duration::from_millis(10))
                             .await;
                     }
-                    if let Some(secs) = debug_park_after {
-                        let (project, cwd) = cx.update(|cx| {
-                            (
-                                workspace_store
-                                    .read(cx)
-                                    .with_composer_destination(cx, |_, _, project| {
-                                        project.map(str::to_string)
-                                    })
-                                    .flatten(),
-                                workspace_store.read(cx).composer_active_cwd(cx),
-                            )
-                        });
-                        if let (Some(project_id), Some(cwd)) = (project, cwd) {
-                            let host = host.clone();
-                            smol::spawn(async move {
-                                smol::Timer::after(std::time::Duration::from_secs(secs)).await;
-                                log::info!("debug-park-after: opening a draft now");
-                                let _ = host.dispatch(Command::StartDraft { project_id, cwd });
-                            })
-                            .detach();
-                        }
-                    }
                     workspace_store.update(cx, |store, cx| {
                         store.sync_active_conversation_ui(cx);
-                        if open_diff {
-                            store.toggle_diff_panel(cx);
-                        }
-                        if open_plan {
-                            store.toggle_plan_panel(cx);
-                        }
-                        if open_preview.is_some() {
-                            store.open_preview_panel(cx);
-                        }
-                        if open_terminal || terminal_demo {
-                            store.show_terminal_panel(cx);
-                        }
-                    });
-                    window_state.update(cx, |state, cx| {
-                        state.pending_preview_url = open_preview.clone();
-                        if open_settings {
-                            state.open_settings(cx);
-                        }
-                        if open_palette {
-                            state.open_palette(cx);
-                        }
-                        if debug_git_dialog {
-                            state.debug_open_commit_dialog = true;
-                            cx.notify();
-                        }
                     });
                 }
             })

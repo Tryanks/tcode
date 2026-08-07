@@ -389,7 +389,6 @@ fn transcode_image_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
 
 pub struct Composer {
     workspace_store: Entity<WorkspaceStore>,
-    window_state: Entity<WindowState>,
     input: Entity<InputState>,
     /// Dedicated free-form answer field shown inside an agent question card.
     /// Keeping it separate from the turn composer makes the pending question
@@ -448,8 +447,6 @@ pub struct Composer {
     image_load_generation: u64,
     /// Reserved strip slots for image jobs that have not completed yet.
     pending_image_loads: usize,
-    /// Whether the one-shot screenshot debug seed has been applied.
-    debug_applied: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -458,7 +455,7 @@ impl EventEmitter<ComposerEvent> for Composer {}
 impl Composer {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
-        window_state: Entity<WindowState>,
+        _window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -533,7 +530,6 @@ impl Composer {
 
         Self {
             workspace_store,
-            window_state,
             input,
             user_input_custom,
             text_cache: ComposerTextCache::default(),
@@ -558,7 +554,6 @@ impl Composer {
             images_session: None,
             image_load_generation: 0,
             pending_image_loads: 0,
-            debug_applied: false,
             _subscriptions: subscriptions,
         }
     }
@@ -602,49 +597,6 @@ impl Composer {
             state.focus(window, cx);
         });
         self.recompute_trigger(cx);
-    }
-
-    /// Apply the one-shot screenshot debug seed (`--debug-compose` / `--debug-image`).
-    fn apply_debug_seed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.debug_applied {
-            return;
-        }
-        let (compose, image) = {
-            let state = self.window_state.read(cx);
-            (state.debug_compose.clone(), state.debug_image.clone())
-        };
-        if compose.is_none() && image.is_none() {
-            // Nothing to seed, but only latch once a session exists so the seed
-            // survives the initial empty frame.
-            if self
-                .workspace_store
-                .read(cx)
-                .composer_has_active_session(cx)
-            {
-                self.debug_applied = true;
-            }
-            return;
-        }
-        if !self
-            .workspace_store
-            .read(cx)
-            .composer_has_active_session(cx)
-        {
-            return;
-        }
-        self.debug_applied = true;
-        if let Some(text) = compose {
-            let len = text.len();
-            self.input.update(cx, |state, cx| {
-                state.set_value(text, window, cx);
-                state.set_selected_range(len..len, cx);
-            });
-            self.recompute_trigger(cx);
-        }
-        if let Some(path) = image {
-            self.add_image_path(path, window, cx);
-        }
-        cx.notify();
     }
 
     /// Whether `submit` has anything to send. Keep the primary-action choice on
@@ -3248,7 +3200,6 @@ impl Render for Composer {
         self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
         self.sync_native_rewind_prefill(window, cx);
-        self.apply_debug_seed(window, cx);
         let (turn_running, approval, approval_count) =
             self.workspace_store.read(cx).composer_render_state(cx);
 

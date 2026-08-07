@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use gpui::{Context, Entity};
 use tcode_protocol::Command;
 
@@ -12,17 +10,7 @@ pub struct WindowState {
     pub sidebar_collapsed: bool,
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
-    pub debug_compose: Option<String>,
-    pub debug_image: Option<PathBuf>,
-    pub debug_diff_scope: Option<String>,
-    pub debug_diff_split: bool,
-    pub debug_diff_scope_menu: bool,
-    pub debug_review_comment: bool,
-    pub debug_palette: Option<String>,
-    pub debug_settings_section: Option<String>,
-    pub debug_acp_search: Option<String>,
-    pub debug_acp_dialog: bool,
-    pub debug_provider_expanded: Option<String>,
+    pub pending_settings_section: Option<String>,
     pub debug_open_commit_dialog: bool,
     pub pending_preview_url: Option<String>,
 }
@@ -35,17 +23,7 @@ impl WindowState {
             sidebar_collapsed,
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
-            debug_compose: None,
-            debug_image: None,
-            debug_diff_scope: None,
-            debug_diff_split: false,
-            debug_diff_scope_menu: false,
-            debug_review_comment: false,
-            debug_palette: None,
-            debug_settings_section: None,
-            debug_acp_search: None,
-            debug_acp_dialog: false,
-            debug_provider_expanded: None,
+            pending_settings_section: None,
             debug_open_commit_dialog: false,
             pending_preview_url: None,
         }

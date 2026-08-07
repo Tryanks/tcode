@@ -253,7 +253,6 @@ fn representative_commands_and_queries_cross_ndjson() {
     );
     let commands = vec![
         Command::ApplyPendingRelaunch,
-        Command::SetSmokeMode { auto_approve: true },
         Command::CreateSession {
             provider: ProviderKind::Codex,
             cwd: PathBuf::from("/tmp/project"),

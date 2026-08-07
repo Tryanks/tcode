@@ -25,7 +25,7 @@ use tcode_runtime::app::ProjectGroup;
 
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, WorkspaceStore};
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 
@@ -533,7 +533,7 @@ impl SessionsSidebar {
                 )
                 .on_ok(move |_, _, cx| {
                     window_state.update(cx, |state, cx| {
-                        state.debug_settings_section = Some("archived".into());
+                        state.pending_settings_section = Some("archived".into());
                         state.open_settings(cx);
                     });
                     true
@@ -1404,7 +1404,7 @@ impl SessionsSidebar {
                     .hover(|s| s.text_color(cx.theme().sidebar_foreground))
                     .on_click(move |_, _, cx| {
                         window_state.update(cx, |state, cx| {
-                            state.debug_settings_section = Some("archived".into());
+                            state.pending_settings_section = Some("archived".into());
                             state.open_settings(cx);
                         });
                     })
@@ -2268,18 +2268,6 @@ impl Render for SessionsSidebar {
 // ---------------------------------------------------------------------------
 // Relative-time humanizer
 // ---------------------------------------------------------------------------
-
-pub(crate) fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
-}
 
 #[cfg(test)]
 mod tests {

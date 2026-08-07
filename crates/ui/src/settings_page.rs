@@ -37,7 +37,7 @@ use crate::settings::{
 };
 use crate::shell::Quit;
 use crate::store::WorkspaceStore;
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
@@ -100,7 +100,6 @@ pub struct SettingsPage {
     title_model_picker: Entity<ProviderModelPicker>,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
-    debug_acp_dialog_pending: bool,
     section: Section,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: Entity<InputState>,
@@ -121,7 +120,7 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) -> Option<Section> {
         window_state
-            .update(cx, |state, _| state.debug_settings_section.take())
+            .update(cx, |state, _| state.pending_settings_section.take())
             .map(|section| match section.as_str() {
                 "providers" => Section::Providers,
                 "browser" => Section::Browser,
@@ -183,13 +182,12 @@ impl SettingsPage {
             }),
         ];
 
-        // Consume launch-time screenshot/relaunch requests through the same
+        // Consume relaunch and in-app navigation requests through the same
         // channel used by in-app Settings links.
         let section = Self::take_requested_section(&window_state, cx).unwrap_or(Section::General);
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window_state.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        let debug_acp_dialog_pending = window_state.read(cx).debug_acp_dialog;
         let settings = store.read(cx).settings(cx);
         let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
@@ -217,7 +215,6 @@ impl SettingsPage {
             orchestrate_panel,
             title_model_picker,
             acp_cards: Vec::new(),
-            debug_acp_dialog_pending,
             section,
             home_url_input: home_url_input.clone(),
             auto_archive_idle_input: auto_archive_idle_input.clone(),
@@ -1661,10 +1658,6 @@ impl SettingsPage {
 
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.debug_acp_dialog_pending {
-            self.debug_acp_dialog_pending = false;
-            self.open_acp_dialog(window, cx);
-        }
         // No opaque full-page fill: the nav must sit on the same translucent
         // glass canvas the chat sidebar does (its `sidebar` token shows the
         // T0 blur through its own translucency), so navigating chat↔settings
@@ -1691,19 +1684,6 @@ impl Render for SettingsPage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Compact relative-time humanizer for the Archived Threads list.
-fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
-}
 
 #[cfg(test)]
 mod tests {

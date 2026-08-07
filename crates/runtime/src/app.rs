@@ -846,12 +846,6 @@ fn conversation_destination(active: &ActiveSession) -> ConversationDestination {
     }
 }
 
-/// Smoke-mode behavior flags (used by the smoke-test harness).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SmokeMode {
-    pub auto_approve: bool,
-}
-
 /// The result of a provider version check (Group C / s3 §6).
 #[derive(Debug, Clone, Default)]
 pub struct ProviderVersionState {
@@ -902,7 +896,6 @@ pub struct AppState {
     /// provider response is the only authority that can complete it.
     pending_native_rewinds: HashMap<String, (String, RewindMode)>,
     pub settings: Settings,
-    pub smoke: Option<SmokeMode>,
     /// Per-provider model catalog (from `agent::list_models`): loaded instantly
     /// from the persisted cache, then refreshed in the background at start and
     /// whenever a binary path changes. Absent entry = never fetched.
@@ -1054,7 +1047,6 @@ impl AppState {
             terminal_registry,
             pending_native_rewinds: HashMap::new(),
             settings,
-            smoke: None,
             model_catalogs,
             models_loading: HashMap::new(),
             terminal_preferences_path,
@@ -2345,15 +2337,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// Screenshot/dev only (`--debug-live`): start the active (non-draft)
-    /// session's provider process without sending a turn, so provider-supplied
-    /// state (the `/` + `$` command feed) is reachable headlessly.
-    pub fn debug_start_provider(&mut self, cx: &mut HostCx) {
-        if self.active.as_ref().is_some_and(|a| !a.draft) {
-            self.ensure_started(cx);
-        }
-    }
-
     // -- provider version checks (Group C / s3 §6) --------------------------
 
     /// Whether the on-launch provider version check is enabled (default on).
@@ -3082,65 +3065,6 @@ impl AppState {
         });
     }
 
-    /// Debug/E2E entry point (`--debug-git-commit "msg"`): stage everything and
-    /// commit the active session's cwd with `message`, driving the same toast +
-    /// status-refresh path as the UI commit.
-    pub fn debug_git_commit(&mut self, message: String, cx: &mut HostCx) {
-        self.run_git_action(GitAction::Commit, Some(message), None, None, cx);
-    }
-
-    /// Debug/E2E entry point (`--debug-git-action push|pull|publish|init`): run a
-    /// non-commit quick-action directly. The current branch is read fresh (the
-    /// background status refresh may not have landed yet).
-    pub fn debug_git_action(&mut self, name: String, cx: &mut HostCx) {
-        let action = match name.as_str() {
-            "push" => GitAction::Push,
-            "pull" => GitAction::Pull,
-            "publish" => GitAction::PublishBranch,
-            "init" => GitAction::InitializeGit,
-            other => {
-                log::warn!("unknown --debug-git-action '{other}'");
-                return;
-            }
-        };
-        // PublishBranch needs the branch name; seed the status synchronously.
-        if matches!(action, GitAction::PublishBranch)
-            && self.git_status.is_none()
-            && let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone())
-        {
-            self.git_status = Some(read_status(&cwd));
-            self.emit_git_status(cx);
-        }
-        self.run_git_action(action, None, None, None, cx);
-    }
-
-    /// Debug/E2E entry point (`--debug-git-genmsg`): generate a commit message
-    /// for the active session and surface it (logged + info toast) so the AI
-    /// path can be exercised headlessly.
-    pub fn debug_git_generate_message(&mut self, cx: &mut HostCx) {
-        let task = self.generate_commit_message(None, cx);
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = task.await;
-            host_cx.enqueue(move |_state, cx| match result {
-                Ok(message) => {
-                    log::info!("generated commit message:\n{message}");
-                    emit_runtime(
-                        cx,
-                        AppEvent::Toast(RuntimeToast::CommitMessageGenerated { message }),
-                    );
-                }
-                Err(err) => {
-                    log::warn!("commit message generation failed: {err}");
-                    emit_runtime(
-                        cx,
-                        AppEvent::Toast(RuntimeToast::CommitMessageFailed { detail: err }),
-                    );
-                }
-            });
-        });
-    }
-
     // -- the ACP agent marketplace ------------------------------------------
 
     /// Load the registry index (cache first, network when stale). Cheap enough
@@ -3822,63 +3746,6 @@ impl AppState {
             active.terminal_workspace.add_context(label, selection);
             cx.notify();
         }
-    }
-
-    /// Hidden visual-QA fixture: two live PTYs in a split plus a captured chip.
-    pub fn open_terminal_demo(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.active.as_ref() else {
-            return;
-        };
-        if active.terminal_workspace.terminals.is_empty() {
-            self.schedule_terminal_spawn(
-                active.meta.id.clone(),
-                active.meta.cwd.clone(),
-                TerminalSpawnAction::Open {
-                    split_after: Some(TerminalSplitDirection::Horizontal),
-                },
-                cx,
-            );
-        } else {
-            self.split_terminal(TerminalSplitDirection::Horizontal, cx);
-        }
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            smol::Timer::after(std::time::Duration::from_millis(700)).await;
-            let Ok(Some((first, _second))) = host_cx
-                .enqueue_and_wait(move |state, _| {
-                    let active = state.active.as_ref()?;
-                    let split = active.terminal_workspace.splits.first()?;
-                    let first = active.terminal_workspace.terminal(split.first)?;
-                    let second = active.terminal_workspace.terminal(split.second)?;
-                    first.terminal.write_input(
-                        b"printf 'terminal one ready\\nselect this output\\n'\r".to_vec(),
-                    );
-                    second
-                        .terminal
-                        .write_input(b"printf 'terminal two ready\\n'\r".to_vec());
-                    Some((split.first, split.second))
-                })
-                .await
-            else {
-                return;
-            };
-            smol::Timer::after(std::time::Duration::from_millis(700)).await;
-            host_cx.enqueue(move |state, cx| {
-                let selected = state.active.as_ref().and_then(|active| {
-                    let entry = active.terminal_workspace.terminal(first)?;
-                    let snapshot = entry.terminal.snapshot();
-                    let row = snapshot
-                        .text()
-                        .lines()
-                        .position(|line| line.contains("select this output"))?;
-                    entry.terminal.select((row, 0), (row, 17));
-                    Some(())
-                });
-                if selected.is_some() {
-                    state.capture_terminal_selection(first, cx);
-                }
-            });
-        });
     }
 
     pub fn remove_terminal_context(&mut self, context_id: u64, cx: &mut HostCx) {
@@ -4687,12 +4554,6 @@ impl AppState {
         let mut meta = SessionMeta::new(provider, cwd, model);
         meta.acp_agent_id = acp_agent_id;
         meta.profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
-        // Smoke mode forces Supervised so the approval path stays exercised even
-        // though the app-wide default is now FullAccess (T3 parity). Must be set
-        // before `ensure_started` spawns the provider with these launch flags.
-        if self.smoke.is_some() {
-            meta.approval_mode = ApprovalMode::Supervised;
-        }
         // Associate with the given project, or derive one from the cwd.
         meta.project_id = match project_id {
             Some(id) if self.projects.iter().any(|p| p.id == id) => Some(id),
@@ -6646,17 +6507,10 @@ impl AppState {
 
     /// Handle one canonical event from the live provider.
     fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
-        if self.smoke.is_some() {
-            log::info!(
-                "event: {}",
-                serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
-            );
-        } else {
-            log::debug!(
-                "event: {}",
-                serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
-            );
-        }
+        log::debug!(
+            "event: {}",
+            serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
+        );
 
         if let AgentEvent::RewindFailed { error, .. } = &event {
             self.pending_native_rewinds.remove(session_id);
@@ -7029,56 +6883,6 @@ impl AppState {
                 | AgentEvent::UserInputResolved { .. }
         ) {
             self.emit_session_status(session_id, cx);
-        }
-
-        // Smoke-mode automation.
-        if let Some(smoke) = self.smoke {
-            match &event {
-                AgentEvent::ApprovalRequested(request) if smoke.auto_approve => {
-                    log::info!("smoke: auto-approving request {}", request.id);
-                    self.respond_approval(request.id.clone(), ApprovalDecision::Approve, cx);
-                }
-                AgentEvent::UserInputRequested {
-                    request_id,
-                    questions,
-                } if smoke.auto_approve => {
-                    // Keep smokes deterministic: answer each question with its
-                    // first option's label (or empty string when the question is
-                    // free-text-only).
-                    let mut answers = serde_json::Map::new();
-                    for question in questions {
-                        let answer = question
-                            .options
-                            .first()
-                            .map(|o| o.label.clone())
-                            .unwrap_or_default();
-                        log::info!(
-                            "smoke: auto-answering user-input {} / {:?} -> {:?}",
-                            request_id,
-                            question.id,
-                            answer
-                        );
-                        answers.insert(question.id.clone(), serde_json::Value::String(answer));
-                    }
-                    self.respond_user_input(request_id.clone(), answers, cx);
-                }
-                AgentEvent::TurnCompleted { status, .. } => {
-                    let code = match status {
-                        TurnStatus::Completed => 0,
-                        TurnStatus::Failed | TurnStatus::Interrupted => 1,
-                    };
-                    log::info!("smoke: turn completed with status {status:?}; exiting {code}");
-                    std::process::exit(code);
-                }
-                AgentEvent::Error {
-                    fatal: true,
-                    message,
-                } => {
-                    log::error!("smoke: fatal provider error: {message}");
-                    std::process::exit(1);
-                }
-                _ => {}
-            }
         }
 
         cx.notify();
