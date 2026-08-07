@@ -1008,7 +1008,7 @@ impl TerminalDrawer {
             if let Some(text) = self
                 .workspace_store
                 .read(cx)
-                .with_terminal_workspace(cx, |workspace| {
+                .with_terminal_workspace(|workspace| {
                     workspace
                         .terminal(terminal_id)
                         .and_then(|entry| entry.terminal.selected_text())
