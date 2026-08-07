@@ -132,10 +132,6 @@ impl HostHandle {
         }
     }
 
-    pub fn query_blocking(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
-        smol::block_on(self.query(query))
-    }
-
     /// Drain the host's store-write barrier, close the serialized client
     /// endpoint, and wait until the state-owning thread has exited.
     ///
@@ -630,12 +626,6 @@ fn handle_client_message(
                 capabilities: hello.capabilities,
             }));
         }
-        ClientPayload::ReverseResponse(_) => {
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Ok(CommandResponse::Unit),
-            });
-        }
         _ => {
             cx.send_message(HostMessage::Ack {
                 id,
@@ -766,7 +756,6 @@ fn dispatch_command(
             project_id,
             threads,
         } => {
-            let threads = threads.into_iter().map(service_external_thread).collect();
             let receiver = app.start_external_import(&project_id, threads, cx);
             response = CommandResponse::ExternalImportStarted(receiver.is_some());
             if let Some(receiver) = receiver {
@@ -870,27 +859,11 @@ fn dispatch_query(
         Query::ListActiveWorkspace => {
             let cwd = app.active.as_ref().map(|active| active.meta.cwd.clone());
             let task = app.list_workspace_at(cwd, cx);
-            cx.spawn_background(async move {
-                Ok(QueryResponse::ActiveWorkspace(
-                    task.await
-                        .into_iter()
-                        .map(|entry| tcode_protocol::PathEntry {
-                            rel_path: entry.rel_path,
-                            basename: entry.basename,
-                            parent: entry.parent,
-                            is_dir: entry.is_dir,
-                        })
-                        .collect(),
-                ))
-            })
+            cx.spawn_background(async move { Ok(QueryResponse::ActiveWorkspace(task.await)) })
         }
         Query::ScanExternalHistory => {
             let task = app.scan_external_history(cx);
-            cx.spawn_background(async move {
-                Ok(QueryResponse::ExternalHistory(
-                    task.await.into_iter().map(protocol_recent_dir).collect(),
-                ))
-            })
+            cx.spawn_background(async move { Ok(QueryResponse::ExternalHistory(task.await)) })
         }
         Query::GenerateCommitMessage { included } => {
             let task = app.generate_commit_message(included, cx);
@@ -913,34 +886,21 @@ fn dispatch_query(
             base,
             ignore_whitespace,
         } => {
-            let scope = match scope {
-                tcode_protocol::GitDiffScope::WorkingTree => {
-                    tcode_services::git::GitDiffScope::WorkingTree
-                }
-                tcode_protocol::GitDiffScope::Branch => tcode_services::git::GitDiffScope::Branch,
-                tcode_protocol::GitDiffScope::Unknown => {
-                    return cx.spawn_background(async {
-                        Err(ProtocolError {
-                            code: "unsupported_scope".into(),
-                            message: "unknown git diff scope".into(),
-                        })
-                    });
-                }
-                _ => {
-                    return cx.spawn_background(async {
-                        Err(ProtocolError {
-                            code: "unsupported_scope".into(),
-                            message: "unsupported git diff scope".into(),
-                        })
-                    });
-                }
-            };
+            if !matches!(
+                scope,
+                tcode_protocol::GitDiffScope::WorkingTree | tcode_protocol::GitDiffScope::Branch
+            ) {
+                return cx.spawn_background(async {
+                    Err(ProtocolError {
+                        code: "unsupported_scope".into(),
+                        message: "unknown git diff scope".into(),
+                    })
+                });
+            }
             let task = unblock_host(cx, move || {
                 tcode_services::git::load_git_diff(&cwd, scope, base.as_deref(), ignore_whitespace)
             });
-            cx.spawn_background(
-                async move { Ok(QueryResponse::GitDiff(protocol_git_diff(task.await))) },
-            )
+            cx.spawn_background(async move { Ok(QueryResponse::GitDiff(task.await)) })
         }
         Query::ReadFileBytes { path } => {
             let task = unblock_host(cx, move || tcode_services::user_files::read_bytes(&path));
@@ -990,74 +950,6 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
     ProtocolError {
         code: "io_error".into(),
         message: error.to_string(),
-    }
-}
-
-fn protocol_git_diff(result: tcode_services::git::GitDiffResult) -> tcode_protocol::GitDiffResult {
-    tcode_protocol::GitDiffResult {
-        changes: result.changes,
-        texts: result
-            .texts
-            .into_iter()
-            .map(|text| tcode_protocol::GitFileText {
-                old: text.old,
-                new: text.new,
-            })
-            .collect(),
-        truncated: result.truncated,
-        error: result.error,
-        branches: result.branches,
-        default_base: result.default_base,
-    }
-}
-
-fn protocol_recent_dir(recent: crate::ui_facade::RecentDir) -> tcode_protocol::RecentDir {
-    tcode_protocol::RecentDir {
-        path: recent.path,
-        last_active_ms: recent.last_active_ms,
-        threads: recent
-            .threads
-            .into_iter()
-            .map(|thread| tcode_protocol::ExternalThread {
-                source: protocol_source_tool(thread.source),
-                file: thread.file,
-                external_id: thread.external_id,
-                title_hint: thread.title_hint,
-                last_active_ms: thread.last_active_ms,
-            })
-            .collect(),
-    }
-}
-
-fn protocol_source_tool(source: crate::ui_facade::SourceTool) -> tcode_protocol::SourceTool {
-    match source {
-        crate::ui_facade::SourceTool::ClaudeCode => tcode_protocol::SourceTool::ClaudeCode,
-        crate::ui_facade::SourceTool::ClaudeDesktop => tcode_protocol::SourceTool::ClaudeDesktop,
-        crate::ui_facade::SourceTool::T3Code => tcode_protocol::SourceTool::T3Code,
-        crate::ui_facade::SourceTool::CodexCli => tcode_protocol::SourceTool::CodexCli,
-        crate::ui_facade::SourceTool::CodexDesktop => tcode_protocol::SourceTool::CodexDesktop,
-    }
-}
-
-fn service_external_thread(
-    thread: tcode_protocol::ExternalThread,
-) -> crate::ui_facade::ExternalThread {
-    crate::ui_facade::ExternalThread {
-        source: match thread.source {
-            tcode_protocol::SourceTool::ClaudeCode => crate::ui_facade::SourceTool::ClaudeCode,
-            tcode_protocol::SourceTool::ClaudeDesktop => {
-                crate::ui_facade::SourceTool::ClaudeDesktop
-            }
-            tcode_protocol::SourceTool::T3Code => crate::ui_facade::SourceTool::T3Code,
-            tcode_protocol::SourceTool::CodexCli => crate::ui_facade::SourceTool::CodexCli,
-            tcode_protocol::SourceTool::CodexDesktop => crate::ui_facade::SourceTool::CodexDesktop,
-            tcode_protocol::SourceTool::Unknown => crate::ui_facade::SourceTool::T3Code,
-            _ => crate::ui_facade::SourceTool::T3Code,
-        },
-        file: thread.file,
-        external_id: thread.external_id,
-        title_hint: thread.title_hint,
-        last_active_ms: thread.last_active_ms,
     }
 }
 
@@ -1159,14 +1051,14 @@ mod tests {
         );
 
         assert_eq!(
-            host.query_blocking(Query::IsDirectory {
+            smol::block_on(host.query(Query::IsDirectory {
                 path: project_root.clone(),
-            })
+            }))
             .expect("query directory over pipe"),
             QueryResponse::IsDirectory(true)
         );
         assert_eq!(
-            host.query_blocking(Query::ListActiveWorkspace)
+            smol::block_on(host.query(Query::ListActiveWorkspace))
                 .expect("query inactive workspace over pipe"),
             QueryResponse::ActiveWorkspace(Vec::new())
         );

@@ -6,11 +6,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-#[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
 use std::task::{Context as TaskContext, Poll};
 
 use tcode_protocol::{ClientMessage, HostMessage};
@@ -72,10 +67,6 @@ pub struct HostCx {
     mailbox: async_channel::Sender<HostMsg>,
     outgoing: async_channel::Sender<HostOutput>,
     changed: async_channel::Sender<()>,
-    #[cfg(test)]
-    virtual_clock_nanos: Option<Arc<AtomicU64>>,
-    #[cfg(test)]
-    virtual_clock_origin_nanos: u64,
 }
 
 impl HostCx {
@@ -88,27 +79,6 @@ impl HostCx {
             mailbox,
             outgoing,
             changed,
-            #[cfg(test)]
-            virtual_clock_nanos: None,
-            #[cfg(test)]
-            virtual_clock_origin_nanos: 0,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        mailbox: async_channel::Sender<HostMsg>,
-        outgoing: async_channel::Sender<HostOutput>,
-        changed: async_channel::Sender<()>,
-        virtual_clock_nanos: Arc<AtomicU64>,
-    ) -> Self {
-        let virtual_clock_origin_nanos = virtual_clock_nanos.load(Ordering::SeqCst);
-        Self {
-            mailbox,
-            outgoing,
-            changed,
-            virtual_clock_nanos: Some(virtual_clock_nanos),
-            virtual_clock_origin_nanos,
         }
     }
 
@@ -152,18 +122,6 @@ impl HostCx {
     }
 
     pub(crate) fn timer(&self, duration: std::time::Duration) -> HostTask<()> {
-        #[cfg(test)]
-        if let Some(clock) = self.virtual_clock_nanos.clone() {
-            let duration_nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-            let deadline = self
-                .virtual_clock_origin_nanos
-                .saturating_add(duration_nanos);
-            return self.spawn_background(async move {
-                while clock.load(Ordering::SeqCst) < deadline {
-                    smol::Timer::after(std::time::Duration::from_millis(1)).await;
-                }
-            });
-        }
         self.spawn_background(async move {
             smol::Timer::after(duration).await;
         })

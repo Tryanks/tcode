@@ -724,14 +724,7 @@ async fn handshake(
     let caps = init.agent_capabilities.clone();
     // Capability gate: tcode's MCP servers are loopback streamable-HTTP
     // endpoints, so they may only be offered to agents that speak MCP over HTTP.
-    let registrations: Vec<_> = [
-        &opts.mcp_server,
-        &opts.orchestrate_server,
-        &opts.computer_use_server,
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let registrations: Vec<_> = opts.mcp_servers.iter().collect();
     let mcp_servers = mcp_servers(&registrations, &caps);
     if !registrations.is_empty() && mcp_servers.is_empty() {
         log::info!(

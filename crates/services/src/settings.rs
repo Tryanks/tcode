@@ -4,10 +4,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(test)]
 use agent::ProviderKind;
+use tcode_core::settings::Settings;
+#[cfg(test)]
+use tcode_core::settings::provider_key;
 #[cfg(test)]
 use tcode_core::settings::{EnvVar, ProjectSort, ProviderSettings, SidebarLayout, ThemeMode};
-use tcode_core::settings::{Settings, provider_key};
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -54,17 +57,6 @@ impl SettingsStore {
     /// are keyed by their slug id.
     pub fn profile_secrets(&self, profile_id: &str) -> BTreeMap<String, String> {
         self.load_secrets().remove(profile_id).unwrap_or_default()
-    }
-
-    /// Store (`Some`) or clear (`None`) one provider secret. Written 0600 and
-    /// never returned to the settings UI.
-    pub fn set_secret(
-        &self,
-        provider: ProviderKind,
-        name: &str,
-        value: Option<&str>,
-    ) -> std::io::Result<()> {
-        self.set_profile_secret(provider_key(provider), name, value)
     }
 
     /// Store (`Some`) or clear (`None`) one profile secret, by profile id.
@@ -277,8 +269,8 @@ mod tests {
         }];
         store.save(&settings).unwrap();
         store
-            .set_secret(
-                ProviderKind::ClaudeCode,
+            .set_profile_secret(
+                provider_key(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 Some("sk-live"),
             )
@@ -314,7 +306,11 @@ mod tests {
 
         // Clearing removes the entry (and the now-empty provider bucket).
         store
-            .set_secret(ProviderKind::ClaudeCode, "ANTHROPIC_API_KEY", None)
+            .set_profile_secret(
+                provider_key(ProviderKind::ClaudeCode),
+                "ANTHROPIC_API_KEY",
+                None,
+            )
             .unwrap();
         assert!(store.profile_secrets("claude").is_empty());
         let _ = fs::remove_dir_all(root);
@@ -333,8 +329,8 @@ mod tests {
             .set_profile_secret("klaude-kode", "ANTHROPIC_API_KEY", Some("sk-kimi-xyz"))
             .unwrap();
         store
-            .set_secret(
-                ProviderKind::ClaudeCode,
+            .set_profile_secret(
+                provider_key(ProviderKind::ClaudeCode),
                 "ANTHROPIC_API_KEY",
                 Some("sk-official"),
             )

@@ -235,14 +235,6 @@ fn round_trips_top_level_wire_types() {
         code: "not_found".into(),
         message: "missing".into(),
     });
-    round_trip(&ReverseRequest {
-        method: "preview.click".into(),
-        params: json!({"selector": "#submit"}),
-    });
-    round_trip(&ReverseResponse {
-        request_id: 44,
-        result: Ok(json!({"clicked": true})),
-    });
 }
 
 #[test]

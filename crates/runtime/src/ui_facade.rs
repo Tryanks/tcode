@@ -3,41 +3,15 @@
 use std::io;
 use std::path::Path;
 
-pub use tcode_services::git::{GitDiffResult, GitDiffScope, GitFileText};
 pub use tcode_services::import::{ExternalThread, RecentDir, SourceTool};
 pub use tcode_services::workspace::PathEntry;
-
-pub fn load_git_diff(cwd: &Path, scope: GitDiffScope, base: Option<&str>) -> GitDiffResult {
-    load_git_diff_opts(cwd, scope, base, false)
-}
-
-pub fn load_git_diff_opts(
-    cwd: &Path,
-    scope: GitDiffScope,
-    base: Option<&str>,
-    ignore_whitespace: bool,
-) -> GitDiffResult {
-    tcode_services::git::load_git_diff(cwd, scope, base, ignore_whitespace)
-}
 
 pub fn open_in_zed(cwd: &Path) -> io::Result<()> {
     tcode_services::desktop::open_in_zed(cwd)
 }
 
-pub fn read_file_bytes(path: &Path) -> io::Result<Vec<u8>> {
-    tcode_services::user_files::read_bytes(path)
-}
-
-pub fn remove_user_file(path: &Path) -> io::Result<()> {
-    tcode_services::user_files::remove_file(path)
-}
-
 pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
     tcode_services::user_files::relativize_to_workspace(path, cwd)
-}
-
-pub fn is_directory(path: &Path) -> bool {
-    tcode_services::user_files::is_directory(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

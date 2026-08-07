@@ -38,9 +38,7 @@ fn main() {
             approval_mode: ApprovalMode::Supervised,
             option_selections: Vec::new(),
             interaction_mode: InteractionMode::Build,
-            mcp_server: None,
-            orchestrate_server: None,
-            computer_use_server: None,
+            mcp_servers: Vec::new(),
             launch_env: LaunchEnv::default(),
             extra_args: Vec::new(),
             acp: Some(AcpAgent {

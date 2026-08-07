@@ -22,8 +22,8 @@ pub use query::{
     RecentDir, SourceTool,
 };
 pub use wire::{
-    ClientMessage, ClientPayload, HostMessage, ProtocolError, ReverseRequest, ReverseResponse,
-    Subscription, decode_client_line, decode_host_line, encode_line,
+    ClientMessage, ClientPayload, HostMessage, ProtocolError, Subscription, decode_client_line,
+    decode_host_line, encode_line,
 };
 
 use serde::{Deserialize, Serialize};

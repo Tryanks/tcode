@@ -412,11 +412,7 @@ async fn run_actor(
     ready: Sender<Result<(), AgentError>>,
 ) {
     // Register tcode's enabled streamable-HTTP MCP servers via `-c` overrides.
-    let mut extra_args = mcp_args(
-        opts.mcp_server.as_ref(),
-        opts.orchestrate_server.as_ref(),
-        opts.computer_use_server.as_ref(),
-    );
+    let mut extra_args = mcp_args(&opts.mcp_servers);
     // Any additional launch arguments configured for this provider.
     extra_args.extend(opts.extra_args.iter().cloned());
     let (mut child, mut stdin, lines, mut stderr_tail) =
@@ -547,14 +543,9 @@ async fn run_actor(
         .ok();
 }
 
-fn mcp_args(
-    preview: Option<&crate::McpRegistration>,
-    orchestrate: Option<&crate::McpRegistration>,
-    computer_use: Option<&crate::McpRegistration>,
-) -> Vec<String> {
-    [preview, orchestrate, computer_use]
-        .into_iter()
-        .flatten()
+fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
+    registrations
+        .iter()
         .flat_map(|mcp| ["-c".to_string(), mcp.codex_config_override()])
         .collect()
 }
@@ -2391,11 +2382,11 @@ mod tests {
             url: "http://c".into(),
             bearer_token: "c".into(),
         };
-        assert!(mcp_args(None, None, None).is_empty());
-        let one = mcp_args(Some(&preview), None, None);
+        assert!(mcp_args(&[]).is_empty());
+        let one = mcp_args(std::slice::from_ref(&preview));
         assert_eq!(one.len(), 2);
         assert!(one[1].starts_with("mcp_servers.tcode_preview="));
-        let all = mcp_args(Some(&preview), Some(&orchestrate), Some(&computer_use));
+        let all = mcp_args(&[preview, orchestrate, computer_use]);
         assert_eq!(all.len(), 6);
         assert!(all[1].starts_with("mcp_servers.tcode_preview="));
         assert!(all[3].starts_with("mcp_servers.tcode_orchestrate="));

@@ -12,7 +12,7 @@ use gpui::{
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_component::{ActiveTheme as _, StyledExt as _};
+use gpui_component::{ActiveTheme as _, StyledExt as _, popover::Popover, v_flex};
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -65,6 +65,12 @@ pub fn radius_button() -> Pixels {
 /// The composer field — the hero element.
 pub fn radius_composer() -> Pixels {
     px(16.)
+}
+
+/// A T3 overlay popover: one panel surface at the overlay radius with the
+/// component library's large soft shadow.
+pub fn overlay_popover(id: impl Into<ElementId>) -> Popover {
+    Popover::new(id).rounded(radius_overlay()).shadow_xl()
 }
 
 /// A 1px separator that fades out toward both ends, replacing full-bleed
@@ -126,6 +132,29 @@ pub fn floating_card(el: Div, cx: &App) -> Div {
         .border_color(cx.theme().border)
         .bg(cx.theme().popover)
         .shadow_md()
+}
+
+/// One grouped-list container shared by settings surfaces.
+pub fn group(cx: &App) -> Div {
+    floating_card(v_flex().w_full(), cx).overflow_hidden()
+}
+
+/// Assemble rows into a floating group with inset hairlines between them.
+pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
+    let mut group = group(cx);
+    let last = rows.len().saturating_sub(1);
+    for (index, row) in rows.into_iter().enumerate() {
+        group = group.child(row);
+        if index != last {
+            group = group.child(
+                div()
+                    .w_full()
+                    .pl_3()
+                    .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
+            );
+        }
+    }
+    group
 }
 
 /// The sidebar brand wordmark — bold "tcode" + the "DEV" channel pill. The main

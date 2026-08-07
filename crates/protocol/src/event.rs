@@ -50,17 +50,11 @@ pub enum Topic {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub topic: Topic,
     pub seq: u64,
     pub event: ServerEvent,
-}
-
-impl PartialEq for EventEnvelope {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
 }
 
 #[non_exhaustive]

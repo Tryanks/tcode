@@ -28,7 +28,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     notification::Notification,
-    popover::{Popover, PopoverState},
+    popover::PopoverState,
     spinner::Spinner,
     v_flex,
 };
@@ -40,6 +40,7 @@ use crate::composer_trigger::{
 use crate::context_meter;
 use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
+use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::window_state::WindowState;
@@ -97,16 +98,6 @@ fn truncate_queued(text: &str) -> String {
     }
     let clipped: String = normalized.chars().take(MAX).collect();
     format!("{clipped}…")
-}
-
-fn provider_short(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::ClaudeCode => "Claude",
-        ProviderKind::Codex => "Codex",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "OpenCode",
-        ProviderKind::Acp => "ACP",
-    }
 }
 
 /// The provider glyph tinted with the accent configured on its Settings →
@@ -360,17 +351,6 @@ fn filter_provider_commands<'a>(
         matched.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     }
     matched.into_iter().map(|(_, _, command)| command).collect()
-}
-
-/// T3's provider display name (used by the context meter's compaction line).
-fn provider_display_name(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::ClaudeCode => "Claude",
-        ProviderKind::Codex => "Codex",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "OpenCode",
-        ProviderKind::Acp => "ACP",
-    }
 }
 
 /// Guess a file extension for a persisted attachment from its MIME type,
@@ -1436,11 +1416,7 @@ impl Composer {
                 ),
         );
 
-        Popover::new(("model-picker-popover", self.model_picker_token))
-            // T3 overlay contour: popover fill + hairline border (from the
-            // default appearance) lifted to `shadow_xl` at the 14px overlay radius.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover(("model-picker-popover", self.model_picker_token))
             .anchor(Anchor::BottomLeft)
             .default_open(self.model_picker_token > 0)
             .trigger(trigger)
@@ -1517,10 +1493,7 @@ impl Composer {
         );
 
         let store_entity = self.workspace_store.clone();
-        Popover::new("traits-popover")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("traits-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
@@ -1595,10 +1568,7 @@ impl Composer {
                 .child(ring_canvas(pct.unwrap_or(0.0), ring_color, track)),
         );
 
-        Popover::new("context-popover")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("context-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| render_context_meter_pane(usage, provider, pct, cx))
@@ -1633,10 +1603,7 @@ impl Composer {
             .workspace_store
             .read(cx)
             .composer_approval_pending_restart(cx);
-        Popover::new("permission-popover")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("permission-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
@@ -1667,10 +1634,7 @@ impl Composer {
             .tooltip(tcode_i18n::tr!("composer.more_controls"))
             .child(Icon::new(IconName::Ellipsis).small().text_color(muted));
 
-        Popover::new("overflow-popover")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("overflow-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
@@ -2140,10 +2104,7 @@ impl Composer {
         let fg = cx.theme().primary_foreground;
         let store_main = self.workspace_store.clone();
 
-        let chevron = Popover::new("implement-menu")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        let chevron = crate::material::overlay_popover("implement-menu")
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("implement-menu-trigger")
@@ -2779,10 +2740,7 @@ impl Composer {
                     .child(picker_current.clone())
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
-            Popover::new("branch-popover")
-                // T3 overlay contour (shadow_xl at the 14px overlay radius).
-                .rounded(crate::material::radius_overlay())
-                .shadow_xl()
+            crate::material::overlay_popover("branch-popover")
                 .anchor(Anchor::BottomRight)
                 .trigger(trigger)
                 .on_open_change(move |open, _window, cx| {
@@ -2946,10 +2904,7 @@ impl Composer {
                 .child(label)
                 .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
         );
-        Popover::new("workspace-popover")
-            // T3 overlay contour (shadow_xl at the 14px overlay radius).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("workspace-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_state, _window, cx| {
@@ -3884,7 +3839,7 @@ fn render_model_row(
                         .child(
                             tinted_provider_glyph(row.provider, store_entity.read(cx), cx).xsmall(),
                         )
-                        .child(provider_short(row.provider)),
+                        .child(provider_label(row.provider)),
                 ),
         )
         .when(index < 9, |this| {
@@ -4433,7 +4388,7 @@ fn render_context_meter_pane(
         pane = pane.child(div().pt_1().text_size(px(11.)).text_color(muted).child(
             tcode_i18n::tr!(
                 "composer.compacts_automatically",
-                provider = provider_display_name(provider)
+                provider = provider_label(provider)
             ),
         ));
     }

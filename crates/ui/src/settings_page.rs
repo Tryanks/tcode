@@ -6,6 +6,8 @@
 //! description on the left, a control on the right), matching reference shots
 //! 40-settings.png / 41-settings-connections.png.
 
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -17,7 +19,6 @@ use gpui_component::{
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
-    popover::Popover,
     switch::Switch,
     v_flex,
 };
@@ -61,6 +62,15 @@ enum Section {
     ComputerUse,
     Orchestrate,
     Archived,
+}
+
+#[derive(Clone)]
+struct SelectRowOption<T> {
+    value: T,
+    id: SharedString,
+    label: SharedString,
+    description: Option<SharedString>,
+    selected: bool,
 }
 
 /// Apply a settings theme mode to the live window (shared with the palette's
@@ -826,7 +836,7 @@ impl SettingsPage {
             .w_full()
             .gap_3()
             .child(header)
-            .child(self.grouped(provider_rows, cx));
+            .child(crate::material::grouped(provider_rows, cx));
         // ACP agent cards keep their own component styling (defined outside this
         // file); they sit beneath the native providers in the same section.
         for (_, card) in &self.acp_cards {
@@ -1112,99 +1122,49 @@ impl SettingsPage {
             ImageMode::Always => tcode_i18n::tr!("computer_use.image_mode.always"),
             ImageMode::Never => tcode_i18n::tr!("computer_use.image_mode.never"),
         };
-        let trigger = self.dropdown_trigger("cu-image-mode-dropdown", label, cx);
-        let this = cx.entity();
-        let dropdown = Popover::new("cu-image-mode-popover")
-            // T3 overlay contour: one panel surface (popover fill + hairline +
-            // shadow_xl at the 14px overlay radius). The content stays transparent
-            // so the popup is a single card, not a card nested in the panel.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                let this = this.clone();
-                let option = |m: ImageMode,
-                              label_key: &'static str,
-                              desc_key: &'static str,
-                              this: &Entity<SettingsPage>,
-                              cx: &mut Context<gpui_component::popover::PopoverState>|
-                 -> AnyElement {
-                    let this = this.clone();
-                    let popover = cx.entity();
-                    crate::material::accessible_clickable(
-                        gpui_component::h_flex(),
-                        label_key,
-                        Role::MenuItem,
-                        tcode_i18n::tr!(label_key),
-                        cx,
-                    )
-                    .aria_selected(m == mode)
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .gap_2()
-                    .items_start()
-                    .rounded(crate::material::radius_button())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_0p5()
-                            .child(div().text_size(px(13.)).child(tcode_i18n::tr!(label_key)))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(tcode_i18n::tr!(desc_key)),
-                            ),
-                    )
-                    .when(m == mode, |d| d.child(Icon::new(IconName::Check).xsmall()))
-                    .on_click(move |_, window, cx| {
-                        this.update(cx, |page, cx| {
-                            page.update_settings(|s| s.computer_use.image_mode = m, cx);
-                        });
-                        popover.update(cx, |st, cx| st.dismiss(window, cx));
-                    })
-                    .into_any_element()
-                };
-                v_flex()
-                    .id("cu-image-mode-menu")
-                    .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("computer_use.image_mode.title"))
-                    .p_1()
-                    .min_w(px(260.))
-                    .gap_0p5()
-                    .child(option(
-                        ImageMode::Auto,
-                        "computer_use.image_mode.auto",
-                        "computer_use.image_mode.auto_desc",
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ImageMode::Always,
-                        "computer_use.image_mode.always",
-                        "computer_use.image_mode.always_desc",
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ImageMode::Never,
-                        "computer_use.image_mode.never",
-                        "computer_use.image_mode.never_desc",
-                        &this,
-                        cx,
-                    ))
-            });
-        self.row_frame(cx)
-            .child(self.row_labels(
-                tcode_i18n::tr!("computer_use.image_mode.title"),
-                tcode_i18n::tr!("computer_use.image_mode.description"),
-                cx,
-            ))
-            .child(dropdown)
-            .into_any_element()
+        let option = |value, label_key: &'static str, desc_key: &'static str| SelectRowOption {
+            value,
+            id: label_key.into(),
+            label: tcode_i18n::tr!(label_key).into_owned().into(),
+            description: Some(tcode_i18n::tr!(desc_key).into_owned().into()),
+            selected: value == mode,
+        };
+        self.select_row(
+            "cu-image-mode-dropdown",
+            "cu-image-mode-popover",
+            "cu-image-mode-menu",
+            260.,
+            tcode_i18n::tr!("computer_use.image_mode.title")
+                .into_owned()
+                .into(),
+            tcode_i18n::tr!("computer_use.image_mode.description")
+                .into_owned()
+                .into(),
+            label.into_owned().into(),
+            vec![
+                option(
+                    ImageMode::Auto,
+                    "computer_use.image_mode.auto",
+                    "computer_use.image_mode.auto_desc",
+                ),
+                option(
+                    ImageMode::Always,
+                    "computer_use.image_mode.always",
+                    "computer_use.image_mode.always_desc",
+                ),
+                option(
+                    ImageMode::Never,
+                    "computer_use.image_mode.never",
+                    "computer_use.image_mode.never_desc",
+                ),
+            ],
+            |mode, page, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.update_settings(|settings| settings.computer_use.image_mode = mode, cx)
+                })
+            },
+            cx,
+        )
     }
 
     /// The Computer Use "System permissions" group. Non-macOS platforms have
@@ -1215,7 +1175,7 @@ impl SettingsPage {
         if !cfg!(target_os = "macos") {
             return col
                 .child(
-                    self.group(cx).child(
+                    crate::material::group(cx).child(
                         div()
                             .w_full()
                             .px_3()
@@ -1404,45 +1364,11 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// One grouped-list container: a floating card on the paper plane, in
-    /// chat's composer-console idiom — popover fill, a hairline border,
-    /// card-radius corners and a soft shadow so it reads as lifted, not a flat
-    /// System-Settings box (docs/visual-redesign.md §5.5, 2026-07 revision).
-    fn group(&self, cx: &Context<Self>) -> gpui::Div {
-        crate::material::floating_card(v_flex().w_full(), cx).overflow_hidden()
-    }
-
-    /// Faint inset hairline between two rows — flush right, indented past the
-    /// row's left padding, and dropped to 60% so it whispers rather than rules.
-    /// Only dense lists (Providers) use it; sparse surfaces separate with air.
-    fn row_divider(&self, cx: &Context<Self>) -> AnyElement {
-        div()
-            .w_full()
-            .pl_3()
-            .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6)))
-            .into_any_element()
-    }
-
-    /// Assemble rows into a group with faint inset hairlines between neighbours
-    /// (never after the last) — for dense lists where rows need a visible
-    /// boundary.
-    fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
-        let mut group = self.group(cx);
-        let last = rows.len().saturating_sub(1);
-        for (index, row) in rows.into_iter().enumerate() {
-            group = group.child(row);
-            if index != last {
-                group = group.child(self.row_divider(cx));
-            }
-        }
-        group
-    }
-
     /// Assemble rows into a group with NO dividers — chat separates content
     /// with breathing room, not rules. The default for sparse settings surfaces
     /// (General, Browser, Computer Use, Archived, permissions).
     fn grouped_plain(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
-        let mut group = self.group(cx);
+        let mut group = crate::material::group(cx);
         for row in rows {
             group = group.child(row);
         }
@@ -1562,100 +1488,132 @@ impl SettingsPage {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn select_row<T: Clone + 'static>(
+        &self,
+        trigger_id: &'static str,
+        popover_id: &'static str,
+        menu_id: &'static str,
+        menu_width: f32,
+        title: SharedString,
+        description: SharedString,
+        selected_label: SharedString,
+        options: Vec<SelectRowOption<T>>,
+        on_select: impl Fn(T, &Entity<SettingsPage>, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let trigger = self.dropdown_trigger(trigger_id, selected_label, cx);
+        let page = cx.entity();
+        let on_select = Rc::new(on_select);
+        let menu_label = title.clone();
+        let dropdown = crate::material::overlay_popover(popover_id)
+            .trigger(trigger)
+            .content(move |_, _, cx| {
+                v_flex()
+                    .id(menu_id)
+                    .role(Role::Menu)
+                    .aria_label(menu_label.clone())
+                    .p_1()
+                    .min_w(px(menu_width))
+                    .gap_0p5()
+                    .children(options.clone().into_iter().map(|option| {
+                        let page = page.clone();
+                        let popover = cx.entity();
+                        let on_select = on_select.clone();
+                        let label = option.label.clone();
+                        let item = crate::material::accessible_clickable(
+                            gpui_component::h_flex(),
+                            option.id,
+                            Role::MenuItem,
+                            label.clone(),
+                            cx,
+                        )
+                        .aria_selected(option.selected)
+                        .w_full()
+                        .px_2()
+                        .gap_2()
+                        .rounded(crate::material::radius_button())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(cx.theme().accent));
+                        let item = if let Some(description) = option.description {
+                            item.py_1p5().items_start().child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(div().text_size(px(13.)).child(label))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(description),
+                                    ),
+                            )
+                        } else {
+                            item.py_1()
+                                .items_center()
+                                .text_size(px(13.))
+                                .child(div().flex_1().child(label))
+                        };
+                        item.when(option.selected, |item| {
+                            item.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click(move |_, window, cx| {
+                            on_select(option.value.clone(), &page, window, cx);
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        })
+                    }))
+            });
+
+        self.row_frame(cx)
+            .child(self.row_labels(title, description, cx))
+            .child(dropdown)
+            .into_any_element()
+    }
+
     fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
             ThemeMode::System => tcode_i18n::tr!("settings.theme.system"),
             ThemeMode::Light => tcode_i18n::tr!("settings.theme.light"),
             ThemeMode::Dark => tcode_i18n::tr!("settings.theme.dark"),
         };
-        let trigger = self.dropdown_trigger("theme-dropdown", label, cx);
-
-        let this = cx.entity();
-        let dropdown = Popover::new("theme-popover")
-            // Single panel surface at the 14px overlay radius (see image_mode_row).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                let this = this.clone();
-                let option = |mode: ThemeMode,
-                              id: &'static str,
-                              label: SharedString,
-                              selected: bool,
-                              this: &Entity<SettingsPage>,
-                              cx: &mut Context<gpui_component::popover::PopoverState>|
-                 -> AnyElement {
-                    let this = this.clone();
-                    let popover = cx.entity();
-                    crate::material::accessible_clickable(
-                        gpui_component::h_flex(),
-                        id,
-                        Role::MenuItem,
-                        label.clone(),
-                        cx,
-                    )
-                    .aria_selected(selected)
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .items_center()
-                    .rounded(crate::material::radius_button())
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().accent))
-                    .child(div().flex_1().child(label.clone()))
-                    .when(selected, |d| d.child(Icon::new(IconName::Check).xsmall()))
-                    .on_click(move |_, window, cx| {
-                        this.update(cx, |page, cx| {
-                            page.update_settings(|s| s.theme_mode = mode, cx);
-                        });
-                        apply_theme(mode, window, cx);
-                        popover.update(cx, |st, cx| st.dismiss(window, cx));
-                    })
-                    .into_any_element()
-                };
-                v_flex()
-                    .id("theme-options-menu")
-                    .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("settings.theme.title"))
-                    .p_1()
-                    .min_w(px(160.))
-                    .gap_0p5()
-                    .child(option(
-                        ThemeMode::System,
-                        "theme-option-system",
-                        tcode_i18n::tr!("settings.theme.system").into_owned().into(),
-                        mode == ThemeMode::System,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Light,
-                        "theme-option-light",
-                        tcode_i18n::tr!("settings.theme.light").into_owned().into(),
-                        mode == ThemeMode::Light,
-                        &this,
-                        cx,
-                    ))
-                    .child(option(
-                        ThemeMode::Dark,
-                        "theme-option-dark",
-                        tcode_i18n::tr!("settings.theme.dark").into_owned().into(),
-                        mode == ThemeMode::Dark,
-                        &this,
-                        cx,
-                    ))
-            });
-
-        self.row_frame(cx)
-            .child(self.row_labels(
-                tcode_i18n::tr!("settings.theme.title"),
-                tcode_i18n::tr!("settings.theme.description"),
-                cx,
-            ))
-            .child(dropdown)
-            .into_any_element()
+        let option = |value, id: &'static str, label_key: &'static str| SelectRowOption {
+            value,
+            id: id.into(),
+            label: tcode_i18n::tr!(label_key).into_owned().into(),
+            description: None,
+            selected: value == mode,
+        };
+        self.select_row(
+            "theme-dropdown",
+            "theme-popover",
+            "theme-options-menu",
+            160.,
+            tcode_i18n::tr!("settings.theme.title").into_owned().into(),
+            tcode_i18n::tr!("settings.theme.description")
+                .into_owned()
+                .into(),
+            label.into_owned().into(),
+            vec![
+                option(
+                    ThemeMode::System,
+                    "theme-option-system",
+                    "settings.theme.system",
+                ),
+                option(
+                    ThemeMode::Light,
+                    "theme-option-light",
+                    "settings.theme.light",
+                ),
+                option(ThemeMode::Dark, "theme-option-dark", "settings.theme.dark"),
+            ],
+            |mode, page, window, cx| {
+                page.update(cx, |page, cx| {
+                    page.update_settings(|settings| settings.theme_mode = mode, cx)
+                });
+                apply_theme(mode, window, cx);
+            },
+            cx,
+        )
     }
 
     fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
@@ -1665,76 +1623,43 @@ impl SettingsPage {
             Some(LANGUAGE_SIMPLIFIED_CHINESE) => tcode_i18n::tr!("settings.language.chinese"),
             _ => tcode_i18n::tr!("settings.language.system"),
         };
-        let trigger = self.dropdown_trigger("language-dropdown", label, cx);
-        let page = cx.entity();
-        let dropdown = Popover::new("language-popover")
-            // Single panel surface at the 14px overlay radius (see image_mode_row).
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
-            .trigger(trigger)
-            .content(move |_, _, cx| {
-                let option =
-                    |value: Option<&'static str>,
-                     key: &'static str,
-                     cx: &mut Context<gpui_component::popover::PopoverState>| {
-                        let page = page.clone();
-                        let popover = cx.entity();
-                        let is_selected = selected.as_deref() == value;
-                        crate::material::accessible_clickable(
-                            gpui_component::h_flex(),
-                            key,
-                            Role::MenuItem,
-                            tcode_i18n::tr!(key),
-                            cx,
-                        )
-                        .aria_selected(is_selected)
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .gap_2()
-                        .items_center()
-                        .rounded(crate::material::radius_button())
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().accent))
-                        .child(div().flex_1().child(tcode_i18n::tr!(key)))
-                        .when(is_selected, |d| {
-                            d.child(Icon::new(IconName::Check).xsmall())
-                        })
-                        .on_click(move |_, window, cx| {
-                            page.update(cx, |page, cx| {
-                                page.update_settings(|s| s.language = value.map(str::to_owned), cx)
-                            });
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        })
-                    };
-                v_flex()
-                    .id("language-options-menu")
-                    .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("settings.language.title"))
-                    .p_1()
-                    .min_w(px(160.))
-                    .gap_0p5()
-                    .child(option(None, "settings.language.system", cx))
-                    .child(option(
-                        Some(LANGUAGE_ENGLISH),
-                        "settings.language.english",
+        let option = |value, key: &'static str| SelectRowOption {
+            value,
+            id: key.into(),
+            label: tcode_i18n::tr!(key).into_owned().into(),
+            description: None,
+            selected: selected.as_deref() == value,
+        };
+        self.select_row(
+            "language-dropdown",
+            "language-popover",
+            "language-options-menu",
+            160.,
+            tcode_i18n::tr!("settings.language.title")
+                .into_owned()
+                .into(),
+            tcode_i18n::tr!("settings.language.description")
+                .into_owned()
+                .into(),
+            label.into_owned().into(),
+            vec![
+                option(None, "settings.language.system"),
+                option(Some(LANGUAGE_ENGLISH), "settings.language.english"),
+                option(
+                    Some(LANGUAGE_SIMPLIFIED_CHINESE),
+                    "settings.language.chinese",
+                ),
+            ],
+            |language, page, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.update_settings(
+                        |settings| settings.language = language.map(str::to_owned),
                         cx,
-                    ))
-                    .child(option(
-                        Some(LANGUAGE_SIMPLIFIED_CHINESE),
-                        "settings.language.chinese",
-                        cx,
-                    ))
-            });
-        self.row_frame(cx)
-            .child(self.row_labels(
-                tcode_i18n::tr!("settings.language.title"),
-                tcode_i18n::tr!("settings.language.description"),
-                cx,
-            ))
-            .child(dropdown)
-            .into_any_element()
+                    )
+                })
+            },
+            cx,
+        )
     }
 }
 

@@ -35,7 +35,6 @@ pub enum ClientPayload {
     Subscribe(Subscription),
     Unsubscribe(Subscription),
     Hello(Hello),
-    ReverseResponse(ReverseResponse),
 }
 
 #[non_exhaustive]
@@ -52,10 +51,6 @@ pub enum HostMessage {
         result: Result<QueryResponse, ProtocolError>,
     },
     Event(EventEnvelope),
-    ReverseRequest {
-        id: u64,
-        request: ReverseRequest,
-    },
     HelloAck(HelloAck),
 }
 
@@ -63,18 +58,6 @@ pub enum HostMessage {
 pub struct Subscription {
     pub topic: Topic,
     pub after_seq: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReverseRequest {
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReverseResponse {
-    pub request_id: u64,
-    pub result: Result<serde_json::Value, ProtocolError>,
 }
 
 /// Encode one NDJSON record, including its trailing newline.

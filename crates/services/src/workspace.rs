@@ -8,33 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-
-/// One listable workspace entry (relative to the session cwd, `/`-separated).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathEntry {
-    /// Path relative to the workspace root, using `/` separators.
-    pub rel_path: String,
-    /// Final path component.
-    pub basename: String,
-    /// Parent path (`rel_path` without the basename), possibly empty.
-    pub parent: String,
-    pub is_dir: bool,
-}
-
-impl PathEntry {
-    fn from_rel(rel_path: String, is_dir: bool) -> Self {
-        let (parent, basename) = match rel_path.rfind('/') {
-            Some(i) => (rel_path[..i].to_string(), rel_path[i + 1..].to_string()),
-            None => (String::new(), rel_path.clone()),
-        };
-        Self {
-            rel_path,
-            basename,
-            parent,
-            is_dir,
-        }
-    }
-}
+pub use tcode_protocol::PathEntry;
 
 /// Caps for the fallback walk (git listing is naturally bounded by the repo).
 const MAX_ENTRIES: usize = 8000;

@@ -793,14 +793,14 @@ impl ProviderDialog {
 
         let mut tags = h_flex().gap_1().items_center();
         if row.custom {
-            tags = tags.child(tag(
+            tags = tags.child(crate::material::semantic_chip(
                 tcode_i18n::tr!("providers.models.custom").into_owned(),
                 cx.theme().info.opacity(0.12),
                 cx.theme().info_foreground,
             ));
         }
         if hidden {
-            tags = tags.child(tag(
+            tags = tags.child(crate::material::semantic_chip(
                 tcode_i18n::tr!("providers.models.hidden").into_owned(),
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
@@ -1009,69 +1009,46 @@ pub fn render_footer(
 // Copy + helpers
 // ---------------------------------------------------------------------------
 
-fn tag(label: String, background: gpui::Hsla, foreground: gpui::Hsla) -> AnyElement {
-    crate::material::semantic_chip(label, background, foreground).into_any_element()
+type ProviderCopy = [&'static str; 6];
+
+#[rustfmt::skip]
+const PROVIDER_COPY: [(ProviderKind, ProviderCopy); 5] = [
+    (ProviderKind::Codex,      ["codex",    "~/.codex",   "providers.codex_home",  "providers.codex_home_help",  "",                             "gpt-6.7-codex-ultra-preview"]),
+    (ProviderKind::ClaudeCode, ["claude",   "~",          "providers.claude_home", "providers.claude_home_help", "e.g. --chrome",                "claude-sonnet-5"]),
+    (ProviderKind::Pi,         ["pi",       "~/.pi/agent", "providers.pi_home",    "providers.pi_home_help",     "e.g. --provider openai-codex", "openai-codex/gpt-5.5"]),
+    (ProviderKind::OpenCode,   ["opencode", "",           "providers.home",       "providers.home_help",        "e.g. --print-logs",            "openai/gpt-5.1-codex"]),
+    (ProviderKind::Acp,        ["",         "",           "providers.home",       "providers.home_help",        "",                             ""]),
+];
+
+fn provider_copy(provider: ProviderKind) -> &'static ProviderCopy {
+    PROVIDER_COPY
+        .iter()
+        .find_map(|(kind, copy)| (*kind == provider).then_some(copy))
+        .expect("every provider has dialog copy")
 }
 
 fn default_binary_name(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "codex",
-        ProviderKind::ClaudeCode => "claude",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Acp => "",
-    }
+    provider_copy(provider)[0]
 }
 
 fn home_placeholder(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "~/.codex",
-        ProviderKind::ClaudeCode => "~",
-        ProviderKind::Pi => "~/.pi/agent",
-        ProviderKind::OpenCode => "",
-        ProviderKind::Acp => "",
-    }
+    provider_copy(provider)[1]
 }
 
 fn home_label(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.codex_home").into_owned(),
-        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.claude_home").into_owned(),
-        ProviderKind::Pi => tcode_i18n::tr!("providers.pi_home").into_owned(),
-        ProviderKind::OpenCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.home").into_owned()
-        }
-    }
+    tcode_i18n::tr!(provider_copy(provider)[2]).into_owned()
 }
 
 fn home_help(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => tcode_i18n::tr!("providers.codex_home_help").into_owned(),
-        ProviderKind::ClaudeCode => tcode_i18n::tr!("providers.claude_home_help").into_owned(),
-        ProviderKind::Pi => tcode_i18n::tr!("providers.pi_home_help").into_owned(),
-        ProviderKind::OpenCode | ProviderKind::Acp => {
-            tcode_i18n::tr!("providers.home_help").into_owned()
-        }
-    }
+    tcode_i18n::tr!(provider_copy(provider)[3]).into_owned()
 }
 
 fn launch_args_placeholder(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::ClaudeCode => "e.g. --chrome",
-        ProviderKind::Pi => "e.g. --provider openai-codex",
-        ProviderKind::OpenCode => "e.g. --print-logs",
-        ProviderKind::Codex | ProviderKind::Acp => "",
-    }
+    provider_copy(provider)[4]
 }
 
 fn custom_model_placeholder(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "gpt-6.7-codex-ultra-preview",
-        ProviderKind::ClaudeCode => "claude-sonnet-5",
-        ProviderKind::Pi => "openai-codex/gpt-5.5",
-        ProviderKind::OpenCode => "openai/gpt-5.1-codex",
-        ProviderKind::Acp => "",
-    }
+    provider_copy(provider)[5]
 }
 
 fn path_string(path: &Option<std::path::PathBuf>) -> String {

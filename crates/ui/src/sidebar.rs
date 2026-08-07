@@ -116,6 +116,31 @@ struct ThreadRenderState {
     active_direct_children: usize,
 }
 
+struct ThreadRowState {
+    session_id: String,
+    row_key: String,
+    waiting_for_approval: bool,
+    waiting_for_input: bool,
+    is_worktree: bool,
+    is_child: bool,
+    show_unread: bool,
+    direct_children: usize,
+    active_direct_children: usize,
+    children_collapsed: bool,
+    renaming: Option<Entity<InputState>>,
+    menu_can_fork: bool,
+}
+
+impl ThreadRowState {
+    fn has_direct_children(&self) -> bool {
+        self.direct_children > 0
+    }
+
+    fn waiting(&self) -> bool {
+        self.waiting_for_approval || self.waiting_for_input
+    }
+}
+
 fn derive_thread_render_state(
     meta: &SessionMeta,
     sessions: &[SessionMeta],
@@ -1392,6 +1417,209 @@ impl SessionsSidebar {
         container
     }
 
+    fn thread_row_state(
+        &self,
+        meta: &SessionMeta,
+        sessions: &[SessionMeta],
+        row_key: String,
+        working: bool,
+        cx: &mut Context<Self>,
+    ) -> ThreadRowState {
+        let session_id = meta.id.clone();
+        let unread = self.store.read(cx).session_unread(&session_id, cx);
+        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
+        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
+        let render_state = derive_thread_render_state(meta, sessions, unread, working, |id| {
+            self.store.read(cx).turn_running_for(id, cx)
+        });
+        ThreadRowState {
+            children_collapsed: self.collapsed_parents.contains(&session_id),
+            renaming: self
+                .renaming
+                .as_ref()
+                .filter(|rename| rename.session_id == session_id)
+                .map(|rename| rename.input.clone()),
+            session_id,
+            row_key,
+            waiting_for_approval,
+            waiting_for_input,
+            is_worktree: meta.worktree.is_some(),
+            is_child: render_state.is_child,
+            show_unread: render_state.show_unread,
+            direct_children: render_state.direct_children,
+            active_direct_children: render_state.active_direct_children,
+            menu_can_fork: meta.provider.supports_fork(),
+        }
+    }
+
+    fn thread_clickable_row(
+        &self,
+        base: gpui::Div,
+        row_id: gpui::SharedString,
+        meta: &SessionMeta,
+        state: &ThreadRowState,
+        is_active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let session_id = state.session_id.clone();
+        let has_direct_children = state.has_direct_children();
+        crate::material::accessible_clickable(
+            base,
+            row_id,
+            Role::Button,
+            tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
+            cx,
+        )
+        .aria_selected(is_active)
+        .when(has_direct_children, |row| {
+            row.aria_expanded(!state.children_collapsed)
+        })
+        .group(state.row_key.clone())
+        .cursor_pointer()
+        .when(is_active, |row| row.bg(cx.theme().list_active))
+        .when(!is_active, |row| {
+            row.hover(|row| row.bg(cx.theme().sidebar_accent))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let session_id = session_id.clone();
+            toggle_parent_for_row_click(
+                &mut this.collapsed_parents,
+                &session_id,
+                is_active,
+                has_direct_children,
+            );
+            this.store.update(cx, |store, cx| {
+                store.dispatch(
+                    Command::SelectSession {
+                        session_id: session_id.clone(),
+                    },
+                    cx,
+                );
+            });
+            cx.notify();
+        }))
+        .when(state.waiting_for_approval, |row| {
+            row.tooltip(|window, cx| {
+                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
+                    .build(window, cx)
+            })
+        })
+        .when(
+            state.waiting_for_input && !state.waiting_for_approval,
+            |row| {
+                row.tooltip(|window, cx| {
+                    Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
+                        .build(window, cx)
+                })
+            },
+        )
+    }
+
+    fn thread_title_or_input(
+        &self,
+        meta: &SessionMeta,
+        state: &ThreadRowState,
+        emphasize_unread: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if let Some(input) = &state.renaming {
+            div()
+                .flex_1()
+                .min_w_0()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
+                .child(Input::new(input).small())
+                .into_any_element()
+        } else {
+            truncated_sidebar_label()
+                .text_size(px(13.))
+                .text_color(cx.theme().sidebar_foreground)
+                .when(emphasize_unread && state.show_unread, |title| {
+                    title.font_semibold()
+                })
+                .child(meta.title.clone())
+                .into_any_element()
+        }
+    }
+
+    fn thread_status_badge(
+        state: &ThreadRowState,
+        working: bool,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (color, label) = if state.waiting_for_approval {
+            (
+                cx.theme().warning,
+                tcode_i18n::tr!("sidebar.waiting_approval"),
+            )
+        } else if state.waiting_for_input {
+            (cx.theme().warning, tcode_i18n::tr!("sidebar.waiting_input"))
+        } else if working {
+            (cx.theme().success, tcode_i18n::tr!("sidebar.working"))
+        } else {
+            return None;
+        };
+        Some(
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .child(div().size(px(6.)).rounded_full().bg(color))
+                .child(
+                    div()
+                        .whitespace_nowrap()
+                        .text_size(px(11.))
+                        .text_color(color)
+                        .child(label),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn thread_context_menu(
+        row: gpui::Stateful<gpui::Div>,
+        session_id: String,
+        running: bool,
+        can_fork: bool,
+    ) -> gpui::AnyElement {
+        row.context_menu(move |menu, _window, _cx| {
+            let id = session_id.clone();
+            menu.menu(
+                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
+                Box::new(ThreadRename(id.clone())),
+            )
+            .when(can_fork, |menu| {
+                menu.menu(
+                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
+                    Box::new(ThreadFork(id.clone())),
+                )
+            })
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
+                Box::new(ThreadMarkUnread(id.clone())),
+            )
+            .separator()
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
+                Box::new(ThreadCopyPath(id.clone())),
+            )
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
+                Box::new(ThreadCopyId(id.clone())),
+            )
+            .separator()
+            .menu_with_enable(
+                tcode_i18n::tr!("sidebar.archive").into_owned(),
+                Box::new(ThreadArchive(id.clone())),
+                !running,
+            )
+            .menu(
+                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
+                Box::new(ThreadDelete(id.clone())),
+            )
+        })
+        .into_any_element()
+    }
+
     fn render_thread(
         &self,
         meta: &SessionMeta,
@@ -1399,175 +1627,64 @@ impl SessionsSidebar {
         working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let session_id = meta.id.clone();
-        let row_key = format!("thread-{session_id}");
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
-        let unread = self.store.read(cx).session_unread(&session_id, cx);
-        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
-        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
-        let is_worktree = meta.worktree.is_some();
-        let render_state = {
-            let sessions = self.store.read(cx).sidebar_sessions(cx);
-            derive_thread_render_state(meta, &sessions, unread, working, |id| {
-                self.store.read(cx).turn_running_for(id, cx)
-            })
-        };
-        let is_child = render_state.is_child;
-        let show_unread = render_state.show_unread;
-        let direct_children = render_state.direct_children;
-        let active_direct_children = render_state.active_direct_children;
-        let has_direct_children = direct_children > 0;
-        let children_collapsed = self.collapsed_parents.contains(&session_id);
+        let sessions = self.store.read(cx).sidebar_sessions(cx);
+        let state =
+            self.thread_row_state(meta, &sessions, format!("thread-{}", meta.id), working, cx);
+        let session_id = state.session_id.clone();
+        let row_key = state.row_key.clone();
+        let is_worktree = state.is_worktree;
+        let is_child = state.is_child;
+        let show_unread = state.show_unread;
+        let direct_children = state.direct_children;
+        let active_direct_children = state.active_direct_children;
+        let has_direct_children = state.has_direct_children();
+        let children_collapsed = state.children_collapsed;
 
-        // Inline rename takes over the whole row's content area.
-        let renaming = self
-            .renaming
-            .as_ref()
-            .filter(|r| r.session_id == session_id)
-            .map(|r| r.input.clone());
-
-        // Menu-builder captures.
-        let menu_id = session_id.clone();
-        let menu_running = working;
-        let menu_can_fork = meta.provider.supports_fork();
-
-        let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
-        let row = crate::material::accessible_clickable(
-            h_flex(),
-            gpui::SharedString::from(format!("thread-row-{session_id}")),
-            Role::Button,
-            row_label,
-            cx,
-        )
-        .aria_selected(is_active)
-        .when(has_direct_children, |row| {
-            row.aria_expanded(!children_collapsed)
-        })
-        .group(row_key.clone())
-        .h(px(30.))
-        .items_center()
-        .gap_2()
-        .pl(px(if is_child { 42. } else { 30. }))
-        .pr_2()
-        // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(is_active, |s| s.bg(cx.theme().list_active))
-        .when(!is_active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-        .on_click(cx.listener({
-            let session_id = session_id.clone();
-            move |this, _, _, cx| {
-                let session_id = session_id.clone();
-                toggle_parent_for_row_click(
-                    &mut this.collapsed_parents,
-                    &session_id,
-                    is_active,
-                    has_direct_children,
-                );
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::SelectSession {
-                            session_id: session_id.clone(),
-                        },
-                        cx,
-                    );
-                });
-                cx.notify();
-            }
-        }))
-        .when(waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        })
-        .when(waiting_for_input && !waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        })
-        .when(waiting_for_approval, |row| {
-            row.child(
-                h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_approval")),
-                    ),
+        let row = self
+            .thread_clickable_row(
+                h_flex(),
+                gpui::SharedString::from(format!("thread-row-{session_id}")),
+                meta,
+                &state,
+                is_active,
+                cx,
             )
-        })
-        .when(waiting_for_input && !waiting_for_approval, |row| {
-            row.child(
-                h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_input")),
-                    ),
+            .h(px(30.))
+            .items_center()
+            .gap_2()
+            .pl(px(if is_child { 42. } else { 30. }))
+            .pr_2()
+            // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
+            .rounded(px(6.))
+            .when_some(
+                Self::thread_status_badge(&state, working, cx),
+                |row, badge| row.child(badge),
             )
-        })
-        .when(
-            working && !waiting_for_approval && !waiting_for_input,
-            |row| {
+            .when(is_child, |row| {
                 row.child(
-                    h_flex()
+                    div()
                         .flex_none()
-                        .items_center()
-                        .gap_1()
-                        .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
-                        .child(
-                            div()
-                                .whitespace_nowrap()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().success)
-                                .child(tcode_i18n::tr!("sidebar.working")),
-                        ),
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("↳"),
                 )
-            },
-        )
-        .when(is_child, |row| {
-            row.child(
-                div()
-                    .flex_none()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("↳"),
-            )
-        });
+            });
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         // The fold chevron trails the title, right before the child-count
         // badge, so the title keeps the row's full leading width.
-        let row = if let Some(input) = renaming {
-            row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                    .child(Input::new(&input).small()),
-            )
-            .when(has_direct_children, |row| {
-                row.child(collapse_chevron(children_collapsed, cx))
-                    .child(child_count_badge(
-                        &session_id,
-                        direct_children,
-                        active_direct_children,
-                        cx,
-                    ))
-            })
+        let row = if state.renaming.is_some() {
+            row.child(self.thread_title_or_input(meta, &state, false, cx))
+                .when(has_direct_children, |row| {
+                    row.child(collapse_chevron(children_collapsed, cx))
+                        .child(child_count_badge(
+                            &session_id,
+                            direct_children,
+                            active_direct_children,
+                            cx,
+                        ))
+                })
         } else {
             row.when(show_unread, |row| {
                 row.child(
@@ -1586,12 +1703,7 @@ impl SessionsSidebar {
                         .text_color(cx.theme().muted_foreground),
                 )
             })
-            .child(
-                truncated_sidebar_label()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(meta.title.clone()),
-            )
+            .child(self.thread_title_or_input(meta, &state, false, cx))
             .when(has_direct_children, |row| {
                 row.child(collapse_chevron(children_collapsed, cx))
                     .child(child_count_badge(
@@ -1666,43 +1778,7 @@ impl SessionsSidebar {
             })
         };
 
-        row.context_menu(move |menu, _window, _cx| {
-            let id = menu_id.clone();
-            menu.menu(
-                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
-                Box::new(ThreadRename(id.clone())),
-            )
-            .when(menu_can_fork, |menu| {
-                menu.menu(
-                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
-                    Box::new(ThreadFork(id.clone())),
-                )
-            })
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
-                Box::new(ThreadMarkUnread(id.clone())),
-            )
-            .separator()
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
-                Box::new(ThreadCopyPath(id.clone())),
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
-                Box::new(ThreadCopyId(id.clone())),
-            )
-            .separator()
-            .menu_with_enable(
-                tcode_i18n::tr!("sidebar.archive").into_owned(),
-                Box::new(ThreadArchive(id.clone())),
-                !menu_running,
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
-                Box::new(ThreadDelete(id.clone())),
-            )
-        })
-        .into_any_element()
+        Self::thread_context_menu(row, session_id, working, state.menu_can_fork)
     }
 
     fn render_flat_thread_right_slot(
@@ -1787,155 +1863,51 @@ impl SessionsSidebar {
         working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let session_id = meta.id.clone();
-        let row_key = format!("flat-thread-{session_id}");
-        let unread = self.store.read(cx).session_unread(&session_id, cx);
-        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
-        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
-        let waiting = waiting_for_approval || waiting_for_input;
-        let render_state = derive_thread_render_state(meta, sessions, unread, working, |id| {
-            self.store.read(cx).turn_running_for(id, cx)
-        });
-        let is_child = render_state.is_child;
-        let show_unread = render_state.show_unread;
-        let direct_children = render_state.direct_children;
-        let active_direct_children = render_state.active_direct_children;
-        let has_direct_children = direct_children > 0;
-        let children_collapsed = self.collapsed_parents.contains(&session_id);
-        let renaming = self
-            .renaming
-            .as_ref()
-            .filter(|rename| rename.session_id == session_id)
-            .map(|rename| rename.input.clone());
-
-        let menu_id = session_id.clone();
-        let menu_running = working;
-        let menu_can_fork = meta.provider.supports_fork();
-        let row_label = tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned();
-        let row = crate::material::accessible_clickable(
-            if is_child { h_flex() } else { v_flex() },
-            gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
-            Role::Button,
-            row_label,
+        let state = self.thread_row_state(
+            meta,
+            sessions,
+            format!("flat-thread-{}", meta.id),
+            working,
             cx,
-        )
-        .aria_selected(is_active)
-        .when(has_direct_children, |row| {
-            row.aria_expanded(!children_collapsed)
-        })
-        .group(row_key.clone())
-        .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
-        .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
-        .px_2()
-        .rounded(px(6.))
-        .cursor_pointer()
-        .when(is_active, |row| row.bg(cx.theme().list_active))
-        .when(!is_active, |row| {
-            row.hover(|row| row.bg(cx.theme().sidebar_accent))
-        })
-        .on_click(cx.listener({
-            let session_id = session_id.clone();
-            move |this, _, _, cx| {
-                let session_id = session_id.clone();
-                toggle_parent_for_row_click(
-                    &mut this.collapsed_parents,
-                    &session_id,
-                    is_active,
-                    has_direct_children,
-                );
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::SelectSession {
-                            session_id: session_id.clone(),
-                        },
-                        cx,
-                    );
-                });
-                cx.notify();
-            }
-        }))
-        .when(waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        })
-        .when(waiting_for_input && !waiting_for_approval, |row| {
-            row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
-                    .build(window, cx)
-            })
-        });
+        );
+        let session_id = state.session_id.clone();
+        let row_key = state.row_key.clone();
+        let waiting_for_approval = state.waiting_for_approval;
+        let waiting_for_input = state.waiting_for_input;
+        let waiting = state.waiting();
+        let is_child = state.is_child;
+        let show_unread = state.show_unread;
+        let direct_children = state.direct_children;
+        let active_direct_children = state.active_direct_children;
+        let has_direct_children = state.has_direct_children();
+        let children_collapsed = state.children_collapsed;
+
+        let row = self
+            .thread_clickable_row(
+                if state.is_child { h_flex() } else { v_flex() },
+                gpui::SharedString::from(format!("flat-thread-row-{session_id}")),
+                meta,
+                &state,
+                is_active,
+                cx,
+            )
+            .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
+            .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
+            .px_2()
+            .rounded(px(6.));
 
         let row = if is_child {
-            let title_or_input = if let Some(input) = renaming {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                    .child(Input::new(&input).small())
-                    .into_any_element()
-            } else {
-                truncated_sidebar_label()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(meta.title.clone())
-                    .into_any_element()
-            };
+            let title_or_input = self.thread_title_or_input(meta, &state, false, cx);
             row.child(
                 h_flex()
                     .w_full()
                     .min_w_0()
                     .items_center()
                     .gap_2()
-                    .when(waiting_for_approval, |line| {
-                        line.child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
-                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().warning)
-                                        .child(tcode_i18n::tr!("sidebar.waiting_approval")),
-                                ),
-                        )
-                    })
-                    .when(waiting_for_input && !waiting_for_approval, |line| {
-                        line.child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
-                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().warning))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().warning)
-                                        .child(tcode_i18n::tr!("sidebar.waiting_input")),
-                                ),
-                        )
-                    })
-                    .when(working && !waiting, |line| {
-                        line.child(
-                            h_flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_1()
-                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().success))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().success)
-                                        .child(tcode_i18n::tr!("sidebar.working")),
-                                ),
-                        )
-                    })
+                    .when_some(
+                        Self::thread_status_badge(&state, working, cx),
+                        |line, badge| line.child(badge),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -1961,21 +1933,7 @@ impl SessionsSidebar {
                     }),
             )
         } else {
-            let title_or_input = if let Some(input) = renaming {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_rename(cx)))
-                    .child(Input::new(&input).small())
-                    .into_any_element()
-            } else {
-                truncated_sidebar_label()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .when(show_unread, |title| title.font_semibold())
-                    .child(meta.title.clone())
-                    .into_any_element()
-            };
+            let title_or_input = self.thread_title_or_input(meta, &state, true, cx);
             let line_one = h_flex()
                 .w_full()
                 .min_w_0()
@@ -2078,43 +2036,7 @@ impl SessionsSidebar {
             row.child(line_one).child(line_two)
         };
 
-        row.context_menu(move |menu, _window, _cx| {
-            let id = menu_id.clone();
-            menu.menu(
-                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
-                Box::new(ThreadRename(id.clone())),
-            )
-            .when(menu_can_fork, |menu| {
-                menu.menu(
-                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
-                    Box::new(ThreadFork(id.clone())),
-                )
-            })
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
-                Box::new(ThreadMarkUnread(id.clone())),
-            )
-            .separator()
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
-                Box::new(ThreadCopyPath(id.clone())),
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
-                Box::new(ThreadCopyId(id.clone())),
-            )
-            .separator()
-            .menu_with_enable(
-                tcode_i18n::tr!("sidebar.archive").into_owned(),
-                Box::new(ThreadArchive(id.clone())),
-                !menu_running,
-            )
-            .menu(
-                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
-                Box::new(ThreadDelete(id.clone())),
-            )
-        })
-        .into_any_element()
+        Self::thread_context_menu(row, session_id, working, state.menu_can_fork)
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {

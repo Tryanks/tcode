@@ -134,17 +134,8 @@ pub struct SessionOptions {
     /// Build (default) vs Plan interaction mode. Codex applies this per turn via
     /// `collaborationMode`; Claude via `--permission-mode plan` / restore.
     pub interaction_mode: InteractionMode,
-    /// The in-process preview MCP server to register with this session, if it
-    /// came up. Each provider injects it at spawn time (Claude: `--mcp-config`;
-    /// Codex: `-c mcp_servers.tcode_preview=…`) so the agent can drive the
-    /// embedded preview browser. `None` = don't register any preview tooling.
-    pub mcp_server: Option<McpRegistration>,
-    /// The tcode orchestrator MCP server, scoped to this parent session by its
-    /// bearer token. Only orchestrate-enabled sessions receive it.
-    pub orchestrate_server: Option<McpRegistration>,
-    /// The process-wide computer-use MCP server. The runtime supplies it only
-    /// when the global computer-use setting is enabled.
-    pub computer_use_server: Option<McpRegistration>,
+    /// Enabled tcode HTTP MCP servers to register with this session.
+    pub mcp_servers: Vec<McpRegistration>,
     /// Per-provider environment (Settings → Providers): extra variables merged
     /// into the child's environment, plus the home-directory override. See
     /// [`LaunchEnv`].

@@ -1556,10 +1556,18 @@ fn gate_required(mode: ApprovalMode) -> bool {
 /// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
     let mut unattached = Vec::new();
-    if opts.orchestrate_server.is_some() {
+    if opts
+        .mcp_servers
+        .iter()
+        .any(|server| server.name == crate::McpRegistration::SERVER_NAME_ORCHESTRATE)
+    {
         unattached.push("orchestration");
     }
-    if opts.computer_use_server.is_some() {
+    if opts
+        .mcp_servers
+        .iter()
+        .any(|server| server.name == crate::McpRegistration::SERVER_NAME_COMPUTER_USE)
+    {
         unattached.push("computer-use");
     }
     unattached

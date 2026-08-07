@@ -11,7 +11,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    popover::Popover,
     switch::Switch,
     v_flex,
 };
@@ -586,10 +585,7 @@ impl OrchestrateSettingsPanel {
                     ),
             );
         let panel = cx.entity();
-        let dropdown = Popover::new("orchestrate-child-approval-popover")
-            // Single panel surface at the 14px overlay radius; content transparent.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        let dropdown = crate::material::overlay_popover("orchestrate-child-approval-popover")
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let option = |mode: ChildApprovalMode,
@@ -655,7 +651,7 @@ impl OrchestrateSettingsPanel {
                     ))
             });
 
-        self.group(cx)
+        crate::material::group(cx)
             .child(
                 h_flex()
                     .w_full()
@@ -717,34 +713,6 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    /// One grouped-list container: a floating card in chat's composer-console
-    /// idiom — popover fill, a hairline border, card-radius corners and a soft
-    /// shadow (docs/visual-redesign.md §5.5, 2026-07 revision). Shared with the
-    /// General/Providers surfaces via `material::floating_card`.
-    fn group(&self, cx: &Context<Self>) -> gpui::Div {
-        crate::material::floating_card(v_flex().w_full(), cx).overflow_hidden()
-    }
-
-    /// Assemble rows into a group, split by faint inset hairlines (indented past
-    /// the row's left padding, dropped to 60%, never after the last row) — these
-    /// are dense editable rows that need a visible boundary.
-    fn grouped(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
-        let mut group = self.group(cx);
-        let last = rows.len().saturating_sub(1);
-        for (index, row) in rows.into_iter().enumerate() {
-            group = group.child(row);
-            if index != last {
-                group = group.child(
-                    div()
-                        .w_full()
-                        .pl_3()
-                        .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
-                );
-            }
-        }
-        group
-    }
-
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
         let section = v_flex()
             .w_full()
@@ -758,7 +726,7 @@ impl OrchestrateSettingsPanel {
             // Generic identity: a single-row group holding the header, help and
             // its text area — no slab fill.
             .child(
-                self.group(cx).child(
+                crate::material::group(cx).child(
                     v_flex()
                         .w_full()
                         .gap_1p5()
@@ -806,7 +774,7 @@ impl OrchestrateSettingsPanel {
         if self.identity_rows.is_empty() {
             return section
                 .child(
-                    self.group(cx).child(
+                    crate::material::group(cx).child(
                         div()
                             .w_full()
                             .px_3()
@@ -887,7 +855,9 @@ impl OrchestrateSettingsPanel {
                     .into_any_element(),
             );
         }
-        section.child(self.grouped(rows, cx)).into_any_element()
+        section
+            .child(crate::material::grouped(rows, cx))
+            .into_any_element()
     }
 
     fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1047,7 +1017,9 @@ impl OrchestrateSettingsPanel {
                     .into_any_element(),
             );
         }
-        section.child(self.grouped(rows, cx)).into_any_element()
+        section
+            .child(crate::material::grouped(rows, cx))
+            .into_any_element()
     }
 }
 

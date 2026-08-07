@@ -17,9 +17,7 @@ use gpui_component::{
 };
 use serde::Deserialize;
 
-use super::{
-    link_target::LinkTarget, state::MarkdownState, style::TextViewStyle, window_selection,
-};
+use super::{link_target::LinkTarget, state::MarkdownState, window_selection};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_markdown_link, no_json)]
@@ -51,7 +49,6 @@ struct CopyRelativePath(String);
 pub struct MarkdownView {
     id: ElementId,
     state: Entity<MarkdownState>,
-    text_view_style: TextViewStyle,
     style: StyleRefinement,
     selectable: Option<bool>,
     base_dir: Option<PathBuf>,
@@ -63,17 +60,10 @@ impl MarkdownView {
         Self {
             id: ElementId::Name(state.entity_id().to_string().into()),
             state: state.clone(),
-            text_view_style: TextViewStyle::default(),
             style: StyleRefinement::default(),
             selectable: None,
             base_dir: None,
         }
-    }
-
-    /// Set the Markdown presentation style.
-    pub fn style(mut self, style: TextViewStyle) -> Self {
-        self.text_view_style = style;
-        self
     }
 
     /// Set whether text participates in window-level selection.
@@ -124,7 +114,6 @@ impl Element for MarkdownView {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.clone();
         state.update(cx, |state, cx| {
-            state.style = self.text_view_style.clone();
             if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
             }

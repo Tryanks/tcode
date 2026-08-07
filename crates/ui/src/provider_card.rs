@@ -14,7 +14,6 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    popover::Popover,
     switch::Switch,
     v_flex,
 };
@@ -317,10 +316,7 @@ impl ProviderCard {
         let command = self.store.read(cx).provider_update_command(provider, cx);
         let store = self.store.clone();
 
-        Popover::new("update-popover")
-            // Single panel surface at the 14px overlay radius; content transparent.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("update-popover")
             .trigger(
                 Button::new("update-available")
                     .ghost()

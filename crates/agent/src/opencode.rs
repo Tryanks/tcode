@@ -74,21 +74,13 @@ async fn run_actor(
     events: Sender<AgentEvent>,
     ready: Sender<Result<(), AgentError>>,
 ) {
-    let registrations: Vec<_> = [
-        opts.mcp_server.as_ref(),
-        opts.orchestrate_server.as_ref(),
-        opts.computer_use_server.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
     let mut server = match OpenCodeServer::spawn(
         opts.binary_path.as_deref(),
         &opts.cwd,
         &opts.launch_env,
         opts.approval_mode,
         &opts.extra_args,
-        &registrations,
+        &opts.mcp_servers.iter().collect::<Vec<_>>(),
     ) {
         Ok(server) => server,
         Err(err) => {

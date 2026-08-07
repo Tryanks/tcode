@@ -150,11 +150,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
     // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
     // headers inside the merged `--mcp-config` JSON.
-    for arg in mcp_args(
-        opts.mcp_server.as_ref(),
-        opts.orchestrate_server.as_ref(),
-        opts.computer_use_server.as_ref(),
-    ) {
+    for arg in mcp_args(&opts.mcp_servers) {
         cmd.arg(arg);
     }
     // Settings → Providers "Launch arguments", appended last so the user can
@@ -290,15 +286,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
 }
 
-fn mcp_args(
-    preview: Option<&crate::McpRegistration>,
-    orchestrate: Option<&crate::McpRegistration>,
-    computer_use: Option<&crate::McpRegistration>,
-) -> Vec<String> {
-    let registrations: Vec<_> = [preview, orchestrate, computer_use]
-        .into_iter()
-        .flatten()
-        .collect();
+fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
     if registrations.is_empty() {
         Vec::new()
     } else {
@@ -3092,16 +3080,14 @@ mod tests {
             url: "http://c".into(),
             bearer_token: "c".into(),
         };
-        assert!(mcp_args(None, None, None).is_empty());
-        let one = mcp_args(Some(&preview), None, None);
+        assert!(mcp_args(&[]).is_empty());
+        let one = mcp_args(std::slice::from_ref(&preview));
         assert_eq!(one[0], "--mcp-config");
         let one_json: Value = serde_json::from_str(&one[1]).unwrap();
         assert!(one_json["mcpServers"].get("tcode_preview").is_some());
         assert!(one_json["mcpServers"].get("tcode_orchestrate").is_none());
-        let all_json: Value = serde_json::from_str(
-            &mcp_args(Some(&preview), Some(&orchestrate), Some(&computer_use))[1],
-        )
-        .unwrap();
+        let all_json: Value =
+            serde_json::from_str(&mcp_args(&[preview, orchestrate, computer_use])[1]).unwrap();
         assert!(all_json["mcpServers"].get("tcode_preview").is_some());
         assert!(all_json["mcpServers"].get("tcode_orchestrate").is_some());
         assert!(all_json["mcpServers"].get("tcode_computer_use").is_some());
