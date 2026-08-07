@@ -17,6 +17,7 @@ mod subagent_tail;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use smol::channel::{Receiver, Sender};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -412,6 +413,20 @@ pub struct OptionSelection {
     pub value: serde_json::Value,
 } // string or bool
 
+fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
+        .and_then(|selection| selection.value.as_str().map(str::to_owned))
+}
+
+fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
+    selections
+        .iter()
+        .find(|selection| selection.id == id)
+        .and_then(|selection| selection.value.as_bool())
+}
+
 /// A structured question the agent asks the user (Claude `AskUserQuestion`,
 /// Codex `item/tool/requestUserInput`). Rendered as a multiple-choice (or
 /// free-text) prompt; answers ride back through [`SessionCommand::RespondUserInput`].
@@ -534,16 +549,40 @@ pub enum ApprovalMode {
     FullAccess,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum AgentError {
-    #[error("failed to spawn provider process: {0}")]
     Spawn(String),
-    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("provider reported error: {0}")]
     Provider(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(message) => {
+                write!(formatter, "failed to spawn provider process: {message}")
+            }
+            Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
+            Self::Provider(message) => write!(formatter, "provider reported error: {message}"),
+            Self::Io(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for AgentError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 /// Commands the UI sends into a live session's actor loop.
@@ -618,8 +657,61 @@ pub enum SessionCommand {
 /// Dropping both channels (or sending `Shutdown`) tears the child process down.
 pub struct SessionHandle {
     pub provider: ProviderKind,
-    pub commands: async_channel::Sender<SessionCommand>,
-    pub events: async_channel::Receiver<AgentEvent>,
+    pub commands: Sender<SessionCommand>,
+    pub events: Receiver<AgentEvent>,
+}
+
+async fn spawn_session<F, Fut>(
+    provider: ProviderKind,
+    opts: SessionOptions,
+    actor: F,
+    exited_message: &'static str,
+) -> Result<SessionHandle, AgentError>
+where
+    F: FnOnce(
+        SessionOptions,
+        Receiver<SessionCommand>,
+        Sender<AgentEvent>,
+        Sender<Result<(), AgentError>>,
+    ) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (commands, command_rx) = smol::channel::unbounded();
+    let (event_tx, events) = smol::channel::unbounded();
+    let (ready_tx, ready) = smol::channel::bounded(1);
+    smol::spawn(actor(opts, command_rx, event_tx, ready_tx)).detach();
+    ready
+        .recv()
+        .await
+        .map_err(|_| AgentError::Protocol(exited_message.into()))??;
+    Ok(SessionHandle {
+        provider,
+        commands,
+        events,
+    })
+}
+
+async fn blocking_result<T, F>(
+    thread_name: &str,
+    spawn_error: &'static str,
+    missing_result: &'static str,
+    work: F,
+) -> Result<T, AgentError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, AgentError> + Send + 'static,
+{
+    let (sender, receiver) = smol::channel::bounded(1);
+    std::thread::Builder::new()
+        .name(thread_name.into())
+        .spawn(move || {
+            let _ = sender.send_blocking(work());
+        })
+        .map_err(|error| AgentError::Spawn(format!("{spawn_error}: {error}")))?;
+    receiver
+        .recv()
+        .await
+        .map_err(|_| AgentError::Protocol(missing_result.into()))?
 }
 
 /// Start a new (or resumed) session with the given provider.
@@ -1145,7 +1237,7 @@ pub enum ApprovalDecision {
     Option(String),
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
@@ -1162,6 +1254,44 @@ pub struct TokenUsage {
     pub cost_usd: Option<f64>,
     /// Provider-reported turn duration, in milliseconds.
     pub duration_ms: Option<u64>,
+}
+
+impl TokenUsage {
+    fn merge(&mut self, usage: Self) {
+        self.input_tokens = add_token_counts(self.input_tokens, usage.input_tokens);
+        self.cached_input_tokens =
+            add_token_counts(self.cached_input_tokens, usage.cached_input_tokens);
+        self.output_tokens = add_token_counts(self.output_tokens, usage.output_tokens);
+        self.used_tokens = add_token_counts(self.used_tokens, usage.used_tokens);
+        self.context_window = match (self.context_window, usage.context_window) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (left, right) => left.or(right),
+        };
+        self.total_processed_tokens = usage.total_processed_tokens;
+        self.cost_usd = match (self.cost_usd, usage.cost_usd) {
+            (None, None) => None,
+            (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
+        };
+        self.duration_ms = match (self.duration_ms, usage.duration_ms) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (left, right) => left.or(right),
+        };
+    }
+}
+
+fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
+    }
+}
+
+fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
+    })
 }
 
 #[cfg(test)]

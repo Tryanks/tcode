@@ -24,11 +24,11 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use agent_client_protocol::{self as sdk, schema::ProtocolVersion, schema::v1 as acp};
-use async_channel::{Receiver, Sender};
-use futures_lite::{
-    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, StreamExt as _, future,
-};
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
+use smol::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
+use smol::prelude::*;
 
 use crate::{
     AcpAgent, AcpLaunch, AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode,
@@ -67,9 +67,9 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             "session fork is not supported for this provider".into(),
         ));
     }
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
+    let (commands_tx, commands_rx) = smol::channel::unbounded();
+    let (events_tx, events_rx) = smol::channel::unbounded();
+    let (ready_tx, ready_rx) = smol::channel::bounded(1);
 
     // Keep each ACP connection and all of its callbacks on one dedicated
     // executor thread. The 1.2 SDK requires Send handlers internally, but the
@@ -79,7 +79,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .spawn(move || {
             let executor = Rc::new(smol::LocalExecutor::new());
             let task = run_actor(executor.clone(), opts, commands_rx, events_tx, ready_tx);
-            futures_lite::future::block_on(executor.run(task));
+            smol::block_on(executor.run(task));
         })
         .map_err(|err| {
             AgentError::Spawn(format!("could not start the ACP session thread: {err}"))
@@ -325,19 +325,15 @@ async fn run_actor(
 
     // The agent's stderr is its log channel: keep the tail so a startup failure
     // can be reported in the agent's own words.
-    let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_tail = crate::process::StderrTail::default();
     executor
         .spawn({
             let tail = stderr_tail.clone();
             let id = agent.id.clone();
             async move {
-                let mut lines = futures_lite::io::BufReader::new(stderr).lines();
+                let mut lines = smol::io::BufReader::new(stderr).lines();
                 while let Some(Ok(line)) = lines.next().await {
                     log::debug!("acp[{id}] stderr: {line}");
-                    let mut tail = tail.lock().unwrap();
-                    if tail.len() == 20 {
-                        tail.remove(0);
-                    }
                     tail.push(line);
                 }
             }
@@ -350,7 +346,7 @@ async fn run_actor(
         state: state.clone(),
         cwd: opts.cwd.clone(),
     };
-    let (io_done_tx, io_done) = async_channel::bounded::<String>(1);
+    let (io_done_tx, io_done) = smol::channel::bounded::<String>(1);
     let pending_deliveries = Arc::new(Mutex::new(VecDeque::new()));
     let transport = sdk::ByteStreams::new(
         ObservedWriter::new(stdin, pending_deliveries.clone(), events.clone()),
@@ -507,13 +503,8 @@ async fn run_actor(
 
     if !session_started.load(Ordering::Acquire) {
         if let Err(err) = connection_result {
-            let tail = stderr_tail.lock().unwrap().join("\n");
             let message = format!("ACP transport error: {}", describe(&err));
-            let message = if tail.trim().is_empty() {
-                message
-            } else {
-                format!("{message}\n{tail}")
-            };
+            let message = stderr_tail.append_to(message, "\n");
             let _ = ready.send(Err(AgentError::Protocol(message))).await;
         }
         return;
@@ -523,14 +514,7 @@ async fn run_actor(
         Ok(reason) => reason,
         Err(err) => Some(format!("ACP transport error: {}", describe(&err))),
     };
-    let close_reason = close_reason.map(|reason| {
-        let tail = stderr_tail.lock().unwrap().join("\n");
-        if tail.trim().is_empty() {
-            reason
-        } else {
-            format!("{reason}\nstderr:\n{tail}")
-        }
-    });
+    let close_reason = close_reason.map(|reason| stderr_tail.append_to(reason, "\nstderr:\n"));
     let _ = events
         .send(AgentEvent::SessionClosed {
             reason: close_reason,
@@ -548,7 +532,7 @@ async fn connected_actor(
     events: &Sender<AgentEvent>,
     ready: &Sender<Result<(), AgentError>>,
     state: &Arc<Mutex<State>>,
-    stderr_tail: &Arc<Mutex<Vec<String>>>,
+    stderr_tail: &crate::process::StderrTail,
     io_done: &Receiver<String>,
     session_started: &AtomicBool,
     pending_deliveries: &Arc<Mutex<VecDeque<u64>>>,
@@ -573,23 +557,17 @@ async fn connected_actor(
     let session = match startup {
         Startup::Handshake(Ok(session)) => session,
         Startup::Handshake(Err(err)) => {
-            let tail = stderr_tail.lock().unwrap().join("\n");
-            let err = match (&err, tail.trim().is_empty()) {
-                (AgentError::Protocol(message), false) => {
-                    AgentError::Protocol(format!("{message}\n{tail}"))
+            let err = match err {
+                AgentError::Protocol(message) => {
+                    AgentError::Protocol(stderr_tail.append_to(message, "\n"))
                 }
-                _ => err,
+                other => other,
             };
             let _ = ready.send(Err(err)).await;
             return Ok(None);
         }
         Startup::Io(reason) => {
-            let tail = stderr_tail.lock().unwrap().join("\n");
-            let message = if tail.trim().is_empty() {
-                reason
-            } else {
-                format!("{reason}\n{tail}")
-            };
+            let message = stderr_tail.append_to(reason, "\n");
             let _ = ready.send(Err(AgentError::Protocol(message))).await;
             return Ok(None);
         }
@@ -611,13 +589,13 @@ async fn connected_actor(
     }
     session_started.store(true, Ordering::Release);
 
-    let (turn_tx, turn_done) = async_channel::unbounded::<TurnOutcome>();
+    let (turn_tx, turn_done) = smol::channel::unbounded::<TurnOutcome>();
     let mut turn_id: Option<String> = None;
     let mut turn_seq: u64 = 0;
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
             Turn(TurnOutcome),
             Io(String),
         }
@@ -2381,7 +2359,7 @@ impl AcpClient {
             )
         };
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);
-        let (responder, decided) = async_channel::bounded(1);
+        let (responder, decided) = smol::channel::bounded(1);
         {
             let mut state = self.state.lock().unwrap();
             state.approvals.insert(request_id.clone(), responder);
@@ -2588,7 +2566,7 @@ impl Terminal {
             .map_err(|err| acp::Error::new(-32603, format!("could not run `{command}`: {err}")))?;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let (done_tx, done) = async_channel::bounded::<()>(1);
+        let (done_tx, done) = smol::channel::bounded::<()>(1);
 
         let terminal = Arc::new(Terminal {
             child: Mutex::new(child),
@@ -2599,7 +2577,7 @@ impl Terminal {
         });
 
         // stdout and stderr interleave into one buffer, as they do in a terminal.
-        let streams: [Box<dyn futures_lite::AsyncRead + Unpin + Send>; 2] =
+        let streams: [Box<dyn smol::io::AsyncRead + Unpin + Send>; 2] =
             [Box::new(stdout), Box::new(stderr)];
         for stream in streams {
             connection.spawn({
@@ -2712,7 +2690,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .ingest_modes(Some(&modes("build", &["build", "plan"])));
-            let (events, _) = async_channel::unbounded();
+            let (events, _) = smol::channel::unbounded();
             let requested = Arc::new(Mutex::new(Vec::new()));
 
             apply_interaction_mode(InteractionMode::Plan, &state, &events, {
@@ -2736,7 +2714,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .ingest_modes(Some(&modes("review", &["review", "build", "plan"])));
-            let (events, _) = async_channel::unbounded();
+            let (events, _) = smol::channel::unbounded();
             let requested = Arc::new(Mutex::new(Vec::new()));
 
             apply_interaction_mode(InteractionMode::Plan, &state, &events, {
@@ -2768,7 +2746,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .ingest_modes(Some(&modes("build", &["build", "review"])));
-            let (events, received) = async_channel::unbounded();
+            let (events, received) = smol::channel::unbounded();
             let requested = Arc::new(Mutex::new(Vec::new()));
 
             apply_interaction_mode(InteractionMode::Plan, &state, &events, {
@@ -2792,11 +2770,11 @@ mod tests {
     #[test]
     fn prompt_acceptance_follows_the_complete_stdio_write() {
         smol::block_on(async {
-            use futures_lite::AsyncWriteExt as _;
+            use smol::prelude::*;
 
             let pending = Arc::new(Mutex::new(VecDeque::from([41])));
-            let (events, received) = async_channel::unbounded();
-            let inner = futures_lite::io::Cursor::new(Vec::new());
+            let (events, received) = smol::channel::unbounded();
+            let inner = smol::io::Cursor::new(Vec::new());
             let mut writer = ObservedWriter::new(inner, pending.clone(), events);
 
             writer

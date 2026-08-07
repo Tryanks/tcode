@@ -1,9 +1,4 @@
-//! UI-agnostic terminal transport and emulation.
-//!
-//! [`PtyHandle`] is the host half and owns only process/PTY concerns.
-//! [`GridEmulator`] is the client half and owns only terminal emulation.
-//! [`Terminal`] composes both halves over the same raw-byte boundary used by a
-//! remote transport.
+//! UI-agnostic terminal process management and emulation.
 
 use std::{
     io,
@@ -17,9 +12,10 @@ pub mod mappings;
 mod pty;
 mod pty_info;
 
-pub use grid_emulator::{GridEmulator, GridEvent};
 pub use hyperlinks::HyperlinkMatch;
-pub use pty::{PtyEvent, PtyHandle, derive_command_label};
+
+use grid_emulator::{GridEmulator, GridEvent};
+use pty::{PtyEvent, PtyHandle};
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
@@ -157,12 +153,6 @@ pub enum SelectionSide {
     Right,
 }
 
-/// Local compatibility composition of a host [`PtyHandle`] and client
-/// [`GridEmulator`].
-///
-/// The two halves communicate only through `PtyEvent::Output` bytes and
-/// `GridEvent::Input` bytes. Replacing those two local forwarding threads with
-/// a protocol transport requires no change to either half.
 pub struct Terminal {
     pty: PtyHandle,
     emulator: GridEmulator,
@@ -196,8 +186,7 @@ impl Terminal {
         Self::from_parts(pty, emulator)
     }
 
-    /// Wire an independently-created host PTY and client grid together locally.
-    pub fn from_parts(pty: PtyHandle, emulator: GridEmulator) -> io::Result<Self> {
+    fn from_parts(pty: PtyHandle, emulator: GridEmulator) -> io::Result<Self> {
         emulator.set_fallback_title(pty.label());
         if pty.exited() {
             emulator.set_exited(pty.exit_code());
@@ -255,16 +244,6 @@ impl Terminal {
             notifications,
             events,
         })
-    }
-
-    /// Access the separable host half.
-    pub fn pty(&self) -> &PtyHandle {
-        &self.pty
-    }
-
-    /// Access the separable client half.
-    pub fn emulator(&self) -> &GridEmulator {
-        &self.emulator
     }
 
     pub fn shell_name(&self) -> &str {
@@ -329,20 +308,12 @@ impl Terminal {
         self.emulator.select(start, end);
     }
 
-    pub fn select_kind(&self, start: (usize, usize), end: (usize, usize), kind: SelectionKind) {
-        self.emulator.select_kind(start, end, kind);
-    }
-
     pub fn start_selection(&self, kind: SelectionKind, point: (usize, usize), side: SelectionSide) {
         self.emulator.start_selection(kind, point, side);
     }
 
     pub fn update_selection(&self, point: (usize, usize), side: SelectionSide) {
         self.emulator.update_selection(point, side);
-    }
-
-    pub fn extend_selection(&self, end: (usize, usize)) {
-        self.emulator.extend_selection(end);
     }
 
     pub fn clear_selection(&self) {
@@ -461,15 +432,6 @@ mod tests {
     fn shell_label_is_the_file_stem() {
         assert_eq!(shell_label("/bin/zsh"), "zsh");
         assert_eq!(shell_label(r"C:\Windows\system32\cmd.exe"), "cmd");
-    }
-
-    #[test]
-    fn derives_command_label_from_argv0() {
-        assert_eq!(
-            derive_command_label("  /usr/bin/cargo test --workspace"),
-            Some("cargo".into())
-        );
-        assert_eq!(derive_command_label("   "), None);
     }
 
     #[test]
@@ -622,7 +584,7 @@ mod tests {
             .lines()
             .position(|line| line.contains("beta"))
             .unwrap();
-        terminal.select_kind((alpha_row, 0), (beta_row, 3), SelectionKind::Simple);
+        terminal.select((alpha_row, 0), (beta_row, 3));
         let selected = terminal.selected_text().unwrap();
         assert_eq!(selected.text, "alpha\nbeta");
         assert_eq!(selected.line_end, selected.line_start + 1);
@@ -771,7 +733,7 @@ mod tests {
         assert!(state.cells[first + 1].wide_spacer);
         assert_eq!(state.cells[first + 4].text, "e\u{301}");
 
-        terminal.select_kind((row, column + 1), (row, column + 3), SelectionKind::Simple);
+        terminal.select((row, column + 1), (row, column + 3));
         assert_eq!(terminal.selected_text().unwrap().text, "中文");
         let selected = terminal.snapshot();
         assert!(selected.cells[first].selected);

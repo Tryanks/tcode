@@ -77,12 +77,7 @@ pub enum ProviderSummaryDetail {
     None,
     Message(String),
     Diagnostic(ProviderProbeDiagnostic),
-    Checking,
-    Disabled,
-    NotFound,
-    NeedsAttention,
-    Unavailable,
-    Available,
+    Fallback,
 }
 
 pub fn derive_summary(snapshot: Option<&ProviderSnapshot>, enabled: bool) -> ProviderSummary {
@@ -90,7 +85,7 @@ pub fn derive_summary(snapshot: Option<&ProviderSnapshot>, enabled: bool) -> Pro
         return ProviderSummary {
             dot: StatusDot::Warning,
             headline: ProviderSummaryHeadline::Checking,
-            detail: ProviderSummaryDetail::Checking,
+            detail: ProviderSummaryDetail::Fallback,
         };
     };
     let message = snapshot
@@ -111,21 +106,21 @@ pub fn derive_summary(snapshot: Option<&ProviderSnapshot>, enabled: bool) -> Pro
         return ProviderSummary {
             dot: StatusDot::Warning,
             headline: ProviderSummaryHeadline::Checking,
-            detail: ProviderSummaryDetail::Checking,
+            detail: ProviderSummaryDetail::Fallback,
         };
     };
     if !enabled {
         return ProviderSummary {
             dot: StatusDot::Amber,
             headline: ProviderSummaryHeadline::Disabled,
-            detail: detail_or(ProviderSummaryDetail::Disabled),
+            detail: detail_or(ProviderSummaryDetail::Fallback),
         };
     }
     if !snapshot.installed {
         return ProviderSummary {
             dot: StatusDot::Error,
             headline: ProviderSummaryHeadline::NotFound,
-            detail: detail_or(ProviderSummaryDetail::NotFound),
+            detail: detail_or(ProviderSummaryDetail::Fallback),
         };
     }
 
@@ -157,17 +152,17 @@ pub fn derive_summary(snapshot: Option<&ProviderSnapshot>, enabled: bool) -> Pro
             ProviderStatusKind::Warning => ProviderSummary {
                 dot,
                 headline: ProviderSummaryHeadline::NeedsAttention,
-                detail: detail_or(ProviderSummaryDetail::NeedsAttention),
+                detail: detail_or(ProviderSummaryDetail::Fallback),
             },
             ProviderStatusKind::Error => ProviderSummary {
                 dot,
                 headline: ProviderSummaryHeadline::Unavailable,
-                detail: detail_or(ProviderSummaryDetail::Unavailable),
+                detail: detail_or(ProviderSummaryDetail::Fallback),
             },
             ProviderStatusKind::Ready => ProviderSummary {
                 dot,
                 headline: ProviderSummaryHeadline::Available,
-                detail: detail_or(ProviderSummaryDetail::Available),
+                detail: detail_or(ProviderSummaryDetail::Fallback),
             },
         },
     }
@@ -192,7 +187,7 @@ mod tests {
             ProviderSummary {
                 dot: StatusDot::Warning,
                 headline: ProviderSummaryHeadline::Checking,
-                detail: ProviderSummaryDetail::Checking,
+                detail: ProviderSummaryDetail::Fallback,
             }
         );
         assert_eq!(
@@ -200,7 +195,7 @@ mod tests {
             ProviderSummary {
                 dot: StatusDot::Amber,
                 headline: ProviderSummaryHeadline::Disabled,
-                detail: ProviderSummaryDetail::Disabled,
+                detail: ProviderSummaryDetail::Fallback,
             }
         );
         let missing = ProviderSnapshot {
@@ -266,19 +261,19 @@ mod tests {
             (
                 ProviderStatusKind::Warning,
                 ProviderSummaryHeadline::NeedsAttention,
-                ProviderSummaryDetail::NeedsAttention,
+                ProviderSummaryDetail::Fallback,
                 StatusDot::Warning,
             ),
             (
                 ProviderStatusKind::Error,
                 ProviderSummaryHeadline::Unavailable,
-                ProviderSummaryDetail::Unavailable,
+                ProviderSummaryDetail::Fallback,
                 StatusDot::Error,
             ),
             (
                 ProviderStatusKind::Ready,
                 ProviderSummaryHeadline::Available,
-                ProviderSummaryDetail::Available,
+                ProviderSummaryDetail::Fallback,
                 StatusDot::Success,
             ),
         ] {
@@ -353,7 +348,7 @@ mod tests {
         };
         assert_eq!(
             derive_summary(Some(&blank), true).detail,
-            ProviderSummaryDetail::Available
+            ProviderSummaryDetail::Fallback
         );
     }
 
@@ -402,7 +397,7 @@ mod tests {
         };
         assert_eq!(
             derive_summary(Some(&placeholder), true).detail,
-            ProviderSummaryDetail::Checking
+            ProviderSummaryDetail::Fallback
         );
     }
 }

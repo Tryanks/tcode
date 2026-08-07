@@ -80,23 +80,6 @@ impl UiNode {
         }
         self.children.iter().find_map(|child| child.find(ref_id))
     }
-
-    pub fn find_mut(&mut self, ref_id: &str) -> Option<&mut Self> {
-        if self.ref_id == ref_id {
-            return Some(self);
-        }
-        self.children
-            .iter_mut()
-            .find_map(|child| child.find_mut(ref_id))
-    }
-
-    pub fn at_path(&self, path: &[usize]) -> Option<&Self> {
-        let mut node = self;
-        for &index in path {
-            node = node.children.get(index)?;
-        }
-        Some(node)
-    }
 }
 
 pub fn is_interactive_role(role: &str) -> bool {

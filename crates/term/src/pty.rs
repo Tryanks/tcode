@@ -41,7 +41,7 @@ thread_local! {
 /// metadata and exit status are separate data events so they can cross the same
 /// transport boundary without exposing platform process or PTY types.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PtyEvent {
+pub(crate) enum PtyEvent {
     Output(Vec<u8>),
     ProcessInfoChanged {
         name: String,
@@ -65,7 +65,7 @@ struct Shared {
 ///
 /// This type owns process lifecycle and byte I/O only. It has no terminal-grid
 /// state and its public API contains no Alacritty grid or parser types.
-pub struct PtyHandle {
+pub(crate) struct PtyHandle {
     sender: PtyCommandSender,
     notifications: async_channel::Sender<PtyEvent>,
     events: async_channel::Receiver<PtyEvent>,
@@ -230,11 +230,6 @@ impl PtyHandle {
 
     pub fn exit_code(&self) -> Option<i32> {
         self.shared.lock().unwrap().exit_code
-    }
-
-    /// Write user input bytes to the child.
-    pub fn write_input(&self, bytes: impl Into<Vec<u8>>) -> io::Result<()> {
-        self.write_input_inner(bytes.into()).map(|_| ())
     }
 
     pub(crate) fn write_input_inner(&self, bytes: Vec<u8>) -> io::Result<bool> {
@@ -599,7 +594,7 @@ fn schedule_process_refresh(
 }
 
 /// Derive the compact tab label used after a command is submitted.
-pub fn derive_command_label(command: &str) -> Option<String> {
+fn derive_command_label(command: &str) -> Option<String> {
     let first = command.split_whitespace().next()?;
     let first = first.rsplit('/').next().unwrap_or(first);
     (!first.is_empty()).then(|| first.to_string())

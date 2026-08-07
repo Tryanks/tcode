@@ -99,7 +99,7 @@ pub struct NpxDistribution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryDistribution {
-    /// Download URL: a `.tar.gz` / `.tar.bz2` / `.zip`, or a bare executable.
+    /// Download URL: a `.tar.gz` / `.zip`, or a bare executable.
     pub archive: String,
     /// The command inside the extracted tree (`./bin/agent`), or `node`.
     pub cmd: String,
@@ -291,7 +291,7 @@ pub fn install_dir(data_dir: &Path, id: &str, version: &str) -> PathBuf {
 /// Install `agent` for this platform, reporting progress in bytes.
 ///
 /// npx recipes install nothing (npm resolves the package on first launch);
-/// binary recipes are downloaded, hashed, extracted, and made executable.
+/// binary recipes are downloaded, extracted, and made executable.
 /// Blocking — call it from `smol::unblock`.
 pub fn install(
     agent: &RegistryAgent,
@@ -306,8 +306,8 @@ pub fn install(
         ))
     })?;
 
-    let (launch, archive_sha256) = match recipe {
-        Recipe::Npx { package, args, env } => (AcpLaunch::Npx { package, args, env }, None),
+    let launch = match recipe {
+        Recipe::Npx { package, args, env } => AcpLaunch::Npx { package, args, env },
         Recipe::Binary(binary) => {
             let dir = install_dir(data_dir, &agent.id, &agent.version);
             // A fresh install every time: a half-extracted tree from a failed
@@ -315,10 +315,9 @@ pub fn install(
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)?;
             let bytes = download(&binary.archive, &mut progress)?;
-            let sha = sha256(&bytes);
             extract(&binary.archive, &bytes, &dir)?;
             let command = resolve_cmd(&dir, &binary.cmd)?;
-            let launch = match command {
+            match command {
                 Command::Path(path) => AcpLaunch::Binary {
                     command: path,
                     args: binary.args.clone(),
@@ -330,8 +329,7 @@ pub fn install(
                     args: binary.args.clone(),
                     env: pairs(&binary.env),
                 },
-            };
-            (launch, Some(sha))
+            }
         }
     };
 
@@ -341,7 +339,6 @@ pub fn install(
         version: agent.version.clone(),
         icon: agent.icon.clone(),
         launch,
-        archive_sha256,
         enabled: true,
         env: Vec::new(),
         launch_args: None,
@@ -384,20 +381,6 @@ fn download(
     Ok(bytes)
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    use sha2::{Digest as _, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    hex
-}
-
 /// Unpack an archive into `dir`, by the URL's extension. A URL that is not an
 /// archive at all (some agents publish a bare executable) is written as the
 /// binary itself.
@@ -417,8 +400,9 @@ fn extract(url: &str, bytes: &[u8], dir: &Path) -> Result<(), RegistryError> {
         let decoder = flate2::read::GzDecoder::new(bytes);
         tar::Archive::new(decoder).unpack(dir).map_err(unpack)?;
     } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
-        let decoder = bzip2::read::BzDecoder::new(bytes);
-        tar::Archive::new(decoder).unpack(dir).map_err(unpack)?;
+        return Err(RegistryError::Install(format!(
+            "unsupported archive format for {name}: bzip2-compressed tar archives are not supported"
+        )));
     } else if lower.ends_with(".tar") {
         tar::Archive::new(bytes).unpack(dir).map_err(unpack)?;
     } else if lower.ends_with(".zip") {
@@ -539,7 +523,7 @@ mod tests {
           "distribution": {
             "binary": {
               "darwin-aarch64": {
-                "archive": "https://example.test/goose-aarch64-apple-darwin.tar.bz2",
+                "archive": "https://example.test/goose-aarch64-apple-darwin.tar.gz",
                 "cmd": "./goose", "args": ["acp"], "env": { "GOOSE_ACP": "1" }
               },
               "linux-x86_64": {
@@ -588,7 +572,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let installed = install(&agent, &dir, |_, _| {}).expect("install must succeed");
         assert_eq!(installed.id, agent.id);
-        assert_eq!(installed.archive_sha256.as_ref().map(String::len), Some(64));
         match &installed.launch {
             AcpLaunch::Binary { command, .. } => {
                 assert!(command.exists(), "{} was not extracted", command.display());
@@ -764,7 +747,6 @@ mod tests {
             }
             other => panic!("expected the extracted binary, got {:?}", other.is_err()),
         }
-        assert_eq!(sha256(&bytes).len(), 64);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -803,7 +785,6 @@ mod tests {
                 args: Vec::new(),
                 env: Vec::new(),
             },
-            archive_sha256: None,
             enabled: true,
             env: Vec::new(),
             launch_args: Some("  --debug   --yolo ".into()),

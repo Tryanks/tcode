@@ -131,7 +131,7 @@ fn main() {
                 let recv = handle.events.recv();
                 let timeout = async {
                     smol::Timer::after(PHANTOM_TURN_GRACE).await;
-                    Err(async_channel::RecvError)
+                    Err(smol::channel::RecvError)
                 };
                 smol::future::or(recv, timeout).await.ok()
             };

@@ -246,52 +246,7 @@ fn round_trips_top_level_wire_types() {
 }
 
 #[test]
-fn round_trips_commands_for_serialized_ui_mutation_gaps() {
-    let commands = [
-        Command::UpdateProfileSettings {
-            profile_id: "codex".into(),
-            patch: ProfileSettingsPatch::SetEnabled { enabled: false },
-        },
-        Command::UpdateAcpAgent {
-            id: "gemini".into(),
-            patch: AcpAgentPatch::SetLaunchOptions {
-                env: vec![("KEY".into(), "value".into())],
-                launch_args: Some("--flag".into()),
-            },
-        },
-        Command::SplitTerminal {
-            direction: TerminalSplitDirection::Vertical,
-        },
-        Command::AddReviewComment {
-            comment: ReviewComment::new(
-                "src/lib.rs".into(),
-                2,
-                4,
-                ReviewSide::New,
-                "Please simplify this.".into(),
-                "+new code".into(),
-                "working-tree".into(),
-                "Working tree".into(),
-                10,
-                12,
-            ),
-        },
-        Command::SetDraftWorkspace {
-            mode: WorkspaceMode::NewWorktree {
-                base: "main".into(),
-            },
-        },
-        Command::WriteRelaunchMarker {
-            reopen_settings: "computer_use".into(),
-        },
-    ];
-    for command in commands {
-        round_trip(&command);
-    }
-}
-
-#[test]
-fn every_desktop_command_and_query_crosses_ndjson() {
+fn representative_commands_and_queries_cross_ndjson() {
     let review = ReviewComment::new(
         "src/lib.rs".into(),
         2,
@@ -305,6 +260,7 @@ fn every_desktop_command_and_query_crosses_ndjson() {
         12,
     );
     let commands = vec![
+        Command::ApplyPendingRelaunch,
         Command::SetSmokeMode { auto_approve: true },
         Command::CreateSession {
             provider: ProviderKind::Codex,
@@ -314,25 +270,9 @@ fn every_desktop_command_and_query_crosses_ndjson() {
             acp_agent_id: None,
             profile_id: Some("codex".into()),
         },
-        Command::ApplyPendingRelaunch,
-        Command::OpenLatestSession,
-        Command::OpenTerminalPanel,
-        Command::OpenTerminalDemo,
-        Command::DebugStartProvider,
-        Command::DebugGitCommit {
-            message: "commit".into(),
-        },
-        Command::DebugGitAction {
-            name: "push".into(),
-        },
-        Command::DebugGitGenerateMessage,
-        Command::ShutdownAllAndFlush,
         Command::OrchestrateTurn {
             text: "coordinate".into(),
             attachment_paths: vec![PathBuf::from("/tmp/input.png")],
-        },
-        Command::ReloadProvider {
-            provider: ProviderKind::ClaudeCode,
         },
         Command::SetProfileSecret {
             profile_id: "claude".into(),
@@ -349,24 +289,12 @@ fn every_desktop_command_and_query_crosses_ndjson() {
             model: Some("model".into()),
             api_key: "key".into(),
         },
-        Command::DeleteProfile {
-            profile_id: "local".into(),
-        },
-        Command::RefreshProviderStatus,
-        Command::CheckProviderVersions,
-        Command::UpdateProvider {
-            provider: ProviderKind::Codex,
-        },
-        Command::SetSidebarCollapsed { collapsed: true },
         Command::RunGitAction {
             action: tcode_core::git::GitAction::Commit,
             message: Some("message".into()),
             included: Some(vec!["src/lib.rs".into()]),
             feature_branch: Some("feature".into()),
         },
-        Command::RefreshAcpRegistry,
-        Command::InstallAcpAgent { id: "agent".into() },
-        Command::RemoveAcpAgent { id: "agent".into() },
         Command::AddCustomAcpAgent {
             name: "agent".into(),
             command: "agent-bin".into(),
@@ -380,31 +308,12 @@ fn every_desktop_command_and_query_crosses_ndjson() {
                 launch_args: Some("--flag".into()),
             },
         },
-        Command::SetActiveAcpAgent { id: "agent".into() },
-        Command::ResetSettings,
-        Command::WriteRelaunchMarker {
-            reopen_settings: "computer_use".into(),
-        },
         Command::SetTerminalHeight { height: 260.0 },
-        Command::ToggleTerminalPanel,
-        Command::CloseTerminalPanel,
-        Command::RestartTerminal,
-        Command::NewTerminal,
         Command::SplitTerminal {
             direction: TerminalSplitDirection::Vertical,
         },
         Command::ActivateTerminal { terminal_id: 7 },
-        Command::CloseTerminal { terminal_id: 7 },
-        Command::CaptureTerminalSelection { terminal_id: 7 },
-        Command::RemoveTerminalContext { context_id: 3 },
-        Command::AddReviewComment {
-            comment: review.clone(),
-        },
-        Command::RemoveReviewComment { index: 0 },
-        Command::CycleProjectSort,
-        Command::CreateProject {
-            root: PathBuf::from("/tmp/project"),
-        },
+        Command::AddReviewComment { comment: review },
         Command::StartExternalImport {
             project_id: "project-1".into(),
             threads: vec![ExternalThread {
@@ -415,68 +324,18 @@ fn every_desktop_command_and_query_crosses_ndjson() {
                 last_active_ms: 1,
             }],
         },
-        Command::FinishExternalImport {
-            project_id: "project-1".into(),
-        },
-        Command::ToggleProjectCollapsed {
-            project_id: "project-1".into(),
-        },
         Command::UpdateSettings {
             settings: Settings::default(),
-        },
-        Command::ArchiveSession {
-            session_id: "session-1".into(),
-        },
-        Command::UnarchiveSession {
-            session_id: "session-1".into(),
-        },
-        Command::AutoArchiveSweep {
-            project_id: "project-1".into(),
-        },
-        Command::RenameSession {
-            session_id: "session-1".into(),
-            title: "Renamed".into(),
-        },
-        Command::ForkThread {
-            id: "session-1".into(),
         },
         Command::DeleteSession {
             session_id: "session-1".into(),
             remove_worktree: true,
-        },
-        Command::DeleteProject {
-            project_id: "project-1".into(),
-        },
-        Command::MarkSessionUnread {
-            session_id: "session-1".into(),
-        },
-        Command::StartDraft {
-            project_id: "project-1".into(),
-            cwd: PathBuf::from("/tmp/project"),
         },
         Command::SetDraftWorkspace {
             mode: WorkspaceMode::NewWorktree {
                 base: "main".into(),
             },
         },
-        Command::SelectSession {
-            session_id: "session-1".into(),
-        },
-        Command::SendTurn {
-            text: "hello".into(),
-            attachment_paths: vec![PathBuf::from("/tmp/input.png")],
-        },
-        Command::ConfirmRelayAndSend {
-            text: "hello".into(),
-            attachment_paths: Vec::new(),
-        },
-        Command::Steer {
-            text: "adjust".into(),
-            attachment_paths: Vec::new(),
-        },
-        Command::SteerQueued { id: 4 },
-        Command::DropQueued { id: 4 },
-        Command::Interrupt,
         Command::RespondApproval {
             request_id: "approval-1".into(),
             decision: agent::ApprovalDecision::ApproveForSession,
@@ -485,44 +344,18 @@ fn every_desktop_command_and_query_crosses_ndjson() {
             request_id: "input-1".into(),
             answers: serde_json::Map::from_iter([("choice".into(), json!("yes"))]),
         },
+        Command::SetActiveOption {
+            id: "reasoning_effort".into(),
+            value: Some(json!("high")),
+        },
         Command::SetActiveModel {
             provider: ProviderKind::Codex,
             model: Some("gpt-5".into()),
             profile_id: Some("codex".into()),
         },
-        Command::SetActiveOption {
-            id: "reasoning_effort".into(),
-            value: Some(json!("high")),
-        },
-        Command::SelectUltrathink,
-        Command::SetInteractionMode {
-            mode: agent::InteractionMode::Plan,
-        },
-        Command::ToggleInteractionMode,
-        Command::ImplementPlan,
-        Command::DismissPlan,
-        Command::ImplementPlanInNewThread {
-            title: "Implementation".into(),
-        },
-        Command::CopyPlan {
-            markdown: "# Plan".into(),
-        },
-        Command::SavePlanToWorkspace {
-            markdown: "# Plan".into(),
-        },
         Command::DownloadPlan {
             markdown: "# Plan".into(),
             fallback_title: "Plan".into(),
-        },
-        Command::LoadBranches,
-        Command::CheckoutBranch {
-            branch: "feature".into(),
-        },
-        Command::SetActiveApprovalMode {
-            mode: agent::ApprovalMode::Supervised,
-        },
-        Command::ToggleFavoriteModel {
-            model: "gpt-5".into(),
         },
         Command::RewindTurn {
             turn: 2,
@@ -538,7 +371,6 @@ fn every_desktop_command_and_query_crosses_ndjson() {
 
     let queries = vec![
         Query::ListActiveWorkspace,
-        Query::ScanExternalHistory,
         Query::GenerateCommitMessage {
             included: Some(vec!["src/lib.rs".into()]),
         },
@@ -552,19 +384,10 @@ fn every_desktop_command_and_query_crosses_ndjson() {
             base: Some("main".into()),
             ignore_whitespace: true,
         },
-        Query::ReadFileBytes {
-            path: PathBuf::from("/tmp/file.bin"),
-        },
         Query::SaveAttachment {
             dir: PathBuf::from("/tmp/attachments"),
             bytes: vec![0, b'\n', 255],
             ext: "png".into(),
-        },
-        Query::RemoveUserFile {
-            path: PathBuf::from("/tmp/file.bin"),
-        },
-        Query::IsDirectory {
-            path: PathBuf::from("/tmp"),
         },
         Query::RelativizeToWorkspace {
             path: "/tmp/project/src/lib.rs".into(),

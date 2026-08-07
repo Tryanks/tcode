@@ -448,31 +448,6 @@ impl OrchestrateSettings {
         }
     }
 
-    pub fn child_profile(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Option<&OrchestrateChildModel> {
-        self.child_models.iter().find(|entry| {
-            entry.provider == provider && entry.model == model && entry.matches_effort(effort)
-        })
-    }
-
-    pub fn enabled_child_profile(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Option<&OrchestrateChildModel> {
-        self.child_models.iter().find(|entry| {
-            entry.enabled
-                && entry.provider == provider
-                && entry.model == model
-                && entry.matches_effort(effort)
-        })
-    }
-
     pub fn enabled_child_profiles(
         &self,
         provider: ProviderKind,
@@ -789,7 +764,7 @@ impl Settings {
 
     /// Whether `id` names a built-in provider profile.
     pub fn is_builtin_profile_id(id: &str) -> bool {
-        matches!(id, "claude" | "codex" | "pi" | "opencode" | "acp")
+        Self::builtin_kind_from_id(id).is_some()
     }
 
     /// The protocol kind of a built-in profile id, if it is one. Used to route a
@@ -809,20 +784,12 @@ impl Settings {
     /// Built-in ids resolve to the matching `providers` card; anything else to
     /// a user-created `profiles` entry. `None` for an unknown id.
     pub fn resolved_profile(&self, id: &str) -> Option<ResolvedProfile> {
-        for kind in [
-            ProviderKind::Codex,
-            ProviderKind::ClaudeCode,
-            ProviderKind::Pi,
-            ProviderKind::OpenCode,
-            ProviderKind::Acp,
-        ] {
-            if provider_key(kind) == id {
-                return Some(ResolvedProfile {
-                    id: id.to_string(),
-                    kind,
-                    settings: self.provider(kind),
-                });
-            }
+        if let Some(kind) = Self::builtin_kind_from_id(id) {
+            return Some(ResolvedProfile {
+                id: id.to_string(),
+                kind,
+                settings: self.provider(kind),
+            });
         }
         self.profiles.get(id).map(|profile| ResolvedProfile {
             id: id.to_string(),
@@ -919,14 +886,6 @@ impl Settings {
     /// provider rail both render them in this order).
     pub fn installed_acp_agents(&self) -> Vec<&InstalledAcpAgent> {
         self.acp_agents.values().collect()
-    }
-
-    /// The ACP agents offered when starting a thread: installed *and* enabled.
-    pub fn enabled_acp_agents(&self) -> Vec<&InstalledAcpAgent> {
-        self.acp_agents
-            .values()
-            .filter(|agent| agent.enabled)
-            .collect()
     }
 
     /// Fold the pre-`providers` binary overrides into the map (once, on load).
@@ -1156,16 +1115,6 @@ mod tests {
                 .iter()
                 .all(|entry| entry.enabled)
         );
-        let medium = legacy
-            .orchestrate
-            .enabled_child_profile(ProviderKind::Codex, "gpt-5.6-sol", Some("medium"))
-            .unwrap();
-        let max = legacy
-            .orchestrate
-            .enabled_child_profile(ProviderKind::Codex, "gpt-5.6-sol", Some("max"))
-            .unwrap();
-        assert_ne!(medium.description, max.description);
-
         let mut settings = Settings::default();
         settings.orchestrate.generic_identity = "Custom lead identity".into();
         settings.orchestrate.model_identities.clear();

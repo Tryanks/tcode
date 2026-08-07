@@ -18,32 +18,7 @@ use agent::{
     AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ProviderKind,
     SessionCommand, SessionOptions, TurnStatus, start_session,
 };
-
-/// Standard base64 (RFC 4648) encoder. Hand-rolled so the `agent` crate keeps
-/// its dependency set unchanged (the app itself uses the `base64` crate).
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(n >> 18) as usize & 63] as char);
-        out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
+use base64::Engine as _;
 
 fn mime_from_path(path: &std::path::Path) -> String {
     match path
@@ -104,7 +79,7 @@ fn main() {
     };
     let attachment = Attachment {
         media_type: mime_from_path(&image_path),
-        data_base64: base64_encode(&bytes),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         source_path: None,
     };
     eprintln!(

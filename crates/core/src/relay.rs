@@ -9,29 +9,6 @@ use crate::session::{EntryContent, Timeline, TimelineEntry};
 pub const RELAY_TRANSCRIPT_MAX_CHARS: usize = 60_000;
 pub const RELAY_PREAMBLE: &str = "You are taking over an ongoing conversation another agent worked on. The transcript follows; continue seamlessly, do not re-introduce yourself or re-do completed work.";
 
-#[derive(Debug, Clone, Copy)]
-pub struct RelayTranscriptOptions<'a> {
-    pub project_path: &'a Path,
-    pub original_provider: ProviderKind,
-    pub original_model: Option<&'a str>,
-    pub max_chars: usize,
-}
-
-impl<'a> RelayTranscriptOptions<'a> {
-    pub fn new(
-        project_path: &'a Path,
-        original_provider: ProviderKind,
-        original_model: Option<&'a str>,
-    ) -> Self {
-        Self {
-            project_path,
-            original_provider,
-            original_model,
-            max_chars: RELAY_TRANSCRIPT_MAX_CHARS,
-        }
-    }
-}
-
 /// True when at least one provider turn completed successfully. Drafts and
 /// histories containing only an opening/failed turn do not require a relay.
 pub fn has_meaningful_history(timeline: &Timeline) -> bool {
@@ -42,7 +19,13 @@ pub fn has_meaningful_history(timeline: &Timeline) -> bool {
 }
 
 /// Render the canonical folded timeline as a compact markdown handoff.
-pub fn render_relay_transcript(timeline: &Timeline, options: RelayTranscriptOptions<'_>) -> String {
+pub fn render_relay_transcript(
+    timeline: &Timeline,
+    project_path: &Path,
+    original_provider: ProviderKind,
+    original_model: Option<&str>,
+    max_chars: usize,
+) -> String {
     if !has_meaningful_history(timeline) {
         return String::new();
     }
@@ -63,11 +46,11 @@ pub fn render_relay_transcript(timeline: &Timeline, options: RelayTranscriptOpti
             } => Some((*from_provider, from_model.as_deref())),
             _ => None,
         })
-        .unwrap_or((options.original_provider, options.original_model));
+        .unwrap_or((original_provider, original_model));
     let model = original_model.unwrap_or("provider default");
     let header = format!(
         "# Conversation relay\n\n- Project: `{}`\n- Original provider/model: {} / {}\n- Completed turns: {}\n",
-        options.project_path.display(),
+        project_path.display(),
         original_provider.display_name(),
         model,
         completed_turns
@@ -111,11 +94,11 @@ pub fn render_relay_transcript(timeline: &Timeline, options: RelayTranscriptOpti
     }
 
     let full = format!("{}\n{}{}", header, turn_blocks.join("\n"), closing);
-    if full.chars().count() <= options.max_chars {
+    if full.chars().count() <= max_chars {
         return full;
     }
 
-    render_elided(timeline, &header, closing, &turn_blocks, options.max_chars)
+    render_elided(timeline, &header, closing, &turn_blocks, max_chars)
 }
 
 pub fn assemble_relay_prompt(transcript: &str, user_message: &str) -> String {
@@ -140,9 +123,9 @@ fn render_elided(
         format!("## First user message\n\n{}\n\n", first_user)
     };
     let mut kept = Vec::new();
-    let mut used = char_count(header) + char_count(&first) + char_count(closing) + 64;
+    let mut used = header.chars().count() + first.chars().count() + closing.chars().count() + 64;
     for block in blocks.iter().rev() {
-        let len = char_count(block) + 1;
+        let len = block.chars().count() + 1;
         if used + len > max_chars && !kept.is_empty() {
             break;
         }
@@ -157,7 +140,7 @@ fn render_elided(
     let elided = blocks.len().saturating_sub(kept.len());
     let marker = format!("[... {elided} earlier turns elided ...]\n\n");
     let mut out = format!("{header}\n{first}{marker}{}{closing}", kept.join("\n"));
-    if char_count(&out) > max_chars {
+    if out.chars().count() > max_chars {
         out = truncate_chars(&out, max_chars);
     }
     out
@@ -293,44 +276,22 @@ fn tool_target(input: &serde_json::Value) -> String {
 
 fn status_outcome(status: ItemStatus, output: &str) -> String {
     let output = one_line(output);
-    match status {
-        ItemStatus::Failed => {
-            if output.is_empty() {
-                "failed".into()
-            } else {
-                format!("failed: {output}")
-            }
-        }
-        ItemStatus::InProgress => {
-            if output.is_empty() {
-                "in progress".into()
-            } else {
-                format!("in progress: {output}")
-            }
-        }
-        ItemStatus::Completed => {
-            if output.is_empty() {
-                "completed".into()
-            } else {
-                output
-            }
-        }
-        ItemStatus::Declined => {
-            if output.is_empty() {
-                "declined".into()
-            } else {
-                format!("declined: {output}")
-            }
-        }
+    let label = match status {
+        ItemStatus::Failed => "failed",
+        ItemStatus::InProgress => "in progress",
+        ItemStatus::Completed if !output.is_empty() => return output,
+        ItemStatus::Completed => "completed",
+        ItemStatus::Declined => "declined",
+    };
+    if output.is_empty() {
+        label.into()
+    } else {
+        format!("{label}: {output}")
     }
 }
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn char_count(value: &str) -> usize {
-    value.chars().count()
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -376,13 +337,14 @@ mod tests {
         }
     }
 
-    fn options(max_chars: usize) -> RelayTranscriptOptions<'static> {
-        RelayTranscriptOptions {
-            project_path: Path::new("/work/project"),
-            original_provider: ProviderKind::ClaudeCode,
-            original_model: Some("opus"),
+    fn render(timeline: &Timeline, max_chars: usize) -> String {
+        render_relay_transcript(
+            timeline,
+            Path::new("/work/project"),
+            ProviderKind::ClaudeCode,
+            Some("opus"),
             max_chars,
-        }
+        )
     }
 
     #[test]
@@ -396,7 +358,7 @@ mod tests {
             completed("t2"),
         ]);
 
-        let transcript = render_relay_transcript(&timeline, options(60_000));
+        let transcript = render(&timeline, 60_000);
         let positions = [
             "first request",
             "first answer",
@@ -434,7 +396,7 @@ mod tests {
             completed("t1"),
         ]);
 
-        let transcript = render_relay_transcript(&timeline, options(60_000));
+        let transcript = render(&timeline, 60_000);
         assert!(transcript.contains("`read_file` — src/main.rs — line one line two"));
         assert!(transcript.contains("`build` — workspace — failed: compiler error more detail"));
         assert!(!transcript.contains("line one\nline two"));
@@ -455,7 +417,7 @@ mod tests {
             completed("t3"),
         ]);
 
-        let transcript = render_relay_transcript(&timeline, options(1_000));
+        let transcript = render(&timeline, 1_000);
         assert!(transcript.chars().count() <= 1_000);
         assert!(transcript.contains("keep this first request"));
         assert!(transcript.contains("keep this recent request"));
@@ -467,10 +429,10 @@ mod tests {
     #[test]
     fn empty_or_incomplete_history_has_no_transcript() {
         let empty = Timeline::default();
-        assert_eq!(render_relay_transcript(&empty, options(60_000)), "");
+        assert_eq!(render(&empty, 60_000), "");
 
         let incomplete = Timeline::fold_events([user("u1", "not completed")]);
-        assert_eq!(render_relay_transcript(&incomplete, options(60_000)), "");
+        assert_eq!(render(&incomplete, 60_000), "");
     }
 
     #[test]

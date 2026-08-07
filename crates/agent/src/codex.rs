@@ -6,9 +6,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 
-use async_channel::{Receiver, Sender};
-use futures_lite::future;
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -16,7 +16,8 @@ use crate::{
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
     SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
-    UserInputOption, UserInputQuestion, file_changes_from_unified_diff,
+    UserInputOption, UserInputQuestion, file_changes_from_unified_diff, selection_bool,
+    selection_str,
 };
 
 mod developer_instructions;
@@ -54,20 +55,13 @@ fn approval_knobs(mode: ApprovalMode) -> (&'static str, &'static str) {
 
 /// Starts an app-server process and waits until its thread is ready.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
-
-    smol::spawn(run_actor(opts, commands_rx, events_tx, ready_tx)).detach();
-    ready_rx.recv().await.map_err(|_| {
-        AgentError::Protocol("codex actor exited before reporting startup status".into())
-    })??;
-
-    Ok(SessionHandle {
-        provider: ProviderKind::Codex,
-        commands: commands_tx,
-        events: events_rx,
-    })
+    crate::spawn_session(
+        ProviderKind::Codex,
+        opts,
+        run_actor,
+        "codex actor exited before reporting startup status",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -327,21 +321,6 @@ fn reasoning_effort_label(effort: &str) -> String {
     .to_owned()
 }
 
-/// Read a string option value from the session's selections.
-fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_str().map(str::to_owned))
-}
-
-fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_bool())
-}
-
 /// Selected reasoning effort (option id `reasoningEffort`).
 fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "reasoningEffort")
@@ -510,8 +489,8 @@ async fn run_actor(
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
-            Output(Result<ChildOutput, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
+            Output(Result<ChildOutput, smol::channel::RecvError>),
         }
         let input = future::race(async { Input::Command(commands.recv().await) }, async {
             Input::Output(actor.lines.recv().await)
@@ -580,39 +559,7 @@ fn mcp_args(
         .collect()
 }
 
-/// Rolling tail of the child's stderr. Once the process dies its own last
-/// words are the only diagnostics there are, so they are folded into the
-/// startup / exit errors shown to the user.
-struct StderrTail {
-    lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    /// Joined before reading the tail so the reader has drained the pipe.
-    /// `None` after the tail has been read once.
-    reader: Option<std::thread::JoinHandle<()>>,
-}
-
-const STDERR_TAIL_LINES: usize = 20;
-
-impl StderrTail {
-    /// The captured stderr tail, complete up to the child's death. Call only
-    /// after the child has exited (or been killed): that closes the pipe and
-    /// ends the reader. The wait is bounded because a grandchild that
-    /// inherited the pipe keeps it open past the child's death, and an
-    /// unconditional join would hang teardown on it.
-    fn text(&mut self) -> String {
-        if let Some(reader) = self.reader.take() {
-            for _ in 0..50 {
-                if reader.is_finished() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            if reader.is_finished() {
-                let _ = reader.join();
-            }
-        }
-        self.lines.lock().unwrap().join("\n")
-    }
-}
+use crate::process::StderrTail;
 
 /// Append the child's exit status and captured stderr to a process-death
 /// message, so the error shows the provider's own words instead of a bare
@@ -626,11 +573,7 @@ fn describe_child_failure(
     if let Some(status) = status {
         message.push_str(&format!(" ({status})"));
     }
-    let tail = stderr_tail.text();
-    if !tail.trim().is_empty() {
-        message.push_str(&format!("\nstderr:\n{tail}"));
-    }
-    message
+    stderr_tail.append_to(message, "\nstderr:\n")
 }
 
 /// Fold the child's death into a startup error. Protocol errors and I/O
@@ -704,7 +647,7 @@ fn spawn_server(
         .stderr
         .take()
         .ok_or_else(|| AgentError::Spawn("missing child stderr".into()))?;
-    let (tx, rx) = async_channel::unbounded();
+    let (tx, rx) = smol::channel::unbounded();
 
     std::thread::Builder::new()
         .name("codex-app-server-stdout".into())
@@ -727,27 +670,10 @@ fn spawn_server(
             let _ = tx.send_blocking(ChildOutput::Eof);
         })
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
-    let stderr_lines: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let stderr_reader = std::thread::Builder::new()
-        .name("codex-app-server-stderr".into())
-        .spawn({
-            let lines = stderr_lines.clone();
-            move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    log::debug!("codex app-server: {line}");
-                    let mut lines = lines.lock().unwrap();
-                    if lines.len() == STDERR_TAIL_LINES {
-                        lines.remove(0);
-                    }
-                    lines.push(line);
-                }
-            }
-        })
+    let stderr_tail = StderrTail::default();
+    stderr_tail
+        .spawn_joinable(stderr, "codex-app-server-stderr", "codex app-server")
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
-    let stderr_tail = StderrTail {
-        lines: stderr_lines,
-        reader: Some(stderr_reader),
-    };
     Ok((child, stdin, rx, stderr_tail))
 }
 
@@ -2485,7 +2411,7 @@ mod tests {
             .unwrap();
         let stdin = BufWriter::new(child.stdin.take().unwrap());
         let stdout = child.stdout.take().unwrap();
-        let (line_tx, line_rx) = async_channel::unbounded();
+        let (line_tx, line_rx) = smol::channel::unbounded();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if line_tx.send_blocking(ChildOutput::Line(line)).is_err() {
@@ -2493,7 +2419,7 @@ mod tests {
                 }
             }
         });
-        let (event_tx, event_rx) = async_channel::unbounded();
+        let (event_tx, event_rx) = smol::channel::unbounded();
         (
             Actor {
                 child,

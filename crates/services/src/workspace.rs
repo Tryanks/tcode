@@ -124,10 +124,6 @@ fn list_from_walk(cwd: &Path) -> Vec<PathEntry> {
         };
         for entry in read.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') && depth == 0 && name != ".git" {
-                // keep dotfiles at other depths, but skip a leading `.` dir only
-                // when it is in SKIP_DIRS (handled below).
-            }
             if SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }

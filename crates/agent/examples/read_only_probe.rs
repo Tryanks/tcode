@@ -141,7 +141,7 @@ struct Observation {
     approvals: usize,
 }
 
-async fn observe_turn(events: &async_channel::Receiver<AgentEvent>, label: &str) -> Observation {
+async fn observe_turn(events: &smol::channel::Receiver<AgentEvent>, label: &str) -> Observation {
     let mut observation = Observation::default();
     loop {
         let Some(event) = recv_timeout(events).await else {
@@ -163,7 +163,7 @@ async fn observe_turn(events: &async_channel::Receiver<AgentEvent>, label: &str)
 }
 
 async fn observe_turn_until_approval_or_completion(
-    events: &async_channel::Receiver<AgentEvent>,
+    events: &smol::channel::Receiver<AgentEvent>,
     label: &str,
 ) -> Observation {
     let mut observation = Observation::default();
@@ -189,7 +189,7 @@ async fn observe_turn_until_approval_or_completion(
     observation
 }
 
-async fn recv_timeout(events: &async_channel::Receiver<AgentEvent>) -> Option<AgentEvent> {
+async fn recv_timeout(events: &smol::channel::Receiver<AgentEvent>) -> Option<AgentEvent> {
     smol::future::or(async { events.recv().await.ok() }, async {
         smol::Timer::after(EVENT_TIMEOUT).await;
         None

@@ -25,10 +25,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use futures_lite::io::AsyncWrite;
-use futures_lite::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 use serde_json::{Value, json};
-use smol::io::BufReader;
+use smol::io::{AsyncWrite, BufReader};
+use smol::prelude::*;
 use smol::process::Stdio;
 
 use crate::{
@@ -37,7 +36,7 @@ use crate::{
     LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus,
     ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode, SelectOption,
     SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
-    UserInputOption, UserInputQuestion,
+    UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
@@ -205,12 +204,12 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         .take()
         .ok_or_else(|| AgentError::Spawn("child stderr missing".into()))?;
 
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<SessionCommand>();
-    let (event_tx, event_rx) = async_channel::unbounded::<AgentEvent>();
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded::<SessionCommand>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<AgentEvent>();
 
     // Reader task: forward each stdout line (an item = one JSON message) into an
     // internal channel; closing the channel signals stdout EOF.
-    let (line_tx, line_rx) = async_channel::unbounded::<String>();
+    let (line_tx, line_rx) = smol::channel::unbounded::<String>();
     smol::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next().await {
@@ -235,7 +234,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 
     // Stderr drain: never protocol, but the tail is kept so an unexpected exit
     // can be reported in the CLI's own words (crash stacks land here).
-    let stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let stderr_tail = crate::process::StderrTail::default();
     let stderr_task = smol::spawn({
         let tail = stderr_tail.clone();
         async move {
@@ -245,10 +244,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
                     continue;
                 }
                 log::warn!("claude[stderr]: {line}");
-                let mut tail = tail.lock().unwrap();
-                if tail.len() == STDERR_TAIL_LINES {
-                    tail.remove(0);
-                }
                 tail.push(line);
             }
         }
@@ -415,18 +410,15 @@ fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
     args
 }
 
-/// How many trailing stderr lines to keep for exit diagnostics.
-const STDERR_TAIL_LINES: usize = 20;
-
 #[allow(clippy::too_many_arguments)]
 async fn actor_loop(
     mut child: smol::process::Child,
     mut stdin: smol::process::ChildStdin,
-    cmd_rx: async_channel::Receiver<SessionCommand>,
-    line_rx: async_channel::Receiver<String>,
-    event_tx: async_channel::Sender<AgentEvent>,
+    cmd_rx: smol::channel::Receiver<SessionCommand>,
+    line_rx: smol::channel::Receiver<String>,
+    event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
-    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
     let mut mapper = Mapper::new();
@@ -440,7 +432,7 @@ async fn actor_loop(
     let closed_reason: Option<String> = loop {
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
-        let sel = futures_lite::future::or(async { Sel::Cmd(cmd_rx.recv().await.ok()) }, async {
+        let sel = smol::future::or(async { Sel::Cmd(cmd_rx.recv().await.ok()) }, async {
             Sel::Line(line_rx.recv().await.ok())
         })
         .await;
@@ -507,14 +499,13 @@ async fn actor_loop(
     // The child is gone, so its stderr pipe normally closes and the drain task
     // finishes; the timeout covers a grandchild keeping the pipe open, which
     // would otherwise hang the close event forever.
-    futures_lite::future::or(stderr_task, async {
+    smol::future::or(stderr_task, async {
         smol::Timer::after(std::time::Duration::from_millis(500)).await;
     })
     .await;
     let closed_reason = closed_reason.map(|reason| {
-        let tail = stderr_tail.lock().unwrap().join("\n");
-        if provider_exited && !tail.trim().is_empty() {
-            format!("{reason}\nstderr:\n{tail}")
+        if provider_exited {
+            stderr_tail.append_to(reason, "\nstderr:\n")
         } else {
             reason
         }
@@ -538,9 +529,9 @@ enum TailControl {
 
 async fn process_tail_requests(
     requests: Vec<TailRequest>,
-    tailers: &mut HashMap<String, async_channel::Sender<TailControl>>,
+    tailers: &mut HashMap<String, smol::channel::Sender<TailControl>>,
     claude_dir: Option<&Path>,
-    event_tx: &async_channel::Sender<AgentEvent>,
+    event_tx: &smol::channel::Sender<AgentEvent>,
 ) {
     for request in requests {
         match request {
@@ -552,7 +543,7 @@ async fn process_tail_requests(
                 if tailers.contains_key(&parent_id) {
                     continue;
                 }
-                let (control_tx, control_rx) = async_channel::unbounded();
+                let (control_tx, control_rx) = smol::channel::unbounded();
                 tailers.insert(parent_id.clone(), control_tx);
                 let claude_dir = claude_dir.map(Path::to_path_buf);
                 let events = event_tx.clone();
@@ -580,8 +571,8 @@ async fn run_subagent_tail(
     task_id: String,
     session_id: String,
     claude_dir: Option<PathBuf>,
-    controls: async_channel::Receiver<TailControl>,
-    events: async_channel::Sender<AgentEvent>,
+    controls: smol::channel::Receiver<TailControl>,
+    events: smol::channel::Sender<AgentEvent>,
 ) {
     let mut path = None;
     let mut reader = None;
@@ -642,7 +633,7 @@ async fn handle_command(
     command: SessionCommand,
     mapper: &mut Mapper,
     stdin: &mut smol::process::ChildStdin,
-    event_tx: &async_channel::Sender<AgentEvent>,
+    event_tx: &smol::channel::Sender<AgentEvent>,
     child: &mut smol::process::Child,
 ) -> Flow {
     match command {
@@ -849,7 +840,7 @@ async fn write_turn_message<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     message: &Value,
     delivery_id: u64,
-    event_tx: &async_channel::Sender<AgentEvent>,
+    event_tx: &smol::channel::Sender<AgentEvent>,
 ) -> std::io::Result<()> {
     write_line(stdin, message).await?;
     // The complete newline-delimited prompt is now flushed. Emit acceptance
@@ -865,7 +856,7 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
     message: &Value,
     request_id: String,
     mapper: &mut Mapper,
-    event_tx: &async_channel::Sender<AgentEvent>,
+    event_tx: &smol::channel::Sender<AgentEvent>,
 ) {
     if write_line(stdin, message).await.is_err() {
         let _ = event_tx
@@ -2789,20 +2780,6 @@ fn extract_exit_plan_markdown(input: &Value) -> Option<String> {
 // Model catalog + effort mapping
 // ---------------------------------------------------------------------------
 
-fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_str().map(str::to_owned))
-}
-
-fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
-    selections
-        .iter()
-        .find(|s| s.id == id)
-        .and_then(|s| s.value.as_bool())
-}
-
 fn has_boolean_option(spec: &ModelSpec, id: &str) -> bool {
     spec.options
         .iter()
@@ -3061,19 +3038,6 @@ fn version_ge(version: Option<(u32, u32, u32)>, min: (u32, u32, u32)) -> bool {
 
 /// Parse a `MAJOR.MINOR.PATCH` triple from `claude --version` output
 /// (e.g. `"2.1.206 (Claude Code)"`).
-fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
-    let token = text.split_whitespace().next()?;
-    let mut parts = token.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts
-        .next()
-        .and_then(|p| p.split('-').next())
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
-    Some((major, minor, patch))
-}
-
 /// Run `claude --version` and parse the semver triple; `None` on any failure.
 async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
     // Resolve through the PATH search (PATHEXT-aware: on Windows the CLI only
@@ -3081,16 +3045,7 @@ async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option
     // reported by the OS exactly as before.
     let bin = crate::resolve_binary(binary, "claude")
         .unwrap_or_else(|_| std::path::PathBuf::from("claude"));
-    let mut cmd = crate::process::async_command(&bin);
-    cmd.arg("--version")
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT");
-    for (key, value) in launch_env.pairs(ProviderKind::ClaudeCode) {
-        cmd.env(key, value);
-    }
-    let output = cmd.output().await.ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_semver(&stdout)
+    crate::process::probe_version(&bin, launch_env, ProviderKind::ClaudeCode).await
 }
 
 /// List Claude's models: the static catalog, gated by the installed CLI version.
@@ -3354,9 +3309,12 @@ mod tests {
 
     #[test]
     fn parse_semver_from_version_output() {
-        assert_eq!(parse_semver("2.1.206 (Claude Code)"), Some((2, 1, 206)));
-        assert_eq!(parse_semver("2.1.169"), Some((2, 1, 169)));
-        assert_eq!(parse_semver("nonsense"), None);
+        assert_eq!(
+            crate::process::parse_semver("2.1.206 (Claude Code)"),
+            Some((2, 1, 206))
+        );
+        assert_eq!(crate::process::parse_semver("2.1.169"), Some((2, 1, 169)));
+        assert_eq!(crate::process::parse_semver("nonsense"), None);
     }
 
     #[test]
@@ -3501,7 +3459,7 @@ mod tests {
                 .spawn()
                 .unwrap();
             let mut stdin = child.stdin.take().unwrap();
-            let (event_tx, _event_rx) = async_channel::unbounded();
+            let (event_tx, _event_rx) = smol::channel::unbounded();
             let mut m = Mapper::new();
             m.interaction_mode = InteractionMode::Plan;
             m.applied_permission_mode = "plan".into();
@@ -4801,7 +4759,7 @@ mod tests {
             }
 
             let message = user_message("deliver", &[]);
-            let (event_tx, event_rx) = async_channel::unbounded();
+            let (event_tx, event_rx) = smol::channel::unbounded();
             let mut writer = DeterministicWriter::default();
             write_turn_message(&mut writer, &message, 42, &event_tx)
                 .await
@@ -4812,7 +4770,7 @@ mod tests {
             ));
             assert_eq!(writer.bytes.last(), Some(&b'\n'));
 
-            let (event_tx, event_rx) = async_channel::unbounded();
+            let (event_tx, event_rx) = smol::channel::unbounded();
             let mut writer = DeterministicWriter {
                 failure: Some(FailurePoint::Flush),
                 ..Default::default()
@@ -4824,7 +4782,7 @@ mod tests {
             );
             assert!(event_rx.try_recv().is_err(), "failed flush must not ack");
 
-            let (event_tx, event_rx) = async_channel::unbounded();
+            let (event_tx, event_rx) = smol::channel::unbounded();
             let mut writer = DeterministicWriter::default();
             let mut mapper = Mapper::new();
             let message = user_message("redirect", &[]);
@@ -4840,7 +4798,7 @@ mod tests {
             assert_eq!(mapper.pending_steers, VecDeque::from(["steer-ok".into()]));
             assert_eq!(writer.bytes.last(), Some(&b'\n'));
 
-            let (event_tx, event_rx) = async_channel::unbounded();
+            let (event_tx, event_rx) = smol::channel::unbounded();
             let mut mapper = Mapper::new();
             let mut writer = DeterministicWriter {
                 failure: Some(FailurePoint::Write),
@@ -4864,7 +4822,7 @@ mod tests {
                 "stdin write failures must not accept a steer"
             );
 
-            let (event_tx, event_rx) = async_channel::unbounded();
+            let (event_tx, event_rx) = smol::channel::unbounded();
             let mut mapper = Mapper::new();
             let mut writer = DeterministicWriter {
                 failure: Some(FailurePoint::Flush),

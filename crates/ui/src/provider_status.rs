@@ -42,6 +42,23 @@ pub fn summarize(
 ) -> StatusSummary {
     let t = |key: &str| tcode_i18n::tr!(key).into_owned();
     let summary: ProviderSummary = derive_summary(snapshot, enabled);
+    let detail = match summary.detail {
+        ProviderSummaryDetail::None => String::new(),
+        ProviderSummaryDetail::Message(message) => message,
+        ProviderSummaryDetail::Diagnostic(diagnostic) => {
+            probe_diagnostic_message(provider, diagnostic)
+        }
+        ProviderSummaryDetail::Fallback => match &summary.headline {
+            ProviderSummaryHeadline::Checking => t("providers.status.checking_detail"),
+            ProviderSummaryHeadline::Disabled => t("providers.status.disabled_detail"),
+            ProviderSummaryHeadline::NotFound => t("providers.status.not_found_detail"),
+            ProviderSummaryHeadline::NeedsAttention => t("providers.status.needs_attention_detail"),
+            ProviderSummaryHeadline::Unavailable => t("providers.status.unavailable_detail"),
+            ProviderSummaryHeadline::Available => t("providers.status.available_detail"),
+            ProviderSummaryHeadline::Authenticated { .. }
+            | ProviderSummaryHeadline::NotAuthenticated => String::new(),
+        },
+    };
     let (headline, email) = match summary.headline {
         ProviderSummaryHeadline::Checking => (t("providers.status.checking"), None),
         ProviderSummaryHeadline::Disabled => (t("providers.status.disabled"), None),
@@ -72,18 +89,6 @@ pub fn summarize(
         ProviderSummaryHeadline::NeedsAttention => (t("providers.status.needs_attention"), None),
         ProviderSummaryHeadline::Unavailable => (t("providers.status.unavailable"), None),
         ProviderSummaryHeadline::Available => (t("providers.status.available"), None),
-    };
-    let probe_diagnostic_message = |diagnostic| probe_diagnostic_message(provider, diagnostic);
-    let detail = match summary.detail {
-        ProviderSummaryDetail::None => String::new(),
-        ProviderSummaryDetail::Message(message) => message,
-        ProviderSummaryDetail::Diagnostic(diagnostic) => probe_diagnostic_message(diagnostic),
-        ProviderSummaryDetail::Checking => t("providers.status.checking_detail"),
-        ProviderSummaryDetail::Disabled => t("providers.status.disabled_detail"),
-        ProviderSummaryDetail::NotFound => t("providers.status.not_found_detail"),
-        ProviderSummaryDetail::NeedsAttention => t("providers.status.needs_attention_detail"),
-        ProviderSummaryDetail::Unavailable => t("providers.status.unavailable_detail"),
-        ProviderSummaryDetail::Available => t("providers.status.available_detail"),
     };
     StatusSummary {
         dot: summary.dot,

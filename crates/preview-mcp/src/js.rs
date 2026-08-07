@@ -8,12 +8,6 @@
 //! WebView serializes the result and the UI passes the string to
 //! [`parse_result`].
 
-/// Cap on interactive elements returned by [`SNAPSHOT`] (mirrors T3's
-/// `MAX_INTERACTIVE_ELEMENTS`).
-pub const MAX_INTERACTIVE_ELEMENTS: usize = 100;
-/// Cap on `visibleText` length in a snapshot (mirrors T3's `MAX_VISIBLE_TEXT`).
-pub const MAX_VISIBLE_TEXT: usize = 4000;
-
 /// Report `{ url, title, loading }` for the current page.
 pub const STATUS: &str = r#"(() => ({
   url: location.href,

@@ -14,15 +14,6 @@ pub struct InstalledAcpAgent {
     pub icon: Option<String>,
     /// The resolved recipe: exactly what we will spawn.
     pub launch: AcpLaunch,
-    /// SHA-256 of the downloaded archive, for binary distributions.
-    ///
-    /// The registry publishes no digests (there is no `sha256` field in the
-    /// schema — zed does not verify one either), so this is what we computed at
-    /// install time rather than a checked-against-upstream signature. It lets us
-    /// tell whether a re-download changed, which is the most integrity the index
-    /// currently affords.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archive_sha256: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Extra environment for this agent's process (Settings → Providers).

@@ -77,11 +77,6 @@ impl ReviewComment {
             format!("{marker}{} to {marker}{}", self.line_start, self.line_end)
         }
     }
-
-    /// The final rendered-row index covered by this comment.
-    pub fn end_index(&self) -> usize {
-        self.end_index
-    }
 }
 
 fn escape_review_attribute(value: &str) -> String {
@@ -191,16 +186,6 @@ pub struct TurnMeta {
     pub cost_usd: Option<f64>,
     /// Provider-reported duration, distinct from tcode's observed wall clock.
     pub provider_duration_ms: Option<u64>,
-}
-
-impl TurnMeta {
-    /// Wall-clock duration of the turn in whole seconds, when both ends known.
-    pub fn duration_secs(&self) -> Option<u64> {
-        match (self.start_ts, self.end_ts) {
-            (Some(start), Some(end)) if end >= start => Some((end - start) / 1000),
-            _ => None,
-        }
-    }
 }
 
 /// How a finished turn's wall clock divided between waiting on tools and
@@ -2279,7 +2264,6 @@ mod tests {
         assert_eq!(timeline.turns.len(), 2);
         assert_eq!(timeline.turns[0].start_ts, Some(1_000_500));
         assert_eq!(timeline.turns[0].end_ts, Some(1_005_500));
-        assert_eq!(timeline.turns[0].duration_secs(), Some(5));
         assert_eq!(timeline.turns[0].status, Some(TurnStatus::Completed));
         assert!(!timeline.turns[0].running);
         // Second turn is still running (no TurnCompleted yet).
@@ -3257,7 +3241,6 @@ mod tests {
             at(9_000, turn_completed()),
         ]);
         assert_eq!(timeline.turns[0].start_ts, Some(1_000));
-        assert_eq!(timeline.turns[0].duration_secs(), Some(8));
         assert_eq!(timeline.turns[0].timing, None);
     }
 

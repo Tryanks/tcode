@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
-use async_channel::{Receiver, Sender};
 use base64::Engine as _;
-use futures_lite::future;
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -21,62 +21,51 @@ use crate::{
     SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
 };
 
-const STDERR_TAIL_LINES: usize = 20;
-
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
         return Err(AgentError::Protocol(
             "session fork is not supported for this provider".into(),
         ));
     }
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
-    smol::spawn(run_actor(opts, commands_rx, events_tx, ready_tx)).detach();
-    ready_rx.recv().await.map_err(|_| {
-        AgentError::Protocol("OpenCode actor exited before reporting startup status".into())
-    })??;
-    Ok(SessionHandle {
-        provider: ProviderKind::OpenCode,
-        commands: commands_tx,
-        events: events_rx,
-    })
+    crate::spawn_session(
+        ProviderKind::OpenCode,
+        opts,
+        run_actor,
+        "OpenCode actor exited before reporting startup status",
+    )
+    .await
 }
 
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (sender, receiver) = async_channel::bounded(1);
-    std::thread::Builder::new()
-        .name("opencode-model-discovery".into())
-        .spawn(move || {
+    crate::blocking_result(
+        "opencode-model-discovery",
+        "spawning OpenCode model discovery",
+        "OpenCode model discovery worker exited without a result",
+        move || {
+            let cwd = std::env::current_dir()?;
+            let mut server = OpenCodeServer::spawn(
+                binary_path.as_deref(),
+                &cwd,
+                &launch_env,
+                ApprovalMode::FullAccess,
+                &[],
+                &[],
+            )?;
             let result = (|| {
-                let cwd = std::env::current_dir()?;
-                let mut server = OpenCodeServer::spawn(
-                    binary_path.as_deref(),
-                    &cwd,
-                    &launch_env,
-                    ApprovalMode::FullAccess,
-                    &[],
-                    &[],
-                )?;
-                let result = (|| {
-                    server.wait_healthy()?;
-                    let provider_state = server.http.get_json("/provider")?;
-                    let mut catalog = server.http.get_json("/config/providers")?;
-                    reconcile_provider_catalog(&mut catalog, &provider_state);
-                    Ok(map_models(&catalog))
-                })();
-                server.stop();
-                result
+                server.wait_healthy()?;
+                let provider_state = server.http.get_json("/provider")?;
+                let mut catalog = server.http.get_json("/config/providers")?;
+                reconcile_provider_catalog(&mut catalog, &provider_state);
+                Ok(map_models(&catalog))
             })();
-            let _ = sender.send_blocking(result);
-        })
-        .map_err(|err| AgentError::Spawn(format!("spawning OpenCode model discovery: {err}")))?;
-    receiver.recv().await.map_err(|_| {
-        AgentError::Protocol("OpenCode model discovery worker exited without a result".into())
-    })?
+            server.stop();
+            result
+        },
+    )
+    .await
 }
 
 async fn run_actor(
@@ -210,8 +199,8 @@ async fn run_actor(
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
-            Event(Result<SseOutput, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
+            Event(Result<SseOutput, smol::channel::RecvError>),
         }
         let input = future::race(async { Input::Command(commands.recv().await) }, async {
             Input::Event(actor.sse.recv().await)
@@ -832,7 +821,7 @@ impl OpenCodeMapper {
         if self
             .turn_usages
             .get(key)
-            .is_some_and(|previous| same_token_usage(*previous, usage))
+            .is_some_and(|previous| *previous == usage)
         {
             return;
         }
@@ -851,7 +840,7 @@ impl OpenCodeMapper {
         }
         let mut aggregate = TokenUsage::default();
         for usage in self.turn_usages.values().copied() {
-            merge_token_usage(&mut aggregate, usage);
+            aggregate.merge(usage);
         }
         let aggregate = TokenUsage {
             total_processed_tokens: Some(self.cumulative_processed),
@@ -862,17 +851,6 @@ impl OpenCodeMapper {
     }
 }
 
-fn same_token_usage(left: TokenUsage, right: TokenUsage) -> bool {
-    left.input_tokens == right.input_tokens
-        && left.cached_input_tokens == right.cached_input_tokens
-        && left.output_tokens == right.output_tokens
-        && left.used_tokens == right.used_tokens
-        && left.context_window == right.context_window
-        && left.total_processed_tokens == right.total_processed_tokens
-        && left.cost_usd == right.cost_usd
-        && left.duration_ms == right.duration_ms
-}
-
 fn processed_tokens(usage: TokenUsage) -> u64 {
     usage.used_tokens.unwrap_or_else(|| {
         usage
@@ -881,33 +859,6 @@ fn processed_tokens(usage: TokenUsage) -> u64 {
             .saturating_add(usage.output_tokens.unwrap_or(0))
             .saturating_add(usage.cached_input_tokens.unwrap_or(0))
     })
-}
-
-fn merge_token_usage(total: &mut TokenUsage, usage: TokenUsage) {
-    total.input_tokens = add_token_counts(total.input_tokens, usage.input_tokens);
-    total.cached_input_tokens =
-        add_token_counts(total.cached_input_tokens, usage.cached_input_tokens);
-    total.output_tokens = add_token_counts(total.output_tokens, usage.output_tokens);
-    total.used_tokens = add_token_counts(total.used_tokens, usage.used_tokens);
-    total.context_window = match (total.context_window, usage.context_window) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (left, right) => left.or(right),
-    };
-    total.cost_usd = match (total.cost_usd, usage.cost_usd) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
-    };
-    total.duration_ms = match (total.duration_ms, usage.duration_ms) {
-        (Some(left), Some(right)) => Some(left.saturating_add(right)),
-        (left, right) => left.or(right),
-    };
-}
-
-fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
-    }
 }
 
 fn open_code_tool_item(
@@ -1016,11 +967,12 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
 
 fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
     let tokens = tokens?;
-    let input = json_number(tokens.get("input"));
-    let reasoning = json_number(tokens.get("reasoning")).unwrap_or(0);
-    let output = json_number(tokens.get("output")).map(|output| output.saturating_add(reasoning));
-    let cache_read = json_number(tokens.pointer("/cache/read"));
-    let cache_write = json_number(tokens.pointer("/cache/write")).unwrap_or(0);
+    let input = crate::json_u64(tokens.get("input"));
+    let reasoning = crate::json_u64(tokens.get("reasoning")).unwrap_or(0);
+    let output =
+        crate::json_u64(tokens.get("output")).map(|output| output.saturating_add(reasoning));
+    let cache_read = crate::json_u64(tokens.pointer("/cache/read"));
+    let cache_write = crate::json_u64(tokens.pointer("/cache/write")).unwrap_or(0);
     (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
         input_tokens: input,
         cached_input_tokens: cache_read,
@@ -1042,14 +994,6 @@ fn json_i32(value: &Value) -> Option<i32> {
         .as_i64()
         .and_then(|number| i32::try_from(number).ok())
         .or_else(|| value.as_str()?.parse().ok())
-}
-
-fn json_number(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
-    })
 }
 
 fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
@@ -1292,7 +1236,7 @@ fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<&str> {
 struct OpenCodeServer {
     child: Child,
     http: HttpClient,
-    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_tail: crate::process::StderrTail,
 }
 
 impl OpenCodeServer {
@@ -1342,9 +1286,9 @@ impl OpenCodeServer {
             .stderr
             .take()
             .ok_or_else(|| AgentError::Spawn("OpenCode child stderr missing".into()))?;
-        let tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-        spawn_log_reader(stdout, tail.clone(), "opencode-stdout");
-        spawn_log_reader(stderr, tail.clone(), "opencode-stderr");
+        let tail = crate::process::StderrTail::default();
+        let _ = tail.spawn(stdout, "opencode-stdout", "OpenCode");
+        let _ = tail.spawn(stderr, "opencode-stderr", "OpenCode");
         Ok(Self {
             child,
             http: HttpClient::new(format!("http://127.0.0.1:{port}"), password),
@@ -1392,7 +1336,7 @@ impl OpenCodeServer {
             .set("Authorization", &self.http.authorization)
             .call()
             .map_err(http_error)?;
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = smol::channel::unbounded();
         std::thread::Builder::new()
             .name("opencode-sse".into())
             .spawn(move || read_sse(response.into_reader(), sender))
@@ -1406,12 +1350,7 @@ impl OpenCodeServer {
     }
 
     fn describe_failure(&self, base: String) -> String {
-        let tail = self.stderr_tail.lock().unwrap().join("\n");
-        if tail.trim().is_empty() {
-            base
-        } else {
-            format!("{base}\nserver output:\n{tail}")
-        }
+        self.stderr_tail.append_to(base, "\nserver output:\n")
     }
 }
 
@@ -1679,25 +1618,6 @@ fn opencode_config_content(
     }
     config["mcp"] = Value::Object(mcp);
     Ok(Some(config.to_string()))
-}
-
-fn spawn_log_reader(
-    reader: impl Read + Send + 'static,
-    tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    name: &str,
-) {
-    let _ = std::thread::Builder::new()
-        .name(name.into())
-        .spawn(move || {
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                log::debug!("OpenCode: {line}");
-                let mut tail = tail.lock().unwrap();
-                if tail.len() == STDERR_TAIL_LINES {
-                    tail.remove(0);
-                }
-                tail.push(line);
-            }
-        });
 }
 
 #[cfg(test)]

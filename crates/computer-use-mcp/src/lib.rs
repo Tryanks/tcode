@@ -4,8 +4,8 @@
 //!
 //! Served over streamable HTTP on `127.0.0.1:<random port>` with a bearer
 //! token, mirroring `preview-mcp` / `orchestrate-mcp`. The macOS backend talks
-//! to the AX C API, CGEvent, and `screencapture`; other platforms serve a stub
-//! that reports the platform as unsupported.
+//! to the AX C API, CGEvent, and `screencapture`; other platforms report that
+//! computer use is unsupported.
 
 pub mod backend;
 pub mod config;

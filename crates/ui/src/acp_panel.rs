@@ -925,7 +925,6 @@ mod tests {
                 args: vec!["--acp".into()],
                 env: Vec::new(),
             },
-            archive_sha256: None,
             enabled: true,
             env: Vec::new(),
             launch_args: None,

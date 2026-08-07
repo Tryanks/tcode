@@ -204,11 +204,6 @@ impl SessionStore {
         metas
     }
 
-    /// Load the persisted project list.
-    pub fn load_projects(&self) -> Vec<Project> {
-        self.read_file().projects
-    }
-
     /// Persist a whole index file (used to flush migration on startup).
     pub fn persist_index(&self, file: &IndexFile) -> std::io::Result<()> {
         self.write_file(file)
@@ -661,23 +656,20 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_fork_fields_are_legacy_safe_and_roundtrip() {
+    fn session_meta_pending_fork_is_legacy_safe_and_roundtrip() {
         let legacy = serde_json::json!({
             "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
+            "cwd": "/work/alpha", "forked_from": "source", "created_at": 1, "updated_at": 10
         });
         let mut meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.forked_from, None);
         assert!(!meta.pending_fork);
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("forked_from"));
         assert!(!json.contains("pending_fork"));
 
-        meta.forked_from = Some("source".into());
         meta.pending_fork = true;
         let back: SessionMeta =
             serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
-        assert_eq!(back.forked_from.as_deref(), Some("source"));
         assert!(back.pending_fork);
     }
 

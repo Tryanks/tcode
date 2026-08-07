@@ -28,7 +28,8 @@ use tcode_core::project::{
 use tcode_core::provider_models::{ResolvedModel, picker_models, resolve_models};
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
-    RelayTranscriptOptions, assemble_relay_prompt, has_meaningful_history, render_relay_transcript,
+    RELAY_TRANSCRIPT_MAX_CHARS, assemble_relay_prompt, has_meaningful_history,
+    render_relay_transcript,
 };
 use tcode_core::session::{
     EntryContent, ReviewComment, Timeline, append_review_comments_to_prompt, implement_prompt,
@@ -3498,7 +3499,6 @@ impl AppState {
                 version: String::new(),
                 icon: None,
                 launch: agent::AcpLaunch::Custom { command, args, env },
-                archive_sha256: None,
                 enabled: true,
                 env: Vec::new(),
                 launch_args: None,
@@ -4646,7 +4646,6 @@ impl AppState {
         fork.profile_id = source.profile_id.clone();
         fork.resume_cursor = source.resume_cursor.clone();
         fork.pending_fork = true;
-        fork.forked_from = Some(source.id.clone());
         // `worktree` deliberately stays absent: it is an ownership/cleanup
         // marker. The cwd may be shared, but the fork must not own the source's
         // generated worktree or offer to delete it.
@@ -5661,11 +5660,10 @@ impl AppState {
         };
         let transcript = render_relay_transcript(
             &active.timeline,
-            RelayTranscriptOptions::new(
-                &active.meta.cwd,
-                pending.from_provider,
-                pending.from_model.as_deref(),
-            ),
+            &active.meta.cwd,
+            pending.from_provider,
+            pending.from_model.as_deref(),
+            RELAY_TRANSCRIPT_MAX_CHARS,
         );
         let event = AgentEvent::ProviderRelay {
             from_provider: pending.from_provider,
@@ -9120,7 +9118,6 @@ mod tests {
                     args: Vec::new(),
                     env: Vec::new(),
                 },
-                archive_sha256: None,
                 enabled: true,
                 env: Vec::new(),
                 launch_args: None,
@@ -12316,7 +12313,6 @@ mod tests {
             let active = state.active.as_ref().unwrap();
             let fork = &active.meta;
             assert_ne!(fork.id, source.id);
-            assert_eq!(fork.forked_from.as_deref(), Some(source.id.as_str()));
             assert!(fork.pending_fork);
             assert_eq!(
                 fork.resume_cursor.as_ref().unwrap().0["thread_id"],

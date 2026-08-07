@@ -9,9 +9,9 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
 
-use async_channel::{Receiver, Sender};
-use futures_lite::future;
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
 
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -22,7 +22,6 @@ use crate::{
 };
 
 const PERMISSION_EXTENSION: &str = include_str!("../assets/pi/tcode-permissions.ts");
-const STDERR_TAIL_LINES: usize = 20;
 const SETTLED_MIN_VERSION: (u32, u32, u32) = (0, 80, 4);
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -31,35 +30,26 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             "session fork is not supported for this provider".into(),
         ));
     }
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
-    smol::spawn(run_actor(opts, commands_rx, events_tx, ready_tx)).detach();
-    ready_rx.recv().await.map_err(|_| {
-        AgentError::Protocol("pi actor exited before reporting startup status".into())
-    })??;
-    Ok(SessionHandle {
-        provider: ProviderKind::Pi,
-        commands: commands_tx,
-        events: events_rx,
-    })
+    crate::spawn_session(
+        ProviderKind::Pi,
+        opts,
+        run_actor,
+        "pi actor exited before reporting startup status",
+    )
+    .await
 }
 
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (sender, receiver) = async_channel::bounded(1);
-    std::thread::Builder::new()
-        .name("pi-model-discovery".into())
-        .spawn(move || {
-            let result = list_models_blocking(binary_path.as_deref(), &launch_env);
-            let _ = sender.send_blocking(result);
-        })
-        .map_err(|err| AgentError::Spawn(format!("spawning pi model discovery: {err}")))?;
-    receiver.recv().await.map_err(|_| {
-        AgentError::Protocol("pi model discovery worker exited without a result".into())
-    })?
+    crate::blocking_result(
+        "pi-model-discovery",
+        "spawning pi model discovery",
+        "pi model discovery worker exited without a result",
+        move || list_models_blocking(binary_path.as_deref(), &launch_env),
+    )
+    .await
 }
 
 fn list_models_blocking(
@@ -236,7 +226,9 @@ async fn run_actor(
         None
     };
     let supports_settled =
-        pi_version(&binary, &opts.launch_env).is_some_and(|version| version >= SETTLED_MIN_VERSION);
+        crate::process::probe_version(&binary, &opts.launch_env, ProviderKind::Pi)
+            .await
+            .is_some_and(|version| version >= SETTLED_MIN_VERSION);
     let mut cmd = crate::process::command(&binary);
     // Profile arguments are applied first. The transport, optional permission
     // extension, resume target, and read-only tool set are tcode-owned and go
@@ -307,11 +299,12 @@ async fn run_actor(
             return;
         }
     };
-    let (line_tx, line_rx) = async_channel::unbounded();
+    let (line_tx, line_rx) = smol::channel::unbounded();
     let _ = std::thread::Builder::new()
         .name("pi-rpc-stdout".into())
         .spawn(move || read_pi_stdout(stdout, line_tx));
-    let stderr_tail = spawn_stderr_reader(stderr, "pi-rpc-stderr");
+    let stderr_tail = crate::process::StderrTail::default();
+    let _ = stderr_tail.spawn(stderr, "pi-rpc-stderr", "pi");
 
     let mut actor = PiActor {
         child,
@@ -362,8 +355,8 @@ async fn run_actor(
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
-            Output(Result<ChildOutput, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
+            Output(Result<ChildOutput, smol::channel::RecvError>),
         }
         let input = future::race(async { Input::Command(commands.recv().await) }, async {
             Input::Output(actor.lines.recv().await)
@@ -424,7 +417,7 @@ struct PiActor {
     /// acknowledging the stdin write.
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
-    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_tail: crate::process::StderrTail,
 }
 
 impl PiActor {
@@ -806,12 +799,7 @@ impl PiActor {
     }
 
     fn describe_failure(&self, base: String) -> String {
-        let tail = self.stderr_tail.lock().unwrap().join("\n");
-        if tail.trim().is_empty() {
-            base
-        } else {
-            format!("{base}\nstderr:\n{tail}")
-        }
+        self.stderr_tail.append_to(base, "\nstderr:\n")
     }
 }
 
@@ -913,9 +901,9 @@ impl PiMapper {
             "auto_retry_start" => vec![AgentEvent::Warning {
                 message: format!(
                     "pi retry {}/{} in {} ms: {}",
-                    number(message.get("attempt")).unwrap_or(0),
-                    number(message.get("maxAttempts")).unwrap_or(0),
-                    number(message.get("delayMs")).unwrap_or(0),
+                    crate::json_u64(message.get("attempt")).unwrap_or(0),
+                    crate::json_u64(message.get("maxAttempts")).unwrap_or(0),
+                    crate::json_u64(message.get("delayMs")).unwrap_or(0),
                     message
                         .get("errorMessage")
                         .and_then(Value::as_str)
@@ -1046,7 +1034,7 @@ impl PiMapper {
         if delta.is_empty() {
             return Vec::new();
         }
-        let index = number(event.get("contentIndex")).unwrap_or(0);
+        let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
         let message_id = assistant_message_id(message.get("message").unwrap_or(&Value::Null));
         vec![AgentEvent::Delta {
             item_id: format!("{message_id}:{index}"),
@@ -1141,7 +1129,7 @@ impl PiMapper {
                         total_processed_tokens: Some(self.cumulative_processed),
                         ..usage
                     };
-                    merge_usage(&mut self.turn_usage, usage);
+                    self.turn_usage.merge(usage);
                     self.has_usage = true;
                     events.push(AgentEvent::TokenUsage(usage));
                 }
@@ -1458,49 +1446,25 @@ fn assistant_message_id(message: &Value) -> String {
         .unwrap_or_else(|| {
             format!(
                 "pi-assistant-{}",
-                number(message.get("timestamp")).unwrap_or(0)
+                crate::json_u64(message.get("timestamp")).unwrap_or(0)
             )
         })
 }
 
 fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
     let usage = usage?;
-    let input = number(usage.get("input"));
-    let output = number(usage.get("output"));
-    let cache_read = number(usage.get("cacheRead"));
+    let input = crate::json_u64(usage.get("input"));
+    let output = crate::json_u64(usage.get("output"));
+    let cache_read = crate::json_u64(usage.get("cacheRead"));
     (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
         input_tokens: input,
         cached_input_tokens: cache_read,
         output_tokens: output,
-        used_tokens: number(usage.get("totalTokens")),
+        used_tokens: crate::json_u64(usage.get("totalTokens")),
         context_window: None,
         total_processed_tokens: None,
         cost_usd: None,
         duration_ms: None,
-    })
-}
-
-fn merge_usage(total: &mut TokenUsage, usage: TokenUsage) {
-    total.input_tokens = add_options(total.input_tokens, usage.input_tokens);
-    total.cached_input_tokens = add_options(total.cached_input_tokens, usage.cached_input_tokens);
-    total.output_tokens = add_options(total.output_tokens, usage.output_tokens);
-    total.used_tokens = add_options(total.used_tokens, usage.used_tokens);
-    total.context_window = usage.context_window.or(total.context_window);
-    total.total_processed_tokens = usage.total_processed_tokens;
-}
-
-fn add_options(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
-    }
-}
-
-fn number(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
     })
 }
 
@@ -1625,31 +1589,6 @@ fn materialize_permission_extension() -> Result<PathBuf, AgentError> {
     Ok(path)
 }
 
-fn pi_version(binary: &Path, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
-    let mut command = crate::process::command(binary);
-    command.arg("--version");
-    for (key, value) in launch_env.pairs(ProviderKind::Pi) {
-        command.env(key, value);
-    }
-    let output = command.output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_version(&text)
-}
-
-fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
-    let token = text.split_whitespace().find(|token| token.contains('.'))?;
-    let mut parts = token.trim_start_matches('v').split('.');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts
-            .next()
-            .and_then(|part| part.split(['-', '+']).next())?
-            .parse()
-            .ok()?,
-    ))
-}
-
 fn ensure_success(message: &Value) -> Result<(), AgentError> {
     if message
         .get("success")
@@ -1734,27 +1673,6 @@ fn read_lf_record(reader: &mut impl BufRead) -> Result<Option<String>, AgentErro
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|err| AgentError::Protocol(format!("pi stdout was not UTF-8: {err}")))
-}
-
-fn spawn_stderr_reader(
-    stderr: impl std::io::Read + Send + 'static,
-    name: &str,
-) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-    let tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-    let capture = tail.clone();
-    let _ = std::thread::Builder::new()
-        .name(name.into())
-        .spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log::debug!("pi: {line}");
-                let mut tail = capture.lock().unwrap();
-                if tail.len() == STDERR_TAIL_LINES {
-                    tail.remove(0);
-                }
-                tail.push(line);
-            }
-        });
-    tail
 }
 
 #[cfg(test)]
