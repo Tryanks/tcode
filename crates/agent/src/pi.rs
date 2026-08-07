@@ -158,7 +158,7 @@ fn map_model(
                 .into_iter()
                 .map(|level| SelectOption {
                     value: level.into(),
-                    label: thinking_label(level).into(),
+                    label: thinking_label(level),
                     description: None,
                 })
                 .collect(),

@@ -87,7 +87,10 @@ pub(crate) fn word_token_ranges(text: &str) -> Vec<Range<usize>> {
     tokens
 }
 
-pub fn word_diff_ranges(old: &str, new: &str) -> Option<(Vec<Range<usize>>, Vec<Range<usize>>)> {
+/// Matching (old, new) highlight ranges, or `None` when the diff is too noisy.
+pub type WordDiffRanges = (Vec<Range<usize>>, Vec<Range<usize>>);
+
+pub fn word_diff_ranges(old: &str, new: &str) -> Option<WordDiffRanges> {
     const MAX_WORD_DIFF_LEN: usize = 512;
     const MAX_WORD_DIFF_LINE_COUNT: usize = 8;
 
