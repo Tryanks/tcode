@@ -91,12 +91,11 @@ impl SessionStore {
                 // Registry ids are external input and may contain path separators.
                 // Hex keeps the filename reversible and collision-free without
                 // allowing an id to escape the data directory.
-                let mut encoded = String::with_capacity(id.len() * 2);
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                for byte in id.as_bytes() {
-                    encoded.push(HEX[(byte >> 4) as usize] as char);
-                    encoded.push(HEX[(byte & 0x0f) as usize] as char);
-                }
+                let encoded = id
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
                 format!("acp-{encoded}")
             }
         };
@@ -204,16 +203,6 @@ impl SessionStore {
         metas
     }
 
-    /// Load the persisted project list.
-    pub fn load_projects(&self) -> Vec<Project> {
-        self.read_file().projects
-    }
-
-    /// Persist a whole index file (used to flush migration on startup).
-    pub fn persist_index(&self, file: &IndexFile) -> std::io::Result<()> {
-        self.write_file(file)
-    }
-
     /// Insert or replace a meta in the index (by id), then persist.
     pub fn upsert_meta(&self, meta: &SessionMeta) -> std::io::Result<()> {
         let mut file = self.read_file();
@@ -222,7 +211,7 @@ impl SessionStore {
         } else {
             file.sessions.push(meta.clone());
         }
-        self.write_file(&file)
+        self.persist_index(&file)
     }
 
     /// Insert or replace a project (by id), then persist.
@@ -233,7 +222,7 @@ impl SessionStore {
         } else {
             file.projects.push(project.clone());
         }
-        self.write_file(&file)
+        self.persist_index(&file)
     }
 
     /// Remove a project from the index. Its sessions are removed separately so
@@ -241,10 +230,11 @@ impl SessionStore {
     pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
         file.projects.retain(|project| project.id != id);
-        self.write_file(&file)
+        self.persist_index(&file)
     }
 
-    fn write_file(&self, file: &IndexFile) -> std::io::Result<()> {
+    /// Persist a whole index file atomically (also flushes migration on startup).
+    pub fn persist_index(&self, file: &IndexFile) -> std::io::Result<()> {
         let tmp = self.index_path().with_extension("json.tmp");
         let data = serde_json::to_vec_pretty(file)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -323,7 +313,7 @@ impl SessionStore {
     pub fn remove_session(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
         file.sessions.retain(|meta| meta.id != id);
-        self.write_file(&file)?;
+        self.persist_index(&file)?;
         match fs::remove_file(self.events_path(id)) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -352,12 +342,7 @@ fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
     }
 }
 
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use tcode_core::project::now_secs;
 
 /// Current wall-clock time in unix milliseconds (used for event envelopes).
 pub fn now_millis() -> u64 {
@@ -661,23 +646,20 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_fork_fields_are_legacy_safe_and_roundtrip() {
+    fn session_meta_pending_fork_is_legacy_safe_and_roundtrip() {
         let legacy = serde_json::json!({
             "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
+            "cwd": "/work/alpha", "forked_from": "source", "created_at": 1, "updated_at": 10
         });
         let mut meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.forked_from, None);
         assert!(!meta.pending_fork);
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("forked_from"));
         assert!(!json.contains("pending_fork"));
 
-        meta.forked_from = Some("source".into());
         meta.pending_fork = true;
         let back: SessionMeta =
             serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
-        assert_eq!(back.forked_from.as_deref(), Some("source"));
         assert!(back.pending_fork);
     }
 

@@ -2,18 +2,18 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::outline::{Frame, UiNode};
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
-mod stub;
 
 const UNSUPPORTED_MESSAGE: &str = "computer use is unsupported on this platform";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Kind of desktop root to match.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RootKind {
     #[default]
@@ -83,7 +83,10 @@ pub struct RootObservation {
     pub screenshot_png: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Supported desktop input action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename = "UiActionKind")]
 pub enum ActionKind {
     Press,
     Click,
@@ -95,7 +98,9 @@ pub enum ActionKind {
     MoveMouse,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Mouse button used by pointer actions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum MouseButton {
     #[default]
     Left,
@@ -197,36 +202,42 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-pub trait Backend: Send + Sync {
-    fn list_roots(&self, filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError>;
-
-    fn observe(
-        &self,
-        root: &RootInfo,
-        request: ObserveRequest,
-    ) -> Result<RootObservation, BackendError>;
-
-    fn perform_action(
-        &self,
-        root: &RootInfo,
-        request: &ActionRequest,
-    ) -> Result<ActionResult, BackendError>;
-
-    fn read_element_text(
-        &self,
-        root: &RootInfo,
-        target_path: &[usize],
-    ) -> Result<String, BackendError>;
-}
-
-pub fn platform_backend() -> Box<dyn Backend> {
+pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(macos::MacosBackend)
+        macos::MacosBackend.list_roots(filters)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Box::new(stub::StubBackend)
+        let _ = filters;
+        Err(BackendError::unsupported())
+    }
+}
+
+pub fn observe(root: &RootInfo, request: ObserveRequest) -> Result<RootObservation, BackendError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::MacosBackend.observe(root, request)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, request);
+        Err(BackendError::unsupported())
+    }
+}
+
+pub fn perform_action(
+    root: &RootInfo,
+    request: &ActionRequest,
+) -> Result<ActionResult, BackendError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::MacosBackend.perform_action(root, request)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, request);
+        Err(BackendError::unsupported())
     }
 }
 

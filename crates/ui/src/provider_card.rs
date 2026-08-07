@@ -14,7 +14,6 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    popover::Popover,
     switch::Switch,
     v_flex,
 };
@@ -67,7 +66,7 @@ impl ProviderCard {
         let title = self
             .store
             .read(cx)
-            .provider_profile_display_name(&profile_id, cx);
+            .provider_profile_display_name(&profile_id);
         let dialog = cx
             .new(|cx| ProviderDialog::new(store.clone(), provider, profile_id.clone(), window, cx));
         window.open_dialog(cx, move |dlg, window, cx| {
@@ -90,13 +89,11 @@ impl ProviderCard {
         // Name, enabled state, and probe result all belong to this profile;
         // update-check versions remain shared by protocol kind.
         let store = self.store.read(cx);
-        let name = store.provider_profile_display_name(&self.profile_id, cx);
-        let enabled = store
-            .provider_profile_settings(&self.profile_id, cx)
-            .enabled;
-        let snapshot = store.provider_profile_snapshot(&self.profile_id, cx);
+        let name = store.provider_profile_display_name(&self.profile_id);
+        let enabled = store.provider_profile_settings(&self.profile_id).enabled;
+        let snapshot = store.provider_profile_snapshot(&self.profile_id);
         let summary = crate::provider_status::summarize(provider, snapshot.as_ref(), enabled);
-        let provider_version = store.provider_version_status(provider, cx);
+        let provider_version = store.provider_version_status(provider);
         let version = snapshot
             .as_ref()
             .and_then(|s| s.version.clone())
@@ -105,7 +102,7 @@ impl ProviderCard {
             .as_ref()
             .is_some_and(|v| v.update_available);
         let muted = cx.theme().muted_foreground;
-        let accent = store.provider_profile_accent(&self.profile_id, cx);
+        let accent = store.provider_profile_accent(&self.profile_id);
 
         let dot_color = match summary.dot {
             StatusDot::Success => cx.theme().success,
@@ -172,8 +169,7 @@ impl ProviderCard {
             .tooltip({
                 let name = name.clone();
                 move |window, cx| {
-                    let label =
-                        tcode_i18n::tr!("providers.configure", name = name.clone()).into_owned();
+                    let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
                     gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                 }
             })
@@ -195,28 +191,24 @@ impl ProviderCard {
                     .ghost()
                     .xsmall()
                     .icon(IconName::Settings)
-                    .tooltip(tcode_i18n::tr!("providers.configure", name = name.clone()))
+                    .tooltip(crate::tr!("providers.configure", name = name.clone()))
                     .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx))),
             )
             .child(
                 Switch::new("enable-provider")
                     .checked(enabled)
-                    .tooltip(tcode_i18n::tr!("providers.enable", name = name))
+                    .tooltip(crate::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let checked = *checked;
                         let profile_id = this.profile_id.clone();
-                        let provider = this.provider;
-                        this.store.update(cx, |store, cx| {
-                            store.dispatch(
-                                Command::UpdateProfileSettings {
-                                    profile_id,
-                                    patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
-                                        enabled: checked,
-                                    },
+                        this.store.update(cx, |store, _cx| {
+                            store.dispatch(Command::UpdateProfileSettings {
+                                profile_id,
+                                patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
+                                    enabled: checked,
                                 },
-                                cx,
-                            );
-                            store.dispatch(Command::ReloadProvider { provider }, cx);
+                            });
+                            store.dispatch(Command::ReloadProvider);
                         });
                     })),
             )
@@ -285,9 +277,9 @@ impl ProviderCard {
                             .child(shown)
                             .tooltip(move |window, cx| {
                                 let label = if revealed {
-                                    tcode_i18n::tr!("providers.hide_email")
+                                    crate::tr!("providers.hide_email")
                                 } else {
-                                    tcode_i18n::tr!("providers.reveal_email")
+                                    crate::tr!("providers.reveal_email")
                                 }
                                 .into_owned();
                                 gpui_component::tooltip::Tooltip::new(label).build(window, cx)
@@ -312,21 +304,18 @@ impl ProviderCard {
     /// The update-available icon + its popover.
     fn render_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
-        let version = self.store.read(cx).provider_version_status(provider, cx);
+        let version = self.store.read(cx).provider_version_status(provider);
         let updating = version.is_some_and(|v| v.updating);
-        let command = self.store.read(cx).provider_update_command(provider, cx);
+        let command = self.store.read(cx).provider_update_command(provider);
         let store = self.store.clone();
 
-        Popover::new("update-popover")
-            // Single panel surface at the 14px overlay radius; content transparent.
-            .rounded(crate::material::radius_overlay())
-            .shadow_xl()
+        crate::material::overlay_popover("update-popover")
             .trigger(
                 Button::new("update-available")
                     .ghost()
                     .xsmall()
                     .icon(Icon::empty().path("icons/download.svg"))
-                    .tooltip(tcode_i18n::tr!("providers.update_aria")),
+                    .tooltip(crate::tr!("providers.update_aria")),
             )
             .content(move |_, _, cx| {
                 let store = store.clone();
@@ -341,13 +330,13 @@ impl ProviderCard {
                         div()
                             .text_size(px(13.))
                             .font_semibold()
-                            .child(tcode_i18n::tr!("providers.update_title")),
+                            .child(crate::tr!("providers.update_title")),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
                             .text_color(muted)
-                            .child(tcode_i18n::tr!("providers.update_message")),
+                            .child(crate::tr!("providers.update_message")),
                     );
                 if command.is_some() {
                     pane = pane.child(
@@ -356,15 +345,15 @@ impl ProviderCard {
                             .small()
                             .loading(updating)
                             .label(if updating {
-                                tcode_i18n::tr!("providers.updating")
+                                crate::tr!("providers.updating")
                             } else {
-                                tcode_i18n::tr!("providers.update_now")
+                                crate::tr!("providers.update_now")
                             })
                             .on_click({
                                 let store = store.clone();
                                 move |_, _, cx| {
-                                    store.update(cx, |store, cx| {
-                                        store.dispatch(Command::UpdateProvider { provider }, cx);
+                                    store.update(cx, |store, _cx| {
+                                        store.dispatch(Command::UpdateProvider { provider });
                                     });
                                 }
                             }),
@@ -378,7 +367,7 @@ impl ProviderCard {
                                 .pt_1()
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!("providers.update_manual")),
+                                .child(crate::tr!("providers.update_manual")),
                         )
                         .child(
                             h_flex()
@@ -406,7 +395,7 @@ impl ProviderCard {
                                         .ghost()
                                         .xsmall()
                                         .icon(IconName::Copy)
-                                        .tooltip(tcode_i18n::tr!("providers.copy_command"))
+                                        .tooltip(crate::tr!("providers.copy_command"))
                                         .on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 copy.clone(),

@@ -12,27 +12,7 @@ use serde_json::json;
 
 use crate::store::SessionStore;
 use tcode_core::project::{Project, SessionMeta};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SourceTool {
-    ClaudeCode,
-    ClaudeDesktop,
-    T3Code,
-    CodexCli,
-    CodexDesktop,
-}
-
-impl SourceTool {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "Claude Code",
-            Self::ClaudeDesktop => "Claude Desktop",
-            Self::T3Code => "T3 Code",
-            Self::CodexCli => "Codex CLI",
-            Self::CodexDesktop => "Codex Desktop",
-        }
-    }
-}
+pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
 
 #[derive(Debug, Clone)]
 pub struct ExternalRoots {
@@ -57,22 +37,6 @@ impl ExternalRoots {
             ],
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExternalThread {
-    pub source: SourceTool,
-    pub file: PathBuf,
-    pub external_id: String,
-    pub title_hint: Option<String>,
-    pub last_active_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct RecentDir {
-    pub path: PathBuf,
-    pub last_active_ms: u64,
-    pub threads: Vec<ExternalThread>,
 }
 
 pub use scan::scan_recent_dirs;
@@ -102,6 +66,19 @@ pub enum ImportOutcome {
     SkippedDuplicate,
     SkippedEmpty,
     Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalImportUpdate {
+    Progress {
+        done: usize,
+        total: usize,
+        tool: String,
+    },
+    Finished {
+        imported: usize,
+        skipped: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -139,12 +116,14 @@ pub fn import_thread(
     }
 
     let converted = match thread.source {
-        SourceTool::ClaudeCode | SourceTool::ClaudeDesktop | SourceTool::T3Code => {
-            claude::convert(&thread.file, &thread.external_id)
-        }
+        SourceTool::ClaudeCode
+        | SourceTool::ClaudeDesktop
+        | SourceTool::T3Code
+        | SourceTool::Unknown => claude::convert(&thread.file, &thread.external_id),
         SourceTool::CodexCli | SourceTool::CodexDesktop => {
             codex::convert(&thread.file, &thread.external_id)
         }
+        _ => claude::convert(&thread.file, &thread.external_id),
     };
     let converted = match converted {
         Ok(Some(converted)) => converted,

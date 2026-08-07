@@ -1,19 +1,14 @@
 //! Dedicated-thread host execution seam.
 //!
 //! `AppState` is a plain `Send` value owned by the host loop. UI clients can
-//! reach it only through decoded protocol messages. Background completions use
+//! reach it only through typed protocol messages. Background completions use
 //! the same mailbox via [`HostCx::enqueue`].
 
+use std::collections::HashMap;
 use std::future::Future;
-use std::pin::Pin;
-#[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-use std::task::{Context as TaskContext, Poll};
+use std::sync::{Arc, Mutex};
 
-use tcode_protocol::{ClientMessage, HostMessage};
+use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic};
 
 use crate::app::AppState;
 use crate::event::HostEvent;
@@ -22,102 +17,73 @@ pub(crate) type HostFn = Box<dyn FnOnce(&mut AppState, &mut HostCx) + Send + 'st
 
 /// The single mailbox consumed by the thread that owns [`AppState`].
 pub(crate) enum HostMsg {
-    /// A client line that has crossed serde/NDJSON decoding successfully.
-    DecodedClient(Box<ClientMessage>),
     /// Runtime-internal completion posted by [`HostCx::enqueue`].
     Enqueued(HostFn),
-    /// The last serialized client endpoint was dropped.
-    ClientClosed,
-}
-
-/// Items accepted by the host-side NDJSON encoder.
-pub(crate) enum HostOutput {
-    Event(HostEvent),
-    Message(HostMessage),
 }
 
 /// A runtime task handle independent of any UI executor.
-#[must_use = "tasks must be awaited or detached"]
-pub struct HostTask<T>(smol::Task<T>);
-
-impl<T> HostTask<T> {
-    pub(crate) fn new(task: smol::Task<T>) -> Self {
-        Self(task)
-    }
-
-    /// Keep running the task after dropping its handle.
-    pub fn detach(self) {
-        self.0.detach();
-    }
-}
-
-impl<T: 'static> Future for HostTask<T> {
-    type Output = T;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        // `self.0` is structurally pinned with `self`; it is never moved while
-        // this `HostTask` is pinned.
-        let this = unsafe { self.get_unchecked_mut() };
-        unsafe { Pin::new_unchecked(&mut this.0) }.poll(cx)
-    }
-}
+pub type HostTask<T> = smol::Task<T>;
 
 /// The only execution/event context accepted by [`AppState`] methods.
 ///
 /// Clones are `Send` and may be held by background work. All state mutation
-/// returns through `mailbox`; emitted events enter the serialized host-output
+/// returns through `mailbox`; emitted events enter the typed host-output
 /// stream; notification-only changes use a bounded channel as a coalescing bit.
 #[derive(Clone)]
 pub struct HostCx {
-    mailbox: async_channel::Sender<HostMsg>,
-    outgoing: async_channel::Sender<HostOutput>,
-    changed: async_channel::Sender<()>,
-    #[cfg(test)]
-    virtual_clock_nanos: Option<Arc<AtomicU64>>,
-    #[cfg(test)]
-    virtual_clock_origin_nanos: u64,
+    mailbox: smol::channel::Sender<HostMsg>,
+    events: smol::channel::Sender<HostMessage>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+    runtime_seq: Arc<Mutex<u64>>,
+    changed: smol::channel::Sender<()>,
 }
 
 impl HostCx {
     pub(crate) fn new(
-        mailbox: async_channel::Sender<HostMsg>,
-        outgoing: async_channel::Sender<HostOutput>,
-        changed: async_channel::Sender<()>,
+        mailbox: smol::channel::Sender<HostMsg>,
+        events: smol::channel::Sender<HostMessage>,
+        pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+        changed: smol::channel::Sender<()>,
     ) -> Self {
         Self {
             mailbox,
-            outgoing,
+            events,
+            pending,
+            runtime_seq: Arc::new(Mutex::new(0)),
             changed,
-            #[cfg(test)]
-            virtual_clock_nanos: None,
-            #[cfg(test)]
-            virtual_clock_origin_nanos: 0,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        mailbox: async_channel::Sender<HostMsg>,
-        outgoing: async_channel::Sender<HostOutput>,
-        changed: async_channel::Sender<()>,
-        virtual_clock_nanos: Arc<AtomicU64>,
-    ) -> Self {
-        let virtual_clock_origin_nanos = virtual_clock_nanos.load(Ordering::SeqCst);
-        Self {
-            mailbox,
-            outgoing,
-            changed,
-            virtual_clock_nanos: Some(virtual_clock_nanos),
-            virtual_clock_origin_nanos,
         }
     }
 
     pub fn emit(&mut self, event: HostEvent) {
-        let _ = self.outgoing.try_send(HostOutput::Event(event));
+        let envelope = match event {
+            HostEvent::Domain(envelope) => envelope,
+            HostEvent::Runtime(notification) => {
+                let mut seq = self.runtime_seq.lock().unwrap();
+                *seq = seq.wrapping_add(1);
+                let envelope = EventEnvelope {
+                    topic: Topic::RuntimeEvents,
+                    seq: *seq,
+                    event: ServerEvent::Runtime(notification),
+                };
+                let _ = self.events.try_send(HostMessage::Event(envelope));
+                return;
+            }
+        };
+        let _ = self.events.try_send(HostMessage::Event(envelope));
     }
 
     pub(crate) fn send_message(&self, message: HostMessage) {
-        let _ = self.outgoing.try_send(HostOutput::Message(message));
+        let id = match &message {
+            HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = id
+            && let Some(waiter) = self.pending.lock().unwrap().remove(&id)
+        {
+            let _ = waiter.try_send(message);
+        } else {
+            let _ = self.events.try_send(message);
+        }
     }
 
     pub fn notify(&mut self) {
@@ -130,7 +96,15 @@ impl HostCx {
         &self,
         fut: impl Future<Output = T> + Send + 'static,
     ) -> HostTask<T> {
-        HostTask::new(smol::spawn(fut))
+        smol::spawn(fut)
+    }
+
+    pub fn unblock<R, F>(&self, f: F) -> HostTask<R>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
+    {
+        self.spawn_background(smol::unblock(f))
     }
 
     pub fn enqueue(&self, f: impl FnOnce(&mut AppState, &mut HostCx) + Send + 'static) {
@@ -141,7 +115,7 @@ impl HostCx {
         &self,
         f: impl FnOnce(&mut AppState, &mut HostCx) -> R + Send + 'static,
     ) -> Result<R, ()> {
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = smol::channel::bounded(1);
         self.mailbox
             .send(HostMsg::Enqueued(Box::new(move |state, cx| {
                 let _ = sender.try_send(f(state, cx));
@@ -149,24 +123,6 @@ impl HostCx {
             .await
             .map_err(|_| ())?;
         receiver.recv().await.map_err(|_| ())
-    }
-
-    pub(crate) fn timer(&self, duration: std::time::Duration) -> HostTask<()> {
-        #[cfg(test)]
-        if let Some(clock) = self.virtual_clock_nanos.clone() {
-            let duration_nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-            let deadline = self
-                .virtual_clock_origin_nanos
-                .saturating_add(duration_nanos);
-            return self.spawn_background(async move {
-                while clock.load(Ordering::SeqCst) < deadline {
-                    smol::Timer::after(std::time::Duration::from_millis(1)).await;
-                }
-            });
-        }
-        self.spawn_background(async move {
-            smol::Timer::after(duration).await;
-        })
     }
 
     pub fn spawn_detached(&self, fut: impl Future<Output = ()> + Send + 'static) {

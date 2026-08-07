@@ -76,7 +76,7 @@ struct GridGeometry {
 }
 
 struct TerminalEventSubscription {
-    receiver: async_channel::Receiver<TermEvent>,
+    receiver: smol::channel::Receiver<TermEvent>,
     _task: Task<()>,
 }
 
@@ -202,13 +202,13 @@ impl TerminalDrawer {
 
     fn dispatch(&self, command: Command, cx: &mut Context<Self>) {
         self.workspace_store
-            .update(cx, |store, cx| store.dispatch(command, cx));
+            .update(cx, |store, _cx| store.dispatch(command));
     }
 
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&term::Terminal)) {
         self.workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 if let Some(entry) = workspace.active() {
                     f(&entry.terminal);
                 }
@@ -223,7 +223,7 @@ impl TerminalDrawer {
     ) {
         self.workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 if let Some(entry) = workspace.terminal(terminal_id) {
                     f(&entry.terminal);
                 }
@@ -247,7 +247,7 @@ impl TerminalDrawer {
         if let Some(text) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 workspace
                     .terminal(action.0)
                     .and_then(|entry| entry.terminal.selected_text())
@@ -309,7 +309,7 @@ impl TerminalDrawer {
         let streams = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 workspace
                     .terminals
                     .iter()
@@ -416,7 +416,7 @@ impl TerminalDrawer {
                     if let Some(text) = self
                         .workspace_store
                         .read(cx)
-                        .with_terminal_workspace(cx, |workspace| {
+                        .with_terminal_workspace(|workspace| {
                             workspace
                                 .active()
                                 .and_then(|entry| entry.terminal.selected_text())
@@ -432,7 +432,7 @@ impl TerminalDrawer {
                         && let Some(terminal_id) = self
                             .workspace_store
                             .read(cx)
-                            .with_terminal_workspace(cx, |workspace| workspace.active_id)
+                            .with_terminal_workspace(|workspace| workspace.active_id)
                             .flatten()
                     {
                         self.paste_to_terminal(terminal_id, &text, cx);
@@ -469,7 +469,7 @@ impl TerminalDrawer {
         if let Some(id) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| workspace.active_id)
+            .with_terminal_workspace(|workspace| workspace.active_id)
             .flatten()
         {
             self.bell_tabs.remove(&id);
@@ -492,7 +492,7 @@ impl TerminalDrawer {
         if lines != 0 {
             self.workspace_store
                 .read(cx)
-                .with_terminal_workspace(cx, |workspace| {
+                .with_terminal_workspace(|workspace| {
                     if let Some(entry) = workspace.terminal(terminal_id) {
                         let snapshot = entry.terminal.snapshot();
                         let point = self
@@ -781,7 +781,7 @@ impl TerminalDrawer {
             .flatten();
         workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 if let Some(entry) = workspace.terminal(terminal_id) {
                     let snapshot = entry.terminal.snapshot();
                     if snapshot.mode.routes_mouse(event.modifiers.shift) {
@@ -871,7 +871,7 @@ impl TerminalDrawer {
         let workspace_store = self.workspace_store.clone();
         workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 let Some(entry) = workspace.terminal(terminal_id) else {
                     return;
                 };
@@ -962,7 +962,7 @@ impl TerminalDrawer {
             .and_then(|(point, _side)| {
                 self.workspace_store
                     .read(cx)
-                    .with_terminal_workspace(cx, |workspace| {
+                    .with_terminal_workspace(|workspace| {
                         let entry = workspace.terminal(terminal_id)?;
                         let snapshot = entry.terminal.snapshot();
                         if snapshot.mode.routes_mouse(event.modifiers.shift) {
@@ -1008,7 +1008,7 @@ impl TerminalDrawer {
             if let Some(text) = self
                 .workspace_store
                 .read(cx)
-                .with_terminal_workspace(cx, |workspace| {
+                .with_terminal_workspace(|workspace| {
                     workspace
                         .terminal(terminal_id)
                         .and_then(|entry| entry.terminal.selected_text())
@@ -1040,7 +1040,7 @@ impl TerminalDrawer {
         let Some((snapshot, label, register_input)) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 workspace.terminal(terminal_id).map(|entry| {
                     (
                         entry.terminal.snapshot(),
@@ -1058,8 +1058,8 @@ impl TerminalDrawer {
         if snapshot.exited {
             let status = snapshot
                 .exit_code
-                .map(|code| tcode_i18n::tr!("terminal.exited_code", code = code).into_owned())
-                .unwrap_or_else(|| tcode_i18n::tr!("terminal.exited").into_owned());
+                .map(|code| crate::tr!("terminal.exited_code", code = code).into_owned())
+                .unwrap_or_else(|| crate::tr!("terminal.exited").into_owned());
             grid = grid.child(
                 div()
                     .h(px(self.cell_height))
@@ -1096,7 +1096,7 @@ impl TerminalDrawer {
                 let rows = (content_height / cell_height).floor().max(2.) as usize;
                 workspace_store
                     .read(cx)
-                    .with_terminal_workspace(cx, |workspace| {
+                    .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.terminal(terminal_id) {
                             entry.terminal.resize(cols, rows);
                         }
@@ -1165,12 +1165,8 @@ impl TerminalDrawer {
                         .right(px(PANE_PADDING))
                         .top(px(PANE_PADDING))
                         .small()
-                        .label(tcode_i18n::tr!("terminal.add_context"))
-                        .tooltip(format!(
-                            "{} · {}",
-                            label,
-                            tcode_i18n::tr!("terminal.selection")
-                        ))
+                        .label(crate::tr!("terminal.add_context"))
+                        .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.dispatch(Command::CaptureTerminalSelection { terminal_id }, cx);
@@ -1182,7 +1178,7 @@ impl TerminalDrawer {
                 move |menu, _window, cx| {
                     let has_selection = workspace_store
                         .read(cx)
-                        .with_terminal_workspace(cx, |workspace| {
+                        .with_terminal_workspace(|workspace| {
                             workspace
                                 .terminal(terminal_id)
                                 .and_then(|entry| entry.terminal.selected_text())
@@ -1190,25 +1186,25 @@ impl TerminalDrawer {
                         })
                         .unwrap_or(false);
                     menu.menu_with_enable(
-                        tcode_i18n::tr!("terminal.copy").into_owned(),
+                        crate::tr!("terminal.copy").into_owned(),
                         Box::new(TerminalCopy(terminal_id)),
                         has_selection,
                     )
                     .menu(
-                        tcode_i18n::tr!("terminal.paste").into_owned(),
+                        crate::tr!("terminal.paste").into_owned(),
                         Box::new(TerminalPaste(terminal_id)),
                     )
                     .menu(
-                        tcode_i18n::tr!("terminal.select_all").into_owned(),
+                        crate::tr!("terminal.select_all").into_owned(),
                         Box::new(TerminalSelectAll(terminal_id)),
                     )
                     .menu(
-                        tcode_i18n::tr!("terminal.clear").into_owned(),
+                        crate::tr!("terminal.clear").into_owned(),
                         Box::new(TerminalClear(terminal_id)),
                     )
                     .separator()
                     .menu_with_enable(
-                        tcode_i18n::tr!("terminal.add_context").into_owned(),
+                        crate::tr!("terminal.add_context").into_owned(),
                         Box::new(TerminalAddContext(terminal_id)),
                         has_selection,
                     )
@@ -1249,7 +1245,7 @@ impl Render for TerminalDrawer {
             let focus_in = window.on_focus_in(&self.focus_handle, cx, move |_, cx| {
                 workspace_store
                     .read(cx)
-                    .with_terminal_workspace(cx, |workspace| {
+                    .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.active()
                             && entry.terminal.snapshot().mode.focus_in_out
                         {
@@ -1261,7 +1257,7 @@ impl Render for TerminalDrawer {
             let focus_out = window.on_focus_out(&self.focus_handle, cx, move |_, _, cx| {
                 workspace_store
                     .read(cx)
-                    .with_terminal_workspace(cx, |workspace| {
+                    .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.active()
                             && entry.terminal.snapshot().mode.focus_in_out
                         {
@@ -1294,7 +1290,7 @@ impl Render for TerminalDrawer {
         let (tabs, active_id, active_split) = self
             .workspace_store
             .read(cx)
-            .with_terminal_workspace(cx, |workspace| {
+            .with_terminal_workspace(|workspace| {
                 (
                     workspace
                         .terminals
@@ -1325,7 +1321,7 @@ impl Render for TerminalDrawer {
         let mut tab_strip = h_flex()
             .id("terminal-tab-list")
             .role(Role::TabList)
-            .aria_label(tcode_i18n::tr!("terminal.tabs"))
+            .aria_label(crate::tr!("terminal.tabs"))
             .min_w_0()
             .gap(px(2.))
             .overflow_hidden();
@@ -1333,7 +1329,7 @@ impl Render for TerminalDrawer {
             let id = *id;
             let selected = active_id == Some(id);
             let close_id = id;
-            let tab_label = tcode_i18n::tr!("terminal.tab", label = label.clone()).into_owned();
+            let tab_label = crate::tr!("terminal.tab", label = label.clone()).into_owned();
             tab_strip = tab_strip.child(
                 crate::material::accessible_clickable(
                     h_flex(),
@@ -1383,7 +1379,7 @@ impl Render for TerminalDrawer {
                         .compact()
                         .xsmall()
                         .icon(IconName::Close)
-                        .tooltip(tcode_i18n::tr!("terminal.close_tab"))
+                        .tooltip(crate::tr!("terminal.close_tab"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.workspace_store
                                 .update(cx, |store, cx| store.close_terminal(close_id, cx));
@@ -1410,7 +1406,7 @@ impl Render for TerminalDrawer {
                     Button::new("terminal-restart")
                         .ghost()
                         .small()
-                        .label(tcode_i18n::tr!("terminal.restart"))
+                        .label(crate::tr!("terminal.restart"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.dispatch(Command::RestartTerminal, cx);
                         })),
@@ -1423,12 +1419,12 @@ impl Render for TerminalDrawer {
                     .compact()
                     .label("↔")
                     .disabled(!can_split)
-                    .tooltip(tcode_i18n::tr!("terminal.split_horizontal"))
+                    .tooltip(crate::tr!("terminal.split_horizontal"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cwd = this
                             .workspace_store
                             .read(cx)
-                            .with_terminal_workspace(cx, |workspace| {
+                            .with_terminal_workspace(|workspace| {
                                 workspace
                                     .active()
                                     .map(|entry| entry.terminal.working_directory())
@@ -1453,12 +1449,12 @@ impl Render for TerminalDrawer {
                     .compact()
                     .label("↕")
                     .disabled(!can_split)
-                    .tooltip(tcode_i18n::tr!("terminal.split_vertical"))
+                    .tooltip(crate::tr!("terminal.split_vertical"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cwd = this
                             .workspace_store
                             .read(cx)
-                            .with_terminal_workspace(cx, |workspace| {
+                            .with_terminal_workspace(|workspace| {
                                 workspace
                                     .active()
                                     .map(|entry| entry.terminal.working_directory())
@@ -1484,15 +1480,15 @@ impl Render for TerminalDrawer {
                     .label("+")
                     .disabled(at_limit)
                     .tooltip(if at_limit {
-                        tcode_i18n::tr!("terminal.max_reached", count = MAX_TERMINALS_PER_SESSION)
+                        crate::tr!("terminal.max_reached", count = MAX_TERMINALS_PER_SESSION)
                     } else {
-                        tcode_i18n::tr!("terminal.new")
+                        crate::tr!("terminal.new")
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         let cwd = this
                             .workspace_store
                             .read(cx)
-                            .with_terminal_workspace(cx, |workspace| {
+                            .with_terminal_workspace(|workspace| {
                                 workspace
                                     .active()
                                     .map(|entry| entry.terminal.working_directory())
@@ -1511,7 +1507,7 @@ impl Render for TerminalDrawer {
                     .small()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip(tcode_i18n::tr!("terminal.close"))
+                    .tooltip(crate::tr!("terminal.close"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace_store
                             .update(cx, |store, cx| store.close_terminal_panel(cx));
@@ -1548,7 +1544,7 @@ impl Render for TerminalDrawer {
             (Some(id), None) => self.render_terminal(id, cx),
             _ => div()
                 .p_3()
-                .child(tcode_i18n::tr!("terminal.starting"))
+                .child(crate::tr!("terminal.starting"))
                 .into_any_element(),
         };
 
@@ -1568,7 +1564,7 @@ impl Render for TerminalDrawer {
                     div(),
                     "terminal-content",
                     Role::Terminal,
-                    tcode_i18n::tr!("terminal.content"),
+                    crate::tr!("terminal.content"),
                     cx,
                 )
                 .track_focus(&self.focus_handle)

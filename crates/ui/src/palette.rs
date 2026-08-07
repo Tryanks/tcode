@@ -28,7 +28,7 @@ use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
 use crate::store::WorkspaceStore;
-use crate::time::now_secs;
+use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
 
 /// Score `text` against a fuzzy `query` (case-insensitive subsequence match).
@@ -76,19 +76,6 @@ enum Action {
     },
 }
 
-/// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
-fn humanize_ago(secs: u64) -> String {
-    if secs < 60 {
-        tcode_i18n::tr!("time.just_now").into_owned()
-    } else if secs < 3600 {
-        tcode_i18n::tr!("time.minutes_ago", count = secs / 60).into_owned()
-    } else if secs < 86_400 {
-        tcode_i18n::tr!("time.hours_ago", count = secs / 3600).into_owned()
-    } else {
-        tcode_i18n::tr!("time.days_ago", count = secs / 86_400).into_owned()
-    }
-}
-
 /// One rendered palette row.
 #[derive(Clone)]
 struct Item {
@@ -123,9 +110,8 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tcode_i18n::tr!("palette.placeholder"))
-        });
+        let query =
+            cx.new(|cx| InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder")));
 
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
@@ -155,17 +141,10 @@ impl CommandPalette {
         }
     }
 
-    /// Focus the search input (called when the palette opens). `--debug-palette`
-    /// seeds the query so palette states can be screenshotted headlessly.
+    /// Focus the search input when the palette opens.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let seed = self
-            .window_state
-            .read(cx)
-            .debug_palette
-            .clone()
-            .unwrap_or_default();
         self.query.update(cx, |state, cx| {
-            state.set_value(seed, window, cx);
+            state.set_value(String::new(), window, cx);
             state.focus(window, cx);
         });
         self.selected = 0;
@@ -209,9 +188,9 @@ impl CommandPalette {
                 ));
             }
         };
-        for group in store.palette_groups(cx) {
+        for group in store.grouped_sessions() {
             push_action(
-                tcode_i18n::tr!("palette.new_thread", project = group.project.name).into_owned(),
+                crate::tr!("palette.new_thread", project = group.project.name).into_owned(),
                 IconName::Plus,
                 Action::NewThread {
                     cwd: group.project.root.clone(),
@@ -220,32 +199,32 @@ impl CommandPalette {
             );
         }
         push_action(
-            tcode_i18n::tr!("palette.open_settings").into_owned(),
+            crate::tr!("palette.open_settings").into_owned(),
             IconName::Settings,
             Action::OpenSettings,
         );
         push_action(
-            tcode_i18n::tr!("palette.toggle_theme").into_owned(),
+            crate::tr!("palette.toggle_theme").into_owned(),
             IconName::Moon,
             Action::ToggleTheme,
         );
         push_action(
-            tcode_i18n::tr!("palette.toggle_diff").into_owned(),
+            crate::tr!("palette.toggle_diff").into_owned(),
             IconName::PanelRight,
             Action::ToggleDiff,
         );
         push_action(
-            tcode_i18n::tr!("palette.toggle_terminal").into_owned(),
+            crate::tr!("palette.toggle_terminal").into_owned(),
             IconName::SquareTerminal,
             Action::ToggleTerminal,
         );
         push_action(
-            tcode_i18n::tr!("palette.open_preview").into_owned(),
+            crate::tr!("palette.open_preview").into_owned(),
             IconName::Globe,
             Action::OpenPreview,
         );
         push_action(
-            tcode_i18n::tr!("palette.check_updates").into_owned(),
+            crate::tr!("palette.check_updates").into_owned(),
             IconName::Inbox,
             Action::CheckUpdates,
         );
@@ -254,7 +233,7 @@ impl CommandPalette {
         let mut groups = Vec::new();
         if !actions.is_empty() {
             groups.push(Group {
-                label: tcode_i18n::tr!("palette.actions").into_owned(),
+                label: crate::tr!("palette.actions").into_owned(),
                 items: actions.into_iter().map(|(_, i)| i).collect(),
             });
         }
@@ -262,7 +241,7 @@ impl CommandPalette {
         // Threads (fuzzy over titles) — suppressed in `>`-actions-only mode.
         if !actions_only {
             let mut threads: Vec<(i32, Item)> = Vec::new();
-            for group in store.palette_groups(cx) {
+            for group in store.grouped_sessions() {
                 for meta in &group.sessions {
                     if let Some(score) = fuzzy_score(&query, &meta.title) {
                         threads.push((
@@ -284,7 +263,7 @@ impl CommandPalette {
             threads.sort_by_key(|b| std::cmp::Reverse(b.0));
             if !threads.is_empty() {
                 groups.push(Group {
-                    label: tcode_i18n::tr!("palette.threads").into_owned(),
+                    label: crate::tr!("palette.threads").into_owned(),
                     items: threads.into_iter().map(|(_, i)| i).collect(),
                 });
             }
@@ -308,8 +287,8 @@ impl CommandPalette {
         match action {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::StartDraft { project_id, cwd }, cx);
+                self.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::StartDraft { project_id, cwd });
                 });
             }
             Action::OpenSettings => {
@@ -323,10 +302,10 @@ impl CommandPalette {
                 } else {
                     ThemeMode::Dark
                 };
-                self.store.update(cx, |store, cx| {
-                    let mut settings = store.palette_settings(cx);
+                self.store.update(cx, |store, _cx| {
+                    let mut settings = store.settings();
                     settings.theme_mode = next;
-                    store.dispatch(Command::UpdateSettings { settings }, cx);
+                    store.dispatch(Command::UpdateSettings { settings });
                 });
                 apply_theme(next, window, cx);
                 self.close(cx);
@@ -347,14 +326,14 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::CheckUpdates => {
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::CheckProviderVersions, cx)
+                self.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::CheckProviderVersions)
                 });
                 self.close(cx);
             }
             Action::OpenThread { session_id } => {
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::SelectSession { session_id }, cx);
+                self.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::SelectSession { session_id });
                 });
                 self.close(cx);
             }
@@ -485,13 +464,13 @@ impl Render for CommandPalette {
                     .py_4()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("palette.no_matches")),
+                    .child(crate::tr!("palette.no_matches")),
             );
         }
         let list = div()
             .id("palette-list")
             .role(Role::ListBox)
-            .aria_label(tcode_i18n::tr!("palette.results"))
+            .aria_label(crate::tr!("palette.results"))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -532,9 +511,9 @@ impl Render for CommandPalette {
                 .items_center()
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("palette.navigate"))
-                .child(tcode_i18n::tr!("palette.select"))
-                .child(tcode_i18n::tr!("palette.close")),
+                .child(crate::tr!("palette.navigate"))
+                .child(crate::tr!("palette.select"))
+                .child(crate::tr!("palette.close")),
         );
 
         div()

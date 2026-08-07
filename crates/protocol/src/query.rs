@@ -13,10 +13,6 @@ pub enum Query {
     GenerateCommitMessage {
         included: Option<Vec<String>>,
     },
-    SecretPresence {
-        profile_id: String,
-        name: String,
-    },
     LoadGitDiff {
         cwd: PathBuf,
         scope: GitDiffScope,
@@ -38,10 +34,6 @@ pub enum Query {
     IsDirectory {
         path: PathBuf,
     },
-    RelativizeToWorkspace {
-        path: String,
-        cwd: PathBuf,
-    },
 }
 
 /// Typed response paired with a [`Query`].
@@ -52,16 +44,14 @@ pub enum QueryResponse {
     ActiveWorkspace(Vec<PathEntry>),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
-    SecretPresence(bool),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
     IsDirectory(bool),
-    RelativePath(String),
 }
 
-/// Protocol mirror of `tcode_services::git::GitDiffScope`.
+/// Scope used when loading a Git diff.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,15 +62,15 @@ pub enum GitDiffScope {
     Unknown,
 }
 
-/// Protocol mirror of `tcode_services::git::GitFileText`.
+/// Full base- and new-side text for one changed file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitFileText {
     pub old: Option<String>,
     pub new: Option<String>,
 }
 
-/// Protocol mirror of `tcode_services::git::GitDiffResult`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Result of loading a Git diff.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDiffResult {
     pub changes: Vec<FileChange>,
     pub texts: Vec<GitFileText>,
@@ -90,15 +80,7 @@ pub struct GitDiffResult {
     pub default_base: Option<String>,
 }
 
-impl PartialEq for GitDiffResult {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-
-impl Eq for GitDiffResult {}
-
-/// Protocol mirror of `tcode_services::workspace::PathEntry`.
+/// One listable workspace entry (relative to the workspace root).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathEntry {
     pub rel_path: String,
@@ -107,7 +89,22 @@ pub struct PathEntry {
     pub is_dir: bool,
 }
 
-/// Protocol mirror of `tcode_services::import::SourceTool`.
+impl PathEntry {
+    pub fn from_rel(rel_path: String, is_dir: bool) -> Self {
+        let (parent, basename) = match rel_path.rfind('/') {
+            Some(i) => (rel_path[..i].to_string(), rel_path[i + 1..].to_string()),
+            None => (String::new(), rel_path.clone()),
+        };
+        Self {
+            rel_path,
+            basename,
+            parent,
+            is_dir,
+        }
+    }
+}
+
+/// External tool that owns an importable thread.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,7 +131,7 @@ impl SourceTool {
     }
 }
 
-/// Protocol mirror of `tcode_services::import::ExternalThread`.
+/// One importable external thread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalThread {
     pub source: SourceTool,
@@ -144,7 +141,7 @@ pub struct ExternalThread {
     pub last_active_ms: u64,
 }
 
-/// Protocol mirror of `tcode_services::import::RecentDir`.
+/// Recently active directory containing external threads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentDir {
     pub path: PathBuf,

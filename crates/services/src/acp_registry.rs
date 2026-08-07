@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use agent::{AcpLaunch, HIDDEN_ACP_AGENT_IDS};
 use serde::{Deserialize, Serialize};
@@ -31,16 +31,38 @@ const INSTALL_DIR: &str = "acp-agents";
 
 const CACHE_FILE: &str = "acp-registry.json";
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum RegistryError {
-    #[error("could not reach the ACP registry: {0}")]
     Network(String),
-    #[error("the ACP registry returned something unreadable: {0}")]
     Parse(String),
-    #[error("{0}")]
     Install(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Network(err) => write!(f, "could not reach the ACP registry: {err}"),
+            Self::Parse(err) => write!(f, "the ACP registry returned something unreadable: {err}"),
+            Self::Install(err) => write!(f, "{err}"),
+            Self::Io(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for RegistryError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -49,8 +71,6 @@ pub enum RegistryError {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
-    #[serde(default)]
-    pub version: String,
     #[serde(default)]
     pub agents: Vec<RegistryAgent>,
 }
@@ -63,12 +83,6 @@ pub struct RegistryAgent {
     pub version: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub repository: Option<String>,
-    #[serde(default)]
-    pub website: Option<String>,
-    #[serde(default)]
-    pub license: Option<String>,
     /// Icon URL (an SVG on the same CDN).
     #[serde(default)]
     pub icon: Option<String>,
@@ -87,7 +101,7 @@ pub struct Distribution {
     pub binary: BTreeMap<String, BinaryDistribution>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NpxDistribution {
     /// `name@version`, passed to `npm exec`.
     pub package: String,
@@ -99,7 +113,7 @@ pub struct NpxDistribution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryDistribution {
-    /// Download URL: a `.tar.gz` / `.tar.bz2` / `.zip`, or a bare executable.
+    /// Download URL: a `.tar.gz` / `.zip`, or a bare executable.
     pub archive: String,
     /// The command inside the extracted tree (`./bin/agent`), or `node`.
     pub cmd: String,
@@ -146,11 +160,7 @@ pub fn platform_key() -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Recipe {
     /// No install step: npm resolves the package at launch.
-    Npx {
-        package: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-    },
+    Npx(NpxDistribution),
     /// Needs a download + extract first (see [`install`]).
     Binary(BinaryDistribution),
 }
@@ -162,11 +172,7 @@ pub fn resolve_recipe(agent: &RegistryAgent, platform: &str) -> Option<Recipe> {
     if let Some(binary) = agent.distribution.binary.get(platform) {
         return Some(Recipe::Binary(binary.clone()));
     }
-    agent.distribution.npx.as_ref().map(|npx| Recipe::Npx {
-        package: npx.package.clone(),
-        args: npx.args.clone(),
-        env: pairs(&npx.env),
-    })
+    agent.distribution.npx.clone().map(Recipe::Npx)
 }
 
 fn pairs(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
@@ -181,13 +187,6 @@ fn pairs(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
 
 fn cache_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CACHE_FILE)
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// The cached index, whatever its age (`None` when there is no readable cache).
@@ -206,7 +205,7 @@ pub fn cache_is_fresh(data_dir: &Path) -> bool {
     let Ok(cached) = serde_json::from_slice::<CachedRegistry>(&bytes) else {
         return false;
     };
-    now_secs().saturating_sub(cached.fetched_at) < CACHE_TTL.as_secs()
+    tcode_core::project::now_secs().saturating_sub(cached.fetched_at) < CACHE_TTL.as_secs()
 }
 
 /// The registry, served from cache while fresh and re-fetched otherwise.
@@ -240,7 +239,7 @@ pub fn load(data_dir: &Path) -> Result<Registry, RegistryError> {
 fn write_cache(data_dir: &Path, registry: &Registry) -> std::io::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let cached = CachedRegistry {
-        fetched_at: now_secs(),
+        fetched_at: tcode_core::project::now_secs(),
         registry: registry.clone(),
     };
     let tmp = cache_path(data_dir).with_extension("tmp");
@@ -291,7 +290,7 @@ pub fn install_dir(data_dir: &Path, id: &str, version: &str) -> PathBuf {
 /// Install `agent` for this platform, reporting progress in bytes.
 ///
 /// npx recipes install nothing (npm resolves the package on first launch);
-/// binary recipes are downloaded, hashed, extracted, and made executable.
+/// binary recipes are downloaded, extracted, and made executable.
 /// Blocking — call it from `smol::unblock`.
 pub fn install(
     agent: &RegistryAgent,
@@ -306,8 +305,12 @@ pub fn install(
         ))
     })?;
 
-    let (launch, archive_sha256) = match recipe {
-        Recipe::Npx { package, args, env } => (AcpLaunch::Npx { package, args, env }, None),
+    let launch = match recipe {
+        Recipe::Npx(npx) => AcpLaunch::Npx {
+            package: npx.package,
+            args: npx.args,
+            env: pairs(&npx.env),
+        },
         Recipe::Binary(binary) => {
             let dir = install_dir(data_dir, &agent.id, &agent.version);
             // A fresh install every time: a half-extracted tree from a failed
@@ -315,10 +318,9 @@ pub fn install(
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir)?;
             let bytes = download(&binary.archive, &mut progress)?;
-            let sha = sha256(&bytes);
             extract(&binary.archive, &bytes, &dir)?;
             let command = resolve_cmd(&dir, &binary.cmd)?;
-            let launch = match command {
+            match command {
                 Command::Path(path) => AcpLaunch::Binary {
                     command: path,
                     args: binary.args.clone(),
@@ -330,8 +332,7 @@ pub fn install(
                     args: binary.args.clone(),
                     env: pairs(&binary.env),
                 },
-            };
-            (launch, Some(sha))
+            }
         }
     };
 
@@ -341,7 +342,6 @@ pub fn install(
         version: agent.version.clone(),
         icon: agent.icon.clone(),
         launch,
-        archive_sha256,
         enabled: true,
         env: Vec::new(),
         launch_args: None,
@@ -384,20 +384,6 @@ fn download(
     Ok(bytes)
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    use sha2::{Digest as _, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    hex
-}
-
 /// Unpack an archive into `dir`, by the URL's extension. A URL that is not an
 /// archive at all (some agents publish a bare executable) is written as the
 /// binary itself.
@@ -417,8 +403,9 @@ fn extract(url: &str, bytes: &[u8], dir: &Path) -> Result<(), RegistryError> {
         let decoder = flate2::read::GzDecoder::new(bytes);
         tar::Archive::new(decoder).unpack(dir).map_err(unpack)?;
     } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
-        let decoder = bzip2::read::BzDecoder::new(bytes);
-        tar::Archive::new(decoder).unpack(dir).map_err(unpack)?;
+        return Err(RegistryError::Install(format!(
+            "unsupported archive format for {name}: bzip2-compressed tar archives are not supported"
+        )));
     } else if lower.ends_with(".tar") {
         tar::Archive::new(bytes).unpack(dir).map_err(unpack)?;
     } else if lower.ends_with(".zip") {
@@ -539,7 +526,7 @@ mod tests {
           "distribution": {
             "binary": {
               "darwin-aarch64": {
-                "archive": "https://example.test/goose-aarch64-apple-darwin.tar.bz2",
+                "archive": "https://example.test/goose-aarch64-apple-darwin.tar.gz",
                 "cmd": "./goose", "args": ["acp"], "env": { "GOOSE_ACP": "1" }
               },
               "linux-x86_64": {
@@ -588,7 +575,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let installed = install(&agent, &dir, |_, _| {}).expect("install must succeed");
         assert_eq!(installed.id, agent.id);
-        assert_eq!(installed.archive_sha256.as_ref().map(String::len), Some(64));
         match &installed.launch {
             AcpLaunch::Binary { command, .. } => {
                 assert!(command.exists(), "{} was not extracted", command.display());
@@ -608,13 +594,11 @@ mod tests {
     #[test]
     fn parses_the_registry_schema() {
         let registry = registry();
-        assert_eq!(registry.version, "1.0.0");
         assert_eq!(registry.agents.len(), 7);
 
         let gemini = &registry.agents[0];
         assert_eq!(gemini.name, "Gemini CLI");
         assert_eq!(gemini.version, "0.50.0");
-        assert_eq!(gemini.license.as_deref(), Some("Apache-2.0"));
         assert!(gemini.icon.as_deref().unwrap().ends_with("gemini.svg"));
         let npx = gemini.distribution.npx.as_ref().unwrap();
         assert_eq!(npx.package, "@google/gemini-cli@0.50.0");
@@ -661,9 +645,9 @@ mod tests {
         }
         // …but a platform with no binary build falls back to npx.
         match resolve_recipe(kilo, "linux-aarch64") {
-            Some(Recipe::Npx { package, args, .. }) => {
-                assert_eq!(package, "@kilocode/cli@7.4.5");
-                assert_eq!(args, vec!["acp".to_string()]);
+            Some(Recipe::Npx(npx)) => {
+                assert_eq!(npx.package, "@kilocode/cli@7.4.5");
+                assert_eq!(npx.args, vec!["acp".to_string()]);
             }
             other => panic!("expected the npx recipe, got {other:?}"),
         }
@@ -688,8 +672,8 @@ mod tests {
         )
         .unwrap();
         match resolve_recipe(&agent, "linux-x86_64") {
-            Some(Recipe::Npx { env, .. }) => {
-                assert_eq!(env, vec![("X_ACP".to_string(), "1".to_string())]);
+            Some(Recipe::Npx(npx)) => {
+                assert_eq!(npx.env.get("X_ACP").map(String::as_str), Some("1"));
             }
             other => panic!("expected an npx recipe, got {other:?}"),
         }
@@ -764,7 +748,6 @@ mod tests {
             }
             other => panic!("expected the extracted binary, got {:?}", other.is_err()),
         }
-        assert_eq!(sha256(&bytes).len(), 64);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -784,7 +767,8 @@ mod tests {
         let path = cache_path(&dir);
         let mut stale: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        stale["fetched_at"] = serde_json::json!(now_secs() - CACHE_TTL.as_secs() - 1);
+        stale["fetched_at"] =
+            serde_json::json!(tcode_core::project::now_secs() - CACHE_TTL.as_secs() - 1);
         std::fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
         assert!(!cache_is_fresh(&dir));
         assert_eq!(cached(&dir).unwrap().agents.len(), 7);
@@ -803,7 +787,6 @@ mod tests {
                 args: Vec::new(),
                 env: Vec::new(),
             },
-            archive_sha256: None,
             enabled: true,
             env: Vec::new(),
             launch_args: Some("  --debug   --yolo ".into()),

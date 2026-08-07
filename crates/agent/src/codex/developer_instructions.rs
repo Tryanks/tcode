@@ -4,8 +4,9 @@
 //! T3 Code collaborative-browser tool instructions appended before the closing
 //! tag). Do not paraphrase — these are wire-exact so plan-mode behavior matches.
 
-/// `T3_CODE_BROWSER_TOOL_INSTRUCTIONS` — appended inside both mode blocks.
-const T3_CODE_BROWSER_TOOL_INSTRUCTIONS: &str = "
+macro_rules! mode_instructions {
+    ($body:literal) => {
+        concat!($body, "\n", "
 
 ## T3 Code collaborative browser
 
@@ -14,9 +15,12 @@ You are running inside T3 Code. The `t3-code` MCP server is the product-native c
 For browser work, first call `preview_status`. If no automation-capable preview is attached, call `preview_open` before concluding that the browser is unavailable. Then use `preview_navigate`, `preview_snapshot`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
 
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or `preview_open` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
-";
+", "\n</collaboration_mode>")
+    };
+}
 
-const CODEX_PLAN_MODE_BODY: &str = r#"<collaboration_mode># Plan Mode (Conversational)
+pub const PLAN_MODE_INSTRUCTIONS: &str = mode_instructions!(
+    r#"<collaboration_mode># Plan Mode (Conversational)
 
 You work in 3 phases, and you should *chat your way* to a great plan before finalizing it. A great plan is very detailed-intent- and implementation-wise-so that it can be handed to another engineer or agent to be implemented right away. It must be **decision complete**, where the implementer does not need to make any decisions.
 
@@ -135,9 +139,11 @@ plan content should be human and agent digestible. The final plan must be plan-o
 
 Do not ask "should I proceed?" in the final output. The user can easily switch out of Plan mode and request implementation if you have included a `<proposed_plan>` block in your response. Alternatively, they can decide to stay in Plan mode and continue refining the plan.
 
-Only produce at most one `<proposed_plan>` block per turn, and only when you are presenting a complete spec."#;
+Only produce at most one `<proposed_plan>` block per turn, and only when you are presenting a complete spec."#
+);
 
-const CODEX_DEFAULT_MODE_BODY: &str = r#"<collaboration_mode># Collaboration Mode: Default
+pub const DEFAULT_MODE_INSTRUCTIONS: &str = mode_instructions!(
+    r#"<collaboration_mode># Collaboration Mode: Default
 
 You are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.
 
@@ -147,17 +153,5 @@ Your active mode changes only when new developer instructions with a different `
 
 The `request_user_input` tool is unavailable in Default mode. If you call it while in Default mode, it will return an error.
 
-In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message."#;
-
-/// Full plan-mode developer instructions (`<collaboration_mode>` … browser
-/// instructions … `</collaboration_mode>`), matching the JS template literal
-/// `` `${BODY}\n${BROWSER}\n</collaboration_mode>` `` exactly (BROWSER itself
-/// begins with a blank line, so three newlines separate the body from "## T3").
-pub fn plan_mode_instructions() -> String {
-    format!("{CODEX_PLAN_MODE_BODY}\n{T3_CODE_BROWSER_TOOL_INSTRUCTIONS}\n</collaboration_mode>")
-}
-
-/// Full default-mode developer instructions.
-pub fn default_mode_instructions() -> String {
-    format!("{CODEX_DEFAULT_MODE_BODY}\n{T3_CODE_BROWSER_TOOL_INSTRUCTIONS}\n</collaboration_mode>")
-}
+In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message."#
+);

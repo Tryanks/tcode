@@ -1,15 +1,6 @@
-//! The rmcp tool surface (streamable-HTTP `ServerHandler`) and its axum host
-//! with bearer-token auth. Each tool turns its arguments into a [`PreviewOp`],
+//! The rmcp tool surface. Each tool turns its arguments into a [`PreviewOp`],
 //! runs it through the [`Broker`], and maps the reply into an MCP result.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-
-use axum::Router;
-use axum::extract::State;
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -19,6 +10,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
+use std::sync::Arc;
 
 use crate::{Broker, PREVIEW_PRESETS, PreviewOp, PreviewReply};
 
@@ -372,7 +364,15 @@ impl PreviewTools {
     /// Route one op through the broker and map its reply into a tool result.
     async fn run(&self, op: PreviewOp) -> CallToolResult {
         log::info!("preview-mcp: tool invoked: {op:?}");
-        match self.broker.invoke(&self.session_id, op).await {
+        match self
+            .broker
+            .invoke(|reply| crate::BrokerRequest {
+                session_id: self.session_id.clone(),
+                op,
+                reply,
+            })
+            .await
+        {
             Ok(PreviewReply::Json(value)) => {
                 let text =
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
@@ -402,16 +402,9 @@ impl ServerHandler for PreviewTools {
 
 pub type Service = StreamableHttpService<PreviewTools, LocalSessionManager>;
 
-pub struct ServiceEntry {
-    pub session_id: String,
-    service: Service,
-}
-
-pub type Services = HashMap<String, ServiceEntry>;
-
-pub fn service(broker: Broker, session_id: String) -> ServiceEntry {
+pub fn service(broker: Broker, session_id: String) -> Service {
     let service_session_id = session_id.clone();
-    let service = StreamableHttpService::new(
+    StreamableHttpService::new(
         move || {
             Ok(PreviewTools::new(
                 broker.clone(),
@@ -420,67 +413,33 @@ pub fn service(broker: Broker, session_id: String) -> ServiceEntry {
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
-    );
-    ServiceEntry {
-        session_id,
-        service,
-    }
-}
-
-/// Serve the streamable-HTTP MCP endpoint at `/mcp` on `listener`, resolving
-/// each bearer token to its per-session service.
-pub async fn serve(
-    listener: std::net::TcpListener,
-    services: Arc<RwLock<Services>>,
-) -> std::io::Result<()> {
-    let app = Router::new()
-        .route("/mcp", any(handle))
-        .with_state(services);
-
-    listener.set_nonblocking(true)?;
-    let listener = tokio::net::TcpListener::from_std(listener)?;
-    axum::serve(listener, app).await
-}
-
-/// Bearer-gate every request, then hand it to the rmcp streamable-HTTP service.
-async fn handle(
-    State(services): State<Arc<RwLock<Services>>>,
-    req: axum::extract::Request,
-) -> Response {
-    let token = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let service = token.and_then(|token| {
-        services.read().unwrap().get(token).map(|entry| {
-            log::debug!(
-                "preview-mcp: authorized request for session {}",
-                entry.session_id
-            );
-            entry.service.clone()
-        })
-    });
-    let Some(service) = service else {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    };
-    let response = service.handle(req).await;
-    let (parts, body) = response.into_parts();
-    Response::from_parts(parts, axum::body::Body::new(body))
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn broker(
+        requests: async_channel::Sender<crate::BrokerRequest>,
+        timeout: std::time::Duration,
+    ) -> Broker {
+        Broker::new(
+            requests,
+            timeout,
+            mcp_host::BrokerErrors {
+                unavailable: "preview UI is not available",
+                dropped: "preview UI dropped the request",
+                timed_out: "preview operation timed out",
+            },
+        )
+    }
+
     #[tokio::test]
     async fn broker_roundtrip_with_fake_resolver() {
         // Fake UI: echoes op kind back as JSON.
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        let broker = Broker {
-            requests: tx,
-            timeout: std::time::Duration::from_secs(2),
-        };
+        let broker = broker(tx, std::time::Duration::from_secs(2));
         let resolver = tokio::spawn(async move {
             while let Ok(request) = rx.recv().await {
                 assert_eq!(request.session_id, "session-a");
@@ -511,10 +470,7 @@ mod tests {
     async fn broker_reports_disconnect_as_error() {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
         drop(rx); // no UI listening
-        let broker = Broker {
-            requests: tx,
-            timeout: std::time::Duration::from_millis(200),
-        };
+        let broker = broker(tx, std::time::Duration::from_millis(200));
         let tools = PreviewTools::new(broker, "session-a".into());
         let result = tools.run(PreviewOp::Status).await;
         assert_eq!(result.is_error, Some(true));
@@ -523,10 +479,7 @@ mod tests {
     #[test]
     fn tools_are_registered() {
         let (tx, _rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        let broker = Broker {
-            requests: tx,
-            timeout: std::time::Duration::from_secs(1),
-        };
+        let broker = broker(tx, std::time::Duration::from_secs(1));
         let tools = PreviewTools::new(broker, "session-a".into());
         let names: Vec<String> = tools
             .tool_router

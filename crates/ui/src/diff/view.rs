@@ -39,7 +39,7 @@ use tcode_core::{
     ui::RightTab,
 };
 use tcode_protocol::{Command, GitDiffResult, GitDiffScope, GitFileText};
-use tcode_runtime::ui_facade::relativize_to_workspace;
+use tcode_services::user_files::relativize_to_workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DiffScope {
@@ -249,7 +249,7 @@ impl DiffPanel {
     ) -> Self {
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
-            let comments = store.read(cx).diff_review_comments(cx);
+            let comments = store.read(cx).review_comments();
             if this.observed_review_comments != comments {
                 this.observed_review_comments = comments;
                 this.remeasure_lists();
@@ -282,7 +282,7 @@ impl DiffPanel {
             .or_else(|| {
                 self.workspace_store
                     .read(cx)
-                    .diff_selected_turn(cx)
+                    .diff_selected_turn()
                     .map(DiffScope::Turn)
             })
             .or(Some(DiffScope::WorkingTree))
@@ -307,7 +307,7 @@ impl DiffPanel {
         let request = self
             .workspace_store
             .read(cx)
-            .pending_diff_focus(cx)
+            .pending_diff_focus()
             .filter(|request| request.session == session && request.turn == turn);
         let Some(request) = request else {
             return;
@@ -331,8 +331,8 @@ impl DiffPanel {
                 offset_in_item: px(0.),
             });
         }
-        self.workspace_store.update(cx, |store, cx| {
-            store.take_diff_focus(session, turn, cx);
+        self.workspace_store.update(cx, |store, _cx| {
+            store.take_diff_focus(session, turn);
         });
     }
 
@@ -515,12 +515,12 @@ impl DiffPanel {
     /// Rebuild the rendered-file cache when its key (session / turn / theme)
     /// changed. Returns whether there is anything to show.
     fn ensure_cache(&mut self, cx: &mut Context<Self>) -> bool {
-        let pending_focus = self.workspace_store.read(cx).pending_diff_focus(cx);
+        let pending_focus = self.workspace_store.read(cx).pending_diff_focus();
         if let Some(request) = pending_focus {
             let is_active = self
                 .workspace_store
                 .read(cx)
-                .active_session_id(cx)
+                .active_session_id()
                 .is_some_and(|session| session == request.session);
             if is_active {
                 self.scopes
@@ -531,38 +531,10 @@ impl DiffPanel {
                 });
             }
         }
-        let debug = {
-            let active = self.workspace_store.read(cx).diff_active_state(cx);
-            let window_state = self.window_state.read(cx);
-            active.map(|active| {
-                (
-                    active.session,
-                    window_state.debug_diff_scope.clone(),
-                    window_state.debug_diff_split,
-                )
-            })
-        };
-        if let Some((session, scope, split)) = debug {
-            if !self.scopes.contains_key(&session) {
-                match scope.as_deref() {
-                    Some("working") | Some("working-tree") => {
-                        self.scopes.insert(session.clone(), DiffScope::WorkingTree);
-                    }
-                    Some("branch") => {
-                        self.scopes.insert(session.clone(), DiffScope::Branch);
-                    }
-                    _ => {}
-                }
-            }
-            if split {
-                self.workspace_store
-                    .update(cx, |store, cx| store.set_diff_split(true, cx));
-            }
-        }
         let dark = cx.theme().mode.is_dark();
         let (session, scope, revision, cwd) = {
             let store = self.workspace_store.read(cx);
-            let Some(active) = store.diff_active_state(cx) else {
+            let Some(active) = store.diff_active_state() else {
                 self.cache = None;
                 return false;
             };
@@ -571,12 +543,7 @@ impl DiffPanel {
                 self.cache = None;
                 return false;
             };
-            (
-                session,
-                scope,
-                store.diff_refresh_generation(cx),
-                active.cwd,
-            )
+            (session, scope, store.diff_refresh_generation(), active.cwd)
         };
         if matches!(scope, DiffScope::WorkingTree | DiffScope::Branch) {
             let base = (scope == DiffScope::Branch)
@@ -630,7 +597,7 @@ impl DiffPanel {
                     let changes = self
                         .workspace_store
                         .read(cx)
-                        .with_diff_turn_changes(turn, cx, |changes, completeness| {
+                        .with_diff_turn_changes(turn, |changes, completeness| {
                             let _completeness = completeness;
                             changes.to_vec()
                         })
@@ -663,72 +630,6 @@ impl DiffPanel {
             return false;
         }
         self.apply_pending_file_focus(&session, scope, cx);
-        let debug_comment = self.window_state.read(cx).debug_review_comment
-            && self
-                .workspace_store
-                .read(cx)
-                .with_diff_review_comments(cx, <[_]>::is_empty);
-        if debug_comment
-            && let Some((scope, file, row_index, line, side, text)) =
-                self.cache.as_ref().and_then(|cache| {
-                    cache.files.iter().find_map(|file| {
-                        file.all_rows
-                            .iter()
-                            .enumerate()
-                            .find_map(|(index, row)| match row {
-                                RenderedRow::Code {
-                                    kind,
-                                    old,
-                                    new,
-                                    text,
-                                    ..
-                                } => {
-                                    let (line, side) = match kind {
-                                        RowKind::Removed => ((*old)?, ReviewSide::Old),
-                                        RowKind::Added | RowKind::Context => {
-                                            ((*new)?, ReviewSide::New)
-                                        }
-                                    };
-                                    Some((
-                                        cache.scope,
-                                        file.path.clone(),
-                                        index,
-                                        line,
-                                        side,
-                                        text.clone(),
-                                    ))
-                                }
-                                RenderedRow::Gap(_) => None,
-                            })
-                    })
-                })
-        {
-            let (section_id, section_title) = match scope {
-                DiffScope::Turn(turn) => (format!("turn:{turn}"), format!("Turn {}", turn + 1)),
-                DiffScope::WorkingTree => ("unstaged".into(), "Working tree".into()),
-                DiffScope::Branch => ("branch".into(), "Branch changes".into()),
-            };
-            let marker = if side == ReviewSide::Old { '-' } else { '+' };
-            let excerpt = format!("@@ -{line},1 +{line},1 @@\n{marker}{text}");
-            let comment = ReviewComment::new(
-                file,
-                line,
-                line,
-                side,
-                "Please review this line before sending.".into(),
-                excerpt,
-                section_id,
-                section_title,
-                row_index,
-                row_index,
-            );
-            self.window_state.update(cx, |state, _| {
-                state.debug_review_comment = false;
-            });
-            self.workspace_store.update(cx, |store, cx| {
-                store.dispatch(Command::AddReviewComment { comment }, cx);
-            });
-        }
         self.cache.as_ref().is_some_and(|c| !c.files.is_empty())
     }
 
@@ -736,7 +637,7 @@ impl DiffPanel {
 
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (panel_open, expanded, active, plan_tab_active) =
-            self.workspace_store.read(cx).diff_panel_chrome_state(cx);
+            self.workspace_store.read(cx).diff_panel_chrome_state();
         // Windows: the open Diff/Plan panel is the rightmost column, so this
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
@@ -750,9 +651,9 @@ impl DiffPanel {
         // The second tab is "Plan" when a plan exists or the session is in Plan
         // mode, else "Tasks" (S1 §6).
         let plan_label = if plan_tab_active {
-            tcode_i18n::tr!("plan.tab_plan")
+            crate::tr!("plan.tab_plan")
         } else {
-            tcode_i18n::tr!("plan.tab_tasks")
+            crate::tr!("plan.tab_tasks")
         };
         let store = self.workspace_store.clone();
         let store_close = self.workspace_store.clone();
@@ -788,7 +689,7 @@ impl DiffPanel {
         h_flex()
             .id("right-panel-tabs")
             .role(Role::TabList)
-            .aria_label(tcode_i18n::tr!("diff.panel_tabs"))
+            .aria_label(crate::tr!("diff.panel_tabs"))
             .flex_none()
             .h(px(if hosts_caption {
                 window_caption::CAPTION_STRIP_HEIGHT
@@ -804,7 +705,7 @@ impl DiffPanel {
                 tab(
                     "diff-tab",
                     IconName::File,
-                    tcode_i18n::tr!("diff.title").into_owned().into(),
+                    crate::tr!("diff.title").into_owned().into(),
                     active == RightTab::Diff,
                     cx,
                 )
@@ -851,9 +752,9 @@ impl DiffPanel {
                         IconName::Maximize
                     })
                     .tooltip(if expanded {
-                        tcode_i18n::tr!("diff.restore_width")
+                        crate::tr!("diff.restore_width")
                     } else {
-                        tcode_i18n::tr!("diff.expand_width")
+                        crate::tr!("diff.expand_width")
                     })
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, cx| {
@@ -867,7 +768,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::PanelRight)
-                    .tooltip(tcode_i18n::tr!("diff.layout_soon")),
+                    .tooltip(crate::tr!("diff.layout_soon")),
             )
             .child(
                 Button::new("diff-close")
@@ -875,7 +776,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip(tcode_i18n::tr!("diff.close"))
+                    .tooltip(crate::tr!("diff.close"))
                     .on_click(move |_, _, cx| {
                         store_close.update(cx, |store, cx| {
                             store.close_diff_panel(cx);
@@ -890,20 +791,18 @@ impl DiffPanel {
     // -- toolbar (turn selector + view controls) ----------------------------
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active_state = self.workspace_store.read(cx).diff_active_state(cx);
+        let active_state = self.workspace_store.read(cx).diff_active_state();
         let session = active_state
             .as_ref()
             .map(|active| active.session.clone())
             .unwrap_or_default();
         let selected_scope = self.selected_scope(&session, cx);
-        let turns = self.workspace_store.read(cx).diff_turns(cx);
+        let turns = self.workspace_store.read(cx).diff_turns();
         let label = match selected_scope {
-            Some(DiffScope::Turn(turn)) => {
-                tcode_i18n::tr!("diff.turn", count = turn + 1).into_owned()
-            }
-            Some(DiffScope::WorkingTree) => tcode_i18n::tr!("diff.working_tree").into_owned(),
-            Some(DiffScope::Branch) => tcode_i18n::tr!("diff.branch_changes").into_owned(),
-            None => tcode_i18n::tr!("diff.no_changes").into_owned(),
+            Some(DiffScope::Turn(turn)) => crate::tr!("diff.turn", count = turn + 1).into_owned(),
+            Some(DiffScope::WorkingTree) => crate::tr!("diff.working_tree").into_owned(),
+            Some(DiffScope::Branch) => crate::tr!("diff.branch_changes").into_owned(),
+            None => crate::tr!("diff.no_changes").into_owned(),
         };
         let muted = cx.theme().muted_foreground;
         let panel = cx.entity();
@@ -920,7 +819,6 @@ impl DiffPanel {
         );
 
         let selector = Popover::new("diff-turn-popover")
-            .default_open(self.window_state.read(cx).debug_diff_scope_menu)
             .trigger(trigger)
             .content(move |_, _, cx| {
                 let panel_for = panel.clone();
@@ -979,13 +877,13 @@ impl DiffPanel {
                     .gap_0p5()
                     .child(scope_row(
                         "diff-scope-working",
-                        tcode_i18n::tr!("diff.working_tree").into_owned().into(),
+                        crate::tr!("diff.working_tree").into_owned().into(),
                         DiffScope::WorkingTree,
                         cx,
                     ))
                     .child(scope_row(
                         "diff-scope-branch",
-                        tcode_i18n::tr!("diff.branch_changes").into_owned().into(),
+                        crate::tr!("diff.branch_changes").into_owned().into(),
                         DiffScope::Branch,
                         cx,
                     ))
@@ -997,7 +895,7 @@ impl DiffPanel {
                             .pb_1()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("diff.turns")),
+                            .child(crate::tr!("diff.turns")),
                     );
                 let mut items = turns.clone();
                 items.reverse();
@@ -1005,10 +903,9 @@ impl DiffPanel {
                     let panel = panel.clone();
                     let session = session_selector.clone();
                     let is_sel = selected_scope == Some(DiffScope::Turn(turn));
-                    let turn_label: gpui::SharedString =
-                        tcode_i18n::tr!("diff.turn", count = turn + 1)
-                            .into_owned()
-                            .into();
+                    let turn_label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
+                        .into_owned()
+                        .into();
                     list = list.child(
                         material::accessible_clickable(
                             h_flex(),
@@ -1053,7 +950,7 @@ impl DiffPanel {
                 div()
                     .id("diff-turn-list")
                     .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("diff.scope_menu"))
+                    .aria_label(crate::tr!("diff.scope_menu"))
                     .min_w(px(190.))
                     .max_h(px(320.))
                     .overflow_y_scroll()
@@ -1065,10 +962,10 @@ impl DiffPanel {
             .shadow_xl()
             .rounded(material::radius_overlay());
 
-        let wrap_on = self.workspace_store.read(cx).diff_word_wrap(cx);
+        let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
         let ignore_ws = self.ignore_ws;
         let show_invisibles = self.show_invisibles;
-        let split_on = self.workspace_store.read(cx).diff_split(cx);
+        let split_on = self.workspace_store.read(cx).diff_split();
         let panel_split = cx.entity();
         let mut toolbar = h_flex()
             .flex_none()
@@ -1087,9 +984,9 @@ impl DiffPanel {
                     .icon(IconName::PanelLeft)
                     .selected(split_on)
                     .tooltip(if split_on {
-                        tcode_i18n::tr!("diff.unified_view")
+                        crate::tr!("diff.unified_view")
                     } else {
-                        tcode_i18n::tr!("diff.split_view")
+                        crate::tr!("diff.split_view")
                     })
                     .on_click(move |_, _, cx| {
                         panel_split.update(cx, |this, cx| {
@@ -1107,7 +1004,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::Menu)
                     .selected(wrap_on)
-                    .tooltip(tcode_i18n::tr!("diff.toggle_wrap"))
+                    .tooltip(crate::tr!("diff.toggle_wrap"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace_store
                             .update(cx, |store, cx| store.toggle_diff_wrap(cx));
@@ -1122,7 +1019,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::Eye)
                     .selected(ignore_ws)
-                    .tooltip(tcode_i18n::tr!("diff.toggle_whitespace"))
+                    .tooltip(crate::tr!("diff.toggle_whitespace"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.ignore_ws = !this.ignore_ws;
                         this.git_preview = None;
@@ -1137,7 +1034,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::CaseSensitive)
                     .selected(show_invisibles)
-                    .tooltip(tcode_i18n::tr!("diff.toggle_invisibles"))
+                    .tooltip(crate::tr!("diff.toggle_invisibles"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_invisibles = !this.show_invisibles;
                         this.cache = None;
@@ -1185,7 +1082,7 @@ impl DiffPanel {
                             let chosen = branch.clone();
                             let selected = branch == current;
                             let accessible_label =
-                                tcode_i18n::tr!("diff.base_branch", branch = branch.clone())
+                                crate::tr!("diff.base_branch", branch = branch.clone())
                                     .into_owned();
                             list = list.child(
                                 material::accessible_clickable(
@@ -1225,7 +1122,7 @@ impl DiffPanel {
                         div()
                             .id("diff-base-list")
                             .role(Role::Menu)
-                            .aria_label(tcode_i18n::tr!("diff.base_branches"))
+                            .aria_label(crate::tr!("diff.base_branches"))
                             .min_w(px(180.))
                             .max_h(px(280.))
                             .overflow_y_scroll()
@@ -1332,16 +1229,7 @@ impl DiffPanel {
             .iter()
             .enumerate()
             .filter(|(index, _)| *index >= start && *index <= end)
-            .filter_map(|(_, row)| match row {
-                RenderedRow::Code {
-                    kind,
-                    old,
-                    new,
-                    text,
-                    ..
-                } => Some((*kind, *old, *new, text)),
-                RenderedRow::Gap(_) => None,
-            })
+            .map(|(_, row)| (row.kind, row.old, row.new, &row.text))
             .collect::<Vec<_>>();
         let old_start = selected.iter().find_map(|(_, old, _, _)| *old).unwrap_or(0);
         let new_start = selected.iter().find_map(|(_, _, new, _)| *new).unwrap_or(0);
@@ -1396,8 +1284,8 @@ impl DiffPanel {
             selection.start_index,
             selection.end_index,
         );
-        self.workspace_store.update(cx, |store, cx| {
-            store.dispatch(Command::AddReviewComment { comment }, cx);
+        self.workspace_store.update(cx, |store, _cx| {
+            store.dispatch(Command::AddReviewComment { comment });
         });
         self.selection = None;
         self.comment_input = None;
@@ -1408,12 +1296,12 @@ impl DiffPanel {
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(cache) = self.cache.as_ref() else {
             if self.loading_key.is_some() || self.render_loading_key.is_some() {
-                return self.render_status(tcode_i18n::tr!("diff.loading").into_owned(), cx);
+                return self.render_status(crate::tr!("diff.loading").into_owned(), cx);
             }
             return self.render_empty(cx);
         };
-        let split = self.workspace_store.read(cx).diff_split(cx);
-        let wrap = self.workspace_store.read(cx).diff_word_wrap(cx);
+        let split = self.workspace_store.read(cx).diff_split();
+        let wrap = self.workspace_store.read(cx).diff_word_wrap();
         let list_state = if split {
             cache.split_list.clone()
         } else {
@@ -1459,7 +1347,7 @@ impl DiffPanel {
         {
             if preview.result.truncated {
                 content = content
-                    .child(self.render_notice(tcode_i18n::tr!("diff.truncated").into_owned(), cx));
+                    .child(self.render_notice(crate::tr!("diff.truncated").into_owned(), cx));
             }
             if let Some(error) = &preview.result.error {
                 content = content.child(self.render_notice(error.clone(), cx));
@@ -1470,7 +1358,7 @@ impl DiffPanel {
     }
 
     fn render_list_item(&self, index: usize, split: bool, cx: &mut Context<Self>) -> AnyElement {
-        let wrap = self.workspace_store.read(cx).diff_word_wrap(cx);
+        let wrap = self.workspace_store.read(cx).diff_word_wrap();
         let Some(cache) = self.cache.as_ref() else {
             return div().into_any_element();
         };
@@ -1500,30 +1388,16 @@ impl DiffPanel {
                         self.render_gap(file_index, *count, new_lines.clone(), *expandable, cx),
                         None,
                     ),
-                    VisibleItem::Row(row_index) => match &file.all_rows[*row_index] {
-                        RenderedRow::Gap(gap) => (
-                            self.render_gap(
-                                file_index,
-                                gap.count,
-                                gap.new_lines.clone(),
-                                false,
-                                cx,
-                            ),
-                            None,
-                        ),
-                        RenderedRow::Code {
-                            kind,
-                            old,
-                            new,
-                            text,
-                            runs,
-                        } => (
+                    VisibleItem::Row(row_index) => {
+                        let row = &file.all_rows[*row_index];
+                        (
                             self.render_code_row(
-                                &file.path, *row_index, *kind, *old, *new, text, runs, wrap, cx,
+                                &file.path, *row_index, row.kind, row.old, row.new, &row.text,
+                                &row.runs, wrap, cx,
                             ),
-                            Some((*old, *new)),
-                        ),
-                    },
+                            Some((row.old, row.new)),
+                        )
+                    }
                 };
                 v_flex()
                     .min_w_full()
@@ -1550,14 +1424,8 @@ impl DiffPanel {
                     VisibleSplitItem::Pair(pair_index) => {
                         let pair = file.all_split[*pair_index];
                         let rendered = self.render_split_row(file, pair, wrap, cx);
-                        let old = pair.left.and_then(|index| match &file.all_rows[index] {
-                            RenderedRow::Code { old, .. } => *old,
-                            RenderedRow::Gap(_) => None,
-                        });
-                        let new = pair.right.and_then(|index| match &file.all_rows[index] {
-                            RenderedRow::Code { new, .. } => *new,
-                            RenderedRow::Gap(_) => None,
-                        });
+                        let old = pair.left.and_then(|index| file.all_rows[index].old);
+                        let new = pair.right.and_then(|index| file.all_rows[index].new);
                         let comments = self.render_comment_ui(&file.path, old, new, cx);
                         (rendered, comments)
                     }
@@ -1581,17 +1449,17 @@ impl DiffPanel {
         };
         let kind_label = match file.kind {
             FileChangeKind::Create => Some((
-                tcode_i18n::tr!("diff.created"),
+                crate::tr!("diff.created"),
                 cx.theme().success.opacity(0.12),
                 cx.theme().success_foreground,
             )),
             FileChangeKind::Delete => Some((
-                tcode_i18n::tr!("diff.deleted"),
+                crate::tr!("diff.deleted"),
                 cx.theme().danger.opacity(0.12),
                 cx.theme().danger_foreground,
             )),
             FileChangeKind::Rename => Some((
-                tcode_i18n::tr!("diff.renamed"),
+                crate::tr!("diff.renamed"),
                 cx.theme().info.opacity(0.12),
                 cx.theme().info_foreground,
             )),
@@ -1676,7 +1544,7 @@ impl DiffPanel {
             .font_family(cx.theme().font_family.clone());
         if !expandable {
             return row
-                .child(tcode_i18n::tr!("diff.unmodified_lines", count = count))
+                .child(crate::tr!("diff.unmodified_lines", count = count))
                 .into_any_element();
         }
 
@@ -1690,7 +1558,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::ChevronUp)
-                    .tooltip(tcode_i18n::tr!("diff.expand_gap_up"))
+                    .tooltip(crate::tr!("diff.expand_gap_up"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.expand_gap(file_index, up_lines.clone(), ExpandDir::Up, cx);
                     })),
@@ -1700,8 +1568,8 @@ impl DiffPanel {
                     .ghost()
                     .small()
                     .compact()
-                    .label(tcode_i18n::tr!("diff.unmodified_lines", count = count))
-                    .tooltip(tcode_i18n::tr!("diff.expand_gap_all"))
+                    .label(crate::tr!("diff.unmodified_lines", count = count))
+                    .tooltip(crate::tr!("diff.expand_gap_all"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.expand_gap(file_index, all_lines.clone(), ExpandDir::All, cx);
                     })),
@@ -1712,7 +1580,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::ChevronDown)
-                    .tooltip(tcode_i18n::tr!("diff.expand_gap_down"))
+                    .tooltip(crate::tr!("diff.expand_gap_down"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.expand_gap(file_index, new_lines.clone(), ExpandDir::Down, cx);
                     })),
@@ -1754,43 +1622,41 @@ impl DiffPanel {
         let mut rows = self
             .workspace_store
             .read(cx)
-            .with_diff_review_comments(cx, |comments| {
-                comments
-                    .iter()
-                    .filter(|comment| {
-                        comment.file == file
-                            && match comment.side {
-                                ReviewSide::Old => old,
-                                ReviewSide::New => new,
-                            } == Some(comment.line_end)
-                    })
-                    .map(|comment| {
-                        h_flex()
-                            .min_w_full()
-                            .px_3()
-                            .py_1p5()
-                            .gap_2()
-                            .relative()
-                            .rounded(material::radius_card())
-                            .bg(cx.theme().muted)
-                            .font_family(cx.theme().font_family.clone())
-                            .text_size(px(11.))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .left(px(0.))
-                                    .top(px(6.))
-                                    .bottom(px(6.))
-                                    .w(px(2.))
-                                    .rounded_full()
-                                    .bg(cx.theme().primary),
-                            )
-                            .child(Icon::empty().path("icons/pencil.svg").xsmall())
-                            .child(comment.text.clone())
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>()
-            });
+            .review_comments()
+            .iter()
+            .filter(|comment| {
+                comment.file == file
+                    && match comment.side {
+                        ReviewSide::Old => old,
+                        ReviewSide::New => new,
+                    } == Some(comment.line_end)
+            })
+            .map(|comment| {
+                h_flex()
+                    .min_w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .relative()
+                    .rounded(material::radius_card())
+                    .bg(cx.theme().muted)
+                    .font_family(cx.theme().font_family.clone())
+                    .text_size(px(11.))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .w(px(2.))
+                            .rounded_full()
+                            .bg(cx.theme().primary),
+                    )
+                    .child(Icon::empty().path("icons/pencil.svg").xsmall())
+                    .child(comment.text.clone())
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         let selection = self.selection.as_ref().filter(|selection| {
             selection.file == file
                 && match selection.side {
@@ -1815,7 +1681,7 @@ impl DiffPanel {
                                 Button::new("diff-submit-comment")
                                     .primary()
                                     .small()
-                                    .label(tcode_i18n::tr!("diff.submit_comment"))
+                                    .label(crate::tr!("diff.submit_comment"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.submit_comment(cx);
                                     })),
@@ -1836,12 +1702,11 @@ impl DiffPanel {
                             Button::new("diff-add-comment")
                                 .ghost()
                                 .small()
-                                .label(tcode_i18n::tr!("diff.add_comment"))
+                                .label(crate::tr!("diff.add_comment"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.comment_input = Some(cx.new(|cx| {
-                                        InputState::new(window, cx).placeholder(tcode_i18n::tr!(
-                                            "diff.comment_placeholder"
-                                        ))
+                                        InputState::new(window, cx)
+                                            .placeholder(crate::tr!("diff.comment_placeholder"))
                                     }));
                                     this.remeasure_lists();
                                     cx.notify();
@@ -1861,18 +1726,13 @@ impl DiffPanel {
         wrap: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let paired_as_context = pair.left.zip(pair.right).is_some_and(|(left, right)| {
-            matches!(
-                (&file.all_rows[left], &file.all_rows[right]),
-                (
-                    RenderedRow::Code { text: left, .. },
-                    RenderedRow::Code { text: right, .. }
-                ) if left == right
-            )
-        });
+        let paired_as_context = pair
+            .left
+            .zip(pair.right)
+            .is_some_and(|(left, right)| file.all_rows[left].text == file.all_rows[right].text);
         let cell = |row_index: Option<usize>, side: ReviewSide, cx: &mut Context<Self>| {
             let index = row_index.unwrap_or_default();
-            let Some(RenderedRow::Code {
+            let Some(RenderedRow {
                 kind,
                 old,
                 new,
@@ -2067,7 +1927,7 @@ impl DiffPanel {
                 div()
                     .text_size(px(15.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("diff.empty")),
+                    .child(crate::tr!("diff.empty")),
             )
             .into_any_element()
     }
@@ -2076,7 +1936,7 @@ impl DiffPanel {
 impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
-        let tab = self.workspace_store.read(cx).diff_panel_chrome_state(cx).2;
+        let tab = self.workspace_store.read(cx).diff_panel_chrome_state().2;
         let mut root = v_flex()
             .size_full()
             .min_w_0()
@@ -2102,7 +1962,7 @@ mod tests {
 
     #[test]
     fn resolves_file_headers_independently_for_unified_and_split_lists() {
-        let code_row = |text: &str| RenderedRow::Code {
+        let code_row = |text: &str| RenderedRow {
             kind: RowKind::Added,
             old: None,
             new: Some(1),
@@ -2156,7 +2016,7 @@ mod tests {
     #[test]
     fn large_diff_builds_virtual_list_models_without_row_elements() {
         let rows = (1..=5_000)
-            .map(|line| RenderedRow::Code {
+            .map(|line| RenderedRow {
                 kind: RowKind::Added,
                 old: None,
                 new: Some(line),

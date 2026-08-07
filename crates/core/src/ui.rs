@@ -48,9 +48,4 @@ impl ConversationDestination {
             Self::ProjectDraft(id) => format!("draft:{id}"),
         }
     }
-
-    /// String key used by native client resources such as WebViews.
-    pub fn ui_key(&self) -> String {
-        self.preference_key()
-    }
 }

@@ -1,26 +1,20 @@
-//! Serialized in-process client/host pipe.
-//!
-//! Both directions carry real NDJSON strings of `tcode-protocol` wire types.
-//! The desktop client therefore exercises the same serde boundary a future
-//! socket transport will use.
+//! Typed in-process client/host pipe.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tcode_protocol::{
-    ClientMessage, ClientPayload, Command, CommandResponse, EventEnvelope, HelloAck, HostMessage,
-    ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic, decode_host_line,
-    encode_line,
+    ClientMessage, ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage,
+    ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic,
 };
+use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
-use crate::app::{AppState, SmokeMode};
-use crate::blocking::unblock_host;
+use crate::app::AppState;
 use crate::event::HostEvent;
-use crate::host::{HostCx, HostMsg, HostOutput};
+use crate::host::{HostCx, HostMsg};
 use crate::terminal::LocalTerminalRegistry;
-use crate::ui_facade::ExternalImportUpdate;
 
 /// Optional process-local services attached before the host starts accepting
 /// client traffic.
@@ -39,39 +33,21 @@ pub struct HostServices {
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
 
-/// Messages on the one process-local external-import progress bus installed at
-/// host construction. The `StartExternalImport` command and its started result
-/// still cross NDJSON; a remote transport replaces this bus with events.
-enum LocalImportProgress {
-    Update {
-        id: u64,
-        update: ExternalImportUpdate,
-    },
-    Closed {
-        id: u64,
-    },
-}
-
 struct HostHandleInner {
-    client_tx: async_channel::Sender<String>,
-    event_rx: async_channel::Receiver<String>,
-    changed_rx: async_channel::Receiver<()>,
-    stopped_rx: async_channel::Receiver<()>,
+    client_tx: smol::channel::Sender<ClientMessage>,
+    event_rx: smol::channel::Receiver<HostMessage>,
+    changed_rx: smol::channel::Receiver<()>,
+    stopped_rx: smol::channel::Receiver<()>,
     #[cfg(feature = "test-support")]
-    test_mailbox: async_channel::Sender<HostMsg>,
+    test_mailbox: smol::channel::Sender<HostMsg>,
     next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, async_channel::Sender<HostMessage>>>>,
-    import_routes: Arc<Mutex<HashMap<u64, async_channel::Sender<ExternalImportUpdate>>>>,
-    preview_requests: Mutex<Option<async_channel::Receiver<preview_mcp::BrokerRequest>>>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    preview_requests: Mutex<Option<smol::channel::Receiver<preview_mcp::BrokerRequest>>>,
     terminals: LocalTerminalRegistry,
 }
 
-/// Client-side endpoint for the serialized host.
-///
-/// `client_tx` and `event_rx` contain NDJSON lines, never typed shortcuts.
-/// The three non-serialized resources are documented at their accessors:
-/// preview broker requests, external-import progress, and live terminal
-/// handles.
+/// Client-side endpoint for the host.
 #[derive(Clone)]
 pub struct HostHandle {
     inner: Arc<HostHandleInner>,
@@ -83,10 +59,9 @@ impl HostHandle {
     }
 
     fn send_payload(&self, id: u64, payload: ClientPayload) -> Result<(), ProtocolError> {
-        let line = encode_line(&ClientMessage { id, payload })?;
         self.inner
             .client_tx
-            .try_send(line)
+            .try_send(ClientMessage { id, payload })
             .map_err(|error| ProtocolError {
                 code: "transport_closed".into(),
                 message: error.to_string(),
@@ -95,7 +70,7 @@ impl HostHandle {
 
     async fn request(&self, payload: ClientPayload) -> Result<HostMessage, ProtocolError> {
         let id = self.next_id();
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = smol::channel::bounded(1);
         self.inner.pending.lock().unwrap().insert(id, sender);
         if let Err(error) = self.send_payload(id, payload) {
             self.inner.pending.lock().unwrap().remove(&id);
@@ -107,7 +82,7 @@ impl HostHandle {
         })
     }
 
-    /// Fire a mutation through serde/NDJSON. Its correlated ack is intentionally
+    /// Fire a mutation through the typed pipe. Its correlated ack is intentionally
     /// ignored by this fire-and-forget UI convenience.
     pub fn dispatch(&self, command: Command) -> Result<(), ProtocolError> {
         let id = self.next_id();
@@ -132,16 +107,12 @@ impl HostHandle {
         }
     }
 
-    pub fn query_blocking(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
-        smol::block_on(self.query(query))
-    }
-
-    /// Drain the host's store-write barrier, close the serialized client
+    /// Drain the host's store-write barrier, close the typed client
     /// endpoint, and wait until the state-owning thread has exited.
     ///
     /// This is the terminal lifecycle operation for the one-client in-process
     /// transport. Closing happens after the correlated command result so the
-    /// shutdown request itself always crosses NDJSON.
+    /// shutdown request itself is always delivered.
     pub async fn shutdown(&self) -> Result<(), ProtocolError> {
         let result = self.command(Command::ShutdownAllAndFlush).await;
         self.inner.client_tx.close();
@@ -170,29 +141,13 @@ impl HostHandle {
         self.send_payload(id, ClientPayload::Subscribe(subscription))
     }
 
-    pub fn hello(&self, app_version: impl Into<String>) -> Result<(), ProtocolError> {
-        let id = self.next_id();
-        self.send_payload(
-            id,
-            ClientPayload::Hello(tcode_protocol::Hello {
-                protocol_version: tcode_protocol::PROTOCOL_VERSION,
-                app_version: app_version.into(),
-                capabilities: vec![
-                    "ndjson".into(),
-                    "local-terminal-byte-streams".into(),
-                    "local-preview-reverse-rpc".into(),
-                ],
-            }),
-        )
-    }
-
-    /// Serialized event lines consumed by the client-side replica pump.
-    pub fn event_receiver(&self) -> async_channel::Receiver<String> {
+    /// Typed events consumed by the client-side replica pump.
+    pub fn event_receiver(&self) -> smol::channel::Receiver<HostMessage> {
         self.inner.event_rx.clone()
     }
 
     /// Coalesced notification-only changes consumed by the client-side pump.
-    pub fn changed_receiver(&self) -> async_channel::Receiver<()> {
+    pub fn changed_receiver(&self) -> smol::channel::Receiver<()> {
         self.inner.changed_rx.clone()
     }
 
@@ -203,7 +158,7 @@ impl HostHandle {
     /// A remote transport must replace it with reverse RPC.
     pub fn take_preview_requests(
         &self,
-    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
+    ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
         self.inner.preview_requests.lock().unwrap().take()
     }
 
@@ -215,23 +170,21 @@ impl HostHandle {
         self.inner.terminals.clone()
     }
 
-    /// Start an import through a serialized command and receive its one allowed
+    /// Start an import through a command and receive its progress stream.
     /// client-local progress receiver, correlated by the command's wire id.
-    /// Progress enters the client through the single process-local bus installed
-    /// when the host is constructed; no per-command channel handle crosses.
     pub async fn start_external_import(
         &self,
         project_id: String,
         threads: Vec<tcode_protocol::ExternalThread>,
-    ) -> Result<Option<async_channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
+    ) -> Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
         let id = self.next_id();
-        let (progress_sender, progress_receiver) = async_channel::unbounded();
+        let (progress_sender, progress_receiver) = smol::channel::unbounded();
         self.inner
             .import_routes
             .lock()
             .unwrap()
             .insert(id, progress_sender);
-        let (ack_sender, ack_receiver) = async_channel::bounded(1);
+        let (ack_sender, ack_receiver) = smol::channel::bounded(1);
         self.inner.pending.lock().unwrap().insert(id, ack_sender);
         if let Err(error) = self.send_payload(
             id,
@@ -288,7 +241,7 @@ impl HostHandle {
     ///
     /// This is intentionally absent from production builds. The mutation
     /// enters the real host mailbox, and any emitted events still cross the
-    /// NDJSON encoder/decoder before reaching the client.
+    /// typed event path before reaching the client.
     #[cfg(feature = "test-support")]
     pub async fn update_state_for_test<R>(
         &self,
@@ -297,7 +250,7 @@ impl HostHandle {
     where
         R: Send + 'static,
     {
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = smol::channel::bounded(1);
         self.inner
             .test_mailbox
             .send(HostMsg::Enqueued(Box::new(move |state, cx| {
@@ -323,23 +276,16 @@ fn unexpected_response(expected: &str, actual: &HostMessage) -> ProtocolError {
     }
 }
 
-/// Spawn the dedicated host thread and return its serialized client endpoint.
+/// Spawn the dedicated host thread and return its typed client endpoint.
 pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<HostHandle> {
     fn assert_send<T: Send>() {}
     assert_send::<AppState>();
 
-    let (client_tx, client_rx) = async_channel::unbounded::<String>();
-    let (raw_host_tx, raw_host_rx) = async_channel::unbounded::<String>();
-    let (event_tx, event_rx) = async_channel::unbounded::<String>();
-    let (changed_tx, changed_rx) = async_channel::bounded(1);
-    let (stopped_tx, stopped_rx) = async_channel::bounded(1);
-    let (mailbox_tx, mailbox_rx) = async_channel::unbounded::<HostMsg>();
-    let (outgoing_tx, outgoing_rx) = async_channel::unbounded::<HostOutput>();
-    // Deliberate construction-time local affordance: one progress bus crosses
-    // into the host thread. Per-import commands/results remain serialized, and
-    // a future remote transport replaces this bus with correlated events.
-    let (import_progress_tx, import_progress_rx) =
-        async_channel::unbounded::<LocalImportProgress>();
+    let (client_tx, client_rx) = smol::channel::unbounded::<ClientMessage>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<HostMessage>();
+    let (changed_tx, changed_rx) = smol::channel::bounded(1);
+    let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
+    let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
     let terminals = LocalTerminalRegistry::default();
     // Deliberate local-transport affordance: the WebView broker request
     // receiver cannot cross serde. Move its single consumer exactly once into
@@ -370,11 +316,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         terminals: terminals.clone(),
     });
 
-    spawn_client_router(raw_host_rx, event_tx, pending)?;
-    spawn_local_import_router(import_progress_rx, import_routes)?;
-    spawn_decoder(client_rx, mailbox_tx.clone(), outgoing_tx.clone())?;
-    spawn_encoder(outgoing_rx, raw_host_tx)?;
-
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("tcode-host".into())
@@ -389,7 +330,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.token);
             }
-            let mut cx = HostCx::new(mailbox_tx, outgoing_tx, changed_tx);
+            let mut cx = HostCx::new(mailbox_tx, event_tx, pending, changed_tx);
             state.pump_orchestrate_requests(&mut cx);
             if !cfg!(any(test, feature = "test-support")) {
                 state.refresh_model_catalogs(&mut cx);
@@ -400,7 +341,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(());
-            smol::block_on(host_loop(state, cx, mailbox_rx, import_progress_tx));
+            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx, import_routes));
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -413,144 +354,34 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     Ok(HostHandle { inner })
 }
 
-fn spawn_decoder(
-    client_rx: async_channel::Receiver<String>,
-    mailbox: async_channel::Sender<HostMsg>,
-    outgoing: async_channel::Sender<HostOutput>,
-) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("tcode-host-ndjson-decoder".into())
-        .spawn(move || {
-            while let Ok(line) = client_rx.recv_blocking() {
-                match tcode_protocol::decode_client_line(&line) {
-                    Ok(message) => {
-                        if mailbox
-                            .send_blocking(HostMsg::DecodedClient(Box::new(message)))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = outgoing.send_blocking(HostOutput::Message(HostMessage::Ack {
-                            id: 0,
-                            result: Err(error),
-                        }));
-                    }
-                }
-            }
-            let _ = mailbox.send_blocking(HostMsg::ClientClosed);
-        })?;
-    Ok(())
-}
-
-fn spawn_encoder(
-    outgoing: async_channel::Receiver<HostOutput>,
-    raw_host: async_channel::Sender<String>,
-) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("tcode-host-ndjson-encoder".into())
-        .spawn(move || {
-            let mut runtime_seq = 0_u64;
-            while let Ok(output) = outgoing.recv_blocking() {
-                let message = match output {
-                    HostOutput::Message(message) => message,
-                    HostOutput::Event(HostEvent::Domain(envelope)) => HostMessage::Event(envelope),
-                    HostOutput::Event(HostEvent::Runtime(notification)) => {
-                        runtime_seq = runtime_seq.wrapping_add(1);
-                        HostMessage::Event(EventEnvelope {
-                            topic: Topic::RuntimeEvents,
-                            seq: runtime_seq,
-                            event: ServerEvent::Runtime(notification),
-                        })
-                    }
-                };
-                match encode_line(&message) {
-                    Ok(line) => {
-                        if raw_host.send_blocking(line).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => log::error!("failed to encode host NDJSON: {}", error.message),
-                }
-            }
-        })?;
-    Ok(())
-}
-
-fn spawn_client_router(
-    raw_host: async_channel::Receiver<String>,
-    events: async_channel::Sender<String>,
-    pending: Arc<Mutex<HashMap<u64, async_channel::Sender<HostMessage>>>>,
-) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("tcode-client-ndjson-router".into())
-        .spawn(move || {
-            while let Ok(line) = raw_host.recv_blocking() {
-                let message = match decode_host_line(&line) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        log::error!("failed to decode host NDJSON: {}", error.message);
-                        continue;
-                    }
-                };
-                let id = match &message {
-                    HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. } => Some(*id),
-                    _ => None,
-                };
-                if let Some(id) = id
-                    && let Some(waiter) = pending.lock().unwrap().remove(&id)
-                {
-                    let _ = waiter.send_blocking(message);
-                    continue;
-                }
-                if events.send_blocking(line).is_err() {
-                    break;
-                }
-            }
-        })?;
-    Ok(())
-}
-
-fn spawn_local_import_router(
-    progress: async_channel::Receiver<LocalImportProgress>,
-    routes: Arc<Mutex<HashMap<u64, async_channel::Sender<ExternalImportUpdate>>>>,
-) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("tcode-client-local-import-router".into())
-        .spawn(move || {
-            while let Ok(progress) = progress.recv_blocking() {
-                match progress {
-                    LocalImportProgress::Update { id, update } => {
-                        let route = routes.lock().unwrap().get(&id).cloned();
-                        if let Some(route) = route {
-                            let _ = route.send_blocking(update);
-                        }
-                    }
-                    LocalImportProgress::Closed { id } => {
-                        routes.lock().unwrap().remove(&id);
-                    }
-                }
-            }
-        })?;
-    Ok(())
-}
-
 async fn host_loop(
     mut state: AppState,
     mut cx: HostCx,
-    mailbox: async_channel::Receiver<HostMsg>,
-    import_progress: async_channel::Sender<LocalImportProgress>,
+    client: smol::channel::Receiver<ClientMessage>,
+    mailbox: smol::channel::Receiver<HostMsg>,
+    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
 ) {
     let mut active_seq = 0_u64;
     let mut last_active: Option<Option<tcode_protocol::SessionStatus>> = None;
-    while let Ok(message) = mailbox.recv().await {
-        match message {
-            HostMsg::DecodedClient(message) => {
-                handle_client_message(&mut state, &mut cx, *message, &import_progress)
-            }
-            HostMsg::Enqueued(operation) => operation(&mut state, &mut cx),
-            HostMsg::ClientClosed => break,
+    loop {
+        enum Input {
+            Client(Result<Box<ClientMessage>, smol::channel::RecvError>),
+            Internal(Result<HostMsg, smol::channel::RecvError>),
+        }
+        match smol::future::race(
+            async { Input::Client(client.recv().await.map(Box::new)) },
+            async { Input::Internal(mailbox.recv().await) },
+        )
+        .await
+        {
+            Input::Client(message) => match message {
+                Ok(message) => handle_client_message(&mut state, &mut cx, *message, &import_routes),
+                Err(_) => break,
+            },
+            Input::Internal(message) => match message {
+                Ok(HostMsg::Enqueued(operation)) => operation(&mut state, &mut cx),
+                Err(_) => break,
+            },
         }
         state.sync_terminal_handles();
         let active = state
@@ -572,12 +403,12 @@ fn handle_client_message(
     state: &mut AppState,
     cx: &mut HostCx,
     message: ClientMessage,
-    import_progress: &async_channel::Sender<LocalImportProgress>,
+    import_routes: &Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
 ) {
     let ClientMessage { id, payload } = message;
     match payload {
         ClientPayload::Command(command) => {
-            let outcome = dispatch_command(state, cx, id, command, import_progress);
+            let outcome = dispatch_command(state, cx, id, command, import_routes);
             match outcome {
                 CommandOutcome::Immediate(result) => {
                     cx.send_message(HostMessage::Ack { id, result })
@@ -617,25 +448,6 @@ fn handle_client_message(
                 result: Ok(CommandResponse::Unit),
             });
         }
-        ClientPayload::Unsubscribe(_) => {
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Ok(CommandResponse::Unit),
-            });
-        }
-        ClientPayload::Hello(hello) => {
-            cx.send_message(HostMessage::HelloAck(HelloAck {
-                protocol_version: tcode_protocol::PROTOCOL_VERSION,
-                app_version: env!("CARGO_PKG_VERSION").into(),
-                capabilities: hello.capabilities,
-            }));
-        }
-        ClientPayload::ReverseResponse(_) => {
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Ok(CommandResponse::Unit),
-            });
-        }
         _ => {
             cx.send_message(HostMessage::Ack {
                 id,
@@ -650,7 +462,7 @@ fn handle_client_message(
 
 enum CommandOutcome {
     Immediate(Result<CommandResponse, ProtocolError>),
-    StoreBarrier(async_channel::Receiver<()>),
+    StoreBarrier(smol::channel::Receiver<()>),
 }
 
 fn dispatch_command(
@@ -658,39 +470,14 @@ fn dispatch_command(
     cx: &mut HostCx,
     request_id: u64,
     command: Command,
-    import_progress: &async_channel::Sender<LocalImportProgress>,
+    import_routes: &Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
-        Command::SetSmokeMode { auto_approve } => {
-            app.smoke = Some(SmokeMode { auto_approve });
-        }
-        Command::CreateSession {
-            provider,
-            cwd,
-            model,
-            project_id,
-            acp_agent_id,
-            profile_id,
-        } => app.create_session(
-            provider,
-            cwd,
-            model,
-            project_id,
-            acp_agent_id,
-            profile_id,
-            cx,
-        ),
         Command::ApplyPendingRelaunch => {
             response = CommandResponse::PendingRelaunchSection(app.apply_pending_relaunch(cx));
         }
         Command::OpenLatestSession => app.open_latest_session(cx),
-        Command::OpenTerminalPanel => app.open_terminal_panel(cx),
-        Command::OpenTerminalDemo => app.open_terminal_demo(cx),
-        Command::DebugStartProvider => app.debug_start_provider(cx),
-        Command::DebugGitCommit { message } => app.debug_git_commit(message, cx),
-        Command::DebugGitAction { name } => app.debug_git_action(name, cx),
-        Command::DebugGitGenerateMessage => app.debug_git_generate_message(cx),
         Command::ShutdownAllAndFlush => {
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));
@@ -699,7 +486,7 @@ fn dispatch_command(
             text,
             attachment_paths,
         } => app.orchestrate_turn(text, attachment_paths, cx),
-        Command::ReloadProvider { provider } => app.reload_provider(provider, cx),
+        Command::ReloadProvider => app.reload_provider(cx),
         Command::SetProfileSecret {
             profile_id,
             name,
@@ -766,28 +553,23 @@ fn dispatch_command(
             project_id,
             threads,
         } => {
-            let threads = threads.into_iter().map(service_external_thread).collect();
             let receiver = app.start_external_import(&project_id, threads, cx);
             response = CommandResponse::ExternalImportStarted(receiver.is_some());
             if let Some(receiver) = receiver {
-                let progress = import_progress.clone();
+                let route = import_routes.lock().unwrap().get(&request_id).cloned();
+                let import_routes = import_routes.clone();
                 cx.spawn_detached(async move {
-                    while let Ok(update) = receiver.recv().await {
-                        if progress
-                            .send(LocalImportProgress::Update {
-                                id: request_id,
-                                update,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return;
+                    if let Some(route) = route {
+                        while let Ok(update) = receiver.recv().await {
+                            if route.send(update).await.is_err() {
+                                break;
+                            }
                         }
                     }
-                    let _ = progress
-                        .send(LocalImportProgress::Closed { id: request_id })
-                        .await;
+                    import_routes.lock().unwrap().remove(&request_id);
                 });
+            } else {
+                import_routes.lock().unwrap().remove(&request_id);
             }
         }
         Command::FinishExternalImport { project_id } => app.finish_external_import(&project_id, cx),
@@ -870,27 +652,11 @@ fn dispatch_query(
         Query::ListActiveWorkspace => {
             let cwd = app.active.as_ref().map(|active| active.meta.cwd.clone());
             let task = app.list_workspace_at(cwd, cx);
-            cx.spawn_background(async move {
-                Ok(QueryResponse::ActiveWorkspace(
-                    task.await
-                        .into_iter()
-                        .map(|entry| tcode_protocol::PathEntry {
-                            rel_path: entry.rel_path,
-                            basename: entry.basename,
-                            parent: entry.parent,
-                            is_dir: entry.is_dir,
-                        })
-                        .collect(),
-                ))
-            })
+            cx.spawn_background(async move { Ok(QueryResponse::ActiveWorkspace(task.await)) })
         }
         Query::ScanExternalHistory => {
             let task = app.scan_external_history(cx);
-            cx.spawn_background(async move {
-                Ok(QueryResponse::ExternalHistory(
-                    task.await.into_iter().map(protocol_recent_dir).collect(),
-                ))
-            })
+            cx.spawn_background(async move { Ok(QueryResponse::ExternalHistory(task.await)) })
         }
         Query::GenerateCommitMessage { included } => {
             let task = app.generate_commit_message(included, cx);
@@ -903,47 +669,30 @@ fn dispatch_query(
                     })
             })
         }
-        Query::SecretPresence { profile_id, name } => {
-            let present = app.profile_secret_present(&profile_id, &name);
-            cx.spawn_background(async move { Ok(QueryResponse::SecretPresence(present)) })
-        }
         Query::LoadGitDiff {
             cwd,
             scope,
             base,
             ignore_whitespace,
         } => {
-            let scope = match scope {
-                tcode_protocol::GitDiffScope::WorkingTree => {
-                    tcode_services::git::GitDiffScope::WorkingTree
-                }
-                tcode_protocol::GitDiffScope::Branch => tcode_services::git::GitDiffScope::Branch,
-                tcode_protocol::GitDiffScope::Unknown => {
-                    return cx.spawn_background(async {
-                        Err(ProtocolError {
-                            code: "unsupported_scope".into(),
-                            message: "unknown git diff scope".into(),
-                        })
-                    });
-                }
-                _ => {
-                    return cx.spawn_background(async {
-                        Err(ProtocolError {
-                            code: "unsupported_scope".into(),
-                            message: "unsupported git diff scope".into(),
-                        })
-                    });
-                }
-            };
-            let task = unblock_host(cx, move || {
+            if !matches!(
+                scope,
+                tcode_protocol::GitDiffScope::WorkingTree | tcode_protocol::GitDiffScope::Branch
+            ) {
+                return cx.spawn_background(async {
+                    Err(ProtocolError {
+                        code: "unsupported_scope".into(),
+                        message: "unknown git diff scope".into(),
+                    })
+                });
+            }
+            let task = cx.unblock(move || {
                 tcode_services::git::load_git_diff(&cwd, scope, base.as_deref(), ignore_whitespace)
             });
-            cx.spawn_background(
-                async move { Ok(QueryResponse::GitDiff(protocol_git_diff(task.await))) },
-            )
+            cx.spawn_background(async move { Ok(QueryResponse::GitDiff(task.await)) })
         }
         Query::ReadFileBytes { path } => {
-            let task = unblock_host(cx, move || tcode_services::user_files::read_bytes(&path));
+            let task = cx.unblock(move || std::fs::read(&path));
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::FileBytes)
@@ -951,9 +700,7 @@ fn dispatch_query(
             })
         }
         Query::SaveAttachment { dir, bytes, ext } => {
-            let task = unblock_host(cx, move || {
-                AppState::save_attachment_to_dir(&dir, &bytes, &ext)
-            });
+            let task = cx.unblock(move || AppState::save_attachment_to_dir(&dir, &bytes, &ext));
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::SavedAttachment)
@@ -961,7 +708,7 @@ fn dispatch_query(
             })
         }
         Query::RemoveUserFile { path } => {
-            let task = unblock_host(cx, move || tcode_services::user_files::remove_file(&path));
+            let task = cx.unblock(move || std::fs::remove_file(&path));
             cx.spawn_background(async move {
                 task.await
                     .map(|()| QueryResponse::UserFileRemoved)
@@ -969,14 +716,9 @@ fn dispatch_query(
             })
         }
         Query::IsDirectory { path } => {
-            let task = unblock_host(cx, move || tcode_services::user_files::is_directory(&path));
+            let task = cx.unblock(move || path.is_dir());
             cx.spawn_background(async move { Ok(QueryResponse::IsDirectory(task.await)) })
         }
-        Query::RelativizeToWorkspace { path, cwd } => cx.spawn_background(async move {
-            Ok(QueryResponse::RelativePath(
-                tcode_services::user_files::relativize_to_workspace(&path, &cwd),
-            ))
-        }),
         _ => cx.spawn_background(async {
             Err(ProtocolError {
                 code: "unsupported_query".into(),
@@ -993,103 +735,32 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
     }
 }
 
-fn protocol_git_diff(result: tcode_services::git::GitDiffResult) -> tcode_protocol::GitDiffResult {
-    tcode_protocol::GitDiffResult {
-        changes: result.changes,
-        texts: result
-            .texts
-            .into_iter()
-            .map(|text| tcode_protocol::GitFileText {
-                old: text.old,
-                new: text.new,
-            })
-            .collect(),
-        truncated: result.truncated,
-        error: result.error,
-        branches: result.branches,
-        default_base: result.default_base,
-    }
-}
-
-fn protocol_recent_dir(recent: crate::ui_facade::RecentDir) -> tcode_protocol::RecentDir {
-    tcode_protocol::RecentDir {
-        path: recent.path,
-        last_active_ms: recent.last_active_ms,
-        threads: recent
-            .threads
-            .into_iter()
-            .map(|thread| tcode_protocol::ExternalThread {
-                source: protocol_source_tool(thread.source),
-                file: thread.file,
-                external_id: thread.external_id,
-                title_hint: thread.title_hint,
-                last_active_ms: thread.last_active_ms,
-            })
-            .collect(),
-    }
-}
-
-fn protocol_source_tool(source: crate::ui_facade::SourceTool) -> tcode_protocol::SourceTool {
-    match source {
-        crate::ui_facade::SourceTool::ClaudeCode => tcode_protocol::SourceTool::ClaudeCode,
-        crate::ui_facade::SourceTool::ClaudeDesktop => tcode_protocol::SourceTool::ClaudeDesktop,
-        crate::ui_facade::SourceTool::T3Code => tcode_protocol::SourceTool::T3Code,
-        crate::ui_facade::SourceTool::CodexCli => tcode_protocol::SourceTool::CodexCli,
-        crate::ui_facade::SourceTool::CodexDesktop => tcode_protocol::SourceTool::CodexDesktop,
-    }
-}
-
-fn service_external_thread(
-    thread: tcode_protocol::ExternalThread,
-) -> crate::ui_facade::ExternalThread {
-    crate::ui_facade::ExternalThread {
-        source: match thread.source {
-            tcode_protocol::SourceTool::ClaudeCode => crate::ui_facade::SourceTool::ClaudeCode,
-            tcode_protocol::SourceTool::ClaudeDesktop => {
-                crate::ui_facade::SourceTool::ClaudeDesktop
-            }
-            tcode_protocol::SourceTool::T3Code => crate::ui_facade::SourceTool::T3Code,
-            tcode_protocol::SourceTool::CodexCli => crate::ui_facade::SourceTool::CodexCli,
-            tcode_protocol::SourceTool::CodexDesktop => crate::ui_facade::SourceTool::CodexDesktop,
-            tcode_protocol::SourceTool::Unknown => crate::ui_facade::SourceTool::T3Code,
-            _ => crate::ui_facade::SourceTool::T3Code,
-        },
-        file: thread.file,
-        external_id: thread.external_id,
-        title_hint: thread.title_hint,
-        last_active_ms: thread.last_active_ms,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn next_event(
-        events: &async_channel::Receiver<String>,
+        events: &smol::channel::Receiver<HostMessage>,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             match events.try_recv() {
-                Ok(line) => {
-                    assert!(line.ends_with('\n'), "host transport must emit NDJSON");
-                    if let HostMessage::Event(envelope) =
-                        decode_host_line(&line).expect("decode host NDJSON")
-                        && ready(&envelope)
-                    {
+                Ok(HostMessage::Event(envelope)) => {
+                    if ready(&envelope) {
                         return envelope;
                     }
                 }
-                Err(async_channel::TryRecvError::Empty) => {
+                Ok(_) => {}
+                Err(smol::channel::TryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Err(async_channel::TryRecvError::Closed) => {
+                Err(smol::channel::TryRecvError::Closed) => {
                     panic!("host event stream closed before the expected event")
                 }
             }
         }
-        panic!("timed out waiting for serialized host event");
+        panic!("timed out waiting for host event");
     }
 
     #[test]
@@ -1104,9 +775,8 @@ mod tests {
 
         host.subscribe(Subscription {
             topic: Topic::Index,
-            after_seq: None,
         })
-        .expect("serialize subscription");
+        .expect("send subscription");
         let snapshot = next_event(&events, |event| {
             event.topic == Topic::Index && matches!(&event.event, ServerEvent::IndexSnapshot(_))
         });
@@ -1141,7 +811,7 @@ mod tests {
 
         let import_progress =
             smol::block_on(host.start_external_import(project_id.clone(), Vec::new()))
-                .expect("start import over serialized command")
+                .expect("start import over command")
                 .expect("known project starts an import");
         assert_eq!(
             import_progress
@@ -1159,14 +829,14 @@ mod tests {
         );
 
         assert_eq!(
-            host.query_blocking(Query::IsDirectory {
+            smol::block_on(host.query(Query::IsDirectory {
                 path: project_root.clone(),
-            })
+            }))
             .expect("query directory over pipe"),
             QueryResponse::IsDirectory(true)
         );
         assert_eq!(
-            host.query_blocking(Query::ListActiveWorkspace)
+            smol::block_on(host.query(Query::ListActiveWorkspace))
                 .expect("query inactive workspace over pipe"),
             QueryResponse::ActiveWorkspace(Vec::new())
         );

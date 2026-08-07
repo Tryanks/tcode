@@ -372,8 +372,7 @@ than adding every result to the global tab sequence.
 
 ## Verification protocol
 
-For any visual change: `cargo build` (zero warnings) + `cargo test --workspace`
-+ a headless smoke (`--smoke "claude|<tmpdir>|..."`), then launch with
-`--open-latest` (optionally `--open-diff` / `--open-settings` /
+For any visual change: `cargo build` (zero warnings) + `cargo test --workspace`,
+then launch with `--open-latest` (optionally `--open-diff` / `--open-settings` /
 `--open-palette`), capture the window (`tools/windowid.c` helper +
 `screencapture -x -l<id>`), and review both themes against this spec.

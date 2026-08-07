@@ -8,8 +8,6 @@ pub struct LineHunk {
     pub new: Range<u32>,
 }
 
-pub type WordDiffRanges = (Vec<Range<usize>>, Vec<Range<usize>>);
-
 pub fn line_diff(old: &str, new: &str, ignore_whitespace: bool) -> Vec<LineHunk> {
     if ignore_whitespace {
         let old = imara_diff::sources::lines(old)
@@ -88,6 +86,9 @@ pub(crate) fn word_token_ranges(text: &str) -> Vec<Range<usize>> {
     tokens.push(start..text.len());
     tokens
 }
+
+/// Matching (old, new) highlight ranges, or `None` when the diff is too noisy.
+pub type WordDiffRanges = (Vec<Range<usize>>, Vec<Range<usize>>);
 
 pub fn word_diff_ranges(old: &str, new: &str) -> Option<WordDiffRanges> {
     const MAX_WORD_DIFF_LEN: usize = 512;

@@ -2,8 +2,8 @@
 //! `text/window_selection.rs` implementation.
 //!
 //! gpui-component keeps this state on its private `Root`; tcode stores the same
-//! registrations in a GPUI global keyed by `WindowId` so it can be mounted from
-//! the application shell.
+//! registrations in a GPUI global so it can be mounted from the application
+//! shell.
 
 use std::{collections::HashMap, time::Duration};
 
@@ -11,14 +11,14 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds, Element, ElementId,
     Entity, EntityId, Global, GlobalElementId, Hitbox, InspectorElementId, IntoElement, LayoutId,
     Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformInput,
-    Point, ScrollDelta, ScrollWheelEvent, Style, Task, WeakEntity, Window, WindowId, point, px,
+    Point, ScrollDelta, ScrollWheelEvent, Style, Task, WeakEntity, Window, point, px,
 };
 
 use super::state::MarkdownState;
 
 #[derive(Default)]
 struct SelectionGlobal {
-    windows: HashMap<WindowId, WindowSelectionState>,
+    state: WindowSelectionState,
 }
 
 impl Global for SelectionGlobal {}
@@ -94,10 +94,6 @@ impl WindowTextSelection {
     }
 }
 
-fn window_id(window: &Window) -> WindowId {
-    window.window_handle().window_id()
-}
-
 pub(super) fn init_global(cx: &mut App) {
     if !cx.has_global::<SelectionGlobal>() {
         cx.set_global(SelectionGlobal::default());
@@ -107,15 +103,14 @@ pub(super) fn init_global(cx: &mut App) {
 pub(super) fn register_selectable_text_view(
     state: &Entity<MarkdownState>,
     hitbox: &Hitbox,
-    window: &Window,
+    _window: &Window,
     cx: &mut App,
 ) {
-    let id = window_id(window);
     let entity_id = state.entity_id();
     let weak = state.downgrade();
     let hitbox = hitbox.clone();
     cx.update_default_global::<SelectionGlobal, _>(|global, _| {
-        let selection = global.windows.entry(id).or_default();
+        let selection = &mut global.state;
         selection
             .views
             .retain(|_, (view, _)| view.upgrade().is_some());
@@ -127,19 +122,16 @@ pub(super) fn register_selectable_text_view(
 pub(super) fn register_selectable_text_inline(
     state: &Entity<MarkdownState>,
     bounds: Vec<Bounds<Pixels>>,
-    window: &Window,
+    _window: &Window,
     cx: &mut App,
 ) {
     if bounds.is_empty() {
         return;
     }
-    let window_id = window_id(window);
     let entity_id = state.entity_id();
     cx.update_default_global::<SelectionGlobal, _>(|global, _| {
         global
-            .windows
-            .entry(window_id)
-            .or_default()
+            .state
             .inlines
             .entry(entity_id)
             .or_default()
@@ -148,14 +140,11 @@ pub(super) fn register_selectable_text_inline(
 }
 
 pub(super) fn selection_points(
-    window: &Window,
+    _window: &Window,
     view_id: EntityId,
     cx: &App,
 ) -> Option<(Point<Pixels>, Point<Pixels>)> {
-    let state = cx
-        .try_global::<SelectionGlobal>()?
-        .windows
-        .get(&window_id(window))?;
+    let state = &cx.try_global::<SelectionGlobal>()?.state;
     if state
         .selection
         .single_view()
@@ -166,13 +155,11 @@ pub(super) fn selection_points(
     state.selection.resolved_points(cx)
 }
 
-pub(super) fn window_selected_text(window: &Window, cx: &App) -> String {
-    let Some(state) = cx
-        .try_global::<SelectionGlobal>()
-        .and_then(|global| global.windows.get(&window_id(window)))
-    else {
+pub(super) fn window_selected_text(_window: &Window, cx: &App) -> String {
+    let Some(global) = cx.try_global::<SelectionGlobal>() else {
         return String::new();
     };
+    let state = &global.state;
     let resolved = state.selection.resolved_points(cx);
     let single_view = state.selection.single_view();
     let mut items = Vec::new();
@@ -211,9 +198,9 @@ pub(super) fn window_selected_text(window: &Window, cx: &App) -> String {
         .join("\n")
 }
 
-fn clear_window(window_id: WindowId, cx: &mut App) {
+fn clear_window(cx: &mut App) {
     let views = cx.update_default_global::<SelectionGlobal, _>(|global, cx| {
-        let state = global.windows.entry(window_id).or_default();
+        let state = &mut global.state;
         let had_selection = state.selection.anchor.is_some();
         state.selection.reset();
         state.auto_scroll_delta = None;
@@ -233,22 +220,19 @@ fn clear_window(window_id: WindowId, cx: &mut App) {
 
 pub(super) fn clear_selection_for_view(view_id: EntityId, cx: &mut App) {
     let other_views = cx.update_default_global::<SelectionGlobal, _>(|global, _| {
-        let mut views = Vec::new();
-        for state in global.windows.values_mut() {
-            if state.selection.involves(view_id) {
-                state.selection.reset();
-                state.auto_scroll_delta = None;
-                state.auto_scroll_task = None;
-                views.extend(
-                    state
-                        .views
-                        .iter()
-                        .filter(|(id, _)| **id != view_id)
-                        .filter_map(|(_, (view, _))| view.upgrade()),
-                );
-            }
+        let state = &mut global.state;
+        if state.selection.involves(view_id) {
+            state.selection.reset();
+            state.auto_scroll_delta = None;
+            state.auto_scroll_task = None;
+            return state
+                .views
+                .iter()
+                .filter(|(id, _)| **id != view_id)
+                .filter_map(|(_, (view, _))| view.upgrade())
+                .collect();
         }
-        views
+        Vec::new()
     });
     for view in other_views {
         view.update(cx, |state, cx| state.clear_selection(cx));
@@ -256,16 +240,11 @@ pub(super) fn clear_selection_for_view(view_id: EntityId, cx: &mut App) {
 }
 
 pub(super) fn clear_selection_for_resized_view(view_id: EntityId, cx: &mut App) {
-    let windows = cx.update_default_global::<SelectionGlobal, _>(|global, _| {
-        global
-            .windows
-            .iter()
-            .filter(|(_, state)| !state.selection.is_selecting && state.selection.involves(view_id))
-            .map(|(id, _)| *id)
-            .collect::<Vec<_>>()
+    let should_clear = cx.update_default_global::<SelectionGlobal, _>(|global, _| {
+        !global.state.selection.is_selecting && global.state.selection.involves(view_id)
     });
-    for id in windows {
-        clear_window(id, cx);
+    if should_clear {
+        clear_window(cx);
     }
 }
 
@@ -275,20 +254,16 @@ pub(super) fn clear_window_selection_for_select_all(
 ) {
     let selected_id = selected.entity_id();
     let other_views = cx.update_default_global::<SelectionGlobal, _>(|global, _| {
-        let mut views = Vec::new();
-        for state in global.windows.values_mut() {
-            state.selection.reset();
-            state.auto_scroll_delta = None;
-            state.auto_scroll_task = None;
-            views.extend(
-                state
-                    .views
-                    .iter()
-                    .filter(|(id, _)| **id != selected_id)
-                    .filter_map(|(_, (view, _))| view.upgrade()),
-            );
-        }
-        views
+        let state = &mut global.state;
+        state.selection.reset();
+        state.auto_scroll_delta = None;
+        state.auto_scroll_task = None;
+        state
+            .views
+            .iter()
+            .filter(|(id, _)| **id != selected_id)
+            .filter_map(|(_, (view, _))| view.upgrade())
+            .collect::<Vec<_>>()
     });
     for view in other_views {
         view.update(cx, |state, cx| state.clear_selection(cx));
@@ -371,9 +346,8 @@ fn notify_views(state: &mut WindowSelectionState, cx: &mut App) {
 }
 
 fn start_selection(position: Point<Pixels>, window: &mut Window, cx: &mut App) {
-    let id = window_id(window);
     cx.update_default_global::<SelectionGlobal, _>(|global, cx| {
-        let state = global.windows.entry(id).or_default();
+        let state = &mut global.state;
         let endpoint = endpoint_for_position(state, position, window, cx);
         // gpui-component's richer control-suppression flag is crate-private.
         // Its public controls also prevent the default mouse-down behavior, so
@@ -448,14 +422,8 @@ fn compute_auto_scroll(
 }
 
 fn ensure_auto_scroll_task(window: &Window, cx: &mut App) {
-    let id = window_id(window);
     let needs_task = cx.update_default_global::<SelectionGlobal, _>(|global, _| {
-        global
-            .windows
-            .entry(id)
-            .or_default()
-            .auto_scroll_task
-            .is_none()
+        global.state.auto_scroll_task.is_none()
     });
     if !needs_task {
         return;
@@ -464,14 +432,13 @@ fn ensure_auto_scroll_task(window: &Window, cx: &mut App) {
     let task = cx.spawn(async move |cx| {
         loop {
             let sample = cx.update(|cx| {
-                cx.try_global::<SelectionGlobal>()
-                    .and_then(|global| global.windows.get(&id))
-                    .and_then(|state| {
-                        state
-                            .selection
-                            .is_selecting
-                            .then_some((state.auto_scroll_delta, state.auto_scroll_position))
-                    })
+                cx.try_global::<SelectionGlobal>().and_then(|global| {
+                    let state = &global.state;
+                    state
+                        .selection
+                        .is_selecting
+                        .then_some((state.auto_scroll_delta, state.auto_scroll_position))
+                })
             });
             let Some((delta, position)) = sample else {
                 break;
@@ -502,7 +469,7 @@ fn ensure_auto_scroll_task(window: &Window, cx: &mut App) {
         }
     });
     cx.update_default_global::<SelectionGlobal, _>(|global, _| {
-        let state = global.windows.entry(id).or_default();
+        let state = &mut global.state;
         if state.auto_scroll_task.is_none() {
             state.auto_scroll_task = Some(task);
         }
@@ -510,9 +477,8 @@ fn ensure_auto_scroll_task(window: &Window, cx: &mut App) {
 }
 
 fn update_selection(position: Point<Pixels>, window: &mut Window, cx: &mut App) {
-    let id = window_id(window);
     let active = cx.update_default_global::<SelectionGlobal, _>(|global, cx| {
-        let state = global.windows.entry(id).or_default();
+        let state = &mut global.state;
         if !state.selection.is_selecting || cx.has_active_drag() {
             return false;
         }
@@ -530,10 +496,9 @@ fn update_selection(position: Point<Pixels>, window: &mut Window, cx: &mut App) 
     }
 }
 
-fn end_selection(window: &Window, cx: &mut App) {
-    let id = window_id(window);
+fn end_selection(_window: &Window, cx: &mut App) {
     cx.update_default_global::<SelectionGlobal, _>(|global, cx| {
-        let state = global.windows.entry(id).or_default();
+        let state = &mut global.state;
         if !state.selection.is_selecting {
             return;
         }
@@ -623,7 +588,7 @@ impl Element for TextSelectionController {
                 return;
             }
             if phase.capture() {
-                clear_window(window_id(window), cx);
+                clear_window(cx);
             } else if event.click_count == 1 {
                 start_selection(event.position, window, cx);
             }
@@ -702,10 +667,9 @@ mod tests {
     }
 
     fn is_selecting(cx: &mut VisualTestContext) -> bool {
-        cx.update(|window, cx| {
+        cx.update(|_window, cx| {
             cx.try_global::<SelectionGlobal>()
-                .and_then(|global| global.windows.get(&window_id(window)))
-                .is_some_and(|state| state.selection.is_selecting)
+                .is_some_and(|global| global.state.selection.is_selecting)
         })
     }
 

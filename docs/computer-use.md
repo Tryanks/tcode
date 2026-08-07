@@ -93,13 +93,11 @@ own "Quit & Reopen" dialog. tcode therefore treats any permission flow as a pote
 ## Dev & testing
 
 - `tcode --cu-permissions` prints the permission status as JSON and exits.
-- `tcode --cu-smoke` runs a scripted end-to-end pass without any model: launches TextEdit,
-  `find_roots` → `observe_ui` → `act_ui` (type text) → verifies the text via a fresh
-  observation; exit code reflects the verdict. Both flags make VM testing scriptable over SSH.
 - Because developing computer use on the dev machine would require the very permissions being
   developed (and granting them mid-development churns TCC state), end-to-end testing runs in a
   **tart VM**: build on the host, copy the binary in, drive the VM's screen/keyboard over VNC,
-  grant permissions inside the VM, then run the smoke flags via SSH.
-- CI (macOS/Linux/Windows) builds the stub backends and runs the platform-neutral unit tests:
+  grant permissions inside the VM, then inspect permission status via SSH.
+- CI (macOS/Linux/Windows) builds the platform fallback paths and runs the platform-neutral unit
+  tests:
   outline folding and search ranking, state-store eviction and staleness, tool schemas,
   settings serde round-trips, and MCP registration wiring for all three provider paths.

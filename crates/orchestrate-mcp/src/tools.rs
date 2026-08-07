@@ -1,11 +1,5 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -168,7 +162,11 @@ impl OrchestrateTools {
     }
 
     async fn run(&self, op: OrchestrateOp) -> CallToolResult {
-        match self.broker.invoke(op).await {
+        match self
+            .broker
+            .invoke(|reply| crate::BrokerRequest { op, reply })
+            .await
+        {
             Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
             Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
         }
@@ -186,7 +184,6 @@ impl ServerHandler for OrchestrateTools {
 }
 
 pub type Service = StreamableHttpService<OrchestrateTools, LocalSessionManager>;
-pub type Services = HashMap<String, Service>;
 
 pub fn service(broker: Broker, parent_id: String) -> Service {
     StreamableHttpService::new(
@@ -196,46 +193,29 @@ pub fn service(broker: Broker, parent_id: String) -> Service {
     )
 }
 
-pub async fn serve(
-    listener: std::net::TcpListener,
-    services: Arc<RwLock<Services>>,
-) -> std::io::Result<()> {
-    let app = Router::new()
-        .route("/mcp", any(handle))
-        .with_state(services);
-    listener.set_nonblocking(true)?;
-    axum::serve(tokio::net::TcpListener::from_std(listener)?, app).await
-}
-
-async fn handle(
-    State(services): State<Arc<RwLock<Services>>>,
-    req: axum::extract::Request,
-) -> Response {
-    let token = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let service = token.and_then(|token| services.read().unwrap().get(token).cloned());
-    let Some(service) = service else {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    };
-    let response = service.handle(req).await;
-    let (parts, body) = response.into_parts();
-    Response::from_parts(parts, axum::body::Body::new(body))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn broker(
+        requests: async_channel::Sender<crate::BrokerRequest>,
+        timeout: std::time::Duration,
+    ) -> Broker {
+        Broker::new(
+            requests,
+            timeout,
+            mcp_host::BrokerErrors {
+                unavailable: "tcode orchestrator is not available",
+                dropped: "tcode orchestrator dropped the request",
+                timed_out: "orchestrator operation timed out",
+            },
+        )
+    }
+
     #[tokio::test]
     async fn broker_op_reply_roundtrip_preserves_parent() {
         let (tx, rx) = async_channel::unbounded();
-        let broker = Broker {
-            requests: tx,
-            timeout: std::time::Duration::from_secs(2),
-        };
+        let broker = broker(tx, std::time::Duration::from_secs(2));
         let resolver = tokio::spawn(async move {
             let request = rx.recv().await.unwrap();
             assert!(
@@ -256,13 +236,8 @@ mod tests {
     #[test]
     fn all_tools_are_registered() {
         let (tx, _rx) = async_channel::unbounded();
-        let tools = OrchestrateTools::new(
-            Broker {
-                requests: tx,
-                timeout: std::time::Duration::from_secs(1),
-            },
-            "p".into(),
-        );
+        let tools =
+            OrchestrateTools::new(broker(tx, std::time::Duration::from_secs(1)), "p".into());
         let mut names: Vec<_> = tools
             .tool_router
             .list_all()

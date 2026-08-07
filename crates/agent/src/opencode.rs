@@ -8,20 +8,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
-use async_channel::{Receiver, Sender};
 use base64::Engine as _;
-use futures_lite::future;
 use serde_json::{Value, json};
+use smol::channel::{Receiver, Sender};
+use smol::future;
 
+#[cfg(test)]
+use crate::TurnStatus;
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
+    SessionHandle, SessionOptions, ThreadItem, TokenUsage,
 };
-
-const STDERR_TAIL_LINES: usize = 20;
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
@@ -29,54 +29,40 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
             "session fork is not supported for this provider".into(),
         ));
     }
-    let (commands_tx, commands_rx) = async_channel::unbounded();
-    let (events_tx, events_rx) = async_channel::unbounded();
-    let (ready_tx, ready_rx) = async_channel::bounded(1);
-    smol::spawn(run_actor(opts, commands_rx, events_tx, ready_tx)).detach();
-    ready_rx.recv().await.map_err(|_| {
-        AgentError::Protocol("OpenCode actor exited before reporting startup status".into())
-    })??;
-    Ok(SessionHandle {
-        provider: ProviderKind::OpenCode,
-        commands: commands_tx,
-        events: events_rx,
-    })
+    crate::spawn_session(
+        ProviderKind::OpenCode,
+        opts,
+        run_actor,
+        "OpenCode actor exited before reporting startup status",
+    )
+    .await
 }
 
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    let (sender, receiver) = async_channel::bounded(1);
-    std::thread::Builder::new()
-        .name("opencode-model-discovery".into())
-        .spawn(move || {
-            let result = (|| {
-                let cwd = std::env::current_dir()?;
-                let mut server = OpenCodeServer::spawn(
-                    binary_path.as_deref(),
-                    &cwd,
-                    &launch_env,
-                    ApprovalMode::FullAccess,
-                    &[],
-                    &[],
-                )?;
-                let result = (|| {
-                    server.wait_healthy()?;
-                    let provider_state = server.http.get_json("/provider")?;
-                    let mut catalog = server.http.get_json("/config/providers")?;
-                    reconcile_provider_catalog(&mut catalog, &provider_state);
-                    Ok(map_models(&catalog))
-                })();
-                server.stop();
-                result
-            })();
-            let _ = sender.send_blocking(result);
-        })
-        .map_err(|err| AgentError::Spawn(format!("spawning OpenCode model discovery: {err}")))?;
-    receiver.recv().await.map_err(|_| {
-        AgentError::Protocol("OpenCode model discovery worker exited without a result".into())
-    })?
+    smol::unblock(move || {
+        let cwd = std::env::current_dir()?;
+        let mut server = OpenCodeServer::spawn(
+            binary_path.as_deref(),
+            &cwd,
+            &launch_env,
+            ApprovalMode::FullAccess,
+            &[],
+            &[],
+        )?;
+        let result = (|| {
+            server.wait_healthy()?;
+            let provider_state = server.http.get_json("/provider")?;
+            let mut catalog = server.http.get_json("/config/providers")?;
+            reconcile_provider_catalog(&mut catalog, &provider_state);
+            Ok(map_models(&catalog))
+        })();
+        server.stop();
+        result
+    })
+    .await
 }
 
 async fn run_actor(
@@ -85,21 +71,13 @@ async fn run_actor(
     events: Sender<AgentEvent>,
     ready: Sender<Result<(), AgentError>>,
 ) {
-    let registrations: Vec<_> = [
-        opts.mcp_server.as_ref(),
-        opts.orchestrate_server.as_ref(),
-        opts.computer_use_server.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
     let mut server = match OpenCodeServer::spawn(
         opts.binary_path.as_deref(),
         &opts.cwd,
         &opts.launch_env,
         opts.approval_mode,
         &opts.extra_args,
-        &registrations,
+        &opts.mcp_servers.iter().collect::<Vec<_>>(),
     ) {
         Ok(server) => server,
         Err(err) => {
@@ -175,7 +153,6 @@ async fn run_actor(
         sse,
         events,
         mapper: OpenCodeMapper::new(session_id.clone()),
-        session_id: session_id.clone(),
         model,
         variant: selected_variant(&opts.option_selections).map(str::to_owned),
         interaction_mode: opts.interaction_mode,
@@ -210,8 +187,8 @@ async fn run_actor(
 
     let close_reason = loop {
         enum Input {
-            Command(Result<SessionCommand, async_channel::RecvError>),
-            Event(Result<SseOutput, async_channel::RecvError>),
+            Command(Result<SessionCommand, smol::channel::RecvError>),
+            Event(Result<SseOutput, smol::channel::RecvError>),
         }
         let input = future::race(async { Input::Command(commands.recv().await) }, async {
             Input::Event(actor.sse.recv().await)
@@ -246,7 +223,12 @@ async fn run_actor(
         }
     };
     actor.shutdown().await;
-    let reason = close_reason.map(|reason| actor.server.describe_failure(reason));
+    let reason = close_reason.map(|reason| {
+        actor
+            .server
+            .stderr_tail
+            .append_to(reason, "\nserver output:\n")
+    });
     let _ = actor
         .events
         .send(AgentEvent::SessionClosed { reason })
@@ -258,7 +240,6 @@ struct OpenCodeActor {
     sse: Receiver<SseOutput>,
     events: Sender<AgentEvent>,
     mapper: OpenCodeMapper,
-    session_id: String,
     model: Option<(String, String)>,
     variant: Option<String>,
     interaction_mode: InteractionMode,
@@ -319,7 +300,10 @@ impl OpenCodeActor {
                 let (status, _) = self
                     .server
                     .http
-                    .post_json(&format!("/session/{}/prompt_async", self.session_id), &body)
+                    .post_json(
+                        &format!("/session/{}/prompt_async", self.mapper.session_id),
+                        &body,
+                    )
                     .map_err(|err| err.to_string())?;
                 if status != 204 {
                     return Err(format!(
@@ -333,7 +317,10 @@ impl OpenCodeActor {
                 self.mapper.interrupted = true;
                 self.server
                     .http
-                    .post_json(&format!("/session/{}/abort", self.session_id), &json!({}))
+                    .post_json(
+                        &format!("/session/{}/abort", self.mapper.session_id),
+                        &json!({}),
+                    )
                     .map_err(|err| err.to_string())?;
                 Ok(())
             }
@@ -360,10 +347,10 @@ impl OpenCodeActor {
                     .map_err(|err| err.to_string())?;
                 if decision == ApprovalDecision::Cancel {
                     self.mapper.interrupted = true;
-                    let _ = self
-                        .server
-                        .http
-                        .post_json(&format!("/session/{}/abort", self.session_id), &json!({}));
+                    let _ = self.server.http.post_json(
+                        &format!("/session/{}/abort", self.mapper.session_id),
+                        &json!({}),
+                    );
                 }
                 self.emit(AgentEvent::ApprovalResolved {
                     request_id,
@@ -387,9 +374,7 @@ impl OpenCodeActor {
                 self.interaction_mode = mode;
                 Ok(())
             }
-            SessionCommand::SetOption { id, value }
-                if id == "variant" || id == "reasoningEffort" =>
-            {
+            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
                 self.variant = value.as_str().map(str::to_owned);
                 Ok(())
             }
@@ -424,14 +409,9 @@ impl OpenCodeActor {
         let diff = self
             .server
             .http
-            .get_json(&format!("/session/{}/diff", self.session_id))?;
+            .get_json(&format!("/session/{}/diff", self.mapper.session_id))?;
         Ok(AgentEvent::TurnChangesUpdated {
-            turn_id: self
-                .mapper
-                .active_turn
-                .clone()
-                .or_else(|| self.mapper.last_turn.clone())
-                .unwrap_or_else(|| "opencode-turn".into()),
+            turn_id: self.mapper.turn_id(),
             changes: map_snapshot_diffs(&diff),
             completeness: ChangeCompleteness::Exact,
         })
@@ -453,29 +433,19 @@ impl OpenCodeActor {
     }
 }
 
+#[derive(Default)]
 struct MappedEvent {
     events: Vec<AgentEvent>,
     permission_ids: Vec<String>,
     fetch_diff: bool,
 }
 
-impl MappedEvent {
-    fn none() -> Self {
-        Self {
-            events: Vec::new(),
-            permission_ids: Vec::new(),
-            fetch_diff: false,
-        }
-    }
-}
-
-pub(crate) struct OpenCodeMapper {
+struct OpenCodeMapper {
     session_id: String,
     turn_counter: u64,
     active_turn: Option<String>,
     last_turn: Option<String>,
     part_kinds: HashMap<String, DeltaKind>,
-    part_text: HashMap<String, String>,
     user_messages: HashSet<String>,
     /// The same assistant usage is reported by both its step-finish part and
     /// message.updated reconciliation. Keying by message id prevents counting
@@ -489,14 +459,13 @@ pub(crate) struct OpenCodeMapper {
 }
 
 impl OpenCodeMapper {
-    pub(crate) fn new(session_id: String) -> Self {
+    fn new(session_id: String) -> Self {
         Self {
             session_id,
             turn_counter: 0,
             active_turn: None,
             last_turn: None,
             part_kinds: HashMap::new(),
-            part_text: HashMap::new(),
             user_messages: HashSet::new(),
             turn_usages: HashMap::new(),
             turn_usage: None,
@@ -513,9 +482,9 @@ impl OpenCodeMapper {
         if let Some(session_id) = properties.get("sessionID").and_then(Value::as_str)
             && session_id != self.session_id
         {
-            return MappedEvent::none();
+            return MappedEvent::default();
         }
-        let mut mapped = MappedEvent::none();
+        let mut mapped = MappedEvent::default();
         match kind {
             "session.status" => match properties.pointer("/status/type").and_then(Value::as_str) {
                 Some("busy") => mapped.events.extend(self.start_turn()),
@@ -553,10 +522,6 @@ impl OpenCodeMapper {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if !delta.is_empty() {
-                    self.part_text
-                        .entry(part_id.to_owned())
-                        .or_default()
-                        .push_str(delta);
                     mapped.events.push(AgentEvent::Delta {
                         item_id: part_id.to_owned(),
                         kind: self
@@ -626,11 +591,7 @@ impl OpenCodeMapper {
             }
             "session.diff" => {
                 mapped.events.push(AgentEvent::TurnChangesUpdated {
-                    turn_id: self
-                        .active_turn
-                        .clone()
-                        .or_else(|| self.last_turn.clone())
-                        .unwrap_or_else(|| "opencode-turn".into()),
+                    turn_id: self.turn_id(),
                     changes: map_snapshot_diffs(properties.get("diff").unwrap_or(&Value::Null)),
                     completeness: ChangeCompleteness::Exact,
                 });
@@ -665,33 +626,33 @@ impl OpenCodeMapper {
         if self.active_turn.is_some() {
             return Vec::new();
         }
-        self.turn_counter += 1;
-        let turn_id = format!("opencode-turn-{}", self.turn_counter);
-        self.active_turn = Some(turn_id.clone());
         self.turn_usages.clear();
-        self.turn_usage = None;
-        self.turn_failed = false;
-        vec![AgentEvent::TurnStarted { turn_id }]
+        crate::start_mapped_turn(
+            "opencode",
+            &mut self.turn_counter,
+            &mut self.active_turn,
+            &mut self.turn_usage,
+            &mut self.turn_failed,
+        )
+    }
+
+    fn turn_id(&self) -> String {
+        self.active_turn
+            .clone()
+            .or_else(|| self.last_turn.clone())
+            .unwrap_or_else(|| "opencode-turn".into())
     }
 
     fn complete_turn(&mut self) -> Vec<AgentEvent> {
-        let Some(turn_id) = self.active_turn.take() else {
-            return Vec::new();
-        };
-        self.last_turn = Some(turn_id.clone());
-        let status = if self.interrupted {
-            TurnStatus::Interrupted
-        } else if self.turn_failed {
-            TurnStatus::Failed
-        } else {
-            TurnStatus::Completed
-        };
-        self.interrupted = false;
-        vec![AgentEvent::TurnCompleted {
-            turn_id,
-            status,
-            usage: self.turn_usage,
-        }]
+        if let Some(turn_id) = &self.active_turn {
+            self.last_turn = Some(turn_id.clone());
+        }
+        crate::complete_mapped_turn(
+            &mut self.active_turn,
+            &mut self.interrupted,
+            self.turn_failed,
+            self.turn_usage,
+        )
     }
 
     fn part_updated(&mut self, part: &Value, explicit_delta: Option<&Value>) -> Vec<AgentEvent> {
@@ -714,7 +675,6 @@ impl OpenCodeMapper {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
-                self.part_text.insert(part_id.clone(), text.clone());
                 let mut events = Vec::new();
                 if let Some(delta) = explicit_delta.and_then(Value::as_str)
                     && !delta.is_empty()
@@ -759,29 +719,6 @@ impl OpenCodeMapper {
                     Vec::new()
                 }
             }
-            Some("patch") => {
-                let changes = part
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(|path| FileChange {
-                        path: path.to_owned(),
-                        kind: FileChangeKind::Modify,
-                        diff: None,
-                    })
-                    .collect();
-                vec![AgentEvent::TurnChangesUpdated {
-                    turn_id: self
-                        .active_turn
-                        .clone()
-                        .or_else(|| self.last_turn.clone())
-                        .unwrap_or_else(|| "opencode-turn".into()),
-                    changes,
-                    completeness: ChangeCompleteness::Partial,
-                }]
-            }
             _ => Vec::new(),
         }
     }
@@ -819,7 +756,10 @@ impl OpenCodeMapper {
             }
             _ => (ItemStatus::InProgress, None),
         };
-        let exit_code = state.pointer("/metadata/exit").and_then(json_i32);
+        let exit_code = state
+            .pointer("/metadata/exit")
+            .and_then(Value::as_i64)
+            .and_then(|number| i32::try_from(number).ok());
         let item = open_code_tool_item(&call_id, &name, input, output, exit_code, status);
         vec![match state.get("status").and_then(Value::as_str) {
             Some("pending") => AgentEvent::ItemStarted(item),
@@ -832,16 +772,16 @@ impl OpenCodeMapper {
         if self
             .turn_usages
             .get(key)
-            .is_some_and(|previous| same_token_usage(*previous, usage))
+            .is_some_and(|previous| *previous == usage)
         {
             return;
         }
         let previous = self
             .turn_usages
             .insert(key.to_owned(), usage)
-            .map(processed_tokens)
+            .map(crate::processed_tokens)
             .unwrap_or(0);
-        let current = processed_tokens(usage);
+        let current = crate::processed_tokens(usage);
         if current >= previous {
             self.cumulative_processed =
                 self.cumulative_processed.saturating_add(current - previous);
@@ -851,7 +791,7 @@ impl OpenCodeMapper {
         }
         let mut aggregate = TokenUsage::default();
         for usage in self.turn_usages.values().copied() {
-            merge_token_usage(&mut aggregate, usage);
+            aggregate.merge(usage);
         }
         let aggregate = TokenUsage {
             total_processed_tokens: Some(self.cumulative_processed),
@@ -859,54 +799,6 @@ impl OpenCodeMapper {
         };
         self.turn_usage = Some(aggregate);
         events.push(AgentEvent::TokenUsage(aggregate));
-    }
-}
-
-fn same_token_usage(left: TokenUsage, right: TokenUsage) -> bool {
-    left.input_tokens == right.input_tokens
-        && left.cached_input_tokens == right.cached_input_tokens
-        && left.output_tokens == right.output_tokens
-        && left.used_tokens == right.used_tokens
-        && left.context_window == right.context_window
-        && left.total_processed_tokens == right.total_processed_tokens
-        && left.cost_usd == right.cost_usd
-        && left.duration_ms == right.duration_ms
-}
-
-fn processed_tokens(usage: TokenUsage) -> u64 {
-    usage.used_tokens.unwrap_or_else(|| {
-        usage
-            .input_tokens
-            .unwrap_or(0)
-            .saturating_add(usage.output_tokens.unwrap_or(0))
-            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
-    })
-}
-
-fn merge_token_usage(total: &mut TokenUsage, usage: TokenUsage) {
-    total.input_tokens = add_token_counts(total.input_tokens, usage.input_tokens);
-    total.cached_input_tokens =
-        add_token_counts(total.cached_input_tokens, usage.cached_input_tokens);
-    total.output_tokens = add_token_counts(total.output_tokens, usage.output_tokens);
-    total.used_tokens = add_token_counts(total.used_tokens, usage.used_tokens);
-    total.context_window = match (total.context_window, usage.context_window) {
-        (Some(left), Some(right)) => Some(left.max(right)),
-        (left, right) => left.or(right),
-    };
-    total.cost_usd = match (total.cost_usd, usage.cost_usd) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0.0) + right.unwrap_or(0.0)),
-    };
-    total.duration_ms = match (total.duration_ms, usage.duration_ms) {
-        (Some(left), Some(right)) => Some(left.saturating_add(right)),
-        (left, right) => left.or(right),
-    };
-}
-
-fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
     }
 }
 
@@ -1016,11 +908,12 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
 
 fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
     let tokens = tokens?;
-    let input = json_number(tokens.get("input"));
-    let reasoning = json_number(tokens.get("reasoning")).unwrap_or(0);
-    let output = json_number(tokens.get("output")).map(|output| output.saturating_add(reasoning));
-    let cache_read = json_number(tokens.pointer("/cache/read"));
-    let cache_write = json_number(tokens.pointer("/cache/write")).unwrap_or(0);
+    let input = crate::json_u64(tokens.get("input"));
+    let reasoning = crate::json_u64(tokens.get("reasoning")).unwrap_or(0);
+    let output =
+        crate::json_u64(tokens.get("output")).map(|output| output.saturating_add(reasoning));
+    let cache_read = crate::json_u64(tokens.pointer("/cache/read"));
+    let cache_write = crate::json_u64(tokens.pointer("/cache/write")).unwrap_or(0);
     (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
         input_tokens: input,
         cached_input_tokens: cache_read,
@@ -1030,25 +923,7 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
             .checked_add(output.unwrap_or(0))
             .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
             .and_then(|total| total.checked_add(cache_write)),
-        context_window: None,
-        total_processed_tokens: None,
-        cost_usd: None,
-        duration_ms: None,
-    })
-}
-
-fn json_i32(value: &Value) -> Option<i32> {
-    value
-        .as_i64()
-        .and_then(|number| i32::try_from(number).ok())
-        .or_else(|| value.as_str()?.parse().ok())
-}
-
-fn json_number(value: Option<&Value>) -> Option<u64> {
-    value.and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_f64().map(|number| number.max(0.0) as u64))
+        ..Default::default()
     })
 }
 
@@ -1201,20 +1076,11 @@ fn reconcile_provider_catalog(catalog: &mut Value, provider_state: &Value) {
 }
 
 fn title_case(value: &str) -> String {
-    let mut output = String::new();
-    let mut capitalize = true;
-    for character in value.chars() {
-        if matches!(character, '-' | '_') {
-            output.push(' ');
-            capitalize = true;
-        } else if capitalize {
-            output.extend(character.to_uppercase());
-            capitalize = false;
-        } else {
-            output.push(character);
-        }
-    }
-    output
+    let mut characters = value.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_default()
 }
 
 fn discover_commands(http: &HttpClient) -> Vec<ProviderCommand> {
@@ -1281,18 +1147,18 @@ fn split_model_id(model: &str) -> Option<(&str, &str)> {
 fn selected_variant(selections: &[OptionSelection]) -> Option<&str> {
     selections
         .iter()
-        .find(|selection| matches!(selection.id.as_str(), "variant" | "reasoningEffort"))
+        .find(|selection| selection.id == "reasoningEffort")
         .and_then(|selection| selection.value.as_str())
 }
 
 fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<&str> {
-    resume.as_ref()?.0.get("session_id").and_then(Value::as_str)
+    resume.as_ref()?.str_field(&["session_id"])
 }
 
 struct OpenCodeServer {
     child: Child,
     http: HttpClient,
-    stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stderr_tail: crate::process::StderrTail,
 }
 
 impl OpenCodeServer {
@@ -1342,9 +1208,9 @@ impl OpenCodeServer {
             .stderr
             .take()
             .ok_or_else(|| AgentError::Spawn("OpenCode child stderr missing".into()))?;
-        let tail: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
-        spawn_log_reader(stdout, tail.clone(), "opencode-stdout");
-        spawn_log_reader(stderr, tail.clone(), "opencode-stderr");
+        let tail = crate::process::StderrTail::default();
+        let _ = tail.spawn(stdout, "opencode-stdout", "OpenCode");
+        let _ = tail.spawn(stderr, "opencode-stderr", "OpenCode");
         Ok(Self {
             child,
             http: HttpClient::new(format!("http://127.0.0.1:{port}"), password),
@@ -1357,11 +1223,15 @@ impl OpenCodeServer {
         let mut last_error = None;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
-                return Err(AgentError::Provider(self.describe_failure(format!(
-                    "OpenCode server exited during startup ({status})"
-                ))));
+                return Err(AgentError::Provider(self.stderr_tail.append_to(
+                    format!("OpenCode server exited during startup ({status})"),
+                    "\nserver output:\n",
+                )));
             }
-            match self.http.get_health() {
+            match self
+                .http
+                .get_json_with(&self.http.health_agent, "/global/health")
+            {
                 Ok(health)
                     if health.get("healthy").and_then(Value::as_bool) == Some(true)
                         && health.get("version").and_then(Value::as_str).is_some() =>
@@ -1373,10 +1243,13 @@ impl OpenCodeServer {
             }
             std::thread::sleep(Duration::from_millis(75));
         }
-        Err(AgentError::Protocol(self.describe_failure(format!(
-            "timed out waiting for OpenCode health: {}",
-            last_error.unwrap_or_else(|| "no response".into())
-        ))))
+        Err(AgentError::Protocol(self.stderr_tail.append_to(
+            format!(
+                "timed out waiting for OpenCode health: {}",
+                last_error.unwrap_or_else(|| "no response".into())
+            ),
+            "\nserver output:\n",
+        )))
     }
 
     fn subscribe(&self) -> Result<Receiver<SseOutput>, AgentError> {
@@ -1392,7 +1265,7 @@ impl OpenCodeServer {
             .set("Authorization", &self.http.authorization)
             .call()
             .map_err(http_error)?;
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = smol::channel::unbounded();
         std::thread::Builder::new()
             .name("opencode-sse".into())
             .spawn(move || read_sse(response.into_reader(), sender))
@@ -1404,18 +1277,8 @@ impl OpenCodeServer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-
-    fn describe_failure(&self, base: String) -> String {
-        let tail = self.stderr_tail.lock().unwrap().join("\n");
-        if tail.trim().is_empty() {
-            base
-        } else {
-            format!("{base}\nserver output:\n{tail}")
-        }
-    }
 }
 
-#[derive(Clone)]
 struct HttpClient {
     base: String,
     authorization: String,
@@ -1448,19 +1311,12 @@ impl HttpClient {
         }
     }
 
-    fn get_health(&self) -> Result<Value, AgentError> {
-        let response = self
-            .health_agent
-            .get(&format!("{}/global/health", self.base))
-            .set("Authorization", &self.authorization)
-            .call()
-            .map_err(http_error)?;
-        parse_response(response)
+    fn get_json(&self, path: &str) -> Result<Value, AgentError> {
+        self.get_json_with(&self.agent, path)
     }
 
-    fn get_json(&self, path: &str) -> Result<Value, AgentError> {
-        let response = self
-            .agent
+    fn get_json_with(&self, agent: &ureq::Agent, path: &str) -> Result<Value, AgentError> {
+        let response = agent
             .get(&format!("{}{path}", self.base))
             .set("Authorization", &self.authorization)
             .call()
@@ -1523,17 +1379,10 @@ enum SseOutput {
 }
 
 fn read_sse(reader: impl Read, sender: Sender<SseOutput>) {
-    let mut reader = BufReader::new(reader);
     let mut data = Vec::new();
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
-                let _ = sender.send_blocking(SseOutput::Eof);
-                return;
-            }
-            Ok(_) => {
-                let line = line.trim_end_matches(['\r', '\n']);
+    for line in BufReader::new(reader).lines() {
+        match line {
+            Ok(line) => {
                 if line.is_empty() {
                     if !data.is_empty() {
                         let payload = data.join("\n");
@@ -1564,6 +1413,7 @@ fn read_sse(reader: impl Read, sender: Sender<SseOutput>) {
             }
         }
     }
+    let _ = sender.send_blocking(SseOutput::Eof);
 }
 
 async fn wait_for_server_connected(events: &Receiver<SseOutput>) -> Result<(), AgentError> {
@@ -1679,25 +1529,6 @@ fn opencode_config_content(
     }
     config["mcp"] = Value::Object(mcp);
     Ok(Some(config.to_string()))
-}
-
-fn spawn_log_reader(
-    reader: impl Read + Send + 'static,
-    tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    name: &str,
-) {
-    let _ = std::thread::Builder::new()
-        .name(name.into())
-        .spawn(move || {
-            for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                log::debug!("OpenCode: {line}");
-                let mut tail = tail.lock().unwrap();
-                if tail.len() == STDERR_TAIL_LINES {
-                    tail.remove(0);
-                }
-                tail.push(line);
-            }
-        });
 }
 
 #[cfg(test)]

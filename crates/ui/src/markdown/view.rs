@@ -17,9 +17,7 @@ use gpui_component::{
 };
 use serde::Deserialize;
 
-use super::{
-    link_target::LinkTarget, state::MarkdownState, style::TextViewStyle, window_selection,
-};
+use super::{link_target::LinkTarget, state::MarkdownState, window_selection};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_markdown_link, no_json)]
@@ -51,7 +49,6 @@ struct CopyRelativePath(String);
 pub struct MarkdownView {
     id: ElementId,
     state: Entity<MarkdownState>,
-    text_view_style: TextViewStyle,
     style: StyleRefinement,
     selectable: Option<bool>,
     base_dir: Option<PathBuf>,
@@ -63,17 +60,10 @@ impl MarkdownView {
         Self {
             id: ElementId::Name(state.entity_id().to_string().into()),
             state: state.clone(),
-            text_view_style: TextViewStyle::default(),
             style: StyleRefinement::default(),
             selectable: None,
             base_dir: None,
         }
-    }
-
-    /// Set the Markdown presentation style.
-    pub fn style(mut self, style: TextViewStyle) -> Self {
-        self.text_view_style = style;
-        self
     }
 
     /// Set whether text participates in window-level selection.
@@ -124,7 +114,6 @@ impl Element for MarkdownView {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.clone();
         state.update(cx, |state, cx| {
-            state.style = self.text_view_style.clone();
             if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
             }
@@ -192,45 +181,45 @@ impl Element for MarkdownView {
                     match pending.target {
                         LinkTarget::Web(url) => menu
                             .menu(
-                                tcode_i18n::tr!("markdown.link_open").into_owned(),
+                                crate::tr!("markdown.link_open").into_owned(),
                                 Box::new(OpenLink(url)),
                             )
                             .separator()
                             .menu(
-                                tcode_i18n::tr!("markdown.link_copy_address").into_owned(),
+                                crate::tr!("markdown.link_copy_address").into_owned(),
                                 Box::new(CopyLinkAddress(pending.raw_url.to_string())),
                             )
                             .menu(
-                                tcode_i18n::tr!("markdown.link_copy_text").into_owned(),
+                                crate::tr!("markdown.link_copy_text").into_owned(),
                                 Box::new(CopyLinkText(pending.text.to_string())),
                             ),
                         LinkTarget::Local(path) => {
                             let path = path.to_string_lossy().into_owned();
                             let relative_path = markdown.base_dir().map(|base_dir| {
-                                tcode_runtime::ui_facade::relativize_to_workspace(&path, base_dir)
+                                tcode_services::user_files::relativize_to_workspace(&path, base_dir)
                             });
                             menu.menu(
-                                tcode_i18n::tr!("chat.open").into_owned(),
+                                crate::tr!("chat.open").into_owned(),
                                 Box::new(OpenPath(path.clone())),
                             )
                             .menu(
-                                tcode_i18n::tr!("chat.open_zed").into_owned(),
+                                crate::tr!("chat.open_zed").into_owned(),
                                 Box::new(OpenPathInZed(path.clone())),
                             )
                             .menu(
-                                tcode_i18n::tr!("chat.reveal_in_file_manager").into_owned(),
+                                crate::tr!("chat.reveal_in_file_manager").into_owned(),
                                 Box::new(RevealPath(path.clone())),
                             )
                             .separator()
                             .menu(
-                                tcode_i18n::tr!("chat.copy_path").into_owned(),
+                                crate::tr!("chat.copy_path").into_owned(),
                                 Box::new(CopyPath(path)),
                             )
                             .when_some(
                                 relative_path,
                                 |menu, relative_path| {
                                     menu.menu(
-                                        tcode_i18n::tr!("markdown.path_copy_relative").into_owned(),
+                                        crate::tr!("markdown.path_copy_relative").into_owned(),
                                         Box::new(CopyRelativePath(relative_path)),
                                     )
                                 },
@@ -290,9 +279,9 @@ impl Element for MarkdownView {
 }
 
 fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
-    if tcode_runtime::ui_facade::open_in_zed(path).is_err() {
+    if tcode_services::desktop::open_in_zed(path).is_err() {
         window.push_notification(
-            Notification::error(tcode_i18n::tr!("errors.zed_cli_missing")),
+            Notification::error(crate::tr!("errors.zed_cli_missing")),
             cx,
         );
     }

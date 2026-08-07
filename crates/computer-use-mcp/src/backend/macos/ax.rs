@@ -158,10 +158,6 @@ impl Target {
     pub(super) fn frame(&self) -> Frame {
         element_frame(self.element.as_ax())
     }
-
-    pub(super) fn text(&self) -> String {
-        element_text(self.element.as_ax())
-    }
 }
 
 pub(super) fn application_identifier(pid: u32) -> String {
@@ -314,10 +310,6 @@ pub(super) fn locate_target(
         _application: application,
         element,
     })
-}
-
-pub(super) fn read_target_text(root: &RootInfo, path: &[usize]) -> Result<String, BackendError> {
-    Ok(locate_target(root, path, None, None)?.text())
 }
 
 fn create_application(pid: u32) -> Option<OwnedCf> {
@@ -631,25 +623,6 @@ fn action_names(element: AXUIElementRef) -> Vec<String> {
     actions.sort();
     actions.dedup();
     actions
-}
-
-fn element_text(element: AXUIElementRef) -> String {
-    let mut values = Vec::new();
-    for attribute in [
-        "AXSelectedText",
-        "AXValue",
-        "AXTitle",
-        "AXDescription",
-        "AXHelp",
-    ] {
-        if let Some(value) = attribute_text(element, attribute)
-            && !value.is_empty()
-            && !values.contains(&value)
-        {
-            values.push(value);
-        }
-    }
-    values.join("\n")
 }
 
 fn ax_result(operation: &'static str, code: AXError) -> Result<(), AxFailure> {

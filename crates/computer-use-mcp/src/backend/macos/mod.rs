@@ -17,15 +17,15 @@ use core_graphics::window::{
 };
 
 use super::{
-    ActionKind, ActionRequest, ActionResult, Backend, BackendError, BackendErrorCode,
-    CapturePolicy, ObserveRequest, RootFilters, RootInfo, RootObservation,
+    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, CapturePolicy,
+    ObserveRequest, RootFilters, RootInfo, RootObservation,
 };
 use crate::outline::{UiNode, interactive_count};
 
 pub(super) struct MacosBackend;
 
-impl Backend for MacosBackend {
-    fn list_roots(&self, filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
+impl MacosBackend {
+    pub(super) fn list_roots(&self, filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
         let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
         let array =
             core_graphics::window::copy_window_info(options, kCGNullWindowID).ok_or_else(|| {
@@ -92,7 +92,7 @@ impl Backend for MacosBackend {
         Ok(roots)
     }
 
-    fn observe(
+    pub(super) fn observe(
         &self,
         root: &RootInfo,
         request: ObserveRequest,
@@ -123,7 +123,7 @@ impl Backend for MacosBackend {
         })
     }
 
-    fn perform_action(
+    pub(super) fn perform_action(
         &self,
         root: &RootInfo,
         request: &ActionRequest,
@@ -244,14 +244,6 @@ impl Backend for MacosBackend {
                 Ok(ActionResult::unknown("mouse-move event was posted"))
             }
         }
-    }
-
-    fn read_element_text(
-        &self,
-        root: &RootInfo,
-        target_path: &[usize],
-    ) -> Result<String, BackendError> {
-        ax::read_target_text(root, target_path)
     }
 }
 

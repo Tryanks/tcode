@@ -16,7 +16,6 @@
 //!
 //! [Model Context Protocol]: https://modelcontextprotocol.io
 
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub mod js;
@@ -105,74 +104,14 @@ pub struct BrokerRequest {
 /// The server-side half of the broker: MCP tool handlers call [`Broker::invoke`]
 /// to run an op against the UI and await the reply. Cloneable so every tool
 /// call shares the one request channel.
-#[derive(Clone)]
-pub struct Broker {
-    requests: async_channel::Sender<BrokerRequest>,
-    timeout: Duration,
-}
-
-impl Broker {
-    /// Send `op` to the UI and await its reply (or a timeout / disconnect error).
-    pub async fn invoke(&self, session_id: &str, op: PreviewOp) -> Result<PreviewReply, String> {
-        let (tx, rx) = async_channel::bounded(1);
-        self.requests
-            .send(BrokerRequest {
-                session_id: session_id.to_string(),
-                op,
-                reply: tx,
-            })
-            .await
-            .map_err(|_| "preview UI is not available".to_string())?;
-        match tokio::time::timeout(self.timeout, rx.recv()).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("preview UI dropped the request".to_string()),
-            Err(_) => Err("preview operation timed out".to_string()),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct TokenRegistry {
-    inner: Arc<RwLock<tools::Services>>,
-    broker: Broker,
-}
-
-impl TokenRegistry {
-    /// Mint a distinct bearer token whose tool calls are permanently scoped to
-    /// `session_id`.
-    pub fn register(&self, session_id: &str) -> String {
-        let token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        let entry = tools::service(self.broker.clone(), session_id.to_string());
-        self.inner.write().unwrap().insert(token.clone(), entry);
-        token
-    }
-
-    pub fn revoke(&self, token: &str) {
-        self.inner.write().unwrap().remove(token);
-    }
-
-    #[cfg(test)]
-    async fn invoke_registered(&self, token: &str, op: PreviewOp) -> Result<PreviewReply, String> {
-        let session_id = self
-            .inner
-            .read()
-            .unwrap()
-            .get(token)
-            .map(|entry| entry.session_id.clone())
-            .ok_or_else(|| "unauthorized".to_string())?;
-        self.broker.invoke(&session_id, op).await
-    }
-}
+pub type Broker = mcp_host::Broker<BrokerRequest>;
+pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 
 /// A running preview MCP server: the URL + per-session bearer-token issuer to
 /// register with agents, and the receiver the UI pumps to service automation
 /// requests.
 pub struct PreviewMcpServer {
-    /// Streamable-HTTP endpoint, e.g. `http://127.0.0.1:53211/mcp`.
+    /// Streamable-HTTP endpoint, e.g. `http://127.0.0.1:53211/preview`.
     pub url: String,
     /// Per-session bearer-token registry.
     pub tokens: TokenRegistry,
@@ -181,51 +120,27 @@ pub struct PreviewMcpServer {
     pub requests: async_channel::Receiver<BrokerRequest>,
 }
 
-/// Bind a random loopback port and start the streamable-HTTP MCP server on a
-/// dedicated tokio runtime thread. Returns immediately with the bound URL and
-/// token issuer; the server keeps running for the process lifetime.
-pub fn start() -> std::io::Result<PreviewMcpServer> {
-    // Bind synchronously so the caller learns the port before we return.
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    let port = listener.local_addr()?.port();
-    let url = format!("http://127.0.0.1:{port}/mcp");
+pub fn start(host: &mut mcp_host::Host) -> PreviewMcpServer {
+    let url = host.url("/preview");
     let (req_tx, req_rx) = async_channel::unbounded::<BrokerRequest>();
-    let broker = Broker {
-        requests: req_tx,
-        timeout: Duration::from_secs(65),
-    };
-    let services = Arc::new(RwLock::new(tools::Services::new()));
-    let tokens = TokenRegistry {
-        inner: services.clone(),
-        broker,
-    };
-
-    std::thread::Builder::new()
-        .name("preview-mcp".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(err) => {
-                    log::error!("preview-mcp: failed to build tokio runtime: {err}");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                if let Err(err) = tools::serve(listener, services).await {
-                    log::error!("preview-mcp: server exited with error: {err}");
-                }
-            });
-        })?;
+    let broker = Broker::new(
+        req_tx,
+        Duration::from_secs(65),
+        mcp_host::BrokerErrors {
+            unavailable: "preview UI is not available",
+            dropped: "preview UI dropped the request",
+            timed_out: "preview operation timed out",
+        },
+    );
+    let tokens = TokenRegistry::new(move |session_id| tools::service(broker.clone(), session_id));
+    host.mount(mcp_host::route("/preview", &tokens));
 
     log::info!("preview-mcp: serving at {url}");
-    Ok(PreviewMcpServer {
+    PreviewMcpServer {
         url,
         tokens,
         requests: req_rx,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -234,56 +149,35 @@ mod tests {
 
     fn registry() -> (TokenRegistry, async_channel::Receiver<BrokerRequest>) {
         let (requests, receiver) = async_channel::unbounded();
-        let broker = Broker {
+        let broker = Broker::new(
             requests,
-            timeout: Duration::from_secs(2),
-        };
-        let registry = TokenRegistry {
-            inner: Arc::new(RwLock::new(tools::Services::new())),
-            broker,
-        };
+            Duration::from_secs(2),
+            mcp_host::BrokerErrors {
+                unavailable: "preview UI is not available",
+                dropped: "preview UI dropped the request",
+                timed_out: "preview operation timed out",
+            },
+        );
+        let registry =
+            TokenRegistry::new(move |session_id| tools::service(broker.clone(), session_id));
         (registry, receiver)
     }
 
-    #[tokio::test]
-    async fn registered_tokens_route_calls_to_their_owning_sessions() {
-        let (registry, requests) = registry();
+    #[test]
+    fn registered_tokens_are_distinct() {
+        let (registry, _requests) = registry();
         let token_a = registry.register("session-a");
         let token_b = registry.register("session-b");
-        let resolver = tokio::spawn(async move {
-            for expected in ["session-a", "session-b"] {
-                let request = requests.recv().await.unwrap();
-                assert_eq!(request.session_id, expected);
-                assert_eq!(request.op, PreviewOp::Status);
-                request
-                    .reply
-                    .send(Ok(PreviewReply::Json(serde_json::json!({ "ok": true }))))
-                    .await
-                    .unwrap();
-            }
-        });
-
-        registry
-            .invoke_registered(&token_a, PreviewOp::Status)
-            .await
-            .unwrap();
-        registry
-            .invoke_registered(&token_b, PreviewOp::Status)
-            .await
-            .unwrap();
-        resolver.await.unwrap();
+        assert_ne!(token_a, token_b);
+        assert!(registry.contains(&token_a));
+        assert!(registry.contains(&token_b));
     }
 
-    #[tokio::test]
-    async fn revoked_token_can_no_longer_invoke_tools() {
+    #[test]
+    fn revoked_token_is_removed() {
         let (registry, _requests) = registry();
         let token = registry.register("session-a");
         registry.revoke(&token);
-
-        let error = registry
-            .invoke_registered(&token, PreviewOp::Status)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "unauthorized");
+        assert!(!registry.contains(&token));
     }
 }

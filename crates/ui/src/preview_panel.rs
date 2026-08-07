@@ -63,7 +63,7 @@ fn preview_key_for_session(
 }
 
 /// The reply channel a broker request is answered on.
-type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
+type ReplyTx = smol::channel::Sender<Result<PreviewReply, String>>;
 
 #[cfg(not(target_os = "linux"))]
 pub use native::PreviewPanel;
@@ -143,7 +143,7 @@ mod native {
             cx: &mut Context<Self>,
         ) -> Self {
             let url_input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tcode_i18n::tr!("preview.url_placeholder"))
+                InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
             });
             let subscriptions = vec![
                 cx.observe(&store, |this, _, cx| {
@@ -174,7 +174,7 @@ mod native {
         /// Draft -> stored-thread commits retain the same session id, so move
         /// all cached browser state across that one key transition.
         fn active_key(&mut self, cx: &Context<Self>) -> Option<String> {
-            let current = self.store.read(cx).preview_active_identity(cx);
+            let current = self.store.read(cx).preview_active_identity();
 
             if let (Some((old_session, old_key)), Some((session, key))) =
                 (self.active_identity.as_ref(), current.as_ref())
@@ -202,7 +202,7 @@ mod native {
 
         fn routed_key(&mut self, session_id: &str, cx: &Context<Self>) -> String {
             let active_key = self.active_key(cx);
-            let active_session_id = self.store.read(cx).preview_active_session_id(cx);
+            let active_session_id = self.store.read(cx).active_session_id();
             preview_key_for_session(
                 session_id,
                 active_session_id.as_deref(),
@@ -232,7 +232,7 @@ mod native {
                     active.as_deref(),
                     window_state.route,
                     window_state.palette_open,
-                    self.store.read(cx).preview_panel_showing(cx),
+                    self.store.read(cx).preview_panel_showing(),
                 )
                 .map(str::to_string)
             };
@@ -428,14 +428,14 @@ mod native {
 
             // Gate on the Browser settings: a disabled browser rejects every op;
             // `allow_evaluate` gates only `preview_evaluate`.
-            let browser = self.store.read(cx).preview_browser_settings(cx);
+            let browser = self.store.read(cx).preview_browser_settings();
             if !browser.enabled {
-                let _ = reply.try_send(Err(tcode_i18n::tr!("browser.disabled_error").into_owned()));
+                let _ = reply.try_send(Err(crate::tr!("browser.disabled_error").into_owned()));
                 return;
             }
             if matches!(&op, PreviewOp::Evaluate { .. }) && !browser.allow_evaluate {
                 let _ = reply.try_send(Err(
-                    tcode_i18n::tr!("browser.evaluate_disabled_error").into_owned()
+                    crate::tr!("browser.evaluate_disabled_error").into_owned()
                 ));
                 return;
             }
@@ -586,7 +586,7 @@ mod native {
                     })
                 })
                 .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
-            let (status_reply, status_result) = async_channel::bounded(1);
+            let (status_reply, status_result) = smol::channel::bounded(1);
             cx.spawn(async move |_, _| {
                 let result = match status_result.recv().await {
                     Ok(Ok(PreviewReply::Json(mut value))) => {
@@ -667,7 +667,7 @@ mod native {
                         let _ = reply.send(Err(wait_timeout_message(&pending))).await;
                         return;
                     }
-                    let (probe_reply, probe_result) = async_channel::bounded(1);
+                    let (probe_reply, probe_result) = smol::channel::bounded(1);
                     if this
                         .update(cx, |panel, cx| {
                             panel.eval_now(&key, &probe, probe_reply.clone(), cx);
@@ -816,8 +816,7 @@ mod native {
 
             let visible = {
                 let window_state = self.window_state.read(cx);
-                if self.store.read(cx).preview_active_session_id(cx).as_deref() != Some(session_id)
-                {
+                if self.store.read(cx).active_session_id().as_deref() != Some(session_id) {
                     let _ = reply.try_send(Err(
                         "preview is not visible; the user is viewing another conversation".into(),
                     ));
@@ -827,7 +826,7 @@ mod native {
                     Some(key),
                     window_state.route,
                     window_state.palette_open,
-                    self.store.read(cx).preview_panel_showing(cx),
+                    self.store.read(cx).preview_panel_showing(),
                 ) == Some(key)
             };
             if !visible {
@@ -890,7 +889,7 @@ mod native {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             // When the embedded browser is turned off in Settings → Browser, hide
             // the chrome and webview entirely and show a quiet placeholder.
-            if !self.store.read(cx).preview_browser_settings(cx).enabled {
+            if !self.store.read(cx).preview_browser_settings().enabled {
                 return v_flex()
                     .size_full()
                     .items_center()
@@ -898,18 +897,9 @@ mod native {
                     .px_8()
                     .text_center()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("browser.disabled_panel"));
+                    .child(crate::tr!("browser.disabled_panel"));
             }
             let active = self.active_key(cx);
-
-            // Honor a queued `--open-preview <url>` navigation once a session exists.
-            if active.is_some()
-                && let Some(url) = self
-                    .window_state
-                    .update(cx, |state, _| state.pending_preview_url.take())
-            {
-                self.navigate(active.as_deref().unwrap(), &url, window, cx);
-            }
 
             // Mirror the active session's URL into the address bar when it changes.
             if active != self.mirrored {
@@ -954,11 +944,11 @@ mod native {
                         .px_8()
                         .text_center()
                         .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("preview.unavailable"))
+                        .child(crate::tr!("preview.unavailable"))
                         .child(
                             div()
                                 .text_size(gpui::px(13.))
-                                .child(tcode_i18n::tr!("preview.unavailable_hint")),
+                                .child(crate::tr!("preview.unavailable_hint")),
                         )
                         .into_any_element(),
                 },
@@ -967,7 +957,7 @@ mod native {
                     .items_center()
                     .justify_center()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("preview.no_session"))
+                    .child(crate::tr!("preview.no_session"))
                     .into_any_element(),
             };
 
@@ -991,7 +981,7 @@ mod native {
             // drop the trailing/vertical padding on the caption side so the
             // buttons reach the window's true top-right corner.
             let hosts_caption = {
-                let (diff_open, right_tab) = self.store.read(cx).window_caption_state(cx);
+                let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
                 window_caption::hosts_caption_for_state(
                     window_caption::CaptionSurface::Preview,
                     self.window_state.read(cx).route,
@@ -1017,7 +1007,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::ArrowLeft)
-                        .tooltip(tcode_i18n::tr!("preview.back"))
+                        .tooltip(crate::tr!("preview.back"))
                         .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
                 )
                 .child(
@@ -1026,7 +1016,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::ArrowRight)
-                        .tooltip(tcode_i18n::tr!("preview.forward"))
+                        .tooltip(crate::tr!("preview.forward"))
                         .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
                 )
                 .child(
@@ -1035,7 +1025,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::Replace)
-                        .tooltip(tcode_i18n::tr!("preview.reload"))
+                        .tooltip(crate::tr!("preview.reload"))
                         .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                 )
                 .child(div().flex_1().min_w_0().child(Input::new(&self.url_input)))
@@ -1045,7 +1035,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::Globe)
-                        .tooltip(tcode_i18n::tr!("preview.scan_ports"))
+                        .tooltip(crate::tr!("preview.scan_ports"))
                         .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
                 )
                 .child(
@@ -1054,7 +1044,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::ExternalLink)
-                        .tooltip(tcode_i18n::tr!("preview.open_external"))
+                        .tooltip(crate::tr!("preview.open_external"))
                         .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
                 )
                 .child(
@@ -1063,7 +1053,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::Close)
-                        .tooltip(tcode_i18n::tr!("preview.close"))
+                        .tooltip(crate::tr!("preview.close"))
                         .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
                 // Last child, so the chrome's own controls stay to its left.
@@ -1140,9 +1130,7 @@ mod placeholder {
             log::info!(
                 "preview: rejecting op {op:?} for session {session_id} (unsupported on Linux)"
             );
-            let _ = reply.try_send(Err(
-                tcode_i18n::tr!("preview.unsupported_linux").into_owned()
-            ));
+            let _ = reply.try_send(Err(crate::tr!("preview.unsupported_linux").into_owned()));
         }
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
@@ -1155,7 +1143,7 @@ mod placeholder {
                 .items_center()
                 .justify_center()
                 .text_color(cx.theme().muted_foreground)
-                .child(tcode_i18n::tr!("preview.unsupported_linux"))
+                .child(crate::tr!("preview.unsupported_linux"))
         }
     }
 }

@@ -12,7 +12,6 @@ pub(crate) mod parse;
 mod render;
 mod selection;
 mod state;
-mod style;
 mod utils;
 mod view;
 mod window_selection;
@@ -22,7 +21,6 @@ use gpui_component::input::{Copy, SelectAll};
 
 pub(crate) use parse::parse;
 pub use state::MarkdownState;
-pub use style::TextViewStyle;
 pub use view::MarkdownView;
 pub(crate) use window_selection::TextSelectionController;
 

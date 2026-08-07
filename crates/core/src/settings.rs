@@ -185,12 +185,6 @@ impl ProviderSettings {
             .map(|s| s.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default()
     }
-
-    /// The home directory this provider's children should run against
-    /// (`None` = inherit).
-    pub fn effective_home(&self) -> Option<PathBuf> {
-        self.home_path.clone()
-    }
 }
 
 /// A user-created provider profile (Settings → Providers "+ New profile").
@@ -446,31 +440,6 @@ impl OrchestrateSettings {
             (ProviderKind::ClaudeCode, "claude-fable-5") => Some(DEFAULT_FABLE_CHILD_DEFINITION),
             _ => None,
         }
-    }
-
-    pub fn child_profile(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Option<&OrchestrateChildModel> {
-        self.child_models.iter().find(|entry| {
-            entry.provider == provider && entry.model == model && entry.matches_effort(effort)
-        })
-    }
-
-    pub fn enabled_child_profile(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Option<&OrchestrateChildModel> {
-        self.child_models.iter().find(|entry| {
-            entry.enabled
-                && entry.provider == provider
-                && entry.model == model
-                && entry.matches_effort(effort)
-        })
     }
 
     pub fn enabled_child_profiles(
@@ -768,18 +737,6 @@ impl Settings {
             .or_default()
     }
 
-    /// The provider's card title: trimmed display-name override, else its label.
-    pub fn provider_display_name(&self, provider: ProviderKind) -> String {
-        let settings = self.provider(provider);
-        settings
-            .display_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| provider_label(provider).to_string())
-    }
-
     /// The built-in profile id for a native protocol (its [`provider_key`]).
     /// This is the id a session carries when it uses the default, non-custom
     /// configuration for its kind.
@@ -789,7 +746,7 @@ impl Settings {
 
     /// Whether `id` names a built-in provider profile.
     pub fn is_builtin_profile_id(id: &str) -> bool {
-        matches!(id, "claude" | "codex" | "pi" | "opencode" | "acp")
+        Self::builtin_kind_from_id(id).is_some()
     }
 
     /// The protocol kind of a built-in profile id, if it is one. Used to route a
@@ -809,20 +766,12 @@ impl Settings {
     /// Built-in ids resolve to the matching `providers` card; anything else to
     /// a user-created `profiles` entry. `None` for an unknown id.
     pub fn resolved_profile(&self, id: &str) -> Option<ResolvedProfile> {
-        for kind in [
-            ProviderKind::Codex,
-            ProviderKind::ClaudeCode,
-            ProviderKind::Pi,
-            ProviderKind::OpenCode,
-            ProviderKind::Acp,
-        ] {
-            if provider_key(kind) == id {
-                return Some(ResolvedProfile {
-                    id: id.to_string(),
-                    kind,
-                    settings: self.provider(kind),
-                });
-            }
+        if let Some(kind) = Self::builtin_kind_from_id(id) {
+            return Some(ResolvedProfile {
+                id: id.to_string(),
+                kind,
+                settings: self.provider(kind),
+            });
         }
         self.profiles.get(id).map(|profile| ResolvedProfile {
             id: id.to_string(),
@@ -921,14 +870,6 @@ impl Settings {
         self.acp_agents.values().collect()
     }
 
-    /// The ACP agents offered when starting a thread: installed *and* enabled.
-    pub fn enabled_acp_agents(&self) -> Vec<&InstalledAcpAgent> {
-        self.acp_agents
-            .values()
-            .filter(|agent| agent.enabled)
-            .collect()
-    }
-
     /// Fold the pre-`providers` binary overrides into the map (once, on load).
     pub fn migrate_legacy(&mut self) {
         for (provider, legacy) in [
@@ -1001,26 +942,6 @@ mod tests {
     }
 
     #[test]
-    fn display_name_falls_back_to_driver_label() {
-        let mut settings = Settings::default();
-        assert_eq!(
-            settings.provider_display_name(ProviderKind::ClaudeCode),
-            "Claude"
-        );
-        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
-        assert_eq!(settings.provider_display_name(ProviderKind::Pi), "pi");
-        assert_eq!(
-            settings.provider_display_name(ProviderKind::OpenCode),
-            "OpenCode"
-        );
-        // A blank override is treated as "no override".
-        settings.provider_mut(ProviderKind::Codex).display_name = Some("   ".into());
-        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
-        settings.provider_mut(ProviderKind::Codex).display_name = Some("Work".into());
-        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Work");
-    }
-
-    #[test]
     fn launch_arguments_split_on_whitespace() {
         let settings = ProviderSettings {
             launch_args: Some("  --chrome  --verbose ".into()),
@@ -1061,16 +982,6 @@ mod tests {
         .unwrap();
         assert!(!legacy_patch.pi_trust_project_extensions);
         assert!(!legacy_patch.pi_native_approvals);
-    }
-
-    #[test]
-    fn effective_home_reads_home_path() {
-        let settings = ProviderSettings {
-            home_path: Some(PathBuf::from("/a")),
-            ..ProviderSettings::default()
-        };
-        assert_eq!(settings.effective_home(), Some(PathBuf::from("/a")));
-        assert_eq!(ProviderSettings::default().effective_home(), None);
     }
 
     #[test]
@@ -1156,16 +1067,6 @@ mod tests {
                 .iter()
                 .all(|entry| entry.enabled)
         );
-        let medium = legacy
-            .orchestrate
-            .enabled_child_profile(ProviderKind::Codex, "gpt-5.6-sol", Some("medium"))
-            .unwrap();
-        let max = legacy
-            .orchestrate
-            .enabled_child_profile(ProviderKind::Codex, "gpt-5.6-sol", Some("max"))
-            .unwrap();
-        assert_ne!(medium.description, max.description);
-
         let mut settings = Settings::default();
         settings.orchestrate.generic_identity = "Custom lead identity".into();
         settings.orchestrate.model_identities.clear();

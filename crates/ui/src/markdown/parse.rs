@@ -29,7 +29,6 @@ fn block_node(
     let block = match node.kind_data() {
         KindData::Document(_) => BlockNode::Root {
             children: block_children(arena, node_ref, source, None),
-            span: None,
         },
         KindData::Paragraph(_) => {
             let paragraph = inline_paragraph(arena, node_ref, source);
@@ -41,9 +40,8 @@ fn block_node(
         KindData::Heading(heading) => BlockNode::Heading {
             level: heading.level(),
             children: inline_paragraph(arena, node_ref, source),
-            span: None,
         },
-        KindData::ThematicBreak(_) => BlockNode::HorizontalRule { span: None },
+        KindData::ThematicBreak(_) => BlockNode::HorizontalRule,
         KindData::CodeBlock(code) => {
             let value = code.value().iter(source).collect::<String>();
             let lang = match code.code_block_kind() {
@@ -57,32 +55,27 @@ fn block_node(
             BlockNode::CodeBlock(CodeBlock {
                 code: value.into(),
                 lang,
-                span: None,
                 ..Default::default()
             })
         }
         KindData::Blockquote(_) => BlockNode::Blockquote {
             children: block_children(arena, node_ref, source, None),
-            span: None,
         },
         KindData::List(list) => {
             let spread = !list.is_tight();
             BlockNode::List {
                 children: block_children(arena, node_ref, source, Some(spread)),
                 ordered: list.is_ordered(),
-                span: None,
             }
         }
         KindData::ListItem(item) => BlockNode::ListItem {
             children: block_children(arena, node_ref, source, None),
             spread: list_spread.unwrap_or(false),
             checked: item.task().map(|task| matches!(task, Task::Completed)),
-            span: None,
         },
         KindData::HtmlBlock(html) => {
             let text = html.value().iter(source).collect::<String>();
             BlockNode::Paragraph(Paragraph {
-                span: None,
                 children: vec![plain_inline(text)],
                 ..Default::default()
             })
@@ -229,7 +222,6 @@ fn parse_inline(
             source,
             TextMark::default().link(LinkMark {
                 url: link.destination_str(source).into(),
-                identifier: None,
                 title: link
                     .title_str(source)
                     .map(|title| title.into_owned().into()),
@@ -450,7 +442,6 @@ mod tests {
             marked[4].marks[0].1.link.as_ref().unwrap(),
             &LinkMark {
                 url: "https://url".into(),
-                identifier: None,
                 title: Some("title".into())
             }
         );
@@ -636,7 +627,7 @@ mod tests {
     fn maps_horizontal_rules() {
         assert!(matches!(
             root_children("---").as_slice(),
-            [BlockNode::HorizontalRule { .. }]
+            [BlockNode::HorizontalRule]
         ));
     }
 

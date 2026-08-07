@@ -33,7 +33,7 @@ The debt was concentrated at the top:
 - `runtime/src/app.rs` (~13k lines) held `AppState` as a gpui `Entity`, mixing
   backend authority (stores, provider processes, MCP registries, event pumps)
   with window state (`route`, `palette_open`, `sidebar_collapsed`, right-panel
-  tabs, `debug_*` seeds).
+  tabs).
 - Production UI reached **166 distinct `AppState` methods** through
   `Entity<AppState>::read/update` (~550 call sites in 18 files): 95 mutating
   commands, 4 backend I/O queries, 67 pure selectors. It also reads 22 pub
@@ -183,8 +183,8 @@ mutates `AppState` through shared memory.
   in protocol/core; `copy_plan`'s host-side clipboard write becomes a
   client-side effect event (clipboard is always a client device).
 - **Window state.** `route`, `palette_open`, `sidebar_collapsed`, right-panel
-  tab/expansion, terminal drawer height, `debug_*` seeds leave `AppState` and
-  live client-side (per-window). Per-conversation UI state that today parks in
+  tab/expansion, and terminal drawer height leave `AppState` and live
+  client-side (per-window). Per-conversation UI state that today parks in
   `conversation_ui` stays client-side keyed by conversation destination.
 - **Multi-client.** This effort intentionally has one client endpoint. Request
   ids, topic snapshots, and sequence numbers preserve the information a later
@@ -193,11 +193,11 @@ mutates `AppState` through shared memory.
 ## 5. Migration plan — strangler fig, app always shippable
 
 Each phase compiles, passes `cargo test --workspace`, and ships behind no flag.
-Verification per phase: existing smoke mode (`--smoke`), plus a protocol
+Verification per phase: provider probes, plus a protocol
 loopback test harness added in P1.
 
 - **P0 — Purify the boundary** ✅ done.
-  Window state (route, palette, sidebar collapse, quit confirm, debug seeds)
+  Window state (route, palette, sidebar collapse, quit confirm)
   lives in a UI-owned `WindowState`; the UI performs no direct backend-field
   writes; the send commands take typed text + attachment paths and the runtime
   assembles terminal contexts, review comments and attachment encoding itself;
@@ -235,7 +235,7 @@ loopback test harness added in P1.
   Exit — this is the finish line of the whole effort: `tcode-runtime` compiles
   with no gpui dependency; the desktop app runs fully through the serialized
   in-process pipe; `crates/ui` has zero `Entity<AppState>` references; the
-  smoke suite passes end-to-end over the pipeline.
+  provider probes pass end-to-end over the pipeline.
 
 Rough effort: P0 and P1 are days each; P2 is the long tail (weeks,
 parallelizable per view once the store lands); P3 is a week of concentrated

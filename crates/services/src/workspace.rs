@@ -8,33 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-
-/// One listable workspace entry (relative to the session cwd, `/`-separated).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PathEntry {
-    /// Path relative to the workspace root, using `/` separators.
-    pub rel_path: String,
-    /// Final path component.
-    pub basename: String,
-    /// Parent path (`rel_path` without the basename), possibly empty.
-    pub parent: String,
-    pub is_dir: bool,
-}
-
-impl PathEntry {
-    fn from_rel(rel_path: String, is_dir: bool) -> Self {
-        let (parent, basename) = match rel_path.rfind('/') {
-            Some(i) => (rel_path[..i].to_string(), rel_path[i + 1..].to_string()),
-            None => (String::new(), rel_path.clone()),
-        };
-        Self {
-            rel_path,
-            basename,
-            parent,
-            is_dir,
-        }
-    }
-}
+pub use tcode_protocol::PathEntry;
 
 /// Caps for the fallback walk (git listing is naturally bounded by the repo).
 const MAX_ENTRIES: usize = 8000;
@@ -124,10 +98,6 @@ fn list_from_walk(cwd: &Path) -> Vec<PathEntry> {
         };
         for entry in read.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') && depth == 0 && name != ".git" {
-                // keep dotfiles at other depths, but skip a leading `.` dir only
-                // when it is in SKIP_DIRS (handled below).
-            }
             if SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }

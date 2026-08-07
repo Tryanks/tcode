@@ -1,18 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
-    std::fs::read(path)
-}
-
-pub fn remove_file(path: &Path) -> io::Result<()> {
-    std::fs::remove_file(path)
-}
-
-pub fn is_directory(path: &Path) -> bool {
-    path.is_dir()
-}
-
 pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
     let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let path_buf = Path::new(path);
@@ -26,20 +14,6 @@ pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
 /// Return the directory used to persist attachments for a session.
 pub fn attachment_dir(data_root: &Path, session_id: &str) -> PathBuf {
     data_root.join("attachments").join(session_id)
-}
-
-/// Persist attachment bytes under the session's attachment directory.
-pub fn save_attachment(
-    data_root: &Path,
-    session_id: &str,
-    bytes: &[u8],
-    ext: &str,
-) -> io::Result<PathBuf> {
-    let dir = attachment_dir(data_root, session_id);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
-    std::fs::write(&path, bytes)?;
-    Ok(path)
 }
 
 /// Save plan markdown to the lowest unused numbered plan file in the workspace.
@@ -96,28 +70,6 @@ mod tests {
     }
 
     #[test]
-    fn attachment_bytes_path_and_extension() {
-        let root = temp_dir("attachment");
-        let bytes = b"\0attachment\xffbytes";
-
-        let path = save_attachment(&root, "session-123", bytes, "png").unwrap();
-
-        assert_eq!(
-            path.parent(),
-            Some(attachment_dir(&root, "session-123").as_path())
-        );
-        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("png"));
-        assert_eq!(
-            uuid::Uuid::parse_str(path.file_stem().unwrap().to_str().unwrap())
-                .unwrap()
-                .get_version(),
-            Some(uuid::Version::Random)
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn workspace_uses_next_plan_number_without_overwriting() {
         let cwd = temp_dir("workspace");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -167,9 +119,9 @@ mod tests {
         let bytes = b"\0exact\xffbytes";
         std::fs::write(&path, bytes).unwrap();
 
-        assert!(is_directory(&workspace));
-        assert!(!is_directory(&path));
-        assert_eq!(read_bytes(&path).unwrap(), bytes);
+        assert!(workspace.is_dir());
+        assert!(!path.is_dir());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(
             relativize_to_workspace(path.to_str().unwrap(), &workspace),
             "exact.bin"
@@ -186,7 +138,7 @@ mod tests {
             outside.to_string_lossy()
         );
 
-        remove_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
     }

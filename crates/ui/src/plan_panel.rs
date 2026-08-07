@@ -75,8 +75,8 @@ impl PlanPanel {
     }
 
     fn render_proposed_plan(&mut self, markdown: String, cx: &mut Context<Self>) -> AnyElement {
-        let title = plan_title(&markdown)
-            .unwrap_or_else(|| tcode_i18n::tr!("plan.proposed_plan").into_owned());
+        let title =
+            plan_title(&markdown).unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
         let md_state = self.sync_markdown(&markdown, cx);
         let copied = self.copied;
 
@@ -101,7 +101,7 @@ impl PlanPanel {
                             .text_color(cx.theme().info_foreground)
                             .text_size(px(11.))
                             .font_medium()
-                            .child(tcode_i18n::tr!("plan.badge")),
+                            .child(crate::tr!("plan.badge")),
                     )
                     .child(
                         div()
@@ -132,14 +132,14 @@ impl PlanPanel {
                             .xsmall()
                             .icon(IconName::Copy)
                             .label(if copied {
-                                tcode_i18n::tr!("plan.copied")
+                                crate::tr!("plan.copied")
                             } else {
-                                tcode_i18n::tr!("plan.copy")
+                                crate::tr!("plan.copy")
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(Command::CopyPlan { markdown: md }, cx);
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::CopyPlan { markdown: md });
                                 });
                                 this.mark_copied(cx);
                             })),
@@ -149,18 +149,15 @@ impl PlanPanel {
                             .ghost()
                             .xsmall()
                             .icon(Icon::empty().path("icons/download.svg"))
-                            .label(tcode_i18n::tr!("plan.download"))
+                            .label(crate::tr!("plan.download"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_download.clone();
-                                let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::DownloadPlan {
-                                            markdown: md,
-                                            fallback_title: fallback,
-                                        },
-                                        cx,
-                                    );
+                                let fallback = crate::tr!("plan.proposed_plan").into_owned();
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::DownloadPlan {
+                                        markdown: md,
+                                        fallback_title: fallback,
+                                    });
                                 });
                             })),
                     )
@@ -169,14 +166,11 @@ impl PlanPanel {
                             .ghost()
                             .xsmall()
                             .icon(IconName::HardDrive)
-                            .label(tcode_i18n::tr!("plan.save_workspace"))
+                            .label(crate::tr!("plan.save_workspace"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_save.clone();
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::SavePlanToWorkspace { markdown: md },
-                                        cx,
-                                    );
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::SavePlanToWorkspace { markdown: md });
                                 });
                             })),
                     ),
@@ -193,7 +187,7 @@ impl PlanPanel {
                 .text_size(px(11.))
                 .font_medium()
                 .text_color(muted)
-                .child(tcode_i18n::tr!("plan.steps")),
+                .child(crate::tr!("plan.steps")),
         );
         for (index, step) in steps.iter().enumerate() {
             col = col.child(self.render_step(index, step, cx));
@@ -281,13 +275,13 @@ impl PlanPanel {
                 div()
                     .text_size(px(15.))
                     .font_medium()
-                    .child(tcode_i18n::tr!("plan.empty_title")),
+                    .child(crate::tr!("plan.empty_title")),
             )
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("plan.empty_desc")),
+                    .child(crate::tr!("plan.empty_desc")),
             )
             .into_any_element()
     }
@@ -295,7 +289,7 @@ impl PlanPanel {
 
 impl Render for PlanPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (markdown, steps) = self.store.read(cx).plan_panel_state(cx);
+        let (markdown, steps) = self.store.read(cx).plan_panel_state();
 
         if markdown.is_none() && steps.is_empty() {
             return v_flex().size_full().child(self.render_empty(cx));

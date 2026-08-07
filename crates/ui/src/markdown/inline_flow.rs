@@ -7,8 +7,8 @@ use std::{
 };
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
+    AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity,
+    GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, LineFragment as WrapLineFragment, ObjectFit, ParentElement as _, Pixels,
     ShapedLine, SharedString, SharedUri, Size, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, TextRun, TextStyle, WhiteSpace, Window, div, img, point,
@@ -61,8 +61,6 @@ pub(super) enum InlineFlowItem {
         url: SharedUri,
         link: Option<LinkMark>,
         title: String,
-        width: Option<DefiniteLength>,
-        height: Option<DefiniteLength>,
     },
 }
 
@@ -107,8 +105,6 @@ enum MeasureItem {
     },
     Image {
         url: SharedUri,
-        width: Option<DefiniteLength>,
-        height: Option<DefiniteLength>,
     },
 }
 
@@ -203,20 +199,13 @@ impl Element for InlineFlow {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let measure_items = self.items.iter().map(MeasureItem::from).collect::<Vec<_>>();
         let line_height = window.line_height();
-        let rem_size = window.rem_size();
         let image_sizes = measure_items
             .iter()
             .enumerate()
             .map(|(ix, item)| match item {
-                MeasureItem::Image { url, width, height } => Some(measure_image_size(
-                    ix,
-                    url,
-                    *width,
-                    *height,
+                MeasureItem::Image { url } => Some(inline_image_size_for_line(
+                    intrinsic_image_size(ix, url, window, cx),
                     line_height,
-                    rem_size,
-                    window,
-                    cx,
                 )),
                 MeasureItem::Text { .. } => None,
             })
@@ -395,13 +384,7 @@ impl From<&InlineFlowItem> for MeasureItem {
                 font_overrides: font_overrides.clone(),
                 code_style: code_style.clone(),
             },
-            InlineFlowItem::Image {
-                url, width, height, ..
-            } => Self::Image {
-                url: url.clone(),
-                width: *width,
-                height: *height,
-            },
+            InlineFlowItem::Image { url, .. } => Self::Image { url: url.clone() },
         }
     }
 }
@@ -617,30 +600,9 @@ fn line_ranges(
     ranges
 }
 
-#[allow(clippy::too_many_arguments)]
-fn measure_image_size(
-    ix: usize,
-    url: &SharedUri,
-    width: Option<DefiniteLength>,
-    height: Option<DefiniteLength>,
-    line_height: Pixels,
-    rem_size: Pixels,
-    window: &mut Window,
-    cx: &mut App,
-) -> Size<Pixels> {
-    let intrinsic = if width.is_some() && height.is_some() {
-        None
-    } else {
-        intrinsic_image_size(ix, url, width, height, window, cx)
-    };
-    image_size(width, height, intrinsic, line_height, rem_size)
-}
-
 fn intrinsic_image_size(
     ix: usize,
     url: &SharedUri,
-    width: Option<DefiniteLength>,
-    height: Option<DefiniteLength>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Size<Pixels>> {
@@ -648,44 +610,9 @@ fn intrinsic_image_size(
         .id(ix)
         .object_fit(ObjectFit::Contain)
         .max_w(relative(1.))
-        .when_some(width, |this, width| this.w(width))
-        .when_some(height, |this, height| this.h(height))
         .into_any_element();
     let measured = image.layout_as_root(AvailableSpace::min_size(), window, cx);
     (measured.width > Pixels::ZERO && measured.height > Pixels::ZERO).then_some(measured)
-}
-
-fn image_size(
-    width: Option<DefiniteLength>,
-    height: Option<DefiniteLength>,
-    intrinsic: Option<Size<Pixels>>,
-    line_height: Pixels,
-    rem_size: Pixels,
-) -> Size<Pixels> {
-    let base = AbsoluteLength::Pixels(line_height);
-    match (width, height) {
-        (Some(width), Some(height)) => size(
-            width.to_pixels(base, rem_size),
-            height.to_pixels(base, rem_size),
-        ),
-        (Some(width), None) => {
-            let width = width.to_pixels(base, rem_size);
-            let height = intrinsic
-                .filter(|size| size.width > Pixels::ZERO && size.height > Pixels::ZERO)
-                .map(|size| width * (size.height / size.width))
-                .unwrap_or(line_height);
-            size(width, height)
-        }
-        (None, Some(height)) => {
-            let height = height.to_pixels(base, rem_size);
-            let width = intrinsic
-                .filter(|size| size.width > Pixels::ZERO && size.height > Pixels::ZERO)
-                .map(|size| height * (size.width / size.height))
-                .unwrap_or(height);
-            size(width, height)
-        }
-        (None, None) => inline_image_size_for_line(intrinsic, line_height),
-    }
 }
 
 fn inline_image_size_for_line(

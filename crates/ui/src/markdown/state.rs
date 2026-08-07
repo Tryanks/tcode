@@ -9,9 +9,7 @@ use gpui::{
 };
 use gpui_component::{ElementExt as _, v_flex};
 
-use super::{
-    link_target::LinkTarget, nodes::BlockNode, render, style::TextViewStyle, window_selection,
-};
+use super::{link_target::LinkTarget, nodes::BlockNode, render, window_selection};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingLinkMenu {
@@ -28,7 +26,6 @@ pub struct MarkdownState {
     pub(super) selectable: bool,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) pending_context_link: Option<PendingLinkMenu>,
-    pub(super) style: TextViewStyle,
     pub(super) is_selecting: bool,
     multi_click_selection: Option<MarkdownMultiClickSelection>,
     selected_text_override: Option<String>,
@@ -51,7 +48,6 @@ impl MarkdownState {
             selectable: false,
             base_dir: None,
             pending_context_link: None,
-            style: TextViewStyle::default(),
             is_selecting: false,
             multi_click_selection: None,
             selected_text_override: None,
@@ -352,11 +348,10 @@ impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = cx.entity();
         let parsed = self.parsed.clone();
-        let style = self.style.clone();
         let measured_content_height = self.measured_content_height;
         v_flex()
             .w_full()
-            .text_size(style.base_font_size)
+            .text_size(px(15.))
             .child(render::render_root(
                 &parsed,
                 self.list_state.clone(),
@@ -365,7 +360,6 @@ impl Render for MarkdownState {
                     content_height: measured_content_height,
                 },
                 &state,
-                &style,
                 window,
                 cx,
             ))

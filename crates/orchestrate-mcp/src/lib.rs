@@ -1,6 +1,5 @@
 //! In-process MCP server for dispatching work to child tcode threads.
 
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 mod tools;
@@ -49,51 +48,8 @@ pub struct BrokerRequest {
     pub reply: async_channel::Sender<Result<serde_json::Value, String>>,
 }
 
-#[derive(Clone)]
-pub struct Broker {
-    requests: async_channel::Sender<BrokerRequest>,
-    timeout: Duration,
-}
-
-impl Broker {
-    pub async fn invoke(&self, op: OrchestrateOp) -> Result<serde_json::Value, String> {
-        let (tx, rx) = async_channel::bounded(1);
-        self.requests
-            .send(BrokerRequest { op, reply: tx })
-            .await
-            .map_err(|_| "tcode orchestrator is not available".to_string())?;
-        match tokio::time::timeout(self.timeout, rx.recv()).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("tcode orchestrator dropped the request".to_string()),
-            Err(_) => Err("orchestrator operation timed out".to_string()),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct TokenRegistry {
-    inner: Arc<RwLock<tools::Services>>,
-    broker: Broker,
-}
-
-impl TokenRegistry {
-    /// Mint a distinct bearer token whose tool calls are permanently scoped to
-    /// `parent_session_id`.
-    pub fn register(&self, parent_session_id: &str) -> String {
-        let token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        let service = tools::service(self.broker.clone(), parent_session_id.to_string());
-        self.inner.write().unwrap().insert(token.clone(), service);
-        token
-    }
-
-    pub fn revoke(&self, token: &str) {
-        self.inner.write().unwrap().remove(token);
-    }
-}
+pub type Broker = mcp_host::Broker<BrokerRequest>;
+pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 
 pub struct OrchestrateMcpServer {
     pub url: String,
@@ -101,45 +57,25 @@ pub struct OrchestrateMcpServer {
     pub requests: async_channel::Receiver<BrokerRequest>,
 }
 
-pub fn start() -> std::io::Result<OrchestrateMcpServer> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    let port = listener.local_addr()?.port();
-    let url = format!("http://127.0.0.1:{port}/mcp");
+pub fn start(host: &mut mcp_host::Host) -> OrchestrateMcpServer {
+    let url = host.url("/orchestrate");
     let (req_tx, req_rx) = async_channel::unbounded();
-    let broker = Broker {
-        requests: req_tx,
-        timeout: Duration::from_secs(30),
-    };
-    let services = Arc::new(RwLock::new(tools::Services::new()));
-    let tokens = TokenRegistry {
-        inner: services.clone(),
-        broker,
-    };
-
-    std::thread::Builder::new()
-        .name("orchestrate-mcp".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(err) => {
-                    log::error!("orchestrate-mcp: failed to build tokio runtime: {err}");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                if let Err(err) = tools::serve(listener, services).await {
-                    log::error!("orchestrate-mcp: server exited with error: {err}");
-                }
-            });
-        })?;
+    let broker = Broker::new(
+        req_tx,
+        Duration::from_secs(30),
+        mcp_host::BrokerErrors {
+            unavailable: "tcode orchestrator is not available",
+            dropped: "tcode orchestrator dropped the request",
+            timed_out: "orchestrator operation timed out",
+        },
+    );
+    let tokens = TokenRegistry::new(move |parent_id| tools::service(broker.clone(), parent_id));
+    host.mount(mcp_host::route("/orchestrate", &tokens));
 
     log::info!("orchestrate-mcp: serving at {url}");
-    Ok(OrchestrateMcpServer {
+    OrchestrateMcpServer {
         url,
         tokens,
         requests: req_rx,
-    })
+    }
 }

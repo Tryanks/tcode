@@ -55,16 +55,14 @@ pub fn format_tokens(value: Option<u64>) -> String {
     if v < 1_000.0 {
         format!("{}", v.round() as i64)
     } else if v < 10_000.0 {
-        trim_dot_zero(format!("{:.1}", v / 1_000.0)) + "k"
+        let s = format!("{:.1}", v / 1_000.0);
+        s.strip_suffix(".0").unwrap_or(&s).to_string() + "k"
     } else if v < 1_000_000.0 {
         format!("{}k", (v / 1_000.0).round() as i64)
     } else {
-        trim_dot_zero(format!("{:.1}", v / 1_000_000.0)) + "m"
+        let s = format!("{:.1}", v / 1_000_000.0);
+        s.strip_suffix(".0").unwrap_or(&s).to_string() + "m"
     }
-}
-
-fn trim_dot_zero(s: String) -> String {
-    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
 }
 
 #[cfg(test)]

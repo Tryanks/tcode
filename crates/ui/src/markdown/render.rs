@@ -13,15 +13,15 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
     LayoutId, ListSizingBehavior, ListState, ObjectFit, ParentElement as _, Pixels, ScrollHandle,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Style, StyleRefinement,
-    Styled as _, StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px,
-    relative, rems, size,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Style, Styled as _,
+    StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px, relative,
+    rems, size,
 };
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _, h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex,
+    ActiveTheme as _, h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex,
 };
 
-use crate::highlight;
+use crate::{diff::model::sub_runs, highlight};
 
 use super::{
     inline::{Inline, InlineState},
@@ -29,7 +29,6 @@ use super::{
     link_target::{LinkTarget, resolve_link},
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
     state::MarkdownState,
-    style::TextViewStyle,
     utils::list_item_prefix,
     window_selection,
 };
@@ -38,6 +37,9 @@ const CODE_CACHE_CAPACITY: usize = 64;
 const BLOCK_OVERDRAW: Pixels = px(300.);
 const SCROLL_GESTURE_TIMEOUT: Duration = Duration::from_millis(250);
 const TABLE_BORDER_PX: f32 = 1.;
+const HEADING_BASE_FONT_SIZE: Pixels = px(15.);
+const INLINE_CODE_FONT_SIZE: Pixels = px(13.);
+const INLINE_CODE_RADIUS: Pixels = px(4.);
 type HighlightRuns = Vec<(Range<usize>, HighlightStyle)>;
 type SharedHighlightRuns = Arc<HighlightRuns>;
 type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
@@ -164,12 +166,11 @@ pub(super) fn render_root(
     list_state: ListState,
     measurements: RootMeasurements,
     state: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let BlockNode::Root { children, .. } = node else {
-        return render_block(node, RenderOptions::default(), state, style, window, cx);
+        return render_block(node, RenderOptions::default(), state, window, cx);
     };
     if list_state.item_count() != children.len() {
         list_state.reset(children.len());
@@ -184,19 +185,17 @@ pub(super) fn render_root(
                 list_state,
                 content_height,
                 state: state.clone(),
-                style: style.clone(),
             })
             .into_any_element();
     }
 
     let blocks = children.clone();
     let state = state.clone();
-    let style = style.clone();
     // `Infer` asks for min-content width during request-layout. Pin the list and
     // its blocks to the last real parent width so that intrinsic probes cannot
     // invalidate ListState at a narrow width while this frame measures height.
     let list = gpui::list(list_state, move |ix, window, cx| {
-        render_root_block(&blocks, ix, measurements.width, &state, &style, window, cx)
+        render_root_block(&blocks, ix, measurements.width, &state, window, cx)
     })
     .with_sizing_behavior(ListSizingBehavior::Infer)
     .w_full()
@@ -211,7 +210,6 @@ fn render_root_block(
     ix: usize,
     width: Pixels,
     state: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -223,7 +221,6 @@ fn render_root_block(
             &blocks[ix],
             RenderOptions::default().child(ix, is_last),
             state,
-            style,
             window,
             cx,
         ));
@@ -250,7 +247,6 @@ struct VirtualizedBlockList {
     list_state: ListState,
     content_height: Pixels,
     state: Entity<MarkdownState>,
-    style: TextViewStyle,
 }
 
 impl IntoElement for VirtualizedBlockList {
@@ -326,10 +322,9 @@ impl Element for VirtualizedBlockList {
 
         let blocks = self.blocks.clone();
         let state = self.state.clone();
-        let style = self.style.clone();
         let width = viewport.size.width;
         let mut list = gpui::list(self.list_state.clone(), move |ix, window, cx| {
-            render_root_block(&blocks, ix, width, &state, &style, window, cx)
+            render_root_block(&blocks, ix, width, &state, window, cx)
         })
         .size_full()
         .into_any_element();
@@ -365,14 +360,13 @@ fn render_block(
     node: &BlockNode,
     options: RenderOptions,
     state: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let gap = if options.in_list || options.is_last {
         rems(0.)
     } else {
-        style.paragraph_gap
+        rems(1.)
     };
     match node {
         BlockNode::Root { children, .. } => {
@@ -381,14 +375,7 @@ fn render_block(
                 .id(options.path.clone())
                 .w_full()
                 .children(children.iter().enumerate().map(|(ix, child)| {
-                    render_block(
-                        child,
-                        options.child(ix, ix + 1 == len),
-                        state,
-                        style,
-                        window,
-                        cx,
-                    )
+                    render_block(child, options.child(ix, ix + 1 == len), state, window, cx)
                 }))
                 .into_any_element()
         }
@@ -397,7 +384,7 @@ fn render_block(
             .w_full()
             .pb(gap)
             .whitespace_normal()
-            .child(render_paragraph(paragraph, &options.path, state, style, cx))
+            .child(render_paragraph(paragraph, &options.path, state, cx))
             .into_any_element(),
         BlockNode::Heading {
             level, children, ..
@@ -411,17 +398,14 @@ fn render_block(
                 6 => (1., FontWeight::MEDIUM),
                 _ => (1., FontWeight::NORMAL),
             };
-            let mut size = style.heading_base_font_size * scale;
-            if let Some(resolve) = &style.heading_font_size {
-                size = resolve(*level, style.heading_base_font_size);
-            }
+            let size = HEADING_BASE_FONT_SIZE * scale;
             div()
                 .id(options.path.clone())
                 .pb(rems(0.3))
                 .whitespace_normal()
                 .text_size(size)
                 .font_weight(weight)
-                .child(render_paragraph(children, &options.path, state, style, cx))
+                .child(render_paragraph(children, &options.path, state, cx))
                 .into_any_element()
         }
         BlockNode::Blockquote { children, .. } => {
@@ -438,14 +422,7 @@ fn render_block(
                         .border_color(cx.theme().secondary_active)
                         .px_4()
                         .children(children.iter().enumerate().map(|(ix, child)| {
-                            render_block(
-                                child,
-                                options.child(ix, ix + 1 == len),
-                                state,
-                                style,
-                                window,
-                                cx,
-                            )
+                            render_block(child, options.child(ix, ix + 1 == len), state, window, cx)
                         })),
                 )
                 .into_any_element()
@@ -469,17 +446,16 @@ fn render_block(
                             ..options.clone()
                         },
                         state,
-                        style,
                         window,
                         cx,
                     )
                 }))
                 .into_any_element()
         }
-        BlockNode::ListItem { .. } => render_list_item(node, 0, options, state, style, window, cx),
-        BlockNode::CodeBlock(code) => render_code_block(code, &options, state, style, window, cx),
-        BlockNode::Table(table) => render_table(table, &options, state, style, window, cx),
-        BlockNode::HorizontalRule { .. } => div()
+        BlockNode::ListItem { .. } => render_list_item(node, 0, options, state, window, cx),
+        BlockNode::CodeBlock(code) => render_code_block(code, &options, state, window, cx),
+        BlockNode::Table(table) => render_table(table, &options, state, window, cx),
+        BlockNode::HorizontalRule => div()
             .id(options.path)
             .pb(gap)
             .child(div().h(px(2.)).w_full().bg(cx.theme().border))
@@ -492,7 +468,6 @@ fn render_paragraph(
     paragraph: &Paragraph,
     id: &str,
     view: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     cx: &mut App,
 ) -> AnyElement {
     let has_image = paragraph.children.iter().any(|child| child.image.is_some());
@@ -504,7 +479,7 @@ fn render_paragraph(
         return InlineFlow::new(
             id.to_string(),
             view.clone(),
-            inline_flow_items(paragraph, style, cx),
+            inline_flow_items(paragraph, cx),
         )
         .into_any_element();
     }
@@ -527,8 +502,6 @@ fn render_paragraph(
                     .max_w(relative(1.))
                     .min_w(px(15.))
                     .min_h(px(15.))
-                    .when_some(image.width, |this, width| this.w(width))
-                    .when_some(image.height, |this, height| this.h(height))
                     .when_some(image.link.clone(), |this, link| {
                         let title = title.clone();
                         this.cursor_pointer()
@@ -548,7 +521,7 @@ fn render_paragraph(
             .into_any_element();
     }
 
-    let (text, links, highlights, fonts) = paragraph_text_style(paragraph, style, cx);
+    let (text, links, highlights, fonts) = paragraph_text_style(paragraph, cx);
     if let Ok(mut inline_state) = paragraph.state.lock() {
         inline_state.set_text(text.into());
     }
@@ -563,11 +536,7 @@ fn render_paragraph(
     .into_any_element()
 }
 
-fn paragraph_text_style(
-    paragraph: &Paragraph,
-    style: &TextViewStyle,
-    cx: &mut App,
-) -> ParagraphTextStyle {
+fn paragraph_text_style(paragraph: &Paragraph, cx: &mut App) -> ParagraphTextStyle {
     let mut text = String::new();
     let mut links = Vec::new();
     let mut highlights = Vec::new();
@@ -575,8 +544,7 @@ fn paragraph_text_style(
     for child in &paragraph.children {
         let offset = text.len();
         text.push_str(&child.text);
-        let (node_links, node_highlights, node_fonts) =
-            marks_for_node(&child.marks, offset, style, cx);
+        let (node_links, node_highlights, node_fonts) = marks_for_node(&child.marks, offset, cx);
         links.extend(node_links);
         highlights = gpui::combine_highlights(highlights, node_highlights).collect();
         fonts.extend(node_fonts);
@@ -584,12 +552,7 @@ fn paragraph_text_style(
     (text, links, highlights, fonts)
 }
 
-fn marks_for_node(
-    marks: &[(Range<usize>, TextMark)],
-    offset: usize,
-    _style: &TextViewStyle,
-    cx: &mut App,
-) -> MarkRuns {
+fn marks_for_node(marks: &[(Range<usize>, TextMark)], offset: usize, cx: &mut App) -> MarkRuns {
     let mut links = Vec::new();
     let mut highlights = Vec::new();
     let mut fonts = Vec::new();
@@ -608,18 +571,9 @@ fn marks_for_node(
                 ..Default::default()
             });
         }
-        if mark.underline {
-            highlight.underline = Some(gpui::UnderlineStyle {
-                thickness: px(1.),
-                ..Default::default()
-            });
-        }
         if mark.code {
             highlight.background_color = Some(*cx.theme().tokens.muted);
             fonts.push((range.clone(), cx.theme().mono_font_family.clone()));
-        }
-        if let Some(color) = mark.highlight {
-            highlight.background_color = Some(color);
         }
         if let Some(link) = mark.link.clone() {
             highlight.color = Some(cx.theme().link);
@@ -634,11 +588,7 @@ fn marks_for_node(
     (links, highlights, fonts)
 }
 
-fn inline_flow_items(
-    paragraph: &Paragraph,
-    style: &TextViewStyle,
-    cx: &mut App,
-) -> Vec<InlineFlowItem> {
+fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem> {
     let mut items = Vec::new();
     let mut text = String::new();
     let mut links = Vec::new();
@@ -684,8 +634,6 @@ fn inline_flow_items(
                 url: image.url.clone(),
                 link: image.link.clone(),
                 title: image.title(),
-                width: image.width,
-                height: image.height,
             });
             continue;
         }
@@ -700,8 +648,7 @@ fn inline_flow_items(
                 &mut fonts,
                 &mut segment_state,
             );
-            let (code_links, code_highlights, code_fonts) =
-                marks_for_node(&child.marks, 0, style, cx);
+            let (code_links, code_highlights, code_fonts) = marks_for_node(&child.marks, 0, cx);
             if let Ok(mut inline_state) = child.state.lock() {
                 inline_state.set_text(child.text.clone());
             }
@@ -713,9 +660,9 @@ fn inline_flow_items(
                 font_overrides: code_fonts,
                 code_style: Some(InlineCodeStyle {
                     font_family: cx.theme().mono_font_family.clone(),
-                    font_size: style.inline_code_font_size,
+                    font_size: INLINE_CODE_FONT_SIZE,
                     background: *cx.theme().tokens.muted,
-                    radius: style.inline_code_radius,
+                    radius: INLINE_CODE_RADIUS,
                 }),
             });
             continue;
@@ -726,8 +673,7 @@ fn inline_flow_items(
         }
         let offset = text.len();
         text.push_str(&child.text);
-        let (node_links, node_highlights, node_fonts) =
-            marks_for_node(&child.marks, offset, style, cx);
+        let (node_links, node_highlights, node_fonts) = marks_for_node(&child.marks, offset, cx);
         links.extend(node_links);
         highlights = gpui::combine_highlights(highlights, node_highlights).collect();
         fonts.extend(node_fonts);
@@ -748,7 +694,6 @@ fn render_list_item(
     item_ix: usize,
     options: RenderOptions,
     state: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -772,7 +717,7 @@ fn render_list_item(
         };
         match child {
             BlockNode::Paragraph(_) if ix == 0 => {
-                let content = render_block(child, child_options, state, style, window, cx);
+                let content = render_block(child, child_options, state, window, cx);
                 rows.push(
                     h_flex()
                         .w_full()
@@ -808,7 +753,6 @@ fn render_list_item(
                 child,
                 child_options,
                 state,
-                style,
                 window,
                 cx,
             ))),
@@ -816,7 +760,6 @@ fn render_list_item(
                 child,
                 child_options,
                 state,
-                style,
                 window,
                 cx,
             ))),
@@ -899,21 +842,6 @@ fn cached_code_width(
     })
 }
 
-fn sub_runs(
-    runs: &[(Range<usize>, HighlightStyle)],
-    start: usize,
-    end: usize,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    runs.iter()
-        .filter(|(range, _)| range.start < end && range.end > start)
-        .map(|(range, style)| {
-            let clipped_start = range.start.max(start) - start;
-            let clipped_end = range.end.min(end) - start;
-            (clipped_start..clipped_end, *style)
-        })
-        .collect()
-}
-
 /// Split code content into display lines. The fence's single terminating
 /// newline is a delimiter, not content; genuine trailing blank lines survive
 /// (`"a\n\n"` → `["a", ""]`).
@@ -929,7 +857,6 @@ fn render_code_block(
     code: &CodeBlock,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -954,7 +881,7 @@ fn render_code_block(
     let max_width = cached_code_width(
         code_text,
         &lines,
-        style.inline_code_font_size,
+        INLINE_CODE_FONT_SIZE,
         &mono_font_family,
         window,
     );
@@ -967,7 +894,7 @@ fn render_code_block(
                 .min_h(px(18.))
                 .whitespace_nowrap()
                 .font_family(mono_font_family.clone())
-                .text_size(style.inline_code_font_size)
+                .text_size(INLINE_CODE_FONT_SIZE)
                 .child(Inline::new(
                     ix,
                     view.clone(),
@@ -988,21 +915,15 @@ fn render_code_block(
         .children(rendered_lines);
     div()
         .id(options.path.clone())
-        .pb(if options.is_last {
-            rems(0.)
-        } else {
-            style.paragraph_gap
-        })
+        .pb(if options.is_last { rems(0.) } else { rems(1.) })
         .child(horizontal_scroll_area(
             format!("{}-viewport", options.path),
             &scroll,
-            &StyleRefinement::default(),
             cx,
             div()
                 .p_3()
                 .rounded(cx.theme().radius)
                 .bg(cx.theme().tokens.muted)
-                .refine_style(&style.code_block)
                 .child(track),
         ))
         .into_any_element()
@@ -1012,7 +933,6 @@ fn render_table(
     table: &Table,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1020,7 +940,7 @@ fn render_table(
     for row in &table.children {
         column_count = column_count.max(row.children.len());
     }
-    render_scroll_table(table, column_count, options, view, style, window, cx)
+    render_scroll_table(table, column_count, options, view, window, cx)
 }
 
 fn table_track_width(column_widths: &[f32]) -> f32 {
@@ -1038,7 +958,6 @@ fn render_scroll_table(
     column_count: usize,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
-    style: &TextViewStyle,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -1122,7 +1041,6 @@ fn render_scroll_table(
                         &cell.children,
                         &format!("{}-{row_ix}-{ix}", options.path),
                         view,
-                        style,
                         cx,
                     ));
                     #[cfg(test)]
@@ -1147,7 +1065,6 @@ fn render_scroll_table(
                         .when(ix + 1 < row.children.len(), |this| {
                             this.border_r_1().border_color(cx.theme().border)
                         })
-                        .refine_style(&style.table_cell)
                         .child(cell_content);
                     #[cfg(test)]
                     let rendered_cell = rendered_cell
@@ -1179,15 +1096,10 @@ fn render_scroll_table(
     div()
         .id(options.path.clone())
         .w_full()
-        .pb(if options.is_last {
-            rems(0.)
-        } else {
-            style.paragraph_gap
-        })
+        .pb(if options.is_last { rems(0.) } else { rems(1.) })
         .child(horizontal_scroll_area(
             format!("{}-viewport", options.path),
             &scroll,
-            &style.table,
             cx,
             track,
         ))
@@ -1197,7 +1109,6 @@ fn render_scroll_table(
 fn horizontal_scroll_area(
     id: impl Into<gpui::ElementId>,
     state: &Entity<HorizontalScrollState>,
-    style: &StyleRefinement,
     cx: &App,
     child: impl IntoElement,
 ) -> impl IntoElement {
@@ -1207,7 +1118,6 @@ fn horizontal_scroll_area(
         .id(id)
         .w_full()
         .relative()
-        .refine_style(style)
         .overflow_hidden()
         .track_scroll(&scroll)
         .child(child)
@@ -1244,13 +1154,6 @@ fn horizontal_scroll_area(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn clips_and_rebases_code_runs() {
-        let style = HighlightStyle::default();
-        let runs = vec![(0..5, style), (5..12, style)];
-        assert_eq!(sub_runs(&runs, 4, 10), vec![(0..1, style), (1..6, style)]);
-    }
 
     #[test]
     fn code_lines_drops_only_the_terminating_newline() {

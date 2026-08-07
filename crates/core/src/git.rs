@@ -240,7 +240,7 @@ pub fn menu_items(status: &GitStatus, is_busy: bool) -> Vec<MenuItem> {
     let can_push = !is_busy
         && status.has_upstream
         && status.ahead > 0
-        && !status.behind_blocks_push()
+        && status.behind == 0
         && !status.detached;
     items.push(MenuItem {
         action: GitAction::Push,
@@ -269,12 +269,6 @@ pub fn menu_items(status: &GitStatus, is_busy: bool) -> Vec<MenuItem> {
     }
 
     items
-}
-
-impl GitStatus {
-    fn behind_blocks_push(&self) -> bool {
-        self.behind > 0
-    }
 }
 
 fn commit_disabled_hint(status: &GitStatus) -> GitHint {
