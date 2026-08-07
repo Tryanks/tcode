@@ -223,7 +223,7 @@ impl WorkspaceStore {
         store
     }
 
-    pub fn sync_active_conversation_ui(&mut self, _cx: &App) {
+    pub fn sync_active_conversation_ui(&mut self) {
         let destination = self.session_status_replica.as_ref().map(Self::destination);
         if let Some((destination, status)) = destination
             .clone()
@@ -467,7 +467,7 @@ impl WorkspaceStore {
             .collect()
     }
 
-    pub fn profile_catalog(&self, profile_id: &str, _cx: &App) -> Vec<agent::ModelSpec> {
+    pub fn profile_catalog(&self, profile_id: &str) -> Vec<agent::ModelSpec> {
         if Settings::is_builtin_profile_id(profile_id) {
             let kind = self
                 .settings_replica
@@ -485,7 +485,7 @@ impl WorkspaceStore {
     }
 
     /// Dispatch a serializable backend mutation.
-    pub fn dispatch(&mut self, command: Command, _cx: &mut Context<Self>) {
+    pub fn dispatch(&mut self, command: Command) {
         if let Err(error) = self.host.dispatch(command) {
             log::error!("failed to dispatch host command: {}", error.message);
         }
@@ -526,7 +526,7 @@ impl WorkspaceStore {
         while changed.try_recv().is_ok() {}
     }
 
-    pub fn working_sessions_count(&self, _cx: &App) -> usize {
+    pub fn working_sessions_count(&self) -> usize {
         let active = usize::from(
             self.session_status_replica
                 .as_ref()
@@ -762,9 +762,9 @@ impl WorkspaceStore {
             ui.terminal_open = opening;
         }
         if opening {
-            self.dispatch(Command::ToggleTerminalPanel, cx);
+            self.dispatch(Command::ToggleTerminalPanel);
         } else {
-            self.dispatch(Command::CloseTerminalPanel, cx);
+            self.dispatch(Command::CloseTerminalPanel);
         }
         cx.notify();
     }
@@ -773,7 +773,7 @@ impl WorkspaceStore {
         if let Some(ui) = self.active_conversation_ui_mut() {
             ui.terminal_open = false;
         }
-        self.dispatch(Command::CloseTerminalPanel, cx);
+        self.dispatch(Command::CloseTerminalPanel);
         cx.notify();
     }
 
@@ -788,7 +788,7 @@ impl WorkspaceStore {
         if let Some(ui) = self.active_conversation_ui_mut() {
             ui.terminal_height = height;
         }
-        self.dispatch(Command::SetTerminalHeight { height }, cx);
+        self.dispatch(Command::SetTerminalHeight { height });
         cx.notify();
     }
 
@@ -800,11 +800,11 @@ impl WorkspaceStore {
         if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
             ui.terminal_open = false;
         }
-        self.dispatch(Command::CloseTerminal { terminal_id }, cx);
+        self.dispatch(Command::CloseTerminal { terminal_id });
         cx.notify();
     }
 
-    pub fn grouped_sessions(&self, _cx: &App) -> Vec<ProjectGroup> {
+    pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
         let visible: Vec<_> = self
             .index_replica
             .0
@@ -819,11 +819,11 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn settings(&self, _cx: &App) -> Settings {
+    pub fn settings(&self) -> Settings {
         self.settings_replica.clone()
     }
 
-    pub fn archived_groups(&self, _cx: &App) -> Vec<ProjectGroup> {
+    pub fn archived_groups(&self) -> Vec<ProjectGroup> {
         let archived: Vec<_> = self
             .index_replica
             .0
@@ -845,15 +845,15 @@ impl WorkspaceStore {
         groups
     }
 
-    pub fn project_sort(&self, _cx: &App) -> ProjectSort {
+    pub fn project_sort(&self) -> ProjectSort {
         self.settings_replica.project_sort
     }
 
-    pub fn sidebar_layout(&self, _cx: &App) -> SidebarLayout {
+    pub fn sidebar_layout(&self) -> SidebarLayout {
         self.settings_replica.sidebar_layout
     }
 
-    pub fn flat_sessions(&self, _cx: &App) -> Vec<SessionMeta> {
+    pub fn flat_sessions(&self) -> Vec<SessionMeta> {
         let visible = self
             .index_replica
             .0
@@ -864,24 +864,24 @@ impl WorkspaceStore {
         order_sessions_with_children(visible)
     }
 
-    pub fn projects(&self, _cx: &App) -> Vec<Project> {
+    pub fn projects(&self) -> Vec<Project> {
         self.index_replica.1.clone()
     }
 
-    pub fn is_project_collapsed(&self, project_id: &str, _cx: &App) -> bool {
+    pub fn is_project_collapsed(&self, project_id: &str) -> bool {
         self.settings_replica
             .collapsed_projects
             .iter()
             .any(|id| id == project_id)
     }
 
-    pub fn active_session_id(&self, _cx: &App) -> Option<String> {
+    pub fn active_session_id(&self) -> Option<String> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.session_id.clone())
     }
 
-    pub fn turn_running_for(&self, session_id: &str, _cx: &App) -> bool {
+    pub fn turn_running_for(&self, session_id: &str) -> bool {
         self.session_status_replica
             .as_ref()
             .filter(|status| status.session_id == session_id)
@@ -894,7 +894,7 @@ impl WorkspaceStore {
             .unwrap_or(false)
     }
 
-    pub fn session_unread(&self, session_id: &str, _cx: &App) -> bool {
+    pub fn session_unread(&self, session_id: &str) -> bool {
         if self
             .session_status_replica
             .as_ref()
@@ -916,7 +916,7 @@ impl WorkspaceStore {
             .is_some_and(|visited| meta.updated_at > *visited)
     }
 
-    pub fn pending_approval_for(&self, session_id: &str, _cx: &App) -> bool {
+    pub fn pending_approval_for(&self, session_id: &str) -> bool {
         self.session_status_replica
             .as_ref()
             .filter(|status| status.session_id == session_id)
@@ -929,7 +929,7 @@ impl WorkspaceStore {
             .unwrap_or(false)
     }
 
-    pub fn pending_user_input_for(&self, session_id: &str, _cx: &App) -> bool {
+    pub fn pending_user_input_for(&self, session_id: &str) -> bool {
         self.session_status_replica
             .as_ref()
             .filter(|status| status.session_id == session_id)
@@ -942,7 +942,7 @@ impl WorkspaceStore {
             .unwrap_or(false)
     }
 
-    pub fn fork_availability(&self, session_id: &str, cx: &App) -> ForkAvailability {
+    pub fn fork_availability(&self, session_id: &str) -> ForkAvailability {
         let Some(meta) = self
             .index_replica
             .0
@@ -955,21 +955,18 @@ impl WorkspaceStore {
             ForkAvailability::Unsupported
         } else if meta.resume_cursor.is_none() {
             ForkAvailability::Empty
-        } else if self.turn_running_for(session_id, cx) {
+        } else if self.turn_running_for(session_id) {
             ForkAvailability::Running
         } else {
             ForkAvailability::Available
         }
     }
 
-    pub fn sidebar_sessions(&self, _cx: &App) -> Vec<SessionMeta> {
+    pub fn sidebar_sessions(&self) -> Vec<SessionMeta> {
         self.index_replica.0.clone()
     }
 
-    pub fn settings_installed_acp_agents(
-        &self,
-        _cx: &App,
-    ) -> Vec<tcode_core::acp::InstalledAcpAgent> {
+    pub fn settings_installed_acp_agents(&self) -> Vec<tcode_core::acp::InstalledAcpAgent> {
         self.settings_replica
             .installed_acp_agents()
             .into_iter()
@@ -977,22 +974,21 @@ impl WorkspaceStore {
             .collect()
     }
 
-    pub fn providers_checked_at(&self, _cx: &App) -> Option<u64> {
+    pub fn providers_checked_at(&self) -> Option<u64> {
         self.providers_replica.providers_checked_at
     }
 
-    pub fn providers_checking(&self, _cx: &App) -> bool {
+    pub fn providers_checking(&self) -> bool {
         self.providers_replica.providers_checking
     }
 
-    pub fn window_caption_state(&self, _cx: &App) -> (bool, tcode_core::ui::RightTab) {
+    pub fn window_caption_state(&self) -> (bool, tcode_core::ui::RightTab) {
         self.active_conversation_ui()
             .map(|ui| (ui.right_panel_open, ui.right_tab))
             .unwrap_or((false, RightTab::default()))
     }
 
-    pub fn shell_window_title(&self, cx: &App) -> String {
-        let _ = cx;
+    pub fn shell_window_title(&self) -> String {
         match self.session_status_replica.as_ref() {
             Some(status) if status.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
             Some(status) => status.title.clone(),
@@ -1000,13 +996,13 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn shell_panel_state(&self, _cx: &App) -> (bool, tcode_core::ui::RightTab, bool) {
+    pub fn shell_panel_state(&self) -> (bool, tcode_core::ui::RightTab, bool) {
         self.active_conversation_ui()
             .map(|ui| (ui.right_panel_open, ui.right_tab, ui.right_panel_expanded))
             .unwrap_or((false, RightTab::default(), false))
     }
 
-    pub fn preview_active_identity(&self, _cx: &App) -> Option<(String, String)> {
+    pub fn preview_active_identity(&self) -> Option<(String, String)> {
         self.session_status_replica.as_ref().map(|status| {
             let key = if status.draft {
                 format!(
@@ -1020,12 +1016,12 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn preview_panel_showing(&self, _cx: &App) -> bool {
+    pub fn preview_panel_showing(&self) -> bool {
         self.active_conversation_ui()
             .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
     }
 
-    pub fn preview_browser_settings(&self, _cx: &App) -> BrowserSettings {
+    pub fn preview_browser_settings(&self) -> BrowserSettings {
         self.settings_replica.browser.clone()
     }
 
@@ -1036,30 +1032,25 @@ impl WorkspaceStore {
     /// reverse-RPC affordance documented by [`HostHandle::take_preview_requests`].
     pub fn take_preview_requests(
         &mut self,
-        _cx: &mut Context<Self>,
     ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
         self.host.take_preview_requests()
     }
 
-    pub fn provider_profile_kind(&self, profile_id: &str, _cx: &App) -> agent::ProviderKind {
+    pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
         self.settings_replica
             .resolved_profile(profile_id)
             .map(|profile| profile.kind)
             .unwrap_or(agent::ProviderKind::ClaudeCode)
     }
 
-    pub fn provider_profile_settings(&self, profile_id: &str, _cx: &App) -> ProviderSettings {
+    pub fn provider_profile_settings(&self, profile_id: &str) -> ProviderSettings {
         self.settings_replica
             .resolved_profile(profile_id)
             .map(|profile| profile.settings)
             .unwrap_or_default()
     }
 
-    pub fn provider_model_catalog(
-        &self,
-        provider: agent::ProviderKind,
-        _cx: &App,
-    ) -> Vec<agent::ModelSpec> {
+    pub fn provider_model_catalog(&self, provider: agent::ProviderKind) -> Vec<agent::ModelSpec> {
         self.providers_replica
             .model_catalogs
             .get(&provider)
@@ -1067,23 +1058,19 @@ impl WorkspaceStore {
             .unwrap_or_default()
     }
 
-    pub fn picker_models_for_profile(&self, profile_id: &str, cx: &App) -> Vec<ResolvedModel> {
+    pub fn picker_models_for_profile(&self, profile_id: &str) -> Vec<ResolvedModel> {
         picker_models(
-            &self.profile_catalog(profile_id, cx),
-            &self.provider_profile_settings(profile_id, cx),
+            &self.profile_catalog(profile_id),
+            &self.provider_profile_settings(profile_id),
             &self.settings_replica.favorite_models,
         )
     }
 
-    pub fn provider_profile_display_name(&self, profile_id: &str, _cx: &App) -> String {
+    pub fn provider_profile_display_name(&self, profile_id: &str) -> String {
         self.settings_replica.profile_display_name(profile_id)
     }
 
-    pub fn provider_profile_snapshot(
-        &self,
-        profile_id: &str,
-        _cx: &App,
-    ) -> Option<ProviderSnapshot> {
+    pub fn provider_profile_snapshot(&self, profile_id: &str) -> Option<ProviderSnapshot> {
         self.providers_replica
             .provider_snapshots
             .get(profile_id)
@@ -1093,7 +1080,6 @@ impl WorkspaceStore {
     pub fn provider_version_status(
         &self,
         provider: agent::ProviderKind,
-        _cx: &App,
     ) -> Option<ProviderVersionStatus> {
         self.providers_replica
             .provider_versions
@@ -1101,7 +1087,7 @@ impl WorkspaceStore {
             .cloned()
     }
 
-    pub fn provider_profile_accent(&self, profile_id: &str, _cx: &App) -> Option<u32> {
+    pub fn provider_profile_accent(&self, profile_id: &str) -> Option<u32> {
         let raw = self
             .settings_replica
             .resolved_profile(profile_id)?
@@ -1113,22 +1099,14 @@ impl WorkspaceStore {
             .flatten()
     }
 
-    pub fn provider_update_command(
-        &self,
-        provider: agent::ProviderKind,
-        _cx: &App,
-    ) -> Option<String> {
+    pub fn provider_update_command(&self, provider: agent::ProviderKind) -> Option<String> {
         self.providers_replica
             .provider_versions
             .get(&provider)
             .and_then(|status| status.update_command.clone())
     }
 
-    pub fn provider_profile_stored_secret_names(
-        &self,
-        profile_id: &str,
-        _cx: &App,
-    ) -> HashSet<String> {
+    pub fn provider_profile_stored_secret_names(&self, profile_id: &str) -> HashSet<String> {
         self.providers_replica
             .secret_names
             .get(profile_id)
@@ -1141,13 +1119,12 @@ impl WorkspaceStore {
         profile_id: &str,
         custom_models: &[String],
         hidden_models: &[String],
-        cx: &App,
     ) -> Vec<ResolvedModel> {
-        let mut settings = self.provider_profile_settings(profile_id, cx);
+        let mut settings = self.provider_profile_settings(profile_id);
         settings.custom_models = custom_models.to_vec();
         settings.hidden_models = hidden_models.to_vec();
         resolve_models(
-            &self.profile_catalog(profile_id, cx),
+            &self.profile_catalog(profile_id),
             &settings,
             &self.settings_replica.favorite_models,
         )
@@ -1156,12 +1133,11 @@ impl WorkspaceStore {
     pub fn installed_acp_agent(
         &self,
         agent_id: &str,
-        _cx: &App,
     ) -> Option<tcode_core::acp::InstalledAcpAgent> {
         self.settings_replica.acp_agent(agent_id).cloned()
     }
 
-    pub fn acp_marketplace_items(&self, _cx: &App) -> Vec<AcpMarketplaceItem> {
+    pub fn acp_marketplace_items(&self) -> Vec<AcpMarketplaceItem> {
         let mut items = self.providers_replica.acp_marketplace_items.clone();
         for item in &mut items {
             item.installed = self.settings_replica.acp_agents.contains_key(&item.id);
@@ -1169,19 +1145,19 @@ impl WorkspaceStore {
         items
     }
 
-    pub fn acp_registry_loading(&self, _cx: &App) -> bool {
+    pub fn acp_registry_loading(&self) -> bool {
         self.providers_replica.acp_registry_loading
     }
 
-    pub fn acp_registry_error(&self, _cx: &App) -> Option<String> {
+    pub fn acp_registry_error(&self) -> Option<String> {
         self.providers_replica.acp_registry_error.clone()
     }
 
-    pub fn acp_installing(&self, agent_id: &str, _cx: &App) -> bool {
+    pub fn acp_installing(&self, agent_id: &str) -> bool {
         self.providers_replica.acp_installing.contains(agent_id)
     }
 
-    pub fn project_ids(&self, _cx: &App) -> Vec<String> {
+    pub fn project_ids(&self) -> Vec<String> {
         self.index_replica
             .1
             .iter()
@@ -1189,7 +1165,7 @@ impl WorkspaceStore {
             .collect()
     }
 
-    pub fn project_summary(&self, project_id: &str, _cx: &App) -> Option<(String, usize)> {
+    pub fn project_summary(&self, project_id: &str) -> Option<(String, usize)> {
         let project = self
             .index_replica
             .1
@@ -1204,7 +1180,7 @@ impl WorkspaceStore {
         Some((project.name.clone(), count))
     }
 
-    pub fn project_root(&self, project_id: &str, _cx: &App) -> Option<PathBuf> {
+    pub fn project_root(&self, project_id: &str) -> Option<PathBuf> {
         self.index_replica
             .1
             .iter()
@@ -1248,7 +1224,7 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn commit_dialog_state(&self, _cx: &App) -> (Vec<GitFileEntry>, Option<String>, bool) {
+    pub fn commit_dialog_state(&self) -> (Vec<GitFileEntry>, Option<String>, bool) {
         (
             self.git_status_replica
                 .status
@@ -1266,7 +1242,7 @@ impl WorkspaceStore {
         )
     }
 
-    pub(crate) fn diff_active_state(&self, _cx: &App) -> Option<DiffActiveState> {
+    pub(crate) fn diff_active_state(&self) -> Option<DiffActiveState> {
         self.session_status_replica
             .as_ref()
             .map(|status| DiffActiveState {
@@ -1276,8 +1252,8 @@ impl WorkspaceStore {
             })
     }
 
-    pub fn diff_turns(&self, cx: &App) -> Vec<usize> {
-        self.with_active_timeline(cx, |timeline| {
+    pub fn diff_turns(&self) -> Vec<usize> {
+        self.with_active_timeline(|timeline| {
             timeline
                 .turns
                 .iter()
@@ -1293,8 +1269,8 @@ impl WorkspaceStore {
         .unwrap_or_default()
     }
 
-    pub fn diff_selected_turn(&self, cx: &App) -> Option<usize> {
-        let turns = self.diff_turns(cx);
+    pub fn diff_selected_turn(&self) -> Option<usize> {
+        let turns = self.diff_turns();
         let explicit = self
             .active_conversation_ui()
             .and_then(|ui| ui.diff_selected_turn);
@@ -1307,46 +1283,40 @@ impl WorkspaceStore {
     pub fn with_diff_turn_changes<R>(
         &self,
         turn: usize,
-        cx: &App,
         read: impl FnOnce(&[agent::FileChange], agent::ChangeCompleteness) -> R,
     ) -> Option<R> {
-        self.with_active_timeline(cx, |timeline| {
+        self.with_active_timeline(|timeline| {
             let changes = timeline.turns.get(turn)?.changes.as_ref()?;
             Some(read(&changes.changes, changes.completeness))
         })
         .flatten()
     }
 
-    pub(crate) fn pending_diff_focus(&self, _cx: &App) -> Option<DiffFocus> {
+    pub(crate) fn pending_diff_focus(&self) -> Option<DiffFocus> {
         self.active_conversation_ui()
             .and_then(|ui| ui.pending_diff_focus.clone())
     }
 
     /// UI-only consuming selector. The underlying diff focus is replica state;
     /// this does not cross the host boundary.
-    pub(crate) fn take_diff_focus(
-        &mut self,
-        session: &str,
-        turn: usize,
-        _cx: &mut Context<Self>,
-    ) -> Option<DiffFocus> {
+    pub(crate) fn take_diff_focus(&mut self, session: &str, turn: usize) -> Option<DiffFocus> {
         self.active_conversation_ui_mut()?
             .take_diff_focus(session, turn)
     }
 
-    pub fn diff_refresh_generation(&self, _cx: &App) -> u64 {
+    pub fn diff_refresh_generation(&self) -> u64 {
         self.active_conversation_ui()
             .map(|ui| ui.diff_refresh_generation)
             .unwrap_or(0)
     }
 
-    pub fn diff_word_wrap(&self, _cx: &App) -> bool {
+    pub fn diff_word_wrap(&self) -> bool {
         self.active_conversation_ui()
             .map(|ui| ui.diff_wrap)
             .unwrap_or(self.settings_replica.word_wrap_diffs)
     }
 
-    pub fn diff_split(&self, _cx: &App) -> bool {
+    pub fn diff_split(&self) -> bool {
         self.active_conversation_ui()
             .is_some_and(|ui| ui.diff_split)
     }
@@ -1365,14 +1335,11 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn diff_panel_chrome_state(
-        &self,
-        cx: &App,
-    ) -> (bool, bool, tcode_core::ui::RightTab, bool) {
+    pub fn diff_panel_chrome_state(&self) -> (bool, bool, tcode_core::ui::RightTab, bool) {
         let plan_tab_active_label = self
-            .with_active_timeline(cx, |timeline| timeline.proposed_plan.is_some())
+            .with_active_timeline(|timeline| timeline.proposed_plan.is_some())
             .unwrap_or(false)
-            || self.composer_interaction_mode(cx) == agent::InteractionMode::Plan;
+            || self.composer_interaction_mode() == agent::InteractionMode::Plan;
         let (open, expanded, tab) = self
             .active_conversation_ui()
             .map(|ui| (ui.right_panel_open, ui.right_panel_expanded, ui.right_tab))
@@ -1380,18 +1347,14 @@ impl WorkspaceStore {
         (open, expanded, tab, plan_tab_active_label)
     }
 
-    pub fn diff_review_comments(&self, _cx: &App) -> Vec<ReviewComment> {
+    pub fn diff_review_comments(&self) -> Vec<ReviewComment> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.review_comment_drafts.clone())
             .unwrap_or_default()
     }
 
-    pub fn with_diff_review_comments<R>(
-        &self,
-        _cx: &App,
-        read: impl FnOnce(&[ReviewComment]) -> R,
-    ) -> R {
+    pub fn with_diff_review_comments<R>(&self, read: impl FnOnce(&[ReviewComment]) -> R) -> R {
         read(
             self.session_status_replica
                 .as_ref()
@@ -1458,11 +1421,7 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn with_active_timeline<R>(
-        &self,
-        _cx: &App,
-        read: impl FnOnce(&Timeline) -> R,
-    ) -> Option<R> {
+    pub fn with_active_timeline<R>(&self, read: impl FnOnce(&Timeline) -> R) -> Option<R> {
         self.session_replica
             .as_ref()
             .map(|(_, timeline)| read(timeline))
@@ -1475,7 +1434,6 @@ impl WorkspaceStore {
 
     pub fn with_composer_destination<R>(
         &self,
-        _cx: &App,
         read: impl FnOnce(bool, &str, Option<&str>) -> R,
     ) -> Option<R> {
         self.session_status_replica.as_ref().map(|status| {
@@ -1487,13 +1445,13 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn composer_has_active_session(&self, _cx: &App) -> bool {
+    pub fn composer_has_active_session(&self) -> bool {
         self.session_status_replica.is_some()
     }
 
     /// Consumes a prefill already delivered by the serialized
     /// `NativeRewindPrefill` event; no backend consuming read remains.
-    pub fn take_native_rewind_prefill(&mut self, _cx: &mut Context<Self>) -> Option<String> {
+    pub fn take_native_rewind_prefill(&mut self) -> Option<String> {
         let active_id = self.session_status_replica.as_ref()?.session_id.clone();
         let prefill = self.native_rewind_prefills.remove(&active_id)?;
         if let Some(status) = self.session_status_replica.as_mut() {
@@ -1502,7 +1460,7 @@ impl WorkspaceStore {
         Some(prefill)
     }
 
-    pub fn composer_terminal_contexts(&self, _cx: &App) -> Vec<TerminalContext> {
+    pub fn composer_terminal_contexts(&self) -> Vec<TerminalContext> {
         self.session_status_replica
             .as_ref()
             .map(|status| {
@@ -1530,7 +1488,6 @@ impl WorkspaceStore {
     /// transport must substitute raw byte streams, never terminal JSON.
     pub fn with_terminal_workspace<R>(
         &self,
-        _cx: &App,
         read: impl FnOnce(&TerminalWorkspace) -> R,
     ) -> Option<R> {
         let status = self.session_status_replica.as_ref()?;
@@ -1538,20 +1495,20 @@ impl WorkspaceStore {
         Some(read(&workspace))
     }
 
-    pub fn composer_review_comments(&self, _cx: &App) -> Vec<ReviewComment> {
+    pub fn composer_review_comments(&self) -> Vec<ReviewComment> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.review_comment_drafts.clone())
             .unwrap_or_default()
     }
 
-    pub fn composer_relay_confirmation(&self, _cx: &App) -> Option<(String, String)> {
+    pub fn composer_relay_confirmation(&self) -> Option<(String, String)> {
         self.session_status_replica
             .as_ref()
             .and_then(|status| status.relay_confirmation.clone())
     }
 
-    pub fn composer_active_cwd(&self, _cx: &App) -> Option<PathBuf> {
+    pub fn composer_active_cwd(&self) -> Option<PathBuf> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.cwd.clone())
@@ -1574,14 +1531,14 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn composer_provider_commands(&self, _cx: &App) -> Vec<agent::ProviderCommand> {
+    pub fn composer_provider_commands(&self) -> Vec<agent::ProviderCommand> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.provider_commands.clone())
             .unwrap_or_default()
     }
 
-    pub fn composer_attachments_dir(&self, _cx: &App) -> Option<PathBuf> {
+    pub fn composer_attachments_dir(&self) -> Option<PathBuf> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.attachments_dir.clone())
@@ -1619,15 +1576,12 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn composer_pending_user_input(
-        &self,
-        cx: &App,
-    ) -> Option<(String, Vec<agent::UserInputQuestion>)> {
-        self.with_active_timeline(cx, |timeline| timeline.pending_user_input.clone())
+    pub fn composer_pending_user_input(&self) -> Option<(String, Vec<agent::UserInputQuestion>)> {
+        self.with_active_timeline(|timeline| timeline.pending_user_input.clone())
             .flatten()
     }
 
-    pub(crate) fn composer_active_model(&self, _cx: &App) -> Option<ComposerActiveModel> {
+    pub(crate) fn composer_active_model(&self) -> Option<ComposerActiveModel> {
         self.session_status_replica
             .as_ref()
             .map(|status| ComposerActiveModel {
@@ -1638,19 +1592,15 @@ impl WorkspaceStore {
             })
     }
 
-    pub fn composer_picker_models(
-        &self,
-        provider: agent::ProviderKind,
-        cx: &App,
-    ) -> Vec<ResolvedModel> {
+    pub fn composer_picker_models(&self, provider: agent::ProviderKind) -> Vec<ResolvedModel> {
         picker_models(
-            &self.provider_model_catalog(provider, cx),
+            &self.provider_model_catalog(provider),
             &self.settings_replica.provider(provider),
             &self.settings_replica.favorite_models,
         )
     }
 
-    pub fn composer_models_loading(&self, provider: agent::ProviderKind, _cx: &App) -> bool {
+    pub fn composer_models_loading(&self, provider: agent::ProviderKind) -> bool {
         self.providers_replica
             .models_loading
             .get(&provider)
@@ -1663,13 +1613,13 @@ impl WorkspaceStore {
                 .is_none_or(Vec::is_empty)
     }
 
-    pub fn composer_model_pending_restart(&self, _cx: &App) -> bool {
+    pub fn composer_model_pending_restart(&self) -> bool {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.model_pending_restart)
     }
 
-    pub fn composer_active_model_spec(&self, _cx: &App) -> Option<agent::ModelSpec> {
+    pub fn composer_active_model_spec(&self) -> Option<agent::ModelSpec> {
         let status = self.session_status_replica.as_ref()?;
         let model = status.requested_model.as_deref()?;
         self.providers_replica
@@ -1680,61 +1630,58 @@ impl WorkspaceStore {
             .cloned()
     }
 
-    pub fn composer_active_option_descriptors(&self, _cx: &App) -> Vec<agent::OptionDescriptor> {
+    pub fn composer_active_option_descriptors(&self) -> Vec<agent::OptionDescriptor> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.provider_option_descriptors.clone())
             .unwrap_or_default()
     }
 
-    pub fn composer_active_option_selections(&self, _cx: &App) -> Vec<agent::OptionSelection> {
+    pub fn composer_active_option_selections(&self) -> Vec<agent::OptionSelection> {
         self.session_status_replica
             .as_ref()
             .map(|status| status.provider_option_selections.clone())
             .unwrap_or_default()
     }
 
-    pub fn composer_ultrathink_armed(&self, _cx: &App) -> bool {
+    pub fn composer_ultrathink_armed(&self) -> bool {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.ultrathink_armed)
     }
 
-    pub fn composer_options_pending_restart(&self, _cx: &App) -> bool {
+    pub fn composer_options_pending_restart(&self) -> bool {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.options_pending_restart)
     }
 
-    pub fn composer_interaction_mode(&self, _cx: &App) -> agent::InteractionMode {
+    pub fn composer_interaction_mode(&self) -> agent::InteractionMode {
         self.session_status_replica
             .as_ref()
             .map(|status| status.interaction_mode)
             .unwrap_or_default()
     }
 
-    pub fn composer_context(
-        &self,
-        cx: &App,
-    ) -> (Option<agent::TokenUsage>, Option<agent::ProviderKind>) {
+    pub fn composer_context(&self) -> (Option<agent::TokenUsage>, Option<agent::ProviderKind>) {
         let provider = self
             .session_status_replica
             .as_ref()
             .map(|status| status.provider);
         (
-            self.with_active_timeline(cx, |timeline| timeline.usage)
+            self.with_active_timeline(|timeline| timeline.usage)
                 .flatten(),
             provider,
         )
     }
 
-    pub fn composer_approval_mode(&self, _cx: &App) -> agent::ApprovalMode {
+    pub fn composer_approval_mode(&self) -> agent::ApprovalMode {
         let mode = self
             .session_status_replica
             .as_ref()
             .map(|status| status.approval_mode)
             .unwrap_or_default();
-        if !self.composer_native_approval_modes_enabled(_cx)
+        if !self.composer_native_approval_modes_enabled()
             && matches!(
                 mode,
                 agent::ApprovalMode::Supervised | agent::ApprovalMode::AutoAcceptEdits
@@ -1746,7 +1693,7 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn composer_native_approval_modes_enabled(&self, _cx: &App) -> bool {
+    pub fn composer_native_approval_modes_enabled(&self) -> bool {
         let Some(status) = self.session_status_replica.as_ref() else {
             return true;
         };
@@ -1765,16 +1712,13 @@ impl WorkspaceStore {
             })
     }
 
-    pub fn composer_approval_pending_restart(&self, _cx: &App) -> bool {
+    pub fn composer_approval_pending_restart(&self) -> bool {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.approval_pending_restart)
     }
 
-    pub fn composer_queue(
-        &self,
-        _cx: &App,
-    ) -> Option<(Vec<QueuedMessageStatus>, bool, &'static str)> {
+    pub fn composer_queue(&self) -> Option<(Vec<QueuedMessageStatus>, bool, &'static str)> {
         self.session_status_replica.as_ref().map(|status| {
             (
                 status.queued_messages.clone(),
@@ -1784,26 +1728,26 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn composer_supports_steering(&self, _cx: &App) -> bool {
+    pub fn composer_supports_steering(&self) -> bool {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.supports_steering)
     }
 
-    pub fn composer_preparing_worktree(&self, _cx: &App) -> bool {
+    pub fn composer_preparing_worktree(&self) -> bool {
         self.session_status_replica
             .as_ref()
             .is_some_and(|status| status.preparing_worktree)
     }
 
-    pub fn composer_plan_ready_markdown(&self, cx: &App) -> Option<String> {
-        self.with_active_timeline(cx, |timeline| {
+    pub fn composer_plan_ready_markdown(&self) -> Option<String> {
+        self.with_active_timeline(|timeline| {
             timeline.plan_ready().map(|plan| plan.markdown.clone())
         })
         .flatten()
     }
 
-    pub(crate) fn composer_checkout_state(&self, _cx: &App) -> Option<ComposerCheckoutState> {
+    pub(crate) fn composer_checkout_state(&self) -> Option<ComposerCheckoutState> {
         let status = self.session_status_replica.as_ref()?;
         let branch = status.git_branch.clone().or_else(|| {
             status
@@ -1825,12 +1769,12 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn composer_render_state(&self, cx: &App) -> (bool, Option<agent::ApprovalRequest>, usize) {
+    pub fn composer_render_state(&self) -> (bool, Option<agent::ApprovalRequest>, usize) {
         let turn_running = self
             .session_status_replica
             .as_ref()
             .is_some_and(|status| status.turn_running);
-        self.with_active_timeline(cx, |timeline| {
+        self.with_active_timeline(|timeline| {
             (
                 turn_running,
                 timeline.pending_approvals.first().cloned(),
@@ -1840,20 +1784,20 @@ impl WorkspaceStore {
         .unwrap_or((turn_running, None, 0))
     }
 
-    pub fn composer_is_favorite_model(&self, model: &str, _cx: &App) -> bool {
+    pub fn composer_is_favorite_model(&self, model: &str) -> bool {
         self.settings_replica
             .favorite_models
             .iter()
             .any(|favorite| favorite == model)
     }
 
-    pub fn chat_active_session(&self, _cx: &App) -> Option<(String, PathBuf, bool)> {
+    pub fn chat_active_session(&self) -> Option<(String, PathBuf, bool)> {
         self.session_status_replica
             .as_ref()
             .map(|status| (status.title.clone(), status.cwd.clone(), status.draft))
     }
 
-    pub fn chat_requested_model(&self, _cx: &App) -> Option<String> {
+    pub fn chat_requested_model(&self) -> Option<String> {
         self.session_status_replica
             .as_ref()
             .and_then(|status| status.requested_model.clone())
@@ -1862,9 +1806,8 @@ impl WorkspaceStore {
     pub fn chat_turn_changes(
         &self,
         turn: usize,
-        cx: &App,
     ) -> (Vec<agent::FileChange>, agent::ChangeCompleteness) {
-        self.with_active_timeline(cx, |timeline| {
+        self.with_active_timeline(|timeline| {
             timeline
                 .turns
                 .get(turn)
@@ -1875,10 +1818,10 @@ impl WorkspaceStore {
         .unwrap_or((Vec::new(), agent::ChangeCompleteness::Partial))
     }
 
-    pub fn chat_native_rewind_state(&self, turn: usize, cx: &App) -> Option<(bool, bool)> {
+    pub fn chat_native_rewind_state(&self, turn: usize) -> Option<(bool, bool)> {
         let status = self.session_status_replica.as_ref()?;
         let has_checkpoint = self
-            .with_active_timeline(cx, |timeline| {
+            .with_active_timeline(|timeline| {
                 timeline
                     .turns
                     .get(turn)
@@ -1894,11 +1837,7 @@ impl WorkspaceStore {
         ))
     }
 
-    pub fn chat_panel_state(
-        &self,
-        cx: &App,
-    ) -> (bool, tcode_core::ui::RightTab, bool, bool, bool, f32) {
-        let _ = cx;
+    pub fn chat_panel_state(&self) -> (bool, tcode_core::ui::RightTab, bool, bool, bool, f32) {
         self.active_conversation_ui()
             .map(|ui| {
                 (
@@ -1913,7 +1852,7 @@ impl WorkspaceStore {
             .unwrap_or((false, RightTab::default(), false, false, false, 240.))
     }
 
-    pub fn chat_git_controls(&self, _cx: &App) -> Option<(QuickAction, Vec<MenuItem>)> {
+    pub fn chat_git_controls(&self) -> Option<(QuickAction, Vec<MenuItem>)> {
         self.git_status_replica.status.as_ref().map(|status| {
             (
                 quick_action(status, self.git_status_replica.busy),
@@ -1922,7 +1861,7 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn chat_git_status_loaded(&self, _cx: &App) -> bool {
+    pub fn chat_git_status_loaded(&self) -> bool {
         self.git_status_replica.status.is_some()
     }
 
@@ -1954,8 +1893,8 @@ impl WorkspaceStore {
         )
     }
 
-    pub fn plan_panel_state(&self, cx: &App) -> (Option<String>, Vec<agent::PlanStep>) {
-        self.with_active_timeline(cx, |timeline| {
+    pub fn plan_panel_state(&self) -> (Option<String>, Vec<agent::PlanStep>) {
+        self.with_active_timeline(|timeline| {
             (
                 timeline
                     .proposed_plan
@@ -1967,7 +1906,7 @@ impl WorkspaceStore {
         .unwrap_or_default()
     }
 
-    pub fn worktree_orphaned_by_delete(&self, session_id: &str, _cx: &App) -> Option<WorktreeInfo> {
+    pub fn worktree_orphaned_by_delete(&self, session_id: &str) -> Option<WorktreeInfo> {
         let meta = self
             .index_replica
             .0
@@ -2235,7 +2174,7 @@ mod tests {
                 session_id: seed_session_id.clone(),
             },
         );
-        let mut settings = workspace.read_with(cx, |store, cx| store.settings(cx));
+        let mut settings = workspace.read_with(cx, |store, _cx| store.settings());
         settings.word_wrap_diffs = !settings.word_wrap_diffs;
         let expected_word_wrap = settings.word_wrap_diffs;
         command(&host, Command::UpdateSettings { settings });
@@ -2373,7 +2312,7 @@ mod tests {
         assert_eq!(replica.interaction_mode, agent::InteractionMode::Plan);
         assert_eq!(replica.review_comment_drafts.len(), 1);
         assert_eq!(
-            workspace.read_with(cx, |store, cx| store.composer_review_comments(cx)),
+            workspace.read_with(cx, |store, _cx| store.composer_review_comments()),
             replica.review_comment_drafts
         );
 
@@ -2426,8 +2365,8 @@ mod tests {
             });
         });
 
-        assert!(workspace.read_with(cx, |store, cx| {
-            store.pending_user_input_for(&background_session_id, cx)
+        assert!(workspace.read_with(cx, |store, _cx| {
+            store.pending_user_input_for(&background_session_id)
         }));
 
         shutdown_test_host(&host);
@@ -2501,10 +2440,10 @@ mod tests {
             });
         });
 
-        assert!(workspace.read_with(cx, |store, cx| { store.turn_running_for(&first.id, cx) }));
-        assert!(!workspace.read_with(cx, |store, cx| { store.turn_running_for(&second.id, cx) }));
+        assert!(workspace.read_with(cx, |store, _cx| { store.turn_running_for(&first.id) }));
+        assert!(!workspace.read_with(cx, |store, _cx| { store.turn_running_for(&second.id) }));
         assert_eq!(
-            workspace.read_with(cx, |store, cx| store.working_sessions_count(cx)),
+            workspace.read_with(cx, |store, _cx| store.working_sessions_count()),
             1
         );
 
@@ -2564,7 +2503,7 @@ mod tests {
         });
 
         assert_eq!(
-            workspace.update(cx, |store, cx| store.take_native_rewind_prefill(cx)),
+            workspace.update(cx, |store, _cx| store.take_native_rewind_prefill()),
             Some("first parked prefill".into())
         );
         command(
@@ -2582,7 +2521,7 @@ mod tests {
             })
         });
         assert_eq!(
-            workspace.update(cx, |store, cx| store.take_native_rewind_prefill(cx)),
+            workspace.update(cx, |store, _cx| store.take_native_rewind_prefill()),
             Some("second parked prefill".into())
         );
 

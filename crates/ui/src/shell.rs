@@ -173,9 +173,9 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> Self {
         let toasts = cx.new(|_| ToastCenter::default());
-        window.set_window_title(&workspace_store.read(cx).shell_window_title(cx));
+        window.set_window_title(&workspace_store.read(cx).shell_window_title());
         let subscription = cx.observe_in(&workspace_store, window, move |_, store, window, cx| {
-            window.set_window_title(&store.read(cx).shell_window_title(cx));
+            window.set_window_title(&store.read(cx).shell_window_title());
             cx.notify();
         });
         let event_subscription = cx.subscribe_in(
@@ -194,7 +194,7 @@ impl AppShell {
         // Pump preview automation requests from the MCP server into the live
         // WebView. The receiver is taken once; requests are resolved on the gpui
         // main thread (WKWebView `evaluate_script` must run there).
-        let requests = workspace_store.update(cx, |store, cx| store.take_preview_requests(cx));
+        let requests = workspace_store.update(cx, |store, _cx| store.take_preview_requests());
         if let Some(requests) = requests {
             let preview = preview.clone();
             cx.spawn_in(window, async move |_, cx| {
@@ -324,16 +324,13 @@ impl AppShell {
                 move |_window, cx| {
                     toasts.update(cx, |center, cx| center.dismiss(toast_id, cx));
                     let request = request.clone();
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::RunGitAction {
-                                action: request.action,
-                                message: request.message,
-                                included: request.included,
-                                feature_branch: request.feature_branch,
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::RunGitAction {
+                            action: request.action,
+                            message: request.message,
+                            included: request.included,
+                            feature_branch: request.feature_branch,
+                        });
                     });
                 },
             );
@@ -385,7 +382,7 @@ impl Render for AppShell {
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let (diff_open, right_tab, diff_expanded) = self.store.read(cx).shell_panel_state(cx);
+        let (diff_open, right_tab, diff_expanded) = self.store.read(cx).shell_panel_state();
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
         let diff_expanded = diff_expanded && right_tab != RightTab::Preview;

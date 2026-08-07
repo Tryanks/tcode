@@ -47,7 +47,7 @@ impl CommitDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (files, branch, on_default_branch) = store.read(cx).commit_dialog_state(cx);
+        let (files, branch, on_default_branch) = store.read(cx).commit_dialog_state();
         let message = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -129,16 +129,13 @@ impl CommitDialog {
             None
         };
         let action = self.action;
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::RunGitAction {
-                    action,
-                    message: Some(message),
-                    included,
-                    feature_branch,
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::RunGitAction {
+                action,
+                message: Some(message),
+                included,
+                feature_branch,
+            });
         });
         true
     }

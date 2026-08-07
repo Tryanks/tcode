@@ -128,14 +128,10 @@ impl ProviderModelPicker {
         // Only enabled profiles are offered for new selections; a disabled
         // profile stays configurable in Settings but never reaches the picker.
         for profile in self.store.read(cx).enabled_profiles() {
-            let catalog = self.store.read(cx).provider_model_catalog(profile.kind, cx);
+            let catalog = self.store.read(cx).provider_model_catalog(profile.kind);
             let profile_id =
                 (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
-            for model in self
-                .store
-                .read(cx)
-                .picker_models_for_profile(&profile.id, cx)
-            {
+            for model in self.store.read(cx).picker_models_for_profile(&profile.id) {
                 let effort = catalog
                     .iter()
                     .find(|spec| spec.id == model.id)
@@ -188,7 +184,7 @@ impl ProviderModelPicker {
                         let kind = self
                             .store
                             .read(cx)
-                            .provider_profile_kind(&self.selected_profile, cx);
+                            .provider_profile_kind(&self.selected_profile);
                         (kind, "", None)
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
@@ -400,7 +396,7 @@ fn tinted_glyph(
     let profile_id = profile_id
         .map(str::to_string)
         .unwrap_or_else(|| Settings::builtin_profile_id(provider).to_string());
-    let accent = store.read(cx).provider_profile_accent(&profile_id, cx);
+    let accent = store.read(cx).provider_profile_accent(&profile_id);
     match accent {
         Some(accent) => glyph.text_color(rgb(accent)),
         None => glyph,

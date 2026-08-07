@@ -146,14 +146,11 @@ impl AddProjectDialog {
                 return;
             };
             let _ = this.update_in(cx, |dialog, window, cx| {
-                dialog.store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::StartDraft {
-                            project_id,
-                            cwd: path,
-                        },
-                        cx,
-                    );
+                dialog.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::StartDraft {
+                        project_id,
+                        cwd: path,
+                    });
                 });
                 window.close_dialog(cx);
             });
@@ -393,13 +390,10 @@ impl ImportProgress {
                         }
                         ExternalImportUpdate::Finished { imported, skipped } => {
                             progress.summary = Some((imported, skipped));
-                            progress.store.update(cx, |store, cx| {
-                                store.dispatch(
-                                    Command::FinishExternalImport {
-                                        project_id: progress.project_id.clone(),
-                                    },
-                                    cx,
-                                );
+                            progress.store.update(cx, |store, _cx| {
+                                store.dispatch(Command::FinishExternalImport {
+                                    project_id: progress.project_id.clone(),
+                                });
                             });
                         }
                     }

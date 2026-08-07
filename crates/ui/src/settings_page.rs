@@ -137,7 +137,7 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let title_generation = store.read(cx).settings(cx).title_generation;
+        let title_generation = store.read(cx).settings().title_generation;
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(
                 store.clone(),
@@ -151,7 +151,7 @@ impl SettingsPage {
         });
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| {
-                let selection = this.store.read(cx).settings(cx).title_generation;
+                let selection = this.store.read(cx).settings().title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
@@ -188,7 +188,7 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window_state.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        let settings = store.read(cx).settings(cx);
+        let settings = store.read(cx).settings();
         let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -308,7 +308,7 @@ impl SettingsPage {
     /// Reconcile card entities by installed id, preserving editors for agents
     /// that were not installed or removed since the previous render.
     fn sync_acp_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents(cx);
+        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents();
         let mut old = std::mem::take(&mut self.acp_cards);
         self.acp_cards = installed
             .into_iter()
@@ -344,10 +344,10 @@ impl SettingsPage {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut settings = self.store.read(cx).settings(cx);
+        let mut settings = self.store.read(cx).settings();
         mutate(&mut settings);
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::UpdateSettings { settings }, cx)
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::UpdateSettings { settings })
         });
     }
 
@@ -526,7 +526,7 @@ impl SettingsPage {
         // below), so the cluster is placed out of flow at the strip's right edge
         // and the column reserves matching trailing room for it — its actions
         // therefore end left of the buttons rather than under them.
-        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state(cx);
+        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
             self.window_state.read(cx).route,
@@ -608,8 +608,8 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(Command::ResetSettings, cx);
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::ResetSettings);
                     });
                     // The profile set may have changed; rebuild the rows.
                     page.update(cx, |page, cx| page.build_provider_cards(cx));
@@ -621,7 +621,7 @@ impl SettingsPage {
                         let home_url = page
                             .store
                             .read(cx)
-                            .settings(cx)
+                            .settings()
                             .browser
                             .home_url
                             .clone()
@@ -668,7 +668,7 @@ impl SettingsPage {
     }
 
     fn render_general(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings(cx);
+        let settings = self.store.read(cx).settings();
         // One mega-group on empty paper reads generic. Split the rows into three
         // semantic groups (System-Settings rhythm): 20-24px between groups, each
         // under an 11px caption.
@@ -766,8 +766,8 @@ impl SettingsPage {
         if current_ids != card_ids {
             self.build_provider_cards(cx);
         }
-        let checked_at = self.store.read(cx).providers_checked_at(cx);
-        let checking = self.store.read(cx).providers_checking(cx);
+        let checked_at = self.store.read(cx).providers_checked_at();
+        let checking = self.store.read(cx).providers_checking();
         let muted = cx.theme().muted_foreground;
 
         let mut header = gpui_component::h_flex()
@@ -810,9 +810,9 @@ impl SettingsPage {
                 .icon(Icon::empty().path("icons/rotate-ccw.svg"))
                 .tooltip(tcode_i18n::tr!("providers.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.store.update(cx, |store, cx| {
-                        store.dispatch(Command::RefreshProviderStatus, cx);
-                        store.dispatch(Command::CheckProviderVersions, cx);
+                    this.store.update(cx, |store, _cx| {
+                        store.dispatch(Command::RefreshProviderStatus);
+                        store.dispatch(Command::CheckProviderVersions);
                     });
                 })),
         );
@@ -841,8 +841,8 @@ impl SettingsPage {
     /// Archived Threads: archived sessions grouped by project, each with
     /// Unarchive + Delete-permanently controls (Group A).
     fn render_archived(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let groups = self.store.read(cx).archived_groups(cx);
-        let settings = self.store.read(cx).settings(cx);
+        let groups = self.store.read(cx).archived_groups();
+        let settings = self.store.read(cx).settings();
         let days = settings.auto_archive_max_idle_days.max(1);
         let keep = settings.auto_archive_keep_count.max(1);
         let controls = v_flex()
@@ -950,11 +950,10 @@ impl SettingsPage {
                                         .label(tcode_i18n::tr!("settings.unarchive"))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let id = id_unarchive.clone();
-                                            this.store.update(cx, |store, cx| {
-                                                store.dispatch(
-                                                    Command::UnarchiveSession { session_id: id },
-                                                    cx,
-                                                );
+                                            this.store.update(cx, |store, _cx| {
+                                                store.dispatch(Command::UnarchiveSession {
+                                                    session_id: id,
+                                                });
                                             });
                                         })),
                                 )
@@ -1011,14 +1010,11 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::DeleteSession {
-                                session_id: session_id.clone(),
-                                remove_worktree: false,
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::DeleteSession {
+                            session_id: session_id.clone(),
+                            remove_worktree: false,
+                        });
                     });
                     true
                 })
@@ -1028,7 +1024,7 @@ impl SettingsPage {
     // -- Computer Use & Browser pages --------------------------------------
 
     fn render_computer_use(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings(cx);
+        let settings = self.store.read(cx).settings();
         let rows = vec![
             self.toggle_row(
                 "cu-enabled",
@@ -1065,7 +1061,7 @@ impl SettingsPage {
     }
 
     fn render_browser(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings(cx);
+        let settings = self.store.read(cx).settings();
         let rows = vec![
             self.toggle_row(
                 "browser-enabled",
@@ -1297,13 +1293,10 @@ impl SettingsPage {
     /// the matching System Settings pane. The marker must be written *first*:
     /// macOS may quit tcode from its own "Quit & Reopen" dialog.
     fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::WriteRelaunchMarker {
-                    reopen_settings: "computer_use".into(),
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::WriteRelaunchMarker {
+                reopen_settings: "computer_use".into(),
+            });
         });
         let _ = request(kind);
         open_settings_pane(kind);
@@ -1326,13 +1319,10 @@ impl SettingsPage {
     }
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::WriteRelaunchMarker {
-                    reopen_settings: "computer_use".into(),
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::WriteRelaunchMarker {
+                reopen_settings: "computer_use".into(),
+            });
         });
         if let Err(err) = relaunch_app() {
             log::warn!("failed to relaunch tcode: {err}");

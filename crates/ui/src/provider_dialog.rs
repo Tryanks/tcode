@@ -82,12 +82,12 @@ impl ProviderDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let settings = store.read(cx).provider_profile_settings(&profile_id, cx);
+        let settings = store.read(cx).provider_profile_settings(&profile_id);
         // Which of this profile's names resolve to a value at launch: a sensitive
         // row present here has its secret saved (see `launch_env_for_profile`).
         let stored: HashSet<String> = store
             .read(cx)
-            .provider_profile_stored_secret_names(&profile_id, cx);
+            .provider_profile_stored_secret_names(&profile_id);
 
         let text_input =
             |placeholder: String, value: String, window: &mut Window, cx: &mut Context<Self>| {
@@ -244,55 +244,46 @@ impl ProviderDialog {
         let provider = self.provider;
         let profile_id = self.profile_id.clone();
 
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::UpdateProfileSettings {
-                    profile_id: profile_id.clone(),
-                    patch: tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(
-                        Box::new(tcode_core::settings::ProfileConfigurationPatch {
-                            display_name,
-                            accent_color: accent,
-                            env,
-                            binary_path: binary.map(Into::into),
-                            // OpenCode has no single-home override.
-                            home_path: (provider != ProviderKind::OpenCode)
-                                .then(|| home.map(Into::into))
-                                .flatten(),
-                            // Codex ignores launch arguments (no field is rendered).
-                            launch_args: match provider {
-                                ProviderKind::Codex => None,
-                                _ => launch,
-                            },
-                            pi_trust_project_extensions,
-                            pi_native_approvals,
-                            custom_models: custom,
-                            hidden_models: hidden,
-                        }),
-                    ),
-                },
-                cx,
-            );
-            for (name, value) in secret_writes {
-                store.dispatch(
-                    Command::SetProfileSecret {
-                        profile_id: profile_id.clone(),
-                        name,
-                        value: Some(value),
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::UpdateProfileSettings {
+                profile_id: profile_id.clone(),
+                patch: tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(Box::new(
+                    tcode_core::settings::ProfileConfigurationPatch {
+                        display_name,
+                        accent_color: accent,
+                        env,
+                        binary_path: binary.map(Into::into),
+                        // OpenCode has no single-home override.
+                        home_path: (provider != ProviderKind::OpenCode)
+                            .then(|| home.map(Into::into))
+                            .flatten(),
+                        // Codex ignores launch arguments (no field is rendered).
+                        launch_args: match provider {
+                            ProviderKind::Codex => None,
+                            _ => launch,
+                        },
+                        pi_trust_project_extensions,
+                        pi_native_approvals,
+                        custom_models: custom,
+                        hidden_models: hidden,
                     },
-                    cx,
-                );
+                )),
+            });
+            for (name, value) in secret_writes {
+                store.dispatch(Command::SetProfileSecret {
+                    profile_id: profile_id.clone(),
+                    name,
+                    value: Some(value),
+                });
             }
             for name in clears {
-                store.dispatch(
-                    Command::SetProfileSecret {
-                        profile_id: profile_id.clone(),
-                        name,
-                        value: None,
-                    },
-                    cx,
-                );
+                store.dispatch(Command::SetProfileSecret {
+                    profile_id: profile_id.clone(),
+                    name,
+                    value: None,
+                });
             }
-            store.dispatch(Command::ReloadProvider { provider }, cx);
+            store.dispatch(Command::ReloadProvider { provider });
         });
     }
 
@@ -383,11 +374,11 @@ impl ProviderDialog {
 
     fn add_custom_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.custom_model.read(cx).value().to_string();
-        let catalog = self.store.read(cx).profile_catalog(&self.profile_id, cx);
+        let catalog = self.store.read(cx).profile_catalog(&self.profile_id);
         let mut draft = self
             .store
             .read(cx)
-            .provider_profile_settings(&self.profile_id, cx);
+            .provider_profile_settings(&self.profile_id);
         draft.custom_models = self.custom_models.clone();
         match validate_slug(&raw, &catalog, &draft) {
             Ok(slug) => {
@@ -711,7 +702,6 @@ impl ProviderDialog {
             &self.profile_id,
             &self.custom_models,
             &self.hidden_models,
-            cx,
         );
         let muted = cx.theme().muted_foreground;
 
@@ -858,13 +848,10 @@ impl ProviderDialog {
                         tcode_i18n::tr!("providers.models.favorite")
                     })
                     .on_click(move |_, _, cx| {
-                        store.update(cx, |store, cx| {
-                            store.dispatch(
-                                Command::ToggleFavoriteModel {
-                                    model: fav_id.clone(),
-                                },
-                                cx,
-                            );
+                        store.update(cx, |store, _cx| {
+                            store.dispatch(Command::ToggleFavoriteModel {
+                                model: fav_id.clone(),
+                            });
                         });
                     }),
             )
@@ -962,13 +949,10 @@ pub fn render_footer(
                                     .show_cancel(true),
                             )
                             .on_ok(move |_, window, cx| {
-                                delete_store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::DeleteProfile {
-                                            profile_id: delete_id.clone(),
-                                        },
-                                        cx,
-                                    );
+                                delete_store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::DeleteProfile {
+                                        profile_id: delete_id.clone(),
+                                    });
                                 });
                                 // Close the confirm and the underlying settings dialog.
                                 window.close_all_dialogs(cx);

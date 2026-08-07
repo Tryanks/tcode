@@ -174,7 +174,7 @@ mod native {
         /// Draft -> stored-thread commits retain the same session id, so move
         /// all cached browser state across that one key transition.
         fn active_key(&mut self, cx: &Context<Self>) -> Option<String> {
-            let current = self.store.read(cx).preview_active_identity(cx);
+            let current = self.store.read(cx).preview_active_identity();
 
             if let (Some((old_session, old_key)), Some((session, key))) =
                 (self.active_identity.as_ref(), current.as_ref())
@@ -202,7 +202,7 @@ mod native {
 
         fn routed_key(&mut self, session_id: &str, cx: &Context<Self>) -> String {
             let active_key = self.active_key(cx);
-            let active_session_id = self.store.read(cx).active_session_id(cx);
+            let active_session_id = self.store.read(cx).active_session_id();
             preview_key_for_session(
                 session_id,
                 active_session_id.as_deref(),
@@ -232,7 +232,7 @@ mod native {
                     active.as_deref(),
                     window_state.route,
                     window_state.palette_open,
-                    self.store.read(cx).preview_panel_showing(cx),
+                    self.store.read(cx).preview_panel_showing(),
                 )
                 .map(str::to_string)
             };
@@ -428,7 +428,7 @@ mod native {
 
             // Gate on the Browser settings: a disabled browser rejects every op;
             // `allow_evaluate` gates only `preview_evaluate`.
-            let browser = self.store.read(cx).preview_browser_settings(cx);
+            let browser = self.store.read(cx).preview_browser_settings();
             if !browser.enabled {
                 let _ = reply.try_send(Err(tcode_i18n::tr!("browser.disabled_error").into_owned()));
                 return;
@@ -816,7 +816,7 @@ mod native {
 
             let visible = {
                 let window_state = self.window_state.read(cx);
-                if self.store.read(cx).active_session_id(cx).as_deref() != Some(session_id) {
+                if self.store.read(cx).active_session_id().as_deref() != Some(session_id) {
                     let _ = reply.try_send(Err(
                         "preview is not visible; the user is viewing another conversation".into(),
                     ));
@@ -826,7 +826,7 @@ mod native {
                     Some(key),
                     window_state.route,
                     window_state.palette_open,
-                    self.store.read(cx).preview_panel_showing(cx),
+                    self.store.read(cx).preview_panel_showing(),
                 ) == Some(key)
             };
             if !visible {
@@ -889,7 +889,7 @@ mod native {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             // When the embedded browser is turned off in Settings → Browser, hide
             // the chrome and webview entirely and show a quiet placeholder.
-            if !self.store.read(cx).preview_browser_settings(cx).enabled {
+            if !self.store.read(cx).preview_browser_settings().enabled {
                 return v_flex()
                     .size_full()
                     .items_center()
@@ -981,7 +981,7 @@ mod native {
             // drop the trailing/vertical padding on the caption side so the
             // buttons reach the window's true top-right corner.
             let hosts_caption = {
-                let (diff_open, right_tab) = self.store.read(cx).window_caption_state(cx);
+                let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
                 window_caption::hosts_caption_for_state(
                     window_caption::CaptionSurface::Preview,
                     self.window_state.read(cx).route,

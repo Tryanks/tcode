@@ -146,16 +146,13 @@ impl AcpAgentCard {
                     .tooltip(tcode_i18n::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let (id, checked) = (toggle_id.clone(), *checked);
-                        this.store.update(cx, |store, cx| {
-                            store.dispatch(
-                                Command::UpdateAcpAgent {
-                                    id,
-                                    patch: tcode_core::acp::AcpAgentPatch::SetEnabled {
-                                        enabled: checked,
-                                    },
+                        this.store.update(cx, |store, _cx| {
+                            store.dispatch(Command::UpdateAcpAgent {
+                                id,
+                                patch: tcode_core::acp::AcpAgentPatch::SetEnabled {
+                                    enabled: checked,
                                 },
-                                cx,
-                            );
+                            });
                         });
                     })),
             )
@@ -204,18 +201,16 @@ impl AcpAgentCard {
                                         let launch_args = args.read(cx).value().trim().to_string();
                                         let parsed_env = parse_env(&env.read(cx).value());
                                         let id = save_id.clone();
-                                        this.store.update(cx, |store, cx| {
-                                            store.dispatch(
-                                                Command::UpdateAcpAgent {
-                                                    id,
-                                                    patch: tcode_core::acp::AcpAgentPatch::SetLaunchOptions {
+                                        this.store.update(cx, |store, _cx| {
+                                            store.dispatch(Command::UpdateAcpAgent {
+                                            id,
+                                            patch:
+                                                tcode_core::acp::AcpAgentPatch::SetLaunchOptions {
                                                     launch_args: (!launch_args.is_empty())
                                                         .then_some(launch_args),
                                                     env: parsed_env,
                                                 },
-                                                },
-                                                cx,
-                                            );
+                                        });
                                         });
                                     },
                                 )),
@@ -234,8 +229,8 @@ impl AcpAgentCard {
                         .label(tcode_i18n::tr!("providers.acp.remove").into_owned())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let id = remove_id.clone();
-                            this.store.update(cx, |store, cx| {
-                                store.dispatch(Command::RemoveAcpAgent { id }, cx);
+                            this.store.update(cx, |store, _cx| {
+                                store.dispatch(Command::RemoveAcpAgent { id });
                             });
                         })),
                 ),
@@ -246,7 +241,7 @@ impl AcpAgentCard {
 
 impl Render for AcpAgentCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let agent = self.store.read(cx).installed_acp_agent(&self.agent_id, cx);
+        let agent = self.store.read(cx).installed_acp_agent(&self.agent_id);
         v_flex()
             .w_full()
             .rounded(material::radius_card())
@@ -336,9 +331,9 @@ impl AcpPanel {
             ),
             _subscriptions: subscriptions,
         };
-        panel.store.update(cx, |store, cx| {
-            store.dispatch(Command::RefreshAcpRegistry, cx)
-        });
+        panel
+            .store
+            .update(cx, |store, _cx| store.dispatch(Command::RefreshAcpRegistry));
         panel
     }
 
@@ -438,8 +433,8 @@ impl AcpPanel {
                 .label(tcode_i18n::tr!("providers.acp.install").into_owned())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = id.clone();
-                    this.store.update(cx, |store, cx| {
-                        store.dispatch(Command::InstallAcpAgent { id }, cx);
+                    this.store.update(cx, |store, _cx| {
+                        store.dispatch(Command::InstallAcpAgent { id });
                     });
                 }))
                 .into_any_element()
@@ -452,7 +447,7 @@ impl AcpPanel {
         let market: Vec<AcpMarketplaceItem> = self
             .store
             .read(cx)
-            .acp_marketplace_items(cx)
+            .acp_marketplace_items()
             .into_iter()
             .filter(|agent| {
                 query.is_empty()
@@ -461,8 +456,8 @@ impl AcpPanel {
                     || agent.description.to_lowercase().contains(&query)
             })
             .collect();
-        let error = self.store.read(cx).acp_registry_error(cx);
-        let loading = self.store.read(cx).acp_registry_loading(cx);
+        let error = self.store.read(cx).acp_registry_error();
+        let loading = self.store.read(cx).acp_registry_loading();
         let empty = market.is_empty();
         let mut rows = v_flex().w_full();
         if let Some(error) = error.filter(|_| empty) {
@@ -739,16 +734,13 @@ impl AcpPanel {
                                 if base_url.trim().is_empty() || key.trim().is_empty() {
                                     return;
                                 }
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::CreateThirdPartyProfile {
-                                            name,
-                                            base_url,
-                                            model: Some(model),
-                                            api_key: key,
-                                        },
-                                        cx,
-                                    );
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::CreateThirdPartyProfile {
+                                        name,
+                                        base_url,
+                                        model: Some(model),
+                                        api_key: key,
+                                    });
                                 });
                                 this.view = PanelView::Home;
                                 window.close_dialog(cx);
@@ -826,16 +818,13 @@ impl AcpPanel {
                                     .map(str::to_string)
                                     .collect();
                                 let env = parse_env(&env.read(cx).value());
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::AddCustomAcpAgent {
-                                            name,
-                                            command,
-                                            args,
-                                            env,
-                                        },
-                                        cx,
-                                    );
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::AddCustomAcpAgent {
+                                        name,
+                                        command,
+                                        args,
+                                        env,
+                                    });
                                 });
                                 this.view = PanelView::Home;
                                 window.close_dialog(cx);

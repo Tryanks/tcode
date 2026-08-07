@@ -138,8 +138,8 @@ impl PlanPanel {
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(Command::CopyPlan { markdown: md }, cx);
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::CopyPlan { markdown: md });
                                 });
                                 this.mark_copied(cx);
                             })),
@@ -153,14 +153,11 @@ impl PlanPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_download.clone();
                                 let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::DownloadPlan {
-                                            markdown: md,
-                                            fallback_title: fallback,
-                                        },
-                                        cx,
-                                    );
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::DownloadPlan {
+                                        markdown: md,
+                                        fallback_title: fallback,
+                                    });
                                 });
                             })),
                     )
@@ -172,11 +169,8 @@ impl PlanPanel {
                             .label(tcode_i18n::tr!("plan.save_workspace"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_save.clone();
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(
-                                        Command::SavePlanToWorkspace { markdown: md },
-                                        cx,
-                                    );
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::SavePlanToWorkspace { markdown: md });
                                 });
                             })),
                     ),
@@ -295,7 +289,7 @@ impl PlanPanel {
 
 impl Render for PlanPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (markdown, steps) = self.store.read(cx).plan_panel_state(cx);
+        let (markdown, steps) = self.store.read(cx).plan_panel_state();
 
         if markdown.is_none() && steps.is_empty() {
             return v_flex().size_full().child(self.render_empty(cx));

@@ -249,7 +249,7 @@ impl DiffPanel {
     ) -> Self {
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
-            let comments = store.read(cx).diff_review_comments(cx);
+            let comments = store.read(cx).diff_review_comments();
             if this.observed_review_comments != comments {
                 this.observed_review_comments = comments;
                 this.remeasure_lists();
@@ -282,7 +282,7 @@ impl DiffPanel {
             .or_else(|| {
                 self.workspace_store
                     .read(cx)
-                    .diff_selected_turn(cx)
+                    .diff_selected_turn()
                     .map(DiffScope::Turn)
             })
             .or(Some(DiffScope::WorkingTree))
@@ -307,7 +307,7 @@ impl DiffPanel {
         let request = self
             .workspace_store
             .read(cx)
-            .pending_diff_focus(cx)
+            .pending_diff_focus()
             .filter(|request| request.session == session && request.turn == turn);
         let Some(request) = request else {
             return;
@@ -331,8 +331,8 @@ impl DiffPanel {
                 offset_in_item: px(0.),
             });
         }
-        self.workspace_store.update(cx, |store, cx| {
-            store.take_diff_focus(session, turn, cx);
+        self.workspace_store.update(cx, |store, _cx| {
+            store.take_diff_focus(session, turn);
         });
     }
 
@@ -515,12 +515,12 @@ impl DiffPanel {
     /// Rebuild the rendered-file cache when its key (session / turn / theme)
     /// changed. Returns whether there is anything to show.
     fn ensure_cache(&mut self, cx: &mut Context<Self>) -> bool {
-        let pending_focus = self.workspace_store.read(cx).pending_diff_focus(cx);
+        let pending_focus = self.workspace_store.read(cx).pending_diff_focus();
         if let Some(request) = pending_focus {
             let is_active = self
                 .workspace_store
                 .read(cx)
-                .active_session_id(cx)
+                .active_session_id()
                 .is_some_and(|session| session == request.session);
             if is_active {
                 self.scopes
@@ -534,7 +534,7 @@ impl DiffPanel {
         let dark = cx.theme().mode.is_dark();
         let (session, scope, revision, cwd) = {
             let store = self.workspace_store.read(cx);
-            let Some(active) = store.diff_active_state(cx) else {
+            let Some(active) = store.diff_active_state() else {
                 self.cache = None;
                 return false;
             };
@@ -543,12 +543,7 @@ impl DiffPanel {
                 self.cache = None;
                 return false;
             };
-            (
-                session,
-                scope,
-                store.diff_refresh_generation(cx),
-                active.cwd,
-            )
+            (session, scope, store.diff_refresh_generation(), active.cwd)
         };
         if matches!(scope, DiffScope::WorkingTree | DiffScope::Branch) {
             let base = (scope == DiffScope::Branch)
@@ -602,7 +597,7 @@ impl DiffPanel {
                     let changes = self
                         .workspace_store
                         .read(cx)
-                        .with_diff_turn_changes(turn, cx, |changes, completeness| {
+                        .with_diff_turn_changes(turn, |changes, completeness| {
                             let _completeness = completeness;
                             changes.to_vec()
                         })
@@ -642,7 +637,7 @@ impl DiffPanel {
 
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (panel_open, expanded, active, plan_tab_active) =
-            self.workspace_store.read(cx).diff_panel_chrome_state(cx);
+            self.workspace_store.read(cx).diff_panel_chrome_state();
         // Windows: the open Diff/Plan panel is the rightmost column, so this
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
@@ -796,13 +791,13 @@ impl DiffPanel {
     // -- toolbar (turn selector + view controls) ----------------------------
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let active_state = self.workspace_store.read(cx).diff_active_state(cx);
+        let active_state = self.workspace_store.read(cx).diff_active_state();
         let session = active_state
             .as_ref()
             .map(|active| active.session.clone())
             .unwrap_or_default();
         let selected_scope = self.selected_scope(&session, cx);
-        let turns = self.workspace_store.read(cx).diff_turns(cx);
+        let turns = self.workspace_store.read(cx).diff_turns();
         let label = match selected_scope {
             Some(DiffScope::Turn(turn)) => {
                 tcode_i18n::tr!("diff.turn", count = turn + 1).into_owned()
@@ -970,10 +965,10 @@ impl DiffPanel {
             .shadow_xl()
             .rounded(material::radius_overlay());
 
-        let wrap_on = self.workspace_store.read(cx).diff_word_wrap(cx);
+        let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
         let ignore_ws = self.ignore_ws;
         let show_invisibles = self.show_invisibles;
-        let split_on = self.workspace_store.read(cx).diff_split(cx);
+        let split_on = self.workspace_store.read(cx).diff_split();
         let panel_split = cx.entity();
         let mut toolbar = h_flex()
             .flex_none()
@@ -1301,8 +1296,8 @@ impl DiffPanel {
             selection.start_index,
             selection.end_index,
         );
-        self.workspace_store.update(cx, |store, cx| {
-            store.dispatch(Command::AddReviewComment { comment }, cx);
+        self.workspace_store.update(cx, |store, _cx| {
+            store.dispatch(Command::AddReviewComment { comment });
         });
         self.selection = None;
         self.comment_input = None;
@@ -1317,8 +1312,8 @@ impl DiffPanel {
             }
             return self.render_empty(cx);
         };
-        let split = self.workspace_store.read(cx).diff_split(cx);
-        let wrap = self.workspace_store.read(cx).diff_word_wrap(cx);
+        let split = self.workspace_store.read(cx).diff_split();
+        let wrap = self.workspace_store.read(cx).diff_word_wrap();
         let list_state = if split {
             cache.split_list.clone()
         } else {
@@ -1375,7 +1370,7 @@ impl DiffPanel {
     }
 
     fn render_list_item(&self, index: usize, split: bool, cx: &mut Context<Self>) -> AnyElement {
-        let wrap = self.workspace_store.read(cx).diff_word_wrap(cx);
+        let wrap = self.workspace_store.read(cx).diff_word_wrap();
         let Some(cache) = self.cache.as_ref() else {
             return div().into_any_element();
         };
@@ -1659,7 +1654,7 @@ impl DiffPanel {
         let mut rows = self
             .workspace_store
             .read(cx)
-            .with_diff_review_comments(cx, |comments| {
+            .with_diff_review_comments(|comments| {
                 comments
                     .iter()
                     .filter(|comment| {
@@ -1981,7 +1976,7 @@ impl DiffPanel {
 impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
-        let tab = self.workspace_store.read(cx).diff_panel_chrome_state(cx).2;
+        let tab = self.workspace_store.read(cx).diff_panel_chrome_state().2;
         let mut root = v_flex()
             .size_full()
             .min_w_0()

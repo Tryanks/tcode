@@ -383,7 +383,7 @@ impl SessionsSidebar {
         // Launch sweep: the same auto-archive pass expanding a thread list
         // runs, applied to every project up front so stale threads are gone
         // before the first paint (and before the fold state is seeded below).
-        let project_ids = store.read(cx).project_ids(cx);
+        let project_ids = store.read(cx).project_ids();
         let mut sweeps = Vec::with_capacity(project_ids.len());
         for project_id in project_ids {
             sweeps.push(store.update(cx, |store, cx| {
@@ -406,7 +406,7 @@ impl SessionsSidebar {
                 }
             }
             let _ = sidebar.update(cx, |sidebar, cx| {
-                let settings = sidebar.store.read(cx).settings(cx);
+                let settings = sidebar.store.read(cx).settings();
                 sidebar.startup_archive_dialog =
                     (archived > 0 && !settings.auto_archive_notice_shown).then(|| {
                         (
@@ -420,8 +420,8 @@ impl SessionsSidebar {
         })
         .detach();
         let collapsed_parents = {
-            let sessions = store.read(cx).sidebar_sessions(cx);
-            let active_id = store.read(cx).active_session_id(cx);
+            let sessions = store.read(cx).sidebar_sessions();
+            let active_id = store.read(cx).active_session_id();
             initial_collapsed_parents(&sessions, active_id.as_deref())
         };
         Self {
@@ -456,7 +456,7 @@ impl SessionsSidebar {
         } else {
             self.auto_archive_notice = None;
             let (notice_shown, days, keep) = {
-                let settings = self.store.read(cx).settings(cx);
+                let settings = self.store.read(cx).settings();
                 (
                     settings.auto_archive_notice_shown,
                     settings.auto_archive_max_idle_days.max(1),
@@ -508,10 +508,10 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut settings = self.store.read(cx).settings(cx);
+        let mut settings = self.store.read(cx).settings();
         settings.auto_archive_notice_shown = true;
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::UpdateSettings { settings }, cx);
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::UpdateSettings { settings });
         });
         let window_state = self.window_state.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -562,20 +562,17 @@ impl SessionsSidebar {
         let Some(project) = self
             .store
             .read(cx)
-            .projects(cx)
+            .projects()
             .into_iter()
             .find(|project| project.id == action.0)
         else {
             return;
         };
-        self.store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::StartDraft {
-                    project_id: project.id,
-                    cwd: project.root,
-                },
-                cx,
-            );
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::StartDraft {
+                project_id: project.id,
+                cwd: project.root,
+            });
         });
     }
 
@@ -584,7 +581,7 @@ impl SessionsSidebar {
         let title = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == session_id)
             .map(|m| m.title.clone())
@@ -612,7 +609,7 @@ impl SessionsSidebar {
     }
 
     fn on_fork(&mut self, action: &ThreadFork, window: &mut Window, cx: &mut Context<Self>) {
-        let refusal = match self.store.read(cx).fork_availability(&action.0, cx) {
+        let refusal = match self.store.read(cx).fork_availability(&action.0) {
             ForkAvailability::Available => None,
             ForkAvailability::Unsupported => {
                 Some(tcode_i18n::tr!("sidebar.fork_unsupported").into_owned())
@@ -625,22 +622,19 @@ impl SessionsSidebar {
             return;
         }
         let id = action.0.clone();
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::ForkThread { id }, cx);
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::ForkThread { id });
         });
     }
 
     fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = self.renaming.take() {
             let value = state.input.read(cx).value().to_string();
-            self.store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::RenameSession {
-                        session_id: state.session_id,
-                        title: value,
-                    },
-                    cx,
-                );
+            self.store.update(cx, |store, _cx| {
+                store.dispatch(Command::RenameSession {
+                    session_id: state.session_id,
+                    title: value,
+                });
             });
             cx.notify();
         }
@@ -659,8 +653,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         let id = action.0.clone();
-        self.store.update(cx, |store, cx| {
-            store.dispatch(Command::MarkSessionUnread { session_id: id }, cx);
+        self.store.update(cx, |store, _cx| {
+            store.dispatch(Command::MarkSessionUnread { session_id: id });
         });
     }
 
@@ -673,7 +667,7 @@ impl SessionsSidebar {
         if let Some(meta) = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == action.0)
         {
@@ -691,7 +685,7 @@ impl SessionsSidebar {
         let title = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == id)
             .map(|m| m.title.clone())
@@ -704,7 +698,7 @@ impl SessionsSidebar {
         let title = self
             .store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .find(|m| m.id == id)
             .map(|m| m.title.clone())
@@ -721,12 +715,12 @@ impl SessionsSidebar {
         let store = self.store.clone();
         let session_ids: Vec<String> = store
             .read(cx)
-            .sidebar_sessions(cx)
+            .sidebar_sessions()
             .iter()
             .filter(|meta| {
                 meta.project_id.as_deref() == Some(action.0.as_str())
                     && meta.archived_at.is_none()
-                    && !store.read(cx).turn_running_for(&meta.id, cx)
+                    && !store.read(cx).turn_running_for(&meta.id)
             })
             .map(|meta| meta.id.clone())
             .collect();
@@ -752,14 +746,11 @@ impl SessionsSidebar {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
+                    store.update(cx, |store, _cx| {
                         for session_id in &session_ids {
-                            store.dispatch(
-                                Command::ArchiveSession {
-                                    session_id: session_id.clone(),
-                                },
-                                cx,
-                            );
+                            store.dispatch(Command::ArchiveSession {
+                                session_id: session_id.clone(),
+                            });
                         }
                     });
                     true
@@ -775,7 +766,7 @@ impl SessionsSidebar {
     ) {
         let store = self.store.clone();
         let project_id = action.0.clone();
-        let Some((project_name, count)) = store.read(cx).project_summary(&project_id, cx) else {
+        let Some((project_name, count)) = store.read(cx).project_summary(&project_id) else {
             return;
         };
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -799,13 +790,10 @@ impl SessionsSidebar {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::DeleteProject {
-                                project_id: project_id.clone(),
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::DeleteProject {
+                            project_id: project_id.clone(),
+                        });
                     });
                     true
                 })
@@ -818,7 +806,7 @@ impl SessionsSidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(root) = self.store.read(cx).project_root(&action.0, cx) {
+        if let Some(root) = self.store.read(cx).project_root(&action.0) {
             cx.reveal_path(&root);
         }
     }
@@ -833,18 +821,15 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
-        if store.read(cx).turn_running_for(session_id, cx) {
+        if store.read(cx).turn_running_for(session_id) {
             return;
         }
         let session_id = session_id.to_string();
-        if store.read(cx).settings(cx).skip_delete_confirmation {
-            store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::ArchiveSession {
-                        session_id: session_id.clone(),
-                    },
-                    cx,
-                );
+        if store.read(cx).settings().skip_delete_confirmation {
+            store.update(cx, |store, _cx| {
+                store.dispatch(Command::ArchiveSession {
+                    session_id: session_id.clone(),
+                });
             });
             return;
         }
@@ -867,13 +852,10 @@ impl SessionsSidebar {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::ArchiveSession {
-                                session_id: session_id.clone(),
-                            },
-                            cx,
-                        );
+                    store.update(cx, |store, _cx| {
+                        store.dispatch(Command::ArchiveSession {
+                            session_id: session_id.clone(),
+                        });
                     });
                     true
                 })
@@ -891,7 +873,7 @@ impl SessionsSidebar {
     ) {
         let store = self.store.clone();
         let session_id = session_id.to_string();
-        let skip = store.read(cx).settings(cx).skip_delete_confirmation;
+        let skip = store.read(cx).settings().skip_delete_confirmation;
         if skip {
             proceed_delete(store, session_id, window, cx);
             return;
@@ -1018,19 +1000,19 @@ impl SessionsSidebar {
             .icon(IconName::LayoutDashboard)
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let mut settings = this.store.read(cx).settings(cx);
+                let mut settings = this.store.read(cx).settings();
                 settings.sidebar_layout = match layout {
                     SidebarLayout::Flat => SidebarLayout::Grouped,
                     SidebarLayout::Grouped => SidebarLayout::Flat,
                 };
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(Command::UpdateSettings { settings }, cx);
+                this.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::UpdateSettings { settings });
                 });
             }))
     }
 
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort(cx));
+        let sort_label = crate::settings::project_sort_label(self.store.read(cx).project_sort());
         h_flex()
             .flex_none()
             .h(px(28.))
@@ -1056,8 +1038,8 @@ impl SessionsSidebar {
                             .icon(IconName::SortAscending)
                             .tooltip(tcode_i18n::tr!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.store.update(cx, |store, cx| {
-                                    store.dispatch(Command::CycleProjectSort, cx);
+                                this.store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::CycleProjectSort);
                                 });
                             })),
                     )
@@ -1081,7 +1063,7 @@ impl SessionsSidebar {
     }
 
     fn render_flat_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let projects = self.store.read(cx).projects(cx);
+        let projects = self.store.read(cx).projects();
         let active_filter = self.project_filter.clone();
         let filter_icon_color = if active_filter.is_some() {
             cx.theme().primary
@@ -1127,14 +1109,11 @@ impl SessionsSidebar {
                 .icon(IconName::Plus)
                 .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.store.update(cx, |store, cx| {
-                        store.dispatch(
-                            Command::StartDraft {
-                                project_id: project_id.clone(),
-                                cwd: cwd.clone(),
-                            },
-                            cx,
-                        );
+                    this.store.update(cx, |store, _cx| {
+                        store.dispatch(Command::StartDraft {
+                            project_id: project_id.clone(),
+                            cwd: cwd.clone(),
+                        });
                     });
                 }))
                 .into_any_element()
@@ -1203,10 +1182,9 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let project_id = group.project.id.clone();
-        let collapsed = self.store.read(cx).is_project_collapsed(&project_id, cx);
+        let collapsed = self.store.read(cx).is_project_collapsed(&project_id);
         let has_unread = group.sessions.iter().any(|meta| {
-            meta.parent_session_id.is_none()
-                && self.store.read(cx).session_unread(meta.id.as_str(), cx)
+            meta.parent_session_id.is_none() && self.store.read(cx).session_unread(meta.id.as_str())
         });
         let group_key = format!("group-{project_id}");
 
@@ -1226,7 +1204,7 @@ impl SessionsSidebar {
         let can_archive = group
             .sessions
             .iter()
-            .any(|meta| !self.store.read(cx).turn_running_for(&meta.id, cx));
+            .any(|meta| !self.store.read(cx).turn_running_for(&meta.id));
 
         let header_label =
             tcode_i18n::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
@@ -1247,13 +1225,10 @@ impl SessionsSidebar {
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().sidebar_accent))
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::ToggleProjectCollapsed {
-                        project_id: header_toggle_id.clone(),
-                    },
-                    cx,
-                );
+            this.store.update(cx, |store, _cx| {
+                store.dispatch(Command::ToggleProjectCollapsed {
+                    project_id: header_toggle_id.clone(),
+                });
             });
         }))
         .child(
@@ -1316,8 +1291,8 @@ impl SessionsSidebar {
                 cx.stop_propagation();
                 let cwd = plus_cwd.clone();
                 let project_id = plus_project_id.clone();
-                this.store.update(cx, |store, cx| {
-                    store.dispatch(Command::StartDraft { project_id, cwd }, cx);
+                this.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::StartDraft { project_id, cwd });
                 });
             }))
             .child(
@@ -1354,7 +1329,7 @@ impl SessionsSidebar {
                 let is_active = active_id == Some(meta.id.as_str());
                 // "Working" covers parked sessions too — a thread that keeps
                 // running in the background keeps its green dot.
-                let working = self.store.read(cx).turn_running_for(&meta.id, cx);
+                let working = self.store.read(cx).turn_running_for(&meta.id);
                 container = container.child(self.render_thread(meta, is_active, working, cx));
             }
             if let Some(toggle_label) = thread_list_toggle_label(total, expanded) {
@@ -1425,11 +1400,11 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> ThreadRowState {
         let session_id = meta.id.clone();
-        let unread = self.store.read(cx).session_unread(&session_id, cx);
-        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id, cx);
-        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id, cx);
+        let unread = self.store.read(cx).session_unread(&session_id);
+        let waiting_for_approval = self.store.read(cx).pending_approval_for(&session_id);
+        let waiting_for_input = self.store.read(cx).pending_user_input_for(&session_id);
         let render_state = derive_thread_render_state(meta, sessions, unread, working, |id| {
-            self.store.read(cx).turn_running_for(id, cx)
+            self.store.read(cx).turn_running_for(id)
         });
         ThreadRowState {
             children_collapsed: self.collapsed_parents.contains(&session_id),
@@ -1487,13 +1462,10 @@ impl SessionsSidebar {
                 is_active,
                 has_direct_children,
             );
-            this.store.update(cx, |store, cx| {
-                store.dispatch(
-                    Command::SelectSession {
-                        session_id: session_id.clone(),
-                    },
-                    cx,
-                );
+            this.store.update(cx, |store, _cx| {
+                store.dispatch(Command::SelectSession {
+                    session_id: session_id.clone(),
+                });
             });
             cx.notify();
         }))
@@ -1627,7 +1599,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let ago = humanize_ago(now_secs().saturating_sub(meta.updated_at));
-        let sessions = self.store.read(cx).sidebar_sessions(cx);
+        let sessions = self.store.read(cx).sidebar_sessions();
         let state =
             self.thread_row_state(meta, &sessions, format!("thread-{}", meta.id), working, cx);
         let session_id = state.session_id.clone();
@@ -2082,16 +2054,13 @@ fn proceed_delete(
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    let orphan = store.read(cx).worktree_orphaned_by_delete(&session_id, cx);
+    let orphan = store.read(cx).worktree_orphaned_by_delete(&session_id);
     let Some(worktree) = orphan else {
-        store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::DeleteSession {
-                    session_id,
-                    remove_worktree: false,
-                },
-                cx,
-            );
+        store.update(cx, |store, _cx| {
+            store.dispatch(Command::DeleteSession {
+                session_id,
+                remove_worktree: false,
+            });
         });
         return;
     };
@@ -2117,26 +2086,20 @@ fn proceed_delete(
                     .show_cancel(true),
             )
             .on_ok(move |_, _, cx| {
-                store_remove.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::DeleteSession {
-                            session_id: remove.clone(),
-                            remove_worktree: true,
-                        },
-                        cx,
-                    );
+                store_remove.update(cx, |store, _cx| {
+                    store.dispatch(Command::DeleteSession {
+                        session_id: remove.clone(),
+                        remove_worktree: true,
+                    });
                 });
                 true
             })
             .on_cancel(move |_, _, cx| {
-                store.update(cx, |store, cx| {
-                    store.dispatch(
-                        Command::DeleteSession {
-                            session_id: keep.clone(),
-                            remove_worktree: false,
-                        },
-                        cx,
-                    );
+                store.update(cx, |store, _cx| {
+                    store.dispatch(Command::DeleteSession {
+                        session_id: keep.clone(),
+                        remove_worktree: false,
+                    });
                 });
                 true
             })
@@ -2152,11 +2115,11 @@ impl Render for SessionsSidebar {
                 this.show_auto_archive_dialog(count, days, keep, window, cx);
             });
         }
-        let layout = self.store.read(cx).sidebar_layout(cx);
-        let active_id = self.store.read(cx).active_session_id(cx);
+        let layout = self.store.read(cx).sidebar_layout();
+        let active_id = self.store.read(cx).active_session_id();
         let (header, list_content) = match layout {
             SidebarLayout::Grouped => {
-                let groups = self.store.read(cx).grouped_sessions(cx);
+                let groups = self.store.read(cx).grouped_sessions();
                 let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
                 if groups.is_empty() {
                     list_content = list_content.child(
@@ -2179,17 +2142,17 @@ impl Render for SessionsSidebar {
                 )
             }
             SidebarLayout::Flat => {
-                let sessions = self.store.read(cx).flat_sessions(cx);
-                let projects = self.store.read(cx).projects(cx);
+                let sessions = self.store.read(cx).flat_sessions();
+                let projects = self.store.read(cx).projects();
                 let visible = flat_visible_threads(
                     &sessions,
                     &self.collapsed_parents,
                     self.project_filter.as_deref(),
                     |id| {
-                        self.store.read(cx).pending_approval_for(id, cx)
-                            || self.store.read(cx).pending_user_input_for(id, cx)
+                        self.store.read(cx).pending_approval_for(id)
+                            || self.store.read(cx).pending_user_input_for(id)
                     },
-                    |id| self.store.read(cx).turn_running_for(id, cx),
+                    |id| self.store.read(cx).turn_running_for(id),
                 );
                 let mut list_content = v_flex().w_full().px_2().pb_2().gap(px(2.));
                 if visible.is_empty() {
@@ -2217,7 +2180,7 @@ impl Render for SessionsSidebar {
                                 .map(|project| project.name.clone())
                         });
                         let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                        let working = self.store.read(cx).turn_running_for(&meta.id, cx);
+                        let working = self.store.read(cx).turn_running_for(&meta.id);
                         list_content = list_content.child(self.render_flat_thread(
                             meta,
                             &sessions,

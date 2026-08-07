@@ -31,13 +31,10 @@ impl WindowState {
         cx: &mut Context<Self>,
     ) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
-        store.update(cx, |store, cx| {
-            store.dispatch(
-                Command::SetSidebarCollapsed {
-                    collapsed: self.sidebar_collapsed,
-                },
-                cx,
-            )
+        store.update(cx, |store, _cx| {
+            store.dispatch(Command::SetSidebarCollapsed {
+                collapsed: self.sidebar_collapsed,
+            })
         });
         cx.notify();
     }

@@ -189,7 +189,7 @@ impl CommandPalette {
                 ));
             }
         };
-        for group in store.grouped_sessions(cx) {
+        for group in store.grouped_sessions() {
             push_action(
                 tcode_i18n::tr!("palette.new_thread", project = group.project.name).into_owned(),
                 IconName::Plus,
@@ -242,7 +242,7 @@ impl CommandPalette {
         // Threads (fuzzy over titles) — suppressed in `>`-actions-only mode.
         if !actions_only {
             let mut threads: Vec<(i32, Item)> = Vec::new();
-            for group in store.grouped_sessions(cx) {
+            for group in store.grouped_sessions() {
                 for meta in &group.sessions {
                     if let Some(score) = fuzzy_score(&query, &meta.title) {
                         threads.push((
@@ -288,8 +288,8 @@ impl CommandPalette {
         match action {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::StartDraft { project_id, cwd }, cx);
+                self.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::StartDraft { project_id, cwd });
                 });
             }
             Action::OpenSettings => {
@@ -303,10 +303,10 @@ impl CommandPalette {
                 } else {
                     ThemeMode::Dark
                 };
-                self.store.update(cx, |store, cx| {
-                    let mut settings = store.settings(cx);
+                self.store.update(cx, |store, _cx| {
+                    let mut settings = store.settings();
                     settings.theme_mode = next;
-                    store.dispatch(Command::UpdateSettings { settings }, cx);
+                    store.dispatch(Command::UpdateSettings { settings });
                 });
                 apply_theme(next, window, cx);
                 self.close(cx);
@@ -327,14 +327,14 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::CheckUpdates => {
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::CheckProviderVersions, cx)
+                self.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::CheckProviderVersions)
                 });
                 self.close(cx);
             }
             Action::OpenThread { session_id } => {
-                self.store.update(cx, |store, cx| {
-                    store.dispatch(Command::SelectSession { session_id }, cx);
+                self.store.update(cx, |store, _cx| {
+                    store.dispatch(Command::SelectSession { session_id });
                 });
                 self.close(cx);
             }

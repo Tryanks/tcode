@@ -69,7 +69,7 @@ fn handle_quit(
     window_state: &Entity<WindowState>,
     cx: &mut App,
 ) {
-    let count = workspace_store.read(cx).working_sessions_count(cx);
+    let count = workspace_store.read(cx).working_sessions_count();
     if count == 0 {
         cx.quit();
         return;
@@ -240,7 +240,7 @@ fn main() {
 
             let workspace_store =
                 cx.new(|cx| tcode_ui::store::WorkspaceStore::new(host.clone(), cx));
-            let initial_settings = workspace_store.read(cx).settings(cx);
+            let initial_settings = workspace_store.read(cx).settings();
             let sidebar_collapsed = initial_settings.sidebar_collapsed;
             let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
@@ -332,7 +332,7 @@ fn main() {
                         let workspace_store = workspace_store.clone();
                         let window_state = window_state.clone();
                         move |window, cx| {
-                            match theme_store.read(cx).settings(cx).theme_mode {
+                            match theme_store.read(cx).settings().theme_mode {
                                 settings::ThemeMode::Light => {
                                     Theme::change(ComponentThemeMode::Light, Some(window), cx)
                                 }
@@ -358,16 +358,15 @@ fn main() {
                 if open_latest {
                     let _ = host.dispatch(Command::OpenLatestSession);
                     for _ in 0..100 {
-                        if cx.update(|cx| workspace_store.read(cx).active_session_id(cx).is_some())
-                        {
+                        if cx.update(|cx| workspace_store.read(cx).active_session_id().is_some()) {
                             break;
                         }
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(10))
                             .await;
                     }
-                    workspace_store.update(cx, |store, cx| {
-                        store.sync_active_conversation_ui(cx);
+                    workspace_store.update(cx, |store, _cx| {
+                        store.sync_active_conversation_ui();
                     });
                 }
             })

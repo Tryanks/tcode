@@ -66,7 +66,7 @@ impl ProviderCard {
         let title = self
             .store
             .read(cx)
-            .provider_profile_display_name(&profile_id, cx);
+            .provider_profile_display_name(&profile_id);
         let dialog = cx
             .new(|cx| ProviderDialog::new(store.clone(), provider, profile_id.clone(), window, cx));
         window.open_dialog(cx, move |dlg, window, cx| {
@@ -89,13 +89,11 @@ impl ProviderCard {
         // Name, enabled state, and probe result all belong to this profile;
         // update-check versions remain shared by protocol kind.
         let store = self.store.read(cx);
-        let name = store.provider_profile_display_name(&self.profile_id, cx);
-        let enabled = store
-            .provider_profile_settings(&self.profile_id, cx)
-            .enabled;
-        let snapshot = store.provider_profile_snapshot(&self.profile_id, cx);
+        let name = store.provider_profile_display_name(&self.profile_id);
+        let enabled = store.provider_profile_settings(&self.profile_id).enabled;
+        let snapshot = store.provider_profile_snapshot(&self.profile_id);
         let summary = crate::provider_status::summarize(provider, snapshot.as_ref(), enabled);
-        let provider_version = store.provider_version_status(provider, cx);
+        let provider_version = store.provider_version_status(provider);
         let version = snapshot
             .as_ref()
             .and_then(|s| s.version.clone())
@@ -104,7 +102,7 @@ impl ProviderCard {
             .as_ref()
             .is_some_and(|v| v.update_available);
         let muted = cx.theme().muted_foreground;
-        let accent = store.provider_profile_accent(&self.profile_id, cx);
+        let accent = store.provider_profile_accent(&self.profile_id);
 
         let dot_color = match summary.dot {
             StatusDot::Success => cx.theme().success,
@@ -205,17 +203,14 @@ impl ProviderCard {
                         let checked = *checked;
                         let profile_id = this.profile_id.clone();
                         let provider = this.provider;
-                        this.store.update(cx, |store, cx| {
-                            store.dispatch(
-                                Command::UpdateProfileSettings {
-                                    profile_id,
-                                    patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
-                                        enabled: checked,
-                                    },
+                        this.store.update(cx, |store, _cx| {
+                            store.dispatch(Command::UpdateProfileSettings {
+                                profile_id,
+                                patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
+                                    enabled: checked,
                                 },
-                                cx,
-                            );
-                            store.dispatch(Command::ReloadProvider { provider }, cx);
+                            });
+                            store.dispatch(Command::ReloadProvider { provider });
                         });
                     })),
             )
@@ -311,9 +306,9 @@ impl ProviderCard {
     /// The update-available icon + its popover.
     fn render_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
-        let version = self.store.read(cx).provider_version_status(provider, cx);
+        let version = self.store.read(cx).provider_version_status(provider);
         let updating = version.is_some_and(|v| v.updating);
-        let command = self.store.read(cx).provider_update_command(provider, cx);
+        let command = self.store.read(cx).provider_update_command(provider);
         let store = self.store.clone();
 
         crate::material::overlay_popover("update-popover")
@@ -359,8 +354,8 @@ impl ProviderCard {
                             .on_click({
                                 let store = store.clone();
                                 move |_, _, cx| {
-                                    store.update(cx, |store, cx| {
-                                        store.dispatch(Command::UpdateProvider { provider }, cx);
+                                    store.update(cx, |store, _cx| {
+                                        store.dispatch(Command::UpdateProvider { provider });
                                     });
                                 }
                             }),
