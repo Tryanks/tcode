@@ -20,21 +20,11 @@ use crate::ExternalThread;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Command {
-    /// Create a concrete provider session for non-desktop clients.
-    CreateSession {
-        provider: ProviderKind,
-        cwd: PathBuf,
-        model: Option<String>,
-        project_id: Option<String>,
-        acp_agent_id: Option<String>,
-        profile_id: Option<String>,
-    },
     /// Consume and apply the restart-continuity marker, returning the Settings
     /// section that the client should open.
     ApplyPendingRelaunch,
     /// Open the newest stored session without exposing the host's index.
     OpenLatestSession,
-    OpenTerminalPanel,
     /// Shut down every live provider and PTY, then acknowledge only after the
     /// FIFO store-write barrier has drained.
     ShutdownAllAndFlush,
@@ -42,9 +32,7 @@ pub enum Command {
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
-    ReloadProvider {
-        provider: ProviderKind,
-    },
+    ReloadProvider,
     SetProfileSecret {
         profile_id: String,
         name: String,

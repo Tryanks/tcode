@@ -202,7 +202,6 @@ impl ProviderCard {
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let checked = *checked;
                         let profile_id = this.profile_id.clone();
-                        let provider = this.provider;
                         this.store.update(cx, |store, _cx| {
                             store.dispatch(Command::UpdateProfileSettings {
                                 profile_id,
@@ -210,7 +209,7 @@ impl ProviderCard {
                                     enabled: checked,
                                 },
                             });
-                            store.dispatch(Command::ReloadProvider { provider });
+                            store.dispatch(Command::ReloadProvider);
                         });
                     })),
             )

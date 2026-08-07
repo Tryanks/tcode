@@ -5,14 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tcode_protocol::{
-    ClientMessage, ClientPayload, Command, CommandResponse, EventEnvelope, HelloAck, HostMessage,
+    ClientMessage, ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage,
     ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic,
 };
 use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
 use crate::app::AppState;
-use crate::blocking::unblock_host;
 use crate::event::HostEvent;
 use crate::host::{HostCx, HostMsg};
 use crate::terminal::LocalTerminalRegistry;
@@ -140,22 +139,6 @@ impl HostHandle {
     pub fn subscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
         let id = self.next_id();
         self.send_payload(id, ClientPayload::Subscribe(subscription))
-    }
-
-    pub fn hello(&self, app_version: impl Into<String>) -> Result<(), ProtocolError> {
-        let id = self.next_id();
-        self.send_payload(
-            id,
-            ClientPayload::Hello(tcode_protocol::Hello {
-                protocol_version: tcode_protocol::PROTOCOL_VERSION,
-                app_version: app_version.into(),
-                capabilities: vec![
-                    "typed-local-transport".into(),
-                    "local-terminal-byte-streams".into(),
-                    "local-preview-reverse-rpc".into(),
-                ],
-            }),
-        )
     }
 
     /// Typed events consumed by the client-side replica pump.
@@ -465,19 +448,6 @@ fn handle_client_message(
                 result: Ok(CommandResponse::Unit),
             });
         }
-        ClientPayload::Unsubscribe(_) => {
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Ok(CommandResponse::Unit),
-            });
-        }
-        ClientPayload::Hello(hello) => {
-            cx.send_message(HostMessage::HelloAck(HelloAck {
-                protocol_version: tcode_protocol::PROTOCOL_VERSION,
-                app_version: env!("CARGO_PKG_VERSION").into(),
-                capabilities: hello.capabilities,
-            }));
-        }
         _ => {
             cx.send_message(HostMessage::Ack {
                 id,
@@ -504,27 +474,10 @@ fn dispatch_command(
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
-        Command::CreateSession {
-            provider,
-            cwd,
-            model,
-            project_id,
-            acp_agent_id,
-            profile_id,
-        } => app.create_session(
-            provider,
-            cwd,
-            model,
-            project_id,
-            acp_agent_id,
-            profile_id,
-            cx,
-        ),
         Command::ApplyPendingRelaunch => {
             response = CommandResponse::PendingRelaunchSection(app.apply_pending_relaunch(cx));
         }
         Command::OpenLatestSession => app.open_latest_session(cx),
-        Command::OpenTerminalPanel => app.open_terminal_panel(cx),
         Command::ShutdownAllAndFlush => {
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));
@@ -533,7 +486,7 @@ fn dispatch_command(
             text,
             attachment_paths,
         } => app.orchestrate_turn(text, attachment_paths, cx),
-        Command::ReloadProvider { provider } => app.reload_provider(provider, cx),
+        Command::ReloadProvider => app.reload_provider(cx),
         Command::SetProfileSecret {
             profile_id,
             name,
@@ -716,10 +669,6 @@ fn dispatch_query(
                     })
             })
         }
-        Query::SecretPresence { profile_id, name } => {
-            let present = app.profile_secret_present(&profile_id, &name);
-            cx.spawn_background(async move { Ok(QueryResponse::SecretPresence(present)) })
-        }
         Query::LoadGitDiff {
             cwd,
             scope,
@@ -737,13 +686,13 @@ fn dispatch_query(
                     })
                 });
             }
-            let task = unblock_host(cx, move || {
+            let task = cx.unblock(move || {
                 tcode_services::git::load_git_diff(&cwd, scope, base.as_deref(), ignore_whitespace)
             });
             cx.spawn_background(async move { Ok(QueryResponse::GitDiff(task.await)) })
         }
         Query::ReadFileBytes { path } => {
-            let task = unblock_host(cx, move || std::fs::read(&path));
+            let task = cx.unblock(move || std::fs::read(&path));
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::FileBytes)
@@ -751,9 +700,7 @@ fn dispatch_query(
             })
         }
         Query::SaveAttachment { dir, bytes, ext } => {
-            let task = unblock_host(cx, move || {
-                AppState::save_attachment_to_dir(&dir, &bytes, &ext)
-            });
+            let task = cx.unblock(move || AppState::save_attachment_to_dir(&dir, &bytes, &ext));
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::SavedAttachment)
@@ -761,7 +708,7 @@ fn dispatch_query(
             })
         }
         Query::RemoveUserFile { path } => {
-            let task = unblock_host(cx, move || std::fs::remove_file(&path));
+            let task = cx.unblock(move || std::fs::remove_file(&path));
             cx.spawn_background(async move {
                 task.await
                     .map(|()| QueryResponse::UserFileRemoved)
@@ -769,14 +716,9 @@ fn dispatch_query(
             })
         }
         Query::IsDirectory { path } => {
-            let task = unblock_host(cx, move || path.is_dir());
+            let task = cx.unblock(move || path.is_dir());
             cx.spawn_background(async move { Ok(QueryResponse::IsDirectory(task.await)) })
         }
-        Query::RelativizeToWorkspace { path, cwd } => cx.spawn_background(async move {
-            Ok(QueryResponse::RelativePath(
-                tcode_services::user_files::relativize_to_workspace(&path, &cwd),
-            ))
-        }),
         _ => cx.spawn_background(async {
             Err(ProtocolError {
                 code: "unsupported_query".into(),
@@ -833,7 +775,6 @@ mod tests {
 
         host.subscribe(Subscription {
             topic: Topic::Index,
-            after_seq: None,
         })
         .expect("send subscription");
         let snapshot = next_event(&events, |event| {

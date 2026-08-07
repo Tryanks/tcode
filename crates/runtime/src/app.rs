@@ -14,7 +14,6 @@ use agent::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::blocking::unblock_host as unblock;
 use crate::host::{HostCx, HostTask};
 use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
@@ -22,7 +21,6 @@ use tcode_core::project::{
     AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo,
     auto_archive_candidates,
 };
-use tcode_core::provider_models::{ResolvedModel, picker_models};
 use tcode_core::provider_status::ProviderSnapshot;
 use tcode_core::relay::{
     RELAY_TRANSCRIPT_MAX_CHARS, assemble_relay_prompt, has_meaningful_history,
@@ -33,8 +31,8 @@ use tcode_core::session::{
     plan_title,
 };
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProjectSort,
-    ProviderProfile, ProviderSettings, ResolvedProfile, Settings,
+    ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
+    ProviderSettings, ResolvedProfile, Settings,
 };
 pub use tcode_core::ui::{ConversationDestination, RightTab, WorkspaceMode};
 use tcode_protocol::{
@@ -71,8 +69,8 @@ use tcode_services::workspace::list_workspace;
 #[rustfmt::skip]
 pub use tcode_core::project::{group_sessions, ProjectGroup};
 pub use crate::event::{
-    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent as AppEvent,
-    RuntimeNotice, RuntimeOperationId, RuntimeToast,
+    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice,
+    RuntimeOperationId, RuntimeToast,
 };
 pub use crate::terminal::{
     LocalTerminalRegistry, MAX_TERMINALS_PER_SESSION, TerminalContext, TerminalEntry,
@@ -977,7 +975,7 @@ pub struct AppState {
     pending_relaunch: Option<tcode_services::relaunch::RelaunchMarker>,
 }
 
-fn emit_runtime(cx: &mut HostCx, event: AppEvent) {
+fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
     cx.emit(HostEvent::Runtime(event));
 }
 
@@ -1180,6 +1178,11 @@ impl AppState {
         }
     }
 
+    fn persist_settings(&mut self, cx: &mut HostCx) {
+        let settings = self.settings.clone();
+        self.enqueue_settings(&settings, cx);
+    }
+
     fn emit_domain(&mut self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
         let seq = match &topic {
             Topic::Index => &mut self.index_event_seq,
@@ -1236,12 +1239,6 @@ impl AppState {
             providers_checking: self.providers_checking(),
             secret_names: self.provider_secret_names.clone(),
         }
-    }
-
-    pub(crate) fn profile_secret_present(&self, profile_id: &str, name: &str) -> bool {
-        self.provider_secret_names
-            .get(profile_id)
-            .is_some_and(|names| names.contains(name))
     }
 
     fn emit_providers_status(&mut self, cx: &mut HostCx) {
@@ -1332,9 +1329,7 @@ impl AppState {
             ),
             Topic::RuntimeEvents => (
                 0,
-                ServerEvent::RuntimeSnapshot(tcode_protocol::RuntimeSnapshot {
-                    notifications: Vec::new(),
-                }),
+                ServerEvent::RuntimeSnapshot(tcode_protocol::RuntimeSnapshot),
             ),
             // Raw terminal bytes never travel through JSON in the local
             // transport. The construction-time handle registry carries the
@@ -1366,11 +1361,7 @@ impl AppState {
     /// Build the complete non-event-stream status projection for one resident
     /// session. This is the sole constructor for the replicated status domain.
     pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
-        let session = self
-            .active
-            .as_ref()
-            .filter(|session| session.meta.id == session_id)
-            .or_else(|| self.background.get(session_id))?;
+        let session = self.resident(session_id)?;
         let meta = &session.meta;
         let provider_option_descriptors = if meta.provider == ProviderKind::Acp {
             session.provider_options.clone()
@@ -1387,13 +1378,9 @@ impl AppState {
         };
         let relay_confirmation = session.pending_relay.as_ref().and_then(|pending| {
             has_meaningful_history(&session.timeline).then(|| {
-                let label = |provider: ProviderKind, profile: Option<&str>| match profile {
-                    Some(id) => self.settings.profile_display_name(id),
-                    None => provider.display_name().to_string(),
-                };
                 (
-                    label(pending.from_provider, pending.from_profile.as_deref()),
-                    label(meta.provider, meta.profile_id.as_deref()),
+                    self.provider_label(pending.from_provider, pending.from_profile.as_deref()),
+                    self.provider_label(meta.provider, meta.profile_id.as_deref()),
                 )
             })
         });
@@ -1576,13 +1563,7 @@ impl AppState {
     /// Persistently opt a session into native orchestration. Callers restart a
     /// currently-live provider so its next spawn receives the MCP registration.
     pub fn enable_orchestrate(&mut self, session_id: &str, cx: &mut HostCx) -> Result<(), String> {
-        let Some(mut meta) = self
-            .sessions
-            .iter()
-            .find(|meta| meta.id == session_id)
-            .cloned()
-            .or_else(|| self.meta_mut(session_id).cloned())
-        else {
+        let Some(mut meta) = self.find_meta(session_id) else {
             return Err("unknown session".into());
         };
         meta.orchestrate_enabled = true;
@@ -1711,17 +1692,7 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<String, String> {
         let parent = self
-            .sessions
-            .iter()
-            .find(|meta| meta.id == parent_id)
-            .cloned()
-            .or_else(|| {
-                self.active
-                    .as_ref()
-                    .filter(|active| active.meta.id == parent_id)
-                    .map(|active| active.meta.clone())
-            })
-            .or_else(|| self.background.get(parent_id).map(|s| s.meta.clone()))
+            .find_meta(parent_id)
             .ok_or_else(|| "unknown parent session".to_string())?;
         let cwd = cwd.unwrap_or_else(|| parent.cwd.clone());
         let mut meta = build_child_meta(
@@ -1770,6 +1741,8 @@ impl AppState {
         reply: smol::channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut HostCx,
     ) {
+        use orchestrate_mcp::OrchestrateOp;
+
         match op {
             orchestrate_mcp::OrchestrateOp::Status {
                 parent_id,
@@ -1831,23 +1804,7 @@ impl AppState {
                     let _ = reply.try_send(result);
                     return;
                 };
-                let Some(parent_cwd) = self
-                    .sessions
-                    .iter()
-                    .find(|meta| meta.id == parent_id)
-                    .map(|meta| meta.cwd.clone())
-                    .or_else(|| {
-                        self.active
-                            .as_ref()
-                            .filter(|active| active.meta.id == parent_id)
-                            .map(|active| active.meta.cwd.clone())
-                    })
-                    .or_else(|| {
-                        self.background
-                            .get(&parent_id)
-                            .map(|session| session.meta.cwd.clone())
-                    })
-                else {
+                let Some(parent_cwd) = self.find_meta(&parent_id).map(|meta| meta.cwd) else {
                     let _ = reply.try_send(Err("unknown parent session".to_string()));
                     return;
                 };
@@ -1859,16 +1816,17 @@ impl AppState {
                 };
                 let host_cx = cx.clone();
                 HostCx::spawn_detached(cx, async move {
-                    let resolved_cwd = unblock(&host_cx, move || {
-                        let canonical = path
-                            .canonicalize()
-                            .map_err(|_| format!("invalid cwd: {}", path.display()))?;
-                        if !canonical.is_dir() {
-                            return Err(format!("invalid cwd: {}", canonical.display()));
-                        }
-                        Ok(canonical)
-                    })
-                    .await;
+                    let resolved_cwd = host_cx
+                        .unblock(move || {
+                            let canonical = path
+                                .canonicalize()
+                                .map_err(|_| format!("invalid cwd: {}", path.display()))?;
+                            if !canonical.is_dir() {
+                                return Err(format!("invalid cwd: {}", canonical.display()));
+                            }
+                            Ok(canonical)
+                        })
+                        .await;
                     let result = match resolved_cwd {
                         Ok(cwd) => host_cx
                             .enqueue_and_wait(move |state, cx| {
@@ -1893,108 +1851,81 @@ impl AppState {
                     let _ = reply.try_send(result);
                 });
             }
-            op => {
-                let result = self.handle_orchestrate_sync_op(op, cx);
-                let _ = reply.try_send(result);
-            }
-        }
-    }
-
-    fn handle_orchestrate_sync_op(
-        &mut self,
-        op: orchestrate_mcp::OrchestrateOp,
-        cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
-        use orchestrate_mcp::OrchestrateOp;
-        match op {
-            OrchestrateOp::Dispatch { .. } => {
-                unreachable!("dispatch operations are handled asynchronously")
-            }
-            OrchestrateOp::Status {
-                parent_id: _,
-                thread_id: _,
-            } => unreachable!("status operations are handled asynchronously"),
             OrchestrateOp::Send {
                 parent_id,
                 thread_id,
                 message,
             } => {
-                self.require_child(&parent_id, &thread_id)?;
-                // A live turn accepts the message right away — same routing as
-                // parent callbacks. Queueing a mid-turn correction until the
-                // turn ends would deliver it after the work it was meant to
-                // redirect (and never, if the turn hangs).
-                let can_steer = self
-                    .active
-                    .as_ref()
-                    .filter(|child| child.meta.id == thread_id)
-                    .or_else(|| self.background.get(&thread_id))
-                    .is_some_and(|child| child.turn_in_flight && child.supports_steering());
-                if can_steer {
-                    let request_id = self.record_steer_request(&thread_id, &message, &[], cx);
-                    let sent = self
-                        .active
-                        .as_mut()
-                        .filter(|child| child.meta.id == thread_id)
-                        .or_else(|| self.background.get_mut(&thread_id))
-                        .is_some_and(|child| {
+                let result = (|| {
+                    self.require_child(&parent_id, &thread_id)?;
+                    // A live turn accepts the message right away — same routing as
+                    // parent callbacks. Queueing a mid-turn correction until the
+                    // turn ends would deliver it after the work it was meant to
+                    // redirect (and never, if the turn hangs).
+                    let can_steer = self
+                        .resident(&thread_id)
+                        .is_some_and(|child| child.turn_in_flight && child.supports_steering());
+                    if can_steer {
+                        let request_id = self.record_steer_request(&thread_id, &message, &[], cx);
+                        let sent = self.resident_mut(&thread_id).is_some_and(|child| {
                             child
                                 .steer_now(request_id, message.clone(), Vec::new())
                                 .is_ok()
                         });
-                    if sent {
-                        cx.notify();
-                        return Ok(serde_json::json!({ "ok": true, "delivery": "steered" }));
+                        if sent {
+                            cx.notify();
+                            return Ok(serde_json::json!({ "ok": true, "delivery": "steered" }));
+                        }
+                        // Provider channel gone: fall through so the text survives
+                        // in the queue for the wake-up path.
                     }
-                    // Provider channel gone: fall through so the text survives
-                    // in the queue for the wake-up path.
-                }
-                if self.active_session_id() == Some(&thread_id) {
-                    let child = self.active.as_mut().unwrap();
+                    if self.active_session_id() == Some(&thread_id) {
+                        let child = self.active.as_mut().unwrap();
+                        child.push_queued(message, Vec::new());
+                        let idle = matches!(child.runtime, Runtime::Idle);
+                        if self.dispatch_next_queued(cx).is_err() {
+                            return Err("child provider is unavailable".into());
+                        }
+                        if idle {
+                            self.ensure_started(cx);
+                        }
+                        self.emit_session_status(&thread_id, cx);
+                        return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
+                    }
+                    self.ensure_child_loaded(&thread_id, cx)?;
+                    let child = self.background.get_mut(&thread_id).unwrap();
                     child.push_queued(message, Vec::new());
                     let idle = matches!(child.runtime, Runtime::Idle);
-                    if self.dispatch_next_queued(cx).is_err() {
-                        return Err("child provider is unavailable".into());
+                    if !idle && !child.turn_in_flight {
+                        self.on_background_turn_completed(&thread_id, cx);
                     }
                     if idle {
-                        self.ensure_started(cx);
+                        self.ensure_session_started(&thread_id, cx);
                     }
                     self.emit_session_status(&thread_id, cx);
-                    return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
-                }
-                self.ensure_child_loaded(&thread_id, cx)?;
-                let child = self.background.get_mut(&thread_id).unwrap();
-                child.push_queued(message, Vec::new());
-                let idle = matches!(child.runtime, Runtime::Idle);
-                if !idle && !child.turn_in_flight {
-                    self.on_background_turn_completed(&thread_id, cx);
-                }
-                if idle {
-                    self.ensure_session_started(&thread_id, cx);
-                }
-                self.emit_session_status(&thread_id, cx);
-                Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
+                    Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
+                })();
+                let _ = reply.try_send(result);
             }
-            OrchestrateOp::Result {
-                parent_id: _,
-                thread_id: _,
-            } => unreachable!("result operations are handled asynchronously"),
             OrchestrateOp::Cancel {
                 parent_id,
                 thread_id,
             } => {
-                self.require_child(&parent_id, &thread_id)?;
-                self.sessions_awaiting_approval.remove(&thread_id);
-                if self.active_session_id() == Some(&thread_id) {
-                    if let Some(child) = self.active.as_mut() {
-                        child.queue.clear();
-                        child.timeline.mark_idle();
-                        child.shutdown_to_idle();
+                let result = (|| {
+                    self.require_child(&parent_id, &thread_id)?;
+                    self.sessions_awaiting_approval.remove(&thread_id);
+                    if self.active_session_id() == Some(&thread_id) {
+                        if let Some(child) = self.active.as_mut() {
+                            child.queue.clear();
+                            child.timeline.mark_idle();
+                            child.shutdown_to_idle();
+                        }
+                    } else {
+                        self.drop_background(&thread_id);
                     }
-                } else {
-                    self.drop_background(&thread_id);
-                }
-                Ok(serde_json::json!({ "ok": true }))
+                    Ok(serde_json::json!({ "ok": true }))
+                })();
+                let _ = reply.try_send(result);
             }
             OrchestrateOp::Approve {
                 parent_id,
@@ -2002,26 +1933,33 @@ impl AppState {
                 request_id,
                 decision,
             } => {
-                self.require_child(&parent_id, &thread_id)?;
-                let pending = self.pending_approvals_for(&thread_id);
-                let request = match request_id {
-                    Some(request_id) => pending
-                        .into_iter()
-                        .find(|request| request.id == request_id)
-                        .ok_or_else(|| "no pending approval with that request_id".to_string())?,
-                    None => match pending.as_slice() {
-                        [request] => request.clone(),
-                        [] => return Err("no pending approval".into()),
-                        _ => {
-                            return Err("multiple pending approvals; request_id is required".into());
-                        }
-                    },
-                };
-                let decision = resolve_approval_decision(&decision)?;
-                let request_id = request.id;
-                self.respond_session_approval(&thread_id, request_id.clone(), decision)?;
-                cx.notify();
-                Ok(serde_json::json!({ "ok": true, "request_id": request_id }))
+                let result = (|| {
+                    self.require_child(&parent_id, &thread_id)?;
+                    let pending = self.pending_approvals_for(&thread_id);
+                    let request = match request_id {
+                        Some(request_id) => pending
+                            .into_iter()
+                            .find(|request| request.id == request_id)
+                            .ok_or_else(|| {
+                                "no pending approval with that request_id".to_string()
+                            })?,
+                        None => match pending.as_slice() {
+                            [request] => request.clone(),
+                            [] => return Err("no pending approval".into()),
+                            _ => {
+                                return Err(
+                                    "multiple pending approvals; request_id is required".into()
+                                );
+                            }
+                        },
+                    };
+                    let decision = resolve_approval_decision(&decision)?;
+                    let request_id = request.id;
+                    self.respond_session_approval(&thread_id, request_id.clone(), decision)?;
+                    cx.notify();
+                    Ok(serde_json::json!({ "ok": true, "request_id": request_id }))
+                })();
+                let _ = reply.try_send(result);
             }
         }
     }
@@ -2055,10 +1993,7 @@ impl AppState {
         decision: ApprovalDecision,
     ) -> Result<(), String> {
         let session = self
-            .active
-            .as_ref()
-            .filter(|session| session.meta.id == session_id)
-            .or_else(|| self.background.get(session_id))
+            .resident(session_id)
             .ok_or_else(|| "session is not loaded".to_string())?;
         let Runtime::Live(commands) = &session.runtime else {
             return Err("session is not live".into());
@@ -2141,16 +2076,17 @@ impl AppState {
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let timelines = unblock(&host_cx, move || {
-                unloaded
-                    .into_iter()
-                    .map(|id| {
-                        let timeline = Timeline::fold_events(store.read_events(&id));
-                        (id, timeline)
-                    })
-                    .collect::<HashMap<_, _>>()
-            })
-            .await;
+            let timelines = host_cx
+                .unblock(move || {
+                    unloaded
+                        .into_iter()
+                        .map(|id| {
+                            let timeline = Timeline::fold_events(store.read_events(&id));
+                            (id, timeline)
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .await;
             let result = host_cx
                 .enqueue_and_wait(move |state, _| {
                     state.orchestrate_status_json(&children, &timelines)
@@ -2184,10 +2120,9 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let read_id = thread_id.clone();
-            let timeline = unblock(&host_cx, move || {
-                Timeline::fold_events(store.read_events(&read_id))
-            })
-            .await;
+            let timeline = host_cx
+                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
+                .await;
             let result = host_cx
                 .enqueue_and_wait(move |state, _| {
                     let timeline = state.loaded_child_timeline(&thread_id).unwrap_or(&timeline);
@@ -2200,11 +2135,7 @@ impl AppState {
     }
 
     fn loaded_child_timeline(&self, session_id: &str) -> Option<&Timeline> {
-        self.active
-            .as_ref()
-            .filter(|child| child.meta.id == session_id)
-            .or_else(|| self.background.get(session_id))
-            .map(|child| &child.timeline)
+        self.resident(session_id).map(|child| &child.timeline)
     }
 
     fn child_result(
@@ -2212,18 +2143,13 @@ impl AppState {
         meta: &SessionMeta,
         timeline: &Timeline,
     ) -> (&'static str, String, Option<agent::TokenUsage>) {
-        let running = self
-            .active
-            .as_ref()
-            .filter(|child| child.meta.id == meta.id)
-            .or_else(|| self.background.get(&meta.id))
-            .is_some_and(|child| {
-                child.turn_in_flight
-                    || child.delivery_in_flight.is_some()
-                    || !child.queue.is_empty()
-                    || child.background_task_count > 0
-                    || matches!(child.runtime, Runtime::Starting { .. })
-            });
+        let running = self.resident(&meta.id).is_some_and(|child| {
+            child.turn_in_flight
+                || child.delivery_in_flight.is_some()
+                || !child.queue.is_empty()
+                || child.background_task_count > 0
+                || matches!(child.runtime, Runtime::Starting { .. })
+        });
         let state = if running {
             "running"
         } else {
@@ -2308,11 +2234,12 @@ impl AppState {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let profile_id = Settings::builtin_profile_id(provider).to_string();
-                let launch_env = unblock(&host_cx, move || {
-                    let secrets = settings_store.profile_secrets(&profile_id);
-                    launch_env_for_profile(&settings, &profile_id, secrets)
-                })
-                .await;
+                let launch_env = host_cx
+                    .unblock(move || {
+                        let secrets = settings_store.profile_secrets(&profile_id);
+                        launch_env_for_profile(&settings, &profile_id, secrets)
+                    })
+                    .await;
                 let result = list_models(provider, binary, launch_env).await;
                 host_cx.enqueue(move |state, cx| {
                     state.models_loading.insert(provider, false);
@@ -2364,7 +2291,8 @@ impl AppState {
     /// back out of `secrets.json` under the profile id, and the home override.
     /// This is the profile-aware generalization of [`Self::launch_env`]; a
     /// built-in profile id (a [`provider_key`]) reproduces the old behavior.
-    pub fn launch_env_for_profile(&self, profile_id: &str) -> LaunchEnv {
+    #[cfg(test)]
+    fn launch_env_for_profile(&self, profile_id: &str) -> LaunchEnv {
         let secrets = self.settings_store.profile_secrets(profile_id);
         launch_env_for_profile(&self.settings, profile_id, secrets)
     }
@@ -2380,7 +2308,7 @@ impl AppState {
 
     /// Re-run everything that depends on *how* a provider's CLI is launched
     /// (binary path, home, environment): its model catalog and its status probe.
-    pub fn reload_provider(&mut self, _provider: ProviderKind, cx: &mut HostCx) {
+    pub fn reload_provider(&mut self, cx: &mut HostCx) {
         self.refresh_model_catalogs(cx);
         self.refresh_provider_status(cx);
     }
@@ -2396,51 +2324,11 @@ impl AppState {
 
     /// Every selectable native profile, grouped by kind. ACP is handled
     /// separately through the installed-agent list.
-    pub fn all_profiles(&self) -> Vec<ResolvedProfile> {
-        let mut out = self.settings.profiles_for_kind(ProviderKind::Codex);
-        out.extend(self.settings.profiles_for_kind(ProviderKind::ClaudeCode));
-        out.extend(self.settings.profiles_for_kind(ProviderKind::Pi));
-        out.extend(self.settings.profiles_for_kind(ProviderKind::OpenCode));
-        out
-    }
-
-    /// Every native profile enabled for new sessions (its card's switch on).
-    /// The new-session model/profile pickers iterate this; the Settings page
-    /// still lists every profile through [`Self::all_profiles`].
-    pub fn enabled_profiles(&self) -> Vec<ResolvedProfile> {
-        let mut out = self.settings.enabled_profiles_for_kind(ProviderKind::Codex);
-        out.extend(
-            self.settings
-                .enabled_profiles_for_kind(ProviderKind::ClaudeCode),
-        );
-        out.extend(self.settings.enabled_profiles_for_kind(ProviderKind::Pi));
-        out.extend(
-            self.settings
-                .enabled_profiles_for_kind(ProviderKind::OpenCode),
-        );
-        out
-    }
-
-    /// The protocol kind a profile drives (built-in or user). Falls back to
-    /// ClaudeCode for an unknown id (callers treat unknown ids as gone).
-    pub fn profile_kind(&self, id: &str) -> ProviderKind {
-        self.settings
-            .resolved_profile(id)
-            .map(|profile| profile.kind)
-            .unwrap_or(ProviderKind::ClaudeCode)
-    }
-
-    /// A profile's effective card settings (built-in or user-created).
-    pub fn profile_settings(&self, id: &str) -> ProviderSettings {
-        self.settings
-            .resolved_profile(id)
-            .map(|profile| profile.settings)
-            .unwrap_or_default()
-    }
-
-    /// A profile's display name (its override, else the built-in label, else id).
-    pub fn profile_display_name(&self, id: &str) -> String {
-        self.settings.profile_display_name(id)
+    fn all_profiles(&self) -> Vec<ResolvedProfile> {
+        NATIVE_PROVIDER_KINDS
+            .iter()
+            .flat_map(|kind| self.settings.profiles_for_kind(*kind))
+            .collect()
     }
 
     /// Apply a serializable edit to one profile's card settings, routing built-in
@@ -2566,14 +2454,15 @@ impl AppState {
         let api_key = api_key.trim().to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            unblock(&host_cx, move || {
-                let _ = std::fs::create_dir_all(&home);
-                let _ = std::fs::write(
-                    home.join(".claude.json"),
-                    r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
-                );
-            })
-            .await;
+            host_cx
+                .unblock(move || {
+                    let _ = std::fs::create_dir_all(&home);
+                    let _ = std::fs::write(
+                        home.join(".claude.json"),
+                        r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
+                    );
+                })
+                .await;
             host_cx.enqueue(move |state, cx| {
                 if state.settings.profiles.contains_key(&id) {
                     return;
@@ -2666,11 +2555,12 @@ impl AppState {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let env_profile_id = profile_id.clone();
-                let launch_env = unblock(&host_cx, move || {
-                    let secrets = settings_store.profile_secrets(&env_profile_id);
-                    launch_env_for_profile(&settings, &env_profile_id, secrets)
-                })
-                .await;
+                let launch_env = host_cx
+                    .unblock(move || {
+                        let secrets = settings_store.profile_secrets(&env_profile_id);
+                        launch_env_for_profile(&settings, &env_profile_id, secrets)
+                    })
+                    .await;
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 host_cx.enqueue(move |state, cx| {
@@ -2705,18 +2595,20 @@ impl AppState {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let profile_id = Settings::builtin_profile_id(provider).to_string();
-                let env = unblock(&host_cx, move || {
-                    let secrets = settings_store.profile_secrets(&profile_id);
-                    launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
-                })
-                .await;
-                let source = unblock(&host_cx, move || {
-                    binary
-                        .as_deref()
-                        .map(detect_install_source)
-                        .unwrap_or_default()
-                })
-                .await;
+                let env = host_cx
+                    .unblock(move || {
+                        let secrets = settings_store.profile_secrets(&profile_id);
+                        launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
+                    })
+                    .await;
+                let source = host_cx
+                    .unblock(move || {
+                        binary
+                            .as_deref()
+                            .map(detect_install_source)
+                            .unwrap_or_default()
+                    })
+                    .await;
                 let installed = run_capture_env(&program, &["--version"], &env).await;
                 let latest = run_capture("npm", &["view", package, "version"]).await;
                 host_cx.enqueue(move |state, cx| {
@@ -2753,7 +2645,7 @@ impl AppState {
                     {
                         emit_runtime(
                             cx,
-                            AppEvent::Notice(RuntimeNotice::UpdateAvailable {
+                            RuntimeEvent::Notice(RuntimeNotice::UpdateAvailable {
                                 provider,
                                 version: version.clone(),
                             }),
@@ -2787,7 +2679,7 @@ impl AppState {
         self.emit_providers_status(cx);
         emit_runtime(
             cx,
-            AppEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
+            RuntimeEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
         );
         cx.notify();
         let host_cx = cx.clone();
@@ -2799,7 +2691,10 @@ impl AppState {
                     status.updating = false;
                 }
                 if ok {
-                    emit_runtime(cx, AppEvent::Notice(RuntimeNotice::UpdateDone { provider }));
+                    emit_runtime(
+                        cx,
+                        RuntimeEvent::Notice(RuntimeNotice::UpdateDone { provider }),
+                    );
                     // Refresh the version so the "update available" state clears.
                     state.check_provider_versions(cx);
                 } else {
@@ -2813,7 +2708,8 @@ impl AppState {
 
     /// The copyable update command for a provider whose install source has
     /// already been detected. The install-source detail stays inside runtime.
-    pub fn provider_update_command(&self, provider: ProviderKind) -> Option<String> {
+    #[cfg(test)]
+    fn provider_update_command(&self, provider: ProviderKind) -> Option<String> {
         let source = self.provider_versions.get(&provider)?.install_source;
         update_command_string(provider, source)
     }
@@ -2834,57 +2730,10 @@ impl AppState {
             .unwrap_or(&[])
     }
 
-    /// The provider's model list as the composer's picker sees it: the same
-    /// resolution, minus the models hidden on the provider card.
-    pub fn picker_models(&self, provider: ProviderKind) -> Vec<ResolvedModel> {
-        picker_models(
-            self.models_for(provider),
-            &self.settings.provider(provider),
-            &self.settings.favorite_models,
-        )
-    }
-
-    /// The model catalog backing a profile. The *built-in* profiles share the
-    /// kind's probed catalog; a *user* profile (a third-party endpoint) has its
-    /// own models, so it starts from an empty catalog and shows only the slugs
-    /// the user added to its card (e.g. Kimi's `k3[1m]`) — never the official
-    /// provider's model list.
-    fn catalog_for_profile(&self, id: &str) -> &[ModelSpec] {
-        if Settings::is_builtin_profile_id(id) {
-            self.models_for(self.profile_kind(id))
-        } else {
-            &[]
-        }
-    }
-
-    /// A profile's picker-visible model list (as [`Self::picker_models`], but
-    /// resolved against the profile's card).
-    pub fn picker_models_for_profile(&self, id: &str) -> Vec<ResolvedModel> {
-        picker_models(
-            self.catalog_for_profile(id),
-            &self.profile_settings(id),
-            &self.settings.favorite_models,
-        )
-    }
-
-    /// The model catalog backing a profile, owned (the provider dialog resolves
-    /// draft custom/hidden edits against it before Save; favorites stay live).
-    pub fn profile_catalog(&self, id: &str) -> Vec<ModelSpec> {
-        self.catalog_for_profile(id).to_vec()
-    }
-
-    /// Whether `provider`'s catalog is being fetched and no cache exists yet
-    /// (so the picker should show the "Loading models…" placeholder).
-    pub fn models_loading(&self, provider: ProviderKind) -> bool {
-        self.models_loading.get(&provider).copied().unwrap_or(false)
-            && self.models_for(provider).is_empty()
-    }
-
     pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut HostCx) {
         // Persist so the choice survives a restart (save errors are cosmetic).
         self.settings.sidebar_collapsed = collapsed;
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
         cx.notify();
     }
 
@@ -2912,7 +2761,7 @@ impl AppState {
         self.emit_git_status(cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let status = unblock(&host_cx, move || read_status(&cwd)).await;
+            let status = host_cx.unblock(move || read_status(&cwd)).await;
             host_cx.enqueue(move |state, cx| {
                 if state.git_status_generation == generation
                     && state.active_session_id().map(str::to_string) == session_id
@@ -2928,14 +2777,9 @@ impl AppState {
     fn refresh_session_git_branch(&mut self, session_id: String, cwd: PathBuf, cx: &mut HostCx) {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let branch = unblock(&host_cx, move || read_git_branch(&cwd)).await;
+            let branch = host_cx.unblock(move || read_git_branch(&cwd)).await;
             host_cx.enqueue(move |state, cx| {
-                if let Some(session) = state
-                    .active
-                    .as_mut()
-                    .filter(|session| session.meta.id == session_id)
-                    .or_else(|| state.background.get_mut(&session_id))
-                {
+                if let Some(session) = state.resident_mut(&session_id) {
                     session.git_branch = branch;
                     state.emit_session_status(&session_id, cx);
                     cx.notify();
@@ -2989,7 +2833,7 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         if self.git_busy {
-            emit_runtime(cx, AppEvent::Toast(RuntimeToast::GitBusy));
+            emit_runtime(cx, RuntimeEvent::Toast(RuntimeToast::GitBusy));
             return;
         }
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
@@ -3007,34 +2851,35 @@ impl AppState {
         };
         emit_runtime(
             cx,
-            AppEvent::Toast(RuntimeToast::GitStarted { operation, action }),
+            RuntimeEvent::Toast(RuntimeToast::GitStarted { operation, action }),
         );
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let (result, git_branch) = unblock(&host_cx, move || {
-                let result = perform_action(
-                    &cwd,
-                    action,
-                    message.as_deref(),
-                    included.as_deref(),
-                    feature_branch.as_deref(),
-                    current_branch.as_deref(),
-                );
-                let git_branch = read_git_branch(&cwd);
-                (result, git_branch)
-            })
-            .await;
+            let (result, git_branch) = host_cx
+                .unblock(move || {
+                    let result = perform_action(
+                        &cwd,
+                        action,
+                        message.as_deref(),
+                        included.as_deref(),
+                        feature_branch.as_deref(),
+                        current_branch.as_deref(),
+                    );
+                    let git_branch = read_git_branch(&cwd);
+                    (result, git_branch)
+                })
+                .await;
             host_cx.enqueue(move |state, cx| {
                 state.git_busy = false;
                 match &result {
                     Ok(_) => emit_runtime(
                         cx,
-                        AppEvent::Toast(RuntimeToast::GitSucceeded { operation, action }),
+                        RuntimeEvent::Toast(RuntimeToast::GitSucceeded { operation, action }),
                     ),
                     Err(detail) => emit_runtime(
                         cx,
-                        AppEvent::Toast(RuntimeToast::GitFailed {
+                        RuntimeEvent::Toast(RuntimeToast::GitFailed {
                             operation,
                             detail: detail.clone(),
                             retry,
@@ -3066,7 +2911,7 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let cache_dir = data_dir.clone();
-            let cached_registry = unblock(&host_cx, move || cached(&cache_dir)).await;
+            let cached_registry = host_cx.unblock(move || cached(&cache_dir)).await;
             host_cx.enqueue(move |state, cx| {
                 if state.acp_registry_loading && state.acp_registry.is_none() {
                     state.acp_registry = cached_registry;
@@ -3074,7 +2919,7 @@ impl AppState {
                     cx.notify();
                 }
             });
-            let result = unblock(&host_cx, move || load(&data_dir)).await;
+            let result = host_cx.unblock(move || load(&data_dir)).await;
             host_cx.enqueue(move |state, cx| {
                 state.acp_registry_loading = false;
                 match result {
@@ -3143,32 +2988,33 @@ impl AppState {
         let name = agent.name.clone();
         emit_runtime(
             cx,
-            AppEvent::Toast(RuntimeToast::AcpInstallStarted {
+            RuntimeEvent::Toast(RuntimeToast::AcpInstallStarted {
                 operation,
                 name: name.clone(),
             }),
         );
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = unblock(&host_cx, move || {
-                install(&agent, &data_dir, |_done, _total| {})
-            })
-            .await;
+            let result = host_cx
+                .unblock(move || install(&agent, &data_dir, |_done, _total| {}))
+                .await;
             host_cx.enqueue(move |state, cx| {
                 state.acp_installing.remove(&id);
                 match result {
                     Ok(installed) => {
                         state.settings.acp_agents.insert(id.clone(), installed);
-                        let settings = state.settings.clone();
-                        state.enqueue_settings(&settings, cx);
+                        state.persist_settings(cx);
                         emit_runtime(
                             cx,
-                            AppEvent::Toast(RuntimeToast::AcpInstallSucceeded { operation, name }),
+                            RuntimeEvent::Toast(RuntimeToast::AcpInstallSucceeded {
+                                operation,
+                                name,
+                            }),
                         );
                     }
                     Err(err) => emit_runtime(
                         cx,
-                        AppEvent::Toast(RuntimeToast::AcpInstallFailed {
+                        RuntimeEvent::Toast(RuntimeToast::AcpInstallFailed {
                             operation,
                             name,
                             detail: err.to_string(),
@@ -3185,19 +3031,19 @@ impl AppState {
     /// Remove an installed ACP agent (its files and its settings entry).
     pub fn remove_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
         self.settings.acp_agents.remove(id);
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
         self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            unblock(&host_cx, move || {
-                if let Err(err) = uninstall(&data_dir, &id) {
-                    log::warn!("could not remove ACP agent {id}: {err}");
-                }
-            })
-            .await;
+            host_cx
+                .unblock(move || {
+                    if let Err(err) = uninstall(&data_dir, &id) {
+                        log::warn!("could not remove ACP agent {id}: {err}");
+                    }
+                })
+                .await;
         });
         cx.notify();
     }
@@ -3231,8 +3077,7 @@ impl AppState {
                 launch_args: None,
             },
         );
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
         cx.notify();
     }
 
@@ -3246,10 +3091,23 @@ impl AppState {
                     agent.launch_args = launch_args;
                 }
             }
-            let settings = self.settings.clone();
-            self.enqueue_settings(&settings, cx);
+            self.persist_settings(cx);
             cx.notify();
         }
+    }
+
+    fn preview_draft_or_persist_active(&mut self, cx: &mut HostCx) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.draft {
+            self.emit_active_session_status(cx);
+            cx.notify();
+            return;
+        }
+        active.meta.updated_at = now_secs();
+        let meta = active.meta.clone();
+        self.persist_meta(&meta, cx);
     }
 
     /// Point the active draft at an installed ACP agent (the model picker's
@@ -3286,19 +3144,12 @@ impl AppState {
         active.provider_options.clear();
         active.provider_commands = provider_commands;
         active.pending_ultrathink = false;
-        if active.draft {
-            self.emit_active_session_status(cx);
-            cx.notify();
-            return;
-        }
         if active.pending_relay.is_some() {
             self.emit_active_session_status(cx);
             cx.notify();
             return;
         }
-        active.meta.updated_at = now_secs();
-        let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
+        self.preview_draft_or_persist_active(cx);
     }
 
     /// Reset user settings to defaults, preserving the sidebar's per-project
@@ -3343,6 +3194,16 @@ impl AppState {
         }
     }
 
+    fn terminal_prefs_mut(&mut self, key: String, count: usize) -> &mut TerminalPreferences {
+        self.terminal_preferences
+            .entry(key)
+            .or_insert(TerminalPreferences {
+                open: false,
+                height: 240.,
+                count,
+            })
+    }
+
     fn reopen_persisted_terminals(
         &mut self,
         preferences: Option<TerminalPreferences>,
@@ -3366,29 +3227,19 @@ impl AppState {
         if let Some(active) = self.active.as_ref() {
             let key = conversation_destination(active).preference_key();
             let count = active.terminal_workspace.terminals.len();
-            self.terminal_preferences
-                .entry(key)
-                .or_insert(TerminalPreferences {
-                    open: false,
-                    height: 240.,
-                    count,
-                })
-                .count = count;
+            self.terminal_prefs_mut(key, count).count = count;
         }
         self.write_terminal_preferences(cx);
     }
 
     pub fn set_terminal_height(&mut self, height: f32, cx: &mut HostCx) {
-        if let Some(active) = self.active.as_ref() {
-            let key = conversation_destination(active).preference_key();
-            self.terminal_preferences
-                .entry(key)
-                .or_insert(TerminalPreferences {
-                    open: false,
-                    height,
-                    count: active.terminal_workspace.terminals.len(),
-                })
-                .height = height;
+        if let Some((key, count)) = self.active.as_ref().map(|active| {
+            (
+                conversation_destination(active).preference_key(),
+                active.terminal_workspace.terminals.len(),
+            )
+        }) {
+            self.terminal_prefs_mut(key, count).height = height;
             self.write_terminal_preferences(cx);
         }
     }
@@ -3430,7 +3281,7 @@ impl AppState {
         let cwd = term::Terminal::resolve_spawn_cwd(cwd);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = unblock(&host_cx, move || term::Terminal::spawn(cwd)).await;
+            let result = host_cx.unblock(move || term::Terminal::spawn(cwd)).await;
             host_cx.enqueue(move |state, cx| {
                 let pending = state
                     .pending_terminal_spawns
@@ -3558,14 +3409,7 @@ impl AppState {
             return;
         };
         let key = destination.preference_key();
-        self.terminal_preferences
-            .entry(key)
-            .or_insert(TerminalPreferences {
-                open: true,
-                height: 240.,
-                count,
-            })
-            .open = true;
+        self.terminal_prefs_mut(key, count).open = true;
         self.write_terminal_preferences(cx);
         if terminals_empty {
             let already_pending =
@@ -3597,14 +3441,7 @@ impl AppState {
         if let Some(active) = self.active.as_ref() {
             let key = conversation_destination(active).preference_key();
             let count = active.terminal_workspace.terminals.len();
-            self.terminal_preferences
-                .entry(key)
-                .or_insert(TerminalPreferences {
-                    open: false,
-                    height: 240.,
-                    count,
-                })
-                .open = false;
+            self.terminal_prefs_mut(key, count).open = false;
             self.write_terminal_preferences(cx);
             cx.notify();
         }
@@ -3827,11 +3664,6 @@ impl AppState {
         self.clear_review_comments(cx);
     }
 
-    /// The current sidebar sort mode (for the sort button tooltip/label).
-    pub fn project_sort(&self) -> ProjectSort {
-        self.settings.project_sort
-    }
-
     /// Cycle the sidebar PROJECTS ordering and persist it.
     pub fn cycle_project_sort(&mut self, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
@@ -3862,7 +3694,7 @@ impl AppState {
             .map(|project| project.root.clone())
             .collect();
         let sessions = self.sessions.clone();
-        unblock(executor, move || {
+        executor.unblock(move || {
             let known = existing_external_ids(&sessions);
             let mut recent = scan_recent_dirs(&ExternalRoots::detect(), &exclude);
             for dir in &mut recent {
@@ -3890,28 +3722,29 @@ impl AppState {
         let store = self.store.clone();
         let metas = self.sessions.clone();
         let (sender, receiver) = smol::channel::unbounded();
-        unblock(executor, move || {
-            let total = threads.len();
-            let mut imported = 0;
-            let mut skipped = 0;
-            let mut existing = existing_external_ids(&metas);
-            for (index, thread) in threads.into_iter().enumerate() {
-                let tool = thread.source.display_name().to_string();
-                match import_thread(&store, &project, &thread, &mut existing) {
-                    ImportOutcome::Imported => imported += 1,
-                    ImportOutcome::SkippedDuplicate
-                    | ImportOutcome::SkippedEmpty
-                    | ImportOutcome::Failed(_) => skipped += 1,
+        executor
+            .unblock(move || {
+                let total = threads.len();
+                let mut imported = 0;
+                let mut skipped = 0;
+                let mut existing = existing_external_ids(&metas);
+                for (index, thread) in threads.into_iter().enumerate() {
+                    let tool = thread.source.display_name().to_string();
+                    match import_thread(&store, &project, &thread, &mut existing) {
+                        ImportOutcome::Imported => imported += 1,
+                        ImportOutcome::SkippedDuplicate
+                        | ImportOutcome::SkippedEmpty
+                        | ImportOutcome::Failed(_) => skipped += 1,
+                    }
+                    let _ = sender.try_send(ExternalImportUpdate::Progress {
+                        done: index + 1,
+                        total,
+                        tool,
+                    });
                 }
-                let _ = sender.try_send(ExternalImportUpdate::Progress {
-                    done: index + 1,
-                    total,
-                    tool,
-                });
-            }
-            let _ = sender.try_send(ExternalImportUpdate::Finished { imported, skipped });
-        })
-        .detach();
+                let _ = sender.try_send(ExternalImportUpdate::Finished { imported, skipped });
+            })
+            .detach();
         Some(receiver)
     }
 
@@ -3921,9 +3754,7 @@ impl AppState {
         cwd: Option<PathBuf>,
         executor: &HostCx,
     ) -> HostTask<Vec<PathEntry>> {
-        unblock(executor, move || {
-            cwd.map(|cwd| list_workspace(&cwd)).unwrap_or_default()
-        })
+        executor.unblock(move || cwd.map(|cwd| list_workspace(&cwd)).unwrap_or_default())
     }
 
     /// Reload sessions written by the external-history importer and expand its
@@ -3959,15 +3790,34 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
-    pub fn is_project_collapsed(&self, project_id: &str) -> bool {
-        self.settings
-            .collapsed_projects
-            .iter()
-            .any(|id| id == project_id)
-    }
-
     pub fn active_session_id(&self) -> Option<&str> {
         self.active.as_ref().map(|a| a.meta.id.as_str())
+    }
+
+    fn resident(&self, id: &str) -> Option<&ActiveSession> {
+        self.active
+            .as_ref()
+            .filter(|session| session.meta.id == id)
+            .or_else(|| self.background.get(id))
+    }
+
+    fn resident_mut(&mut self, id: &str) -> Option<&mut ActiveSession> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|session| session.meta.id == id)
+        {
+            return self.active.as_mut();
+        }
+        self.background.get_mut(id)
+    }
+
+    fn find_meta(&self, id: &str) -> Option<SessionMeta> {
+        self.sessions
+            .iter()
+            .find(|meta| meta.id == id)
+            .cloned()
+            .or_else(|| self.resident(id).map(|session| session.meta.clone()))
     }
 
     /// Directory where one session's image attachments are persisted.
@@ -3994,7 +3844,7 @@ impl AppState {
         computer_use_mcp::config::set(self.settings.computer_use.clone());
         emit_runtime(
             cx,
-            AppEvent::Effect(RuntimeEffect::ApplyLocale { language }),
+            RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { language }),
         );
         self.emit_providers_status(cx);
         cx.notify();
@@ -4152,11 +4002,8 @@ impl AppState {
         if title.is_empty() {
             return;
         }
-        if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
-            active.meta.title = title.to_string();
-        }
-        if let Some(background) = self.background.get_mut(session_id) {
-            background.meta.title = title.to_string();
+        if let Some(session) = self.resident_mut(session_id) {
+            session.meta.title = title.to_string();
         }
         if let Some(meta) = self.sessions.iter_mut().find(|m| m.id == session_id) {
             meta.title = title.to_string();
@@ -4289,14 +4136,15 @@ impl AppState {
         self.settings.last_visited.remove(session_id);
         self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
         self.sessions.retain(|meta| meta.id != session_id);
         if let Some((root, cwd)) = worktree_remove {
             let deleted_id = session_id.to_string();
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
-                let result = unblock(&host_cx, move || remove_git_worktree(&root, &cwd)).await;
+                let result = host_cx
+                    .unblock(move || remove_git_worktree(&root, &cwd))
+                    .await;
                 host_cx.enqueue(move |state, cx| {
                     if let Err(err) = result
                         && !state.sessions.iter().any(|meta| meta.id == deleted_id)
@@ -4348,18 +4196,14 @@ impl AppState {
         self.settings
             .collapsed_projects
             .retain(|id| id != project_id);
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
         cx.notify();
     }
 
     /// Whether `session_id` owns live or queued work.
     pub fn turn_running_for(&self, session_id: &str) -> bool {
-        self.active
-            .as_ref()
-            .filter(|session| session.meta.id == session_id)
-            .or_else(|| self.background.get(session_id))
+        self.resident(session_id)
             .is_some_and(ActiveSession::has_work)
     }
 
@@ -4379,7 +4223,8 @@ impl AppState {
     /// flight, an unacknowledged delivery, queued messages, or provider
     /// background tasks. Quitting stops all of it, so the quit guard must gate
     /// on this rather than on turns alone.
-    pub fn working_sessions_count(&self) -> usize {
+    #[cfg(test)]
+    fn working_sessions_count(&self) -> usize {
         usize::from(self.active.as_ref().is_some_and(ActiveSession::has_work))
             + self
                 .background
@@ -4393,8 +4238,7 @@ impl AppState {
         self.settings
             .last_visited
             .insert(session_id.to_string(), now_secs());
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
     }
 
     /// Mark a thread unread (context menu): set its last-visited just below its
@@ -4409,8 +4253,7 @@ impl AppState {
         self.settings
             .last_visited
             .insert(session_id.to_string(), updated.saturating_sub(1));
-        let settings = self.settings.clone();
-        self.enqueue_settings(&settings, cx);
+        self.persist_settings(cx);
         cx.notify();
     }
 
@@ -4430,11 +4273,6 @@ impl AppState {
     }
 
     // -- worktree mode (Group C) --------------------------------------------
-
-    /// Whether a worktree is being prepared for the active thread's first send.
-    pub fn preparing_worktree(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.preparing_worktree)
-    }
 
     /// Choose the draft's workspace mode (checkout-row picker). No-op unless the
     /// active thread is an unstarted draft.
@@ -4472,19 +4310,20 @@ impl AppState {
         let branch_for_task = branch.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = unblock(&host_cx, move || {
-                create_git_worktree(
-                    &root_for_task,
-                    &path_for_task,
-                    &branch_for_task,
-                    &base_for_task,
-                )
-                .map(|worktree_path| {
-                    let git_branch = read_git_branch(&worktree_path);
-                    (worktree_path, git_branch)
+            let result = host_cx
+                .unblock(move || {
+                    create_git_worktree(
+                        &root_for_task,
+                        &path_for_task,
+                        &branch_for_task,
+                        &base_for_task,
+                    )
+                    .map(|worktree_path| {
+                        let git_branch = read_git_branch(&worktree_path);
+                        (worktree_path, git_branch)
+                    })
                 })
-            })
-            .await;
+                .await;
             host_cx.enqueue(move |state, cx| {
                 let Some(active) = state
                     .active
@@ -4520,58 +4359,6 @@ impl AppState {
                 state.emit_session_status(&session_id, cx);
             });
         });
-    }
-
-    /// Create a new session, make it active, and start its provider process.
-    #[allow(clippy::too_many_arguments)] // provider + profile + acp + project ids
-    pub fn create_session(
-        &mut self,
-        provider: ProviderKind,
-        cwd: PathBuf,
-        model: Option<String>,
-        project_id: Option<String>,
-        // Which installed ACP agent to run (required when `provider` is
-        // `ProviderKind::Acp`, ignored otherwise).
-        acp_agent_id: Option<String>,
-        // Which provider profile to run against (`None` = the built-in profile
-        // for `provider`; `Some(id)` selects a user-created profile).
-        profile_id: Option<String>,
-        cx: &mut HostCx,
-    ) {
-        let mut meta = SessionMeta::new(provider, cwd, model);
-        meta.acp_agent_id = acp_agent_id;
-        meta.profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
-        // Associate with the given project, or derive one from the cwd.
-        meta.project_id = match project_id {
-            Some(id) if self.projects.iter().any(|p| p.id == id) => Some(id),
-            _ => self.create_project(meta.cwd.clone(), cx),
-        };
-        self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
-                initial: true,
-            },
-            cx,
-        );
-        self.upsert_session_in_memory(meta.clone());
-        self.park_active(cx);
-        let session_id = meta.id.clone();
-        let cwd = meta.cwd.clone();
-        let provider_commands =
-            self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
-        self.active = Some(ActiveSession::new(meta, false, provider_commands));
-        self.emit_domain(
-            Topic::SessionEvents {
-                session_id: session_id.clone(),
-            },
-            ServerEvent::SessionSnapshot(Vec::new()),
-            cx,
-        );
-        self.emit_session_status(&session_id, cx);
-        self.refresh_session_git_branch(session_id, cwd, cx);
-        self.ensure_started(cx);
-        self.refresh_git_status(cx);
-        cx.notify();
     }
 
     // -- draft threads ------------------------------------------------------
@@ -4909,8 +4696,7 @@ impl AppState {
                 self.ensure_started(cx);
             }
             self.refresh_git_status(cx);
-            self.emit_active_session_status(cx);
-            cx.notify();
+            self.preview_draft_or_persist_active(cx);
             return;
         }
 
@@ -5066,19 +4852,22 @@ impl AppState {
     /// Custom profiles show their card title so a same-kind profile switch
     /// (e.g. official Claude → an Anthropic-compatible endpoint) reads as the
     /// backend change it is.
-    pub fn relay_confirmation(&self) -> Option<(String, String)> {
+    fn provider_label(&self, provider: ProviderKind, profile: Option<&str>) -> String {
+        match profile {
+            Some(id) => self.settings.profile_display_name(id),
+            None => provider.display_name().to_string(),
+        }
+    }
+
+    fn relay_confirmation(&self) -> Option<(String, String)> {
         let active = self.active.as_ref()?;
         let pending = active.pending_relay.as_ref()?;
         if !has_meaningful_history(&active.timeline) {
             return None;
         }
-        let label = |provider: ProviderKind, profile: Option<&str>| match profile {
-            Some(id) => self.settings.profile_display_name(id),
-            None => provider.display_name().to_string(),
-        };
         Some((
-            label(pending.from_provider, pending.from_profile.as_deref()),
-            label(active.meta.provider, active.meta.profile_id.as_deref()),
+            self.provider_label(pending.from_provider, pending.from_profile.as_deref()),
+            self.provider_label(active.meta.provider, active.meta.profile_id.as_deref()),
         ))
     }
 
@@ -5260,10 +5049,7 @@ impl AppState {
             return;
         };
         if self
-            .active
-            .as_ref()
-            .filter(|child| child.meta.id == child_id)
-            .or_else(|| self.background.get(child_id))
+            .resident(child_id)
             .is_some_and(|child| !child.queue.is_empty())
         {
             return;
@@ -5275,10 +5061,9 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let read_id = child_id.clone();
-            let timeline = unblock(&host_cx, move || {
-                Timeline::fold_events(store.read_events(&read_id))
-            })
-            .await;
+            let timeline = host_cx
+                .unblock(move || Timeline::fold_events(store.read_events(&read_id)))
+                .await;
             host_cx.enqueue(move |state, cx| {
                 let child_still_exists = state.sessions.iter().any(|meta| {
                     meta.id == child_id
@@ -5367,20 +5152,14 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let can_steer = self
-            .active
-            .as_ref()
-            .filter(|parent| parent.meta.id == parent_id)
-            .or_else(|| self.background.get(parent_id))
+            .resident(parent_id)
             .is_some_and(|parent| parent.turn_in_flight && parent.supports_steering());
         if can_steer {
             // A steered callback is already part of this turn, so persist it just
             // like a user-triggered steer before handing it to the provider.
             let request_id = self.record_steer_request(parent_id, &text, &[], cx);
             let sent = self
-                .active
-                .as_mut()
-                .filter(|parent| parent.meta.id == parent_id)
-                .or_else(|| self.background.get_mut(parent_id))
+                .resident_mut(parent_id)
                 .is_some_and(|parent| parent.steer_now(request_id, text, Vec::new()).is_ok());
             if !sent {
                 self.report_error(RuntimeError::ProcessGone, cx);
@@ -5706,9 +5485,7 @@ impl AppState {
                 cx.notify();
                 return;
             }
-            active.meta.updated_at = now_secs();
-            let meta = active.meta.clone();
-            self.persist_meta(&meta, cx);
+            self.preview_draft_or_persist_active(cx);
             return;
         }
         if active.meta.model == model {
@@ -5722,9 +5499,7 @@ impl AppState {
             cx.notify();
             return;
         }
-        active.meta.updated_at = now_secs();
-        let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
+        self.preview_draft_or_persist_active(cx);
     }
 
     // -- traits (option selections) -----------------------------------------
@@ -5766,14 +5541,7 @@ impl AppState {
             });
             active.live_option_selections = active.meta.option_selections.clone();
         }
-        if active.draft {
-            self.emit_active_session_status(cx);
-            cx.notify();
-            return;
-        }
-        active.meta.updated_at = now_secs();
-        let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
+        self.preview_draft_or_persist_active(cx);
     }
 
     /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
@@ -5785,19 +5553,6 @@ impl AppState {
             self.emit_active_session_status(cx);
             cx.notify();
         }
-    }
-
-    /// Whether an Ultrathink turn is currently armed for the active session.
-    pub fn ultrathink_armed(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.pending_ultrathink)
-    }
-
-    /// Whether a live launch-time option change will restart the provider on the
-    /// next turn (for the traits popover's "restart" note).
-    pub fn options_pending_restart(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(ActiveSession::options_changed_while_live)
     }
 
     // -- interaction mode (Build / Plan) ------------------------------------
@@ -5824,14 +5579,7 @@ impl AppState {
         if let Runtime::Live(commands) = &active.runtime {
             let _ = commands.try_send(SessionCommand::SetInteractionMode(mode));
         }
-        if active.draft {
-            self.emit_active_session_status(cx);
-            cx.notify();
-            return;
-        }
-        active.meta.updated_at = now_secs();
-        let meta = active.meta.clone();
-        self.persist_meta(&meta, cx);
+        self.preview_draft_or_persist_active(cx);
     }
 
     /// Toggle Build ↔ Plan (the chip click and Shift+Tab).
@@ -5969,7 +5717,7 @@ impl AppState {
     pub fn copy_plan(&mut self, markdown: String, cx: &mut HostCx) {
         emit_runtime(
             cx,
-            AppEvent::Effect(RuntimeEffect::CopyToClipboard { text: markdown }),
+            RuntimeEvent::Effect(RuntimeEffect::CopyToClipboard { text: markdown }),
         );
     }
 
@@ -5981,31 +5729,10 @@ impl AppState {
         };
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = unblock(&host_cx, move || {
-                user_files::save_plan_to_workspace(&cwd, &markdown)
-            })
-            .await;
-            host_cx.enqueue(move |state, cx| {
-                match result {
-                    Ok(path) => {
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        emit_runtime(
-                            cx,
-                            AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
-                        );
-                    }
-                    Err(err) => state.report_error(
-                        RuntimeError::PersistEvent {
-                            error: err.to_string(),
-                        },
-                        cx,
-                    ),
-                }
-                cx.notify();
-            });
+            let result = host_cx
+                .unblock(move || user_files::save_plan_to_workspace(&cwd, &markdown))
+                .await;
+            host_cx.enqueue(move |state, cx| state.notify_plan_saved(result, cx));
         });
     }
 
@@ -6017,41 +5744,35 @@ impl AppState {
         let fallback_cwd = self.active.as_ref().map(|a| a.meta.cwd.clone());
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = unblock(&host_cx, move || {
-                user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
-            })
-            .await;
-            host_cx.enqueue(move |state, cx| {
-                match result {
-                    Ok(path) => {
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        emit_runtime(
-                            cx,
-                            AppEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
-                        );
-                    }
-                    Err(err) => state.report_error(
-                        RuntimeError::PersistEvent {
-                            error: err.to_string(),
-                        },
-                        cx,
-                    ),
-                }
-                cx.notify();
-            });
+            let result = host_cx
+                .unblock(move || {
+                    user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
+                })
+                .await;
+            host_cx.enqueue(move |state, cx| state.notify_plan_saved(result, cx));
         });
     }
 
-    /// The active session's latest structured plan steps and proposed plan (for
-    /// the plan/task panel).
-    pub fn plan_steps(&self) -> Vec<agent::PlanStep> {
-        self.active
-            .as_ref()
-            .map(|a| a.timeline.plan_steps.clone())
-            .unwrap_or_default()
+    fn notify_plan_saved(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
+        match result {
+            Ok(path) => {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                emit_runtime(
+                    cx,
+                    RuntimeEvent::Notice(RuntimeNotice::PlanSaved { file: name }),
+                );
+            }
+            Err(error) => self.report_error(
+                RuntimeError::PersistEvent {
+                    error: error.to_string(),
+                },
+                cx,
+            ),
+        }
+        cx.notify();
     }
 
     // -- git branch picker (checkout row) -----------------------------------
@@ -6066,7 +5787,7 @@ impl AppState {
         let session_id = active.meta.id.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let branches = unblock(&host_cx, move || list_git_branches(&cwd)).await;
+            let branches = host_cx.unblock(move || list_git_branches(&cwd)).await;
             host_cx.enqueue(move |state, cx| {
                 if let Some(active) = state.active.as_mut()
                     && active.meta.id == session_id
@@ -6081,7 +5802,7 @@ impl AppState {
 
     /// Check out `branch` in the active session's cwd, if the working tree is
     /// clean. Runs git off the main thread; reports success/failure as an
-    /// `AppEvent` the chat view turns into a notification.
+    /// `RuntimeEvent` the chat view turns into a notification.
     pub fn checkout_branch(&mut self, branch: String, cx: &mut HostCx) {
         let Some(active) = self.active.as_ref() else {
             return;
@@ -6094,7 +5815,9 @@ impl AppState {
         let branch_for_task = branch.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = unblock(&host_cx, move || checkout_if_clean(&cwd, &branch_for_task)).await;
+            let result = host_cx
+                .unblock(move || checkout_if_clean(&cwd, &branch_for_task))
+                .await;
             host_cx.enqueue(move |state, cx| {
                 match result {
                     Ok(()) => {
@@ -6108,27 +5831,19 @@ impl AppState {
                         }
                         emit_runtime(
                             cx,
-                            AppEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
+                            RuntimeEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
                         );
                     }
                     Err(CheckoutError::Dirty) => {
-                        emit_runtime(cx, AppEvent::Error(RuntimeError::DirtyTree));
+                        emit_runtime(cx, RuntimeEvent::Error(RuntimeError::DirtyTree));
                     }
                     Err(CheckoutError::Git(message)) => {
-                        emit_runtime(cx, AppEvent::Error(RuntimeError::External(message)))
+                        emit_runtime(cx, RuntimeEvent::Error(RuntimeError::External(message)))
                     }
                 }
                 cx.notify();
             });
         });
-    }
-
-    /// Whether the live provider is running a different model than the one now
-    /// selected — used by the model picker to show the "restart" footer note.
-    pub fn model_pending_restart(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(ActiveSession::model_changed_while_live)
     }
 
     /// Select `mode` for the active session and persist it. Claude applies the
@@ -6156,14 +5871,6 @@ impl AppState {
 
         let meta = active.meta.clone();
         self.persist_meta(&meta, cx);
-    }
-
-    /// Whether changing approval mode will restart the live provider on the next
-    /// turn (Codex) — used by the permission picker to show a "restart" note.
-    pub fn approval_pending_restart(&self) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(ActiveSession::approval_mode_changed_while_live)
     }
 
     /// Toggle a model id in the persisted favorites list.
@@ -6238,7 +5945,8 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn native_rewind_pending(&self) -> bool {
+    #[cfg(test)]
+    fn native_rewind_pending(&self) -> bool {
         self.active_session_id()
             .is_some_and(|id| self.pending_native_rewinds.contains_key(id))
     }
@@ -6272,12 +5980,7 @@ impl AppState {
             .checked_add(1)
             .expect("provider start generation overflow");
         let generation = self.next_start_generation;
-        let active = self
-            .active
-            .as_mut()
-            .filter(|active| active.meta.id == session_id)
-            .or_else(|| self.background.get_mut(session_id))
-            .unwrap();
+        let active = self.resident_mut(session_id).unwrap();
         active.runtime = Runtime::Starting { generation };
         active.idle_since = None;
         // Remember the model + approval mode this process is being launched
@@ -6312,10 +6015,9 @@ impl AppState {
         HostCx::spawn_detached(cx, async move {
             let env_meta = meta.clone();
             let env_settings = settings.clone();
-            let launch_env = unblock(&host_cx, move || {
-                session_launch_env(&env_settings, &settings_store, &env_meta)
-            })
-            .await;
+            let launch_env = host_cx
+                .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
+                .await;
             let opts = session_options(
                 &meta,
                 &settings,
@@ -6469,10 +6171,7 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let still_owned = self
-            .active
-            .as_ref()
-            .filter(|active| active.meta.id == session_id)
-            .or_else(|| self.background.get(session_id))
+            .resident(session_id)
             .is_some_and(|session| match &session.runtime {
                 Runtime::Live(current) => current.same_channel(pump_commands),
                 _ => false,
@@ -6781,13 +6480,13 @@ impl AppState {
                 }
                 emit_runtime(
                     cx,
-                    AppEvent::Notice(RuntimeNotice::NativeRewindCompleted { mode: *mode }),
+                    RuntimeEvent::Notice(RuntimeNotice::NativeRewindCompleted { mode: *mode }),
                 );
             }
             AgentEvent::Error { message, .. } => {
                 emit_runtime(
                     cx,
-                    AppEvent::Error(RuntimeError::ProviderMessage(message.clone())),
+                    RuntimeEvent::Error(RuntimeError::ProviderMessage(message.clone())),
                 );
             }
             AgentEvent::Warning { message } => {
@@ -6796,7 +6495,7 @@ impl AppState {
                 // hides them from the person who needs to act on them.
                 emit_runtime(
                     cx,
-                    AppEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
+                    RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
                 );
             }
             _ => {}
@@ -6925,12 +6624,8 @@ impl AppState {
             },
             cx,
         );
-        if let Some(active) = self.active.as_mut()
-            && active.meta.id == session_id
-        {
-            active.timeline.apply_at(Some(ts), event);
-        } else if let Some(background) = self.background.get_mut(session_id) {
-            background.timeline.apply_at(Some(ts), event);
+        if let Some(session) = self.resident_mut(session_id) {
+            session.timeline.apply_at(Some(ts), event);
         }
     }
 
@@ -6977,10 +6672,9 @@ impl AppState {
         HostCx::spawn_detached(cx, async move {
             let env_meta = title_meta.clone();
             let env_settings = settings.clone();
-            let launch_env = unblock(&host_cx, move || {
-                session_launch_env(&env_settings, &settings_store, &env_meta)
-            })
-            .await;
+            let launch_env = host_cx
+                .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
+                .await;
             let options = session_options(&title_meta, &settings, launch_env, None, None, None);
             let title =
                 generate_ai_title(title_meta.provider, options, source, attachments, executor)
@@ -7015,12 +6709,10 @@ impl AppState {
     }
 
     fn meta_mut(&mut self, session_id: &str) -> Option<&mut SessionMeta> {
-        if let Some(active) = self.active.as_mut().filter(|a| a.meta.id == session_id) {
-            return Some(&mut active.meta);
-        }
         // Parked sessions keep receiving meta updates (resume cursor, updated_at)
         // — losing the cursor while parked would break the next cold resume.
-        self.background.get_mut(session_id).map(|s| &mut s.meta)
+        self.resident_mut(session_id)
+            .map(|session| &mut session.meta)
     }
 
     fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
@@ -7034,8 +6726,7 @@ impl AppState {
             let visited = visited.or_insert(meta.updated_at);
             if *visited < meta.updated_at {
                 *visited = meta.updated_at;
-                let settings = self.settings.clone();
-                self.enqueue_settings(&settings, cx);
+                self.persist_settings(cx);
             }
         }
         self.enqueue_store_write(
@@ -7161,7 +6852,7 @@ impl AppState {
         let resident_idle_grace = self.resident_idle_grace;
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            host_cx.timer(resident_idle_grace).await;
+            smol::Timer::after(resident_idle_grace).await;
             host_cx.enqueue(move |state, cx| {
                 let still_idle = state.background.get(&session_id).is_some_and(|session| {
                     session.idle_since == Some(idle_since)
@@ -7218,7 +6909,7 @@ impl AppState {
 
     fn report_error(&mut self, error: RuntimeError, cx: &mut HostCx) {
         log::error!("{error:?}");
-        emit_runtime(cx, AppEvent::Error(error));
+        emit_runtime(cx, RuntimeEvent::Error(error));
     }
 }
 
@@ -7829,10 +7520,9 @@ async fn generate_ai_title(
     // scratch cwd gives us another cheap boundary.
     let scratch = std::env::temp_dir().join(format!("tcode-title-{}", uuid::Uuid::new_v4()));
     let scratch_for_create = scratch.clone();
-    if let Err(err) = unblock(&executor, move || {
-        std::fs::create_dir_all(&scratch_for_create)
-    })
-    .await
+    if let Err(err) = executor
+        .unblock(move || std::fs::create_dir_all(&scratch_for_create))
+        .await
     {
         log::debug!("could not create AI title scratch directory: {err}");
         return None;
@@ -7847,7 +7537,9 @@ async fn generate_ai_title(
         },
     )
     .await;
-    let _ = unblock(&executor, move || std::fs::remove_dir_all(scratch)).await;
+    let _ = executor
+        .unblock(move || std::fs::remove_dir_all(scratch))
+        .await;
     generated
 }
 

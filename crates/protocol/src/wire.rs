@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{
-    Command, CommandResponse, EventEnvelope, Hello, HelloAck, Query, QueryResponse, Topic,
-};
+use crate::{Command, CommandResponse, EventEnvelope, Query, QueryResponse, Topic};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolError {
@@ -33,8 +31,6 @@ pub enum ClientPayload {
     Command(Command),
     Query(Query),
     Subscribe(Subscription),
-    Unsubscribe(Subscription),
-    Hello(Hello),
 }
 
 #[non_exhaustive]
@@ -51,13 +47,11 @@ pub enum HostMessage {
         result: Result<QueryResponse, ProtocolError>,
     },
     Event(EventEnvelope),
-    HelloAck(HelloAck),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     pub topic: Topic,
-    pub after_seq: Option<u64>,
 }
 
 /// Encode one NDJSON record, including its trailing newline.

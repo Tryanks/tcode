@@ -247,10 +247,8 @@ impl PartialEq for IndexSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeSnapshot {
-    pub notifications: Vec<RuntimeNotification>,
-}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSnapshot;
 
 /// Protocol-owned mirror of `tcode_runtime::event::RuntimeEvent`.
 #[non_exhaustive]

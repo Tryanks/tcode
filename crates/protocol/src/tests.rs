@@ -35,18 +35,6 @@ fn round_trip_client_payload(id: u64, payload: ClientPayload) {
 
 #[test]
 fn round_trips_top_level_wire_types() {
-    let hello = Hello {
-        protocol_version: PROTOCOL_VERSION,
-        app_version: "0.1.0".into(),
-        capabilities: vec!["terminal".into()],
-    };
-    round_trip(&hello);
-    round_trip(&HelloAck {
-        protocol_version: PROTOCOL_VERSION,
-        app_version: "0.1.0".into(),
-        capabilities: vec!["terminal".into()],
-    });
-
     let command = Command::SendTurn {
         text: "hello".into(),
         attachment_paths: vec![PathBuf::from("/tmp/image.png")],
@@ -66,7 +54,6 @@ fn round_trips_top_level_wire_types() {
         topic: Topic::SessionEvents {
             session_id: "session-1".into(),
         },
-        after_seq: Some(4),
     };
     round_trip(&subscription);
 
@@ -253,14 +240,6 @@ fn representative_commands_and_queries_cross_ndjson() {
     );
     let commands = vec![
         Command::ApplyPendingRelaunch,
-        Command::CreateSession {
-            provider: ProviderKind::Codex,
-            cwd: PathBuf::from("/tmp/project"),
-            model: Some("gpt-5".into()),
-            project_id: Some("project-1".into()),
-            acp_agent_id: None,
-            profile_id: Some("codex".into()),
-        },
         Command::OrchestrateTurn {
             text: "coordinate".into(),
             attachment_paths: vec![PathBuf::from("/tmp/input.png")],
@@ -365,10 +344,6 @@ fn representative_commands_and_queries_cross_ndjson() {
         Query::GenerateCommitMessage {
             included: Some(vec!["src/lib.rs".into()]),
         },
-        Query::SecretPresence {
-            profile_id: "codex".into(),
-            name: "OPENAI_API_KEY".into(),
-        },
         Query::LoadGitDiff {
             cwd: PathBuf::from("/tmp/project"),
             scope: GitDiffScope::Branch,
@@ -379,10 +354,6 @@ fn representative_commands_and_queries_cross_ndjson() {
             dir: PathBuf::from("/tmp/attachments"),
             bytes: vec![0, b'\n', 255],
             ext: "png".into(),
-        },
-        Query::RelativizeToWorkspace {
-            path: "/tmp/project/src/lib.rs".into(),
-            cwd: PathBuf::from("/tmp/project"),
         },
     ];
     for (offset, query) in queries.into_iter().enumerate() {
@@ -427,13 +398,11 @@ fn every_correlated_response_crosses_ndjson() {
             threads: Vec::new(),
         }]),
         QueryResponse::CommitMessage("message".into()),
-        QueryResponse::SecretPresence(true),
         QueryResponse::GitDiff(GitDiffResult::default()),
         QueryResponse::FileBytes(vec![0, b'\n', 255]),
         QueryResponse::SavedAttachment(PathBuf::from("/tmp/attachment.png")),
         QueryResponse::UserFileRemoved,
         QueryResponse::IsDirectory(true),
-        QueryResponse::RelativePath("src/lib.rs".into()),
     ];
     for (offset, response) in query_responses.into_iter().enumerate() {
         let message = HostMessage::QueryResult {
@@ -488,13 +457,7 @@ fn round_trips_event_and_snapshot_families() {
         feature_branch: None,
     });
     round_trip(&RuntimeOperationId(17));
-    round_trip(&RuntimeSnapshot {
-        notifications: vec![RuntimeNotification::Effect(
-            RuntimeEffect::CopyToClipboard {
-                text: "plan".into(),
-            },
-        )],
-    });
+    round_trip(&RuntimeSnapshot);
 }
 
 #[test]
@@ -529,19 +492,17 @@ fn round_trips_query_dto_families() {
 fn client_message_ndjson_loopback() {
     let message = ClientMessage {
         id: 42,
-        payload: ClientPayload::Query(Query::SecretPresence {
-            profile_id: "claude".into(),
-            name: "ANTHROPIC_API_KEY".into(),
+        payload: ClientPayload::Query(Query::IsDirectory {
+            path: PathBuf::from("/tmp/project"),
         }),
     };
     let line = encode_line(&message).unwrap();
     assert!(line.ends_with('\n'));
     let decoded = decode_client_line(&line).unwrap();
     match decoded.payload {
-        ClientPayload::Query(Query::SecretPresence { profile_id, name }) => {
+        ClientPayload::Query(Query::IsDirectory { path }) => {
             assert_eq!(decoded.id, 42);
-            assert_eq!(profile_id, "claude");
-            assert_eq!(name, "ANTHROPIC_API_KEY");
+            assert_eq!(path, PathBuf::from("/tmp/project"));
         }
         other => panic!("unexpected payload: {other:?}"),
     }

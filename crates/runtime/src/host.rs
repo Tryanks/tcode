@@ -99,6 +99,14 @@ impl HostCx {
         smol::spawn(fut)
     }
 
+    pub fn unblock<R, F>(&self, f: F) -> HostTask<R>
+    where
+        R: Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
+    {
+        self.spawn_background(smol::unblock(f))
+    }
+
     pub fn enqueue(&self, f: impl FnOnce(&mut AppState, &mut HostCx) + Send + 'static) {
         let _ = self.mailbox.try_send(HostMsg::Enqueued(Box::new(f)));
     }
@@ -115,12 +123,6 @@ impl HostCx {
             .await
             .map_err(|_| ())?;
         receiver.recv().await.map_err(|_| ())
-    }
-
-    pub(crate) fn timer(&self, duration: std::time::Duration) -> HostTask<()> {
-        self.spawn_background(async move {
-            smol::Timer::after(duration).await;
-        })
     }
 
     pub fn spawn_detached(&self, fut: impl Future<Output = ()> + Send + 'static) {

@@ -291,7 +291,7 @@ impl ProviderDialog {
                     value: None,
                 });
             }
-            store.dispatch(Command::ReloadProvider { provider });
+            store.dispatch(Command::ReloadProvider);
         });
     }
 

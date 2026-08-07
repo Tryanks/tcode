@@ -115,9 +115,6 @@ impl WorkspaceStore {
 
         // Construction seeding is itself protocol traffic: subscribe, then
         // apply each snapshot event. No live AppState read exists here.
-        if let Err(error) = host.hello(env!("CARGO_PKG_VERSION")) {
-            log::error!("failed to send host hello: {}", error.message);
-        }
         let seed_topics = [
             Topic::Index,
             Topic::Settings,
@@ -129,7 +126,6 @@ impl WorkspaceStore {
         for topic in &seed_topics {
             if let Err(error) = host.subscribe(Subscription {
                 topic: topic.clone(),
-                after_seq: None,
             }) {
                 log::error!("failed to subscribe to {topic:?}: {}", error.message);
             }

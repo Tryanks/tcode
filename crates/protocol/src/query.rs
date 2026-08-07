@@ -13,10 +13,6 @@ pub enum Query {
     GenerateCommitMessage {
         included: Option<Vec<String>>,
     },
-    SecretPresence {
-        profile_id: String,
-        name: String,
-    },
     LoadGitDiff {
         cwd: PathBuf,
         scope: GitDiffScope,
@@ -38,10 +34,6 @@ pub enum Query {
     IsDirectory {
         path: PathBuf,
     },
-    RelativizeToWorkspace {
-        path: String,
-        cwd: PathBuf,
-    },
 }
 
 /// Typed response paired with a [`Query`].
@@ -52,13 +44,11 @@ pub enum QueryResponse {
     ActiveWorkspace(Vec<PathEntry>),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
-    SecretPresence(bool),
     GitDiff(GitDiffResult),
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
     IsDirectory(bool),
-    RelativePath(String),
 }
 
 /// Scope used when loading a Git diff.
