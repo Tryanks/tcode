@@ -51,10 +51,6 @@ pub struct Cell {
 pub enum TermEvent {
     /// The terminal grid or cursor changed.
     Wakeup,
-    /// The terminal title or foreground process changed.
-    TitleChanged,
-    /// The child changed whether its cursor should blink.
-    CursorBlinkingChanged,
     /// The emulated terminal rang the bell.
     Bell,
     /// The host-side child process exited.
@@ -204,7 +200,7 @@ impl Terminal {
                         PtyEvent::Output(bytes) => output_emulator.feed(&bytes),
                         PtyEvent::ProcessInfoChanged { name, .. } => {
                             output_emulator.set_fallback_title(name);
-                            let _ = pty_notifications.try_send(TermEvent::TitleChanged);
+                            let _ = pty_notifications.try_send(TermEvent::Wakeup);
                         }
                         PtyEvent::Exited { exit_code } => {
                             output_emulator.set_exited(exit_code);
@@ -224,8 +220,9 @@ impl Terminal {
                 while let Ok(event) = grid_events.recv_blocking() {
                     let notification = match event {
                         GridEvent::Wakeup => Some(TermEvent::Wakeup),
-                        GridEvent::TitleChanged(_) => Some(TermEvent::TitleChanged),
-                        GridEvent::CursorBlinkingChanged => Some(TermEvent::CursorBlinkingChanged),
+                        GridEvent::TitleChanged(_) | GridEvent::CursorBlinkingChanged => {
+                            Some(TermEvent::Wakeup)
+                        }
                         GridEvent::Bell => Some(TermEvent::Bell),
                         GridEvent::Input(bytes) => {
                             writer.write_raw(bytes);
@@ -244,10 +241,6 @@ impl Terminal {
             notifications,
             events,
         })
-    }
-
-    pub fn shell_name(&self) -> &str {
-        self.pty.shell_name()
     }
 
     pub fn cwd(&self) -> &Path {
@@ -648,14 +641,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn compatibility_events_preserve_grid_and_pty_sources() {
+    fn compatibility_events_cover_consumed_intents() {
         require_live_pty!();
         let terminal = command("printf '\\033]2;wire-title\\007\\007'");
         let events = terminal.events();
         let start = Instant::now();
         let mut emitted = Vec::new();
-        while !emitted.contains(&TermEvent::TitleChanged)
-            || !emitted.contains(&TermEvent::Bell)
+        while !emitted.contains(&TermEvent::Bell)
             || !emitted.contains(&TermEvent::Exited)
             || !emitted.contains(&TermEvent::Wakeup)
         {

@@ -1,10 +1,18 @@
 use super::super::{BackendError, BackendErrorCode, RootInfo};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn capture_window(root: &RootInfo) -> Result<Vec<u8>, BackendError> {
     let path = std::env::temp_dir().join(format!(
         "tcode-computer-use-{}-{}.png",
         root.window_id,
-        uuid::Uuid::new_v4()
+        format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
     ));
     let result = tcode_services::process::command("screencapture")
         .arg("-x")

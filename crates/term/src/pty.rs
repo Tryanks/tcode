@@ -198,10 +198,6 @@ impl PtyHandle {
         self.events.clone()
     }
 
-    pub fn shell_name(&self) -> &str {
-        &self.shell_name
-    }
-
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }

@@ -241,18 +241,6 @@ pub fn perform_action(
     }
 }
 
-pub fn read_element_text(root: &RootInfo, target_path: &[usize]) -> Result<String, BackendError> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::MacosBackend.read_element_text(root, target_path)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (root, target_path);
-        Err(BackendError::unsupported())
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KeyModifiers {
     pub command: bool,

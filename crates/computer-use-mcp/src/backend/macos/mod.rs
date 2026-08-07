@@ -245,14 +245,6 @@ impl MacosBackend {
             }
         }
     }
-
-    pub(super) fn read_element_text(
-        &self,
-        root: &RootInfo,
-        target_path: &[usize],
-    ) -> Result<String, BackendError> {
-        ax::read_target_text(root, target_path)
-    }
 }
 
 fn target(root: &RootInfo, request: &ActionRequest) -> Result<ax::Target, BackendError> {

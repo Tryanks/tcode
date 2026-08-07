@@ -21,9 +21,11 @@ use alacritty_terminal::{
 };
 
 use crate::{
-    Cell, Color, CursorShape, DEFAULT_COLS, DEFAULT_ROWS, ModeSnapshot, SelectedText,
-    SelectionKind, SelectionSide, TermState, hyperlinks,
+    Cell, Color, CursorShape, ModeSnapshot, SelectedText, SelectionKind, SelectionSide, TermState,
+    hyperlinks,
 };
+#[cfg(test)]
+use crate::{DEFAULT_COLS, DEFAULT_ROWS};
 
 impl From<SelectionSide> for AlacrittySide {
     fn from(side: SelectionSide) -> Self {
@@ -188,19 +190,15 @@ impl GridSize {
     }
 }
 
-impl Default for GridEmulator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl GridEmulator {
     /// Create an 80×24 emulator with 1,000 lines of scrollback.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_size(DEFAULT_COLS, DEFAULT_ROWS)
     }
 
     /// Create an emulator with an explicit initial grid size.
+    #[cfg(test)]
     pub fn with_size(cols: usize, rows: usize) -> Self {
         Self::with_size_and_title(cols, rows, String::new())
     }
