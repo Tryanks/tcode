@@ -625,25 +625,6 @@ fn action_names(element: AXUIElementRef) -> Vec<String> {
     actions
 }
 
-fn element_text(element: AXUIElementRef) -> String {
-    let mut values = Vec::new();
-    for attribute in [
-        "AXSelectedText",
-        "AXValue",
-        "AXTitle",
-        "AXDescription",
-        "AXHelp",
-    ] {
-        if let Some(value) = attribute_text(element, attribute)
-            && !value.is_empty()
-            && !values.contains(&value)
-        {
-            values.push(value);
-        }
-    }
-    values.join("\n")
-}
-
 fn ax_result(operation: &'static str, code: AXError) -> Result<(), AxFailure> {
     if code == AX_SUCCESS {
         Ok(())
