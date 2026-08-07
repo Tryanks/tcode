@@ -177,6 +177,14 @@ pub enum Command {
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
+    /// Keep a user-authored turn in the session's in-memory queue until the
+    /// given Unix timestamp. Scheduled turns deliberately share the ordinary
+    /// queue and are not persisted as conversation events before delivery.
+    ScheduleTurn {
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+        fire_at_unix_secs: u64,
+    },
     ConfirmRelayAndSend {
         text: String,
         attachment_paths: Vec<PathBuf>,
