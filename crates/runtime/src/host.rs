@@ -64,16 +64,16 @@ impl<T: 'static> Future for HostTask<T> {
 /// stream; notification-only changes use a bounded channel as a coalescing bit.
 #[derive(Clone)]
 pub struct HostCx {
-    mailbox: async_channel::Sender<HostMsg>,
-    outgoing: async_channel::Sender<HostOutput>,
-    changed: async_channel::Sender<()>,
+    mailbox: smol::channel::Sender<HostMsg>,
+    outgoing: smol::channel::Sender<HostOutput>,
+    changed: smol::channel::Sender<()>,
 }
 
 impl HostCx {
     pub(crate) fn new(
-        mailbox: async_channel::Sender<HostMsg>,
-        outgoing: async_channel::Sender<HostOutput>,
-        changed: async_channel::Sender<()>,
+        mailbox: smol::channel::Sender<HostMsg>,
+        outgoing: smol::channel::Sender<HostOutput>,
+        changed: smol::channel::Sender<()>,
     ) -> Self {
         Self {
             mailbox,
@@ -111,7 +111,7 @@ impl HostCx {
         &self,
         f: impl FnOnce(&mut AppState, &mut HostCx) -> R + Send + 'static,
     ) -> Result<R, ()> {
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = smol::channel::bounded(1);
         self.mailbox
             .send(HostMsg::Enqueued(Box::new(move |state, cx| {
                 let _ = sender.try_send(f(state, cx));

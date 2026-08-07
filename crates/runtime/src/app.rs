@@ -208,7 +208,7 @@ enum StoreWrite {
     CloneEvents {
         src: String,
         dst: String,
-        completion: async_channel::Sender<Result<(), String>>,
+        completion: smol::channel::Sender<Result<(), String>>,
     },
     SaveCommands {
         provider: ProviderKind,
@@ -223,7 +223,7 @@ enum StoreWrite {
         value: Option<String>,
     },
     ClearProfileSecrets(String),
-    Flush(async_channel::Sender<()>),
+    Flush(smol::channel::Sender<()>),
 }
 
 enum StoreWriteFailure {
@@ -446,7 +446,7 @@ enum Runtime {
     /// `start_session` is in flight; queued turns flush when it completes.
     Starting { generation: u64 },
     /// Live child process.
-    Live(async_channel::Sender<SessionCommand>),
+    Live(smol::channel::Sender<SessionCommand>),
 }
 
 pub struct ActiveSession {
@@ -866,10 +866,10 @@ pub struct ProviderVersionState {
 pub struct AppState {
     store: SessionStore,
     settings_store: SettingsStore,
-    store_writes: async_channel::Sender<StoreWrite>,
-    store_write_receiver: Option<async_channel::Receiver<StoreWrite>>,
-    store_write_failures: async_channel::Sender<StoreWriteFailure>,
-    store_write_failure_receiver: Option<async_channel::Receiver<StoreWriteFailure>>,
+    store_writes: smol::channel::Sender<StoreWrite>,
+    store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
+    store_write_failures: smol::channel::Sender<StoreWriteFailure>,
+    store_write_failure_receiver: Option<smol::channel::Receiver<StoreWriteFailure>>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
     pub active: Option<ActiveSession>,
@@ -929,7 +929,7 @@ pub struct AppState {
     orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
     orchestrate_registrations: HashMap<String, agent::McpRegistration>,
     /// Requests from the orchestrate MCP runtime, pumped by the host executor.
-    pub orchestrate_requests: Option<async_channel::Receiver<orchestrate_mcp::BrokerRequest>>,
+    pub orchestrate_requests: Option<smol::channel::Receiver<orchestrate_mcp::BrokerRequest>>,
     /// Process-wide computer-use MCP registration, supplied only to sessions
     /// while the global computer-use setting is enabled.
     computer_use_registration: Option<agent::McpRegistration>,
@@ -1030,8 +1030,8 @@ impl AppState {
             projects.len(),
             store.root().display()
         );
-        let (store_writes, store_write_receiver) = async_channel::unbounded();
-        let (store_write_failures, store_write_failure_receiver) = async_channel::unbounded();
+        let (store_writes, store_write_receiver) = smol::channel::unbounded();
+        let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
         Self {
             store,
             settings_store,
@@ -1530,8 +1530,8 @@ impl AppState {
 
     /// Enqueue a FIFO barrier used by the application quit hook. The returned
     /// receiver resolves only after every earlier store write has completed.
-    pub fn store_write_barrier(&mut self, cx: &mut HostCx) -> async_channel::Receiver<()> {
-        let (completion, barrier) = async_channel::bounded(1);
+    pub fn store_write_barrier(&mut self, cx: &mut HostCx) -> smol::channel::Receiver<()> {
+        let (completion, barrier) = smol::channel::bounded(1);
         self.enqueue_store_write(StoreWrite::Flush(completion), cx);
         barrier
     }
@@ -1769,7 +1769,7 @@ impl AppState {
     pub fn handle_orchestrate_op(
         &mut self,
         op: orchestrate_mcp::OrchestrateOp,
-        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut HostCx,
     ) {
         match op {
@@ -2116,7 +2116,7 @@ impl AppState {
         &mut self,
         parent_id: String,
         thread_id: Option<String>,
-        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut HostCx,
     ) {
         let children: Vec<_> = self
@@ -2167,7 +2167,7 @@ impl AppState {
         &mut self,
         parent_id: String,
         thread_id: String,
-        reply: async_channel::Sender<Result<serde_json::Value, String>>,
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
         cx: &mut HostCx,
     ) {
         let meta = match self.require_child(&parent_id, &thread_id) {
@@ -3894,7 +3894,7 @@ impl AppState {
         project_id: &str,
         threads: Vec<ExternalThread>,
         executor: &HostCx,
-    ) -> Option<async_channel::Receiver<ExternalImportUpdate>> {
+    ) -> Option<smol::channel::Receiver<ExternalImportUpdate>> {
         let project = self
             .projects
             .iter()
@@ -3902,7 +3902,7 @@ impl AppState {
             .clone();
         let store = self.store.clone();
         let metas = self.sessions.clone();
-        let (sender, receiver) = async_channel::unbounded();
+        let (sender, receiver) = smol::channel::unbounded();
         unblock(executor, move || {
             let total = threads.len();
             let mut imported = 0;
@@ -4241,7 +4241,7 @@ impl AppState {
         // marker. The cwd may be shared, but the fork must not own the source's
         // generated worktree or offer to delete it.
 
-        let (completion, completed) = async_channel::bounded(1);
+        let (completion, completed) = smol::channel::bounded(1);
         self.enqueue_store_write(
             StoreWrite::CloneEvents {
                 src: source.id,
@@ -6478,7 +6478,7 @@ impl AppState {
     fn on_event_stream_ended(
         &mut self,
         session_id: &str,
-        pump_commands: &async_channel::Sender<SessionCommand>,
+        pump_commands: &smol::channel::Sender<SessionCommand>,
         cx: &mut HostCx,
     ) {
         let still_owned = self
@@ -8093,20 +8093,20 @@ mod tests {
     /// completions must re-enter through `HostMsg::Enqueued`, and
     /// `run_until_parked` is the only code that mutates the owned `AppState`.
     struct TestAppContext {
-        mailbox_tx: async_channel::Sender<HostMsg>,
-        mailbox_rx: async_channel::Receiver<HostMsg>,
-        outgoing_tx: async_channel::Sender<crate::host::HostOutput>,
-        outgoing_rx: async_channel::Receiver<crate::host::HostOutput>,
-        changed_tx: async_channel::Sender<()>,
-        changed_rx: async_channel::Receiver<()>,
+        mailbox_tx: smol::channel::Sender<HostMsg>,
+        mailbox_rx: smol::channel::Receiver<HostMsg>,
+        outgoing_tx: smol::channel::Sender<crate::host::HostOutput>,
+        outgoing_rx: smol::channel::Receiver<crate::host::HostOutput>,
+        changed_tx: smol::channel::Sender<()>,
+        changed_rx: smol::channel::Receiver<()>,
         state: Option<Weak<RefCell<AppState>>>,
     }
 
     impl Default for TestAppContext {
         fn default() -> Self {
-            let (mailbox_tx, mailbox_rx) = async_channel::unbounded();
-            let (outgoing_tx, outgoing_rx) = async_channel::unbounded();
-            let (changed_tx, changed_rx) = async_channel::bounded(1);
+            let (mailbox_tx, mailbox_rx) = smol::channel::unbounded();
+            let (outgoing_tx, outgoing_rx) = smol::channel::unbounded();
+            let (changed_tx, changed_rx) = smol::channel::bounded(1);
             Self {
                 mailbox_tx,
                 mailbox_rx,
@@ -8574,7 +8574,7 @@ mod tests {
         std::fs::write(&attachment_path, [1, 2, 3]).unwrap();
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, commands);
@@ -8642,7 +8642,7 @@ mod tests {
         let test_store = TestStore::new("tcode-orchestrate-split-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut expected_full = String::new();
         let mut expected_context = 0;
 
@@ -9754,7 +9754,7 @@ mod tests {
         let test_store = TestStore::new("tcode-orchestrate-approval-callback-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut parent = live_session(ProviderKind::Codex, commands);
@@ -9809,8 +9809,8 @@ mod tests {
         let test_store = TestStore::new("tcode-orchestrate-approval-auto-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (parent_commands, parent_receiver) = async_channel::unbounded();
-        let (child_commands, child_receiver) = async_channel::unbounded();
+        let (parent_commands, parent_receiver) = smol::channel::unbounded();
+        let (child_commands, child_receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             state.settings.orchestrate.child_approval = ChildApprovalMode::AlwaysAllow;
@@ -9860,8 +9860,8 @@ mod tests {
         let test_store = TestStore::new("tcode-orchestrate-approval-manual-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (parent_commands, parent_receiver) = async_channel::unbounded();
-        let (child_commands, child_receiver) = async_channel::unbounded();
+        let (parent_commands, parent_receiver) = smol::channel::unbounded();
+        let (child_commands, child_receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             state.settings.orchestrate.child_approval = ChildApprovalMode::Manual;
@@ -9909,7 +9909,7 @@ mod tests {
         let test_store = TestStore::new("tcode-orchestrate-approve-op-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut child = live_session(ProviderKind::Codex, commands);
@@ -9931,7 +9931,7 @@ mod tests {
                 }],
             );
 
-            let (reply, response) = async_channel::bounded(1);
+            let (reply, response) = smol::channel::bounded(1);
             state.handle_orchestrate_op(
                 orchestrate_mcp::OrchestrateOp::Approve {
                     parent_id: "parent".into(),
@@ -9955,7 +9955,7 @@ mod tests {
                 }) if request_id == "approval-op"
             ));
 
-            let (reply, response) = async_channel::bounded(1);
+            let (reply, response) = smol::channel::bounded(1);
             state.handle_orchestrate_op(
                 orchestrate_mcp::OrchestrateOp::Approve {
                     parent_id: "parent".into(),
@@ -9969,7 +9969,7 @@ mod tests {
             let unknown_request = response.try_recv().unwrap().unwrap_err();
             assert_eq!(unknown_request, "no pending approval with that request_id");
 
-            let (reply, response) = async_channel::bounded(1);
+            let (reply, response) = smol::channel::bounded(1);
             state.handle_orchestrate_op(
                 orchestrate_mcp::OrchestrateOp::Approve {
                     parent_id: "parent".into(),
@@ -9986,7 +9986,7 @@ mod tests {
                 "unknown decision: later; expected approve, approve_for_session, or deny"
             );
 
-            let (reply, response) = async_channel::bounded(1);
+            let (reply, response) = smol::channel::bounded(1);
             state.handle_orchestrate_op(
                 orchestrate_mcp::OrchestrateOp::Approve {
                     parent_id: "other-parent".into(),
@@ -10051,7 +10051,7 @@ mod tests {
                 SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
             parent.id = "parent".into();
 
-            let (commands, _receiver) = async_channel::unbounded();
+            let (commands, _receiver) = smol::channel::unbounded();
             let mut child = live_session(ProviderKind::Codex, commands);
             child.meta.id = "child".into();
             child.meta.parent_session_id = Some(parent.id.clone());
@@ -10079,7 +10079,7 @@ mod tests {
             );
             assert!(!child.turn_in_flight);
 
-            let (reply, response) = async_channel::bounded(1);
+            let (reply, response) = smol::channel::bounded(1);
             state.handle_orchestrate_op(
                 orchestrate_mcp::OrchestrateOp::Result {
                     parent_id: "parent".into(),
@@ -10100,7 +10100,7 @@ mod tests {
         let test_store = TestStore::new("tcode-orchestrate-steer-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut recorded_request_id = String::new();
 
         state.host_update(cx, |state, cx| {
@@ -10148,7 +10148,7 @@ mod tests {
         let test_store = TestStore::new("tcode-user-steer-id-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, commands);
@@ -10212,7 +10212,7 @@ mod tests {
         let state = cx.new_entity(|_| AppState::new(store));
 
         state.host_update(cx, |state, cx| {
-            let mut parent = live_session(ProviderKind::ClaudeCode, async_channel::unbounded().0);
+            let mut parent = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
             parent.meta.id = "parent".into();
             parent.runtime = Runtime::Starting { generation: 1 };
             state.background.insert(parent.meta.id.clone(), parent);
@@ -10234,7 +10234,7 @@ mod tests {
             assert!(parent.queue[0].text.contains("result a"));
             assert!(parent.queue[0].text.contains("result b"));
 
-            let (commands, receiver) = async_channel::unbounded();
+            let (commands, receiver) = smol::channel::unbounded();
             state.background.get_mut("parent").unwrap().runtime = Runtime::Live(commands);
             state.on_background_turn_completed("parent", cx);
 
@@ -10258,7 +10258,7 @@ mod tests {
         let test_store = TestStore::new("tcode-app-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let active = ActiveSession {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
@@ -10302,7 +10302,7 @@ mod tests {
         let test_store = TestStore::new("tcode-app-test");
         let store = (*test_store).clone();
         let mut state = AppState::new(store);
-        let (commands, _receiver) = async_channel::unbounded();
+        let (commands, _receiver) = smol::channel::unbounded();
         state.active = Some(ActiveSession {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
@@ -10339,7 +10339,7 @@ mod tests {
 
     #[test]
     fn queued_sends_dispatch_one_per_completed_turn() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut active = ActiveSession {
             meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
             timeline: Timeline::default(),
@@ -10404,7 +10404,7 @@ mod tests {
         let test_store = TestStore::new("tcode-plan-relay-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, commands);
@@ -10459,7 +10459,7 @@ mod tests {
         let test_store = TestStore::new("tcode-profile-relay-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, _receiver) = async_channel::unbounded();
+        let (commands, _receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, commands);
@@ -10524,7 +10524,7 @@ mod tests {
 
     #[test]
     fn queued_turns_keep_the_interaction_mode_selected_at_submit_time() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::Codex, commands);
         active.turn_in_flight = true;
         active.meta.interaction_mode = InteractionMode::Plan;
@@ -10566,7 +10566,7 @@ mod tests {
     /// A live session with `provider`, nothing queued, no turn in flight.
     fn live_session(
         provider: ProviderKind,
-        commands: async_channel::Sender<SessionCommand>,
+        commands: smol::channel::Sender<SessionCommand>,
     ) -> ActiveSession {
         ActiveSession {
             meta: SessionMeta::new(provider, PathBuf::from("/tmp/project"), None),
@@ -10598,7 +10598,7 @@ mod tests {
 
     #[test]
     fn opencode_effort_is_applied_per_turn_without_restart() {
-        let mut active = live_session(ProviderKind::OpenCode, async_channel::unbounded().0);
+        let mut active = live_session(ProviderKind::OpenCode, smol::channel::unbounded().0);
         active.meta.option_selections.push(OptionSelection {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),
@@ -10614,7 +10614,7 @@ mod tests {
         let test_store = TestStore::new("tcode-native-rewind-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, commands);
@@ -10686,10 +10686,10 @@ mod tests {
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
 
-        let (active_commands, active_receiver) = async_channel::unbounded();
-        let (parked_commands, parked_receiver) = async_channel::unbounded();
+        let (active_commands, active_receiver) = smol::channel::unbounded();
+        let (parked_commands, parked_receiver) = smol::channel::unbounded();
         let parked = live_session(ProviderKind::ClaudeCode, parked_commands);
-        let (other_commands, other_receiver) = async_channel::unbounded();
+        let (other_commands, other_receiver) = smol::channel::unbounded();
         let other = live_session(ProviderKind::Acp, other_commands);
         state.host_update(cx, |state, cx| {
             state.active = Some(live_session(ProviderKind::Codex, active_commands));
@@ -10718,7 +10718,7 @@ mod tests {
     /// provider actually supports it, and otherwise degrades to queueing.
     #[test]
     fn send_routing_matrix() {
-        let (commands, _rx) = async_channel::unbounded();
+        let (commands, _rx) = smol::channel::unbounded();
         let mut codex = live_session(ProviderKind::Codex, commands.clone());
 
         // Idle: both gestures are a plain send — there is nothing to steer into.
@@ -10750,7 +10750,7 @@ mod tests {
         assert_eq!(acp.route(true), SendRouting::QueueUnsupported);
 
         // A provider that can steer still can't while it isn't live.
-        let mut dead = live_session(ProviderKind::Codex, async_channel::unbounded().0);
+        let mut dead = live_session(ProviderKind::Codex, smol::channel::unbounded().0);
         dead.runtime = Runtime::Idle;
         dead.turn_in_flight = true;
         assert_eq!(dead.route(true), SendRouting::QueueUnsupported);
@@ -10761,7 +10761,7 @@ mod tests {
     /// (See examples/steer_probe.rs for the live protocol probe.)
     #[test]
     fn steering_does_not_disturb_turn_accounting() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::Codex, commands);
         active.turn_in_flight = true;
         active.push_queued("queued".into(), Vec::new());
@@ -10786,7 +10786,7 @@ mod tests {
     /// leaving the rest of the FIFO in order.
     #[test]
     fn queued_message_converts_to_steer() {
-        let (commands, _rx) = async_channel::unbounded();
+        let (commands, _rx) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::Codex, commands);
         active.turn_in_flight = true;
         let first = active.push_queued("first".into(), Vec::new());
@@ -10813,7 +10813,7 @@ mod tests {
     /// with whatever happens to be dispatched later.
     #[test]
     fn ultrathink_rides_with_the_queued_message() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::Codex, commands);
         active.turn_in_flight = true;
         active.pending_ultrathink = true;
@@ -10843,7 +10843,7 @@ mod tests {
     /// renders just the thumbnails) while the wire carries T3's placeholder.
     #[test]
     fn image_only_message_gets_placeholder_on_the_wire_only() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::Codex, commands);
         let attachment = Attachment {
             media_type: "image/png".into(),
@@ -10875,7 +10875,7 @@ mod tests {
 
     #[test]
     fn relay_context_rides_only_with_the_first_handoff_message() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::Codex, commands);
         active.push_queued("continue here".into(), Vec::new());
         active.queue[0].relay_transcript = Some("# prior work".into());
@@ -10934,7 +10934,7 @@ mod tests {
 
         assert!(!active.is_starting_generation(1));
         assert!(active.is_starting_generation(2));
-        active.runtime = Runtime::Live(async_channel::unbounded().0);
+        active.runtime = Runtime::Live(smol::channel::unbounded().0);
         assert!(!active.is_starting_generation(2));
     }
 
@@ -11011,7 +11011,7 @@ mod tests {
             assert_eq!(active.queue.len(), 1);
             assert_eq!(active.delivery_in_flight, None);
 
-            let (resumed_commands, resumed_actor) = async_channel::unbounded();
+            let (resumed_commands, resumed_actor) = smol::channel::unbounded();
             state.active.as_mut().unwrap().runtime = Runtime::Live(resumed_commands);
             assert_eq!(state.dispatch_next_queued(cx), Ok(true));
             let retried_delivery = match resumed_actor.try_recv() {
@@ -11069,7 +11069,7 @@ mod tests {
         let test_store = TestStore::new("tcode-live-model-sync-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "model-sync".into();
 
@@ -11106,7 +11106,7 @@ mod tests {
         let test_store = TestStore::new("tcode-background-park-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "background-owner".into();
         session.background_task_count = 1;
@@ -11129,7 +11129,7 @@ mod tests {
         let test_store = TestStore::new("tcode-idle-resident-park-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
 
@@ -11153,7 +11153,7 @@ mod tests {
         let test_store = TestStore::new("tcode-idle-resident-readopt-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
         let meta = session.meta.clone();
@@ -11179,7 +11179,7 @@ mod tests {
         let test_store = TestStore::new("tcode-idle-resident-reaper-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
 
@@ -11202,7 +11202,7 @@ mod tests {
         let test_store = TestStore::new("tcode-idle-resident-stale-timer-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "idle-resident".into();
         let meta = session.meta.clone();
@@ -11235,7 +11235,7 @@ mod tests {
 
         state.host_update(cx, |state, cx| {
             for index in 0..MAX_IDLE_RESIDENTS {
-                let (commands, actor) = async_channel::unbounded();
+                let (commands, actor) = smol::channel::unbounded();
                 let mut resident = live_session(ProviderKind::ClaudeCode, commands);
                 resident.meta.id = format!("resident-{index}");
                 resident.idle_since =
@@ -11244,7 +11244,7 @@ mod tests {
                 actors.push(actor);
             }
 
-            let (commands, newest_actor) = async_channel::unbounded();
+            let (commands, newest_actor) = smol::channel::unbounded();
             let mut newest = live_session(ProviderKind::ClaudeCode, commands);
             newest.meta.id = "resident-newest".into();
             state.active = Some(newest);
@@ -11267,7 +11267,7 @@ mod tests {
         let test_store = TestStore::new("tcode-background-restart-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, actor) = async_channel::unbounded();
+        let (commands, actor) = smol::channel::unbounded();
         let mut session = live_session(ProviderKind::ClaudeCode, commands);
         session.meta.id = "background-restart".into();
         session.live_model = Some("claude-opus-4-8".into());
@@ -11315,7 +11315,7 @@ mod tests {
 
     #[test]
     fn model_switch_restarts_live_provider() {
-        let (commands, receiver) = async_channel::unbounded();
+        let (commands, receiver) = smol::channel::unbounded();
         let mut meta = SessionMeta::new(
             ProviderKind::ClaudeCode,
             PathBuf::from("/tmp/project"),
@@ -11361,7 +11361,7 @@ mod tests {
         assert!(!active.model_changed_while_live());
 
         // No restart when the selected model matches the live one.
-        active.runtime = Runtime::Live(async_channel::unbounded().0);
+        active.runtime = Runtime::Live(smol::channel::unbounded().0);
         active.live_model = active.meta.model.clone();
         assert!(!active.model_changed_while_live());
     }
@@ -11617,8 +11617,8 @@ mod tests {
 
     /// An `ActiveSession` wired to a fake live provider: commands land on the
     /// returned receiver, nothing real is spawned.
-    fn fake_live_session(cwd: PathBuf) -> (ActiveSession, async_channel::Receiver<SessionCommand>) {
-        let (commands, receiver) = async_channel::unbounded();
+    fn fake_live_session(cwd: PathBuf) -> (ActiveSession, smol::channel::Receiver<SessionCommand>) {
+        let (commands, receiver) = smol::channel::unbounded();
         let mut session = AppState::build_draft_session(
             "proj-t3".into(),
             cwd,
@@ -11804,7 +11804,7 @@ mod tests {
 
         // Session A, live (fake provider: commands land on `commands_a`).
         let (session, commands_a) = fake_live_session(cwd.clone());
-        let (commands_b, receiver_b) = async_channel::unbounded();
+        let (commands_b, receiver_b) = smol::channel::unbounded();
         let mut id_b = String::new();
 
         state.host_update(cx, |state, cx| {
@@ -11999,7 +11999,7 @@ mod tests {
         let test_store = TestStore::new("tcode-dead-stream-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, _receiver) = async_channel::unbounded();
+        let (commands, _receiver) = smol::channel::unbounded();
 
         let id = state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, commands.clone());
@@ -12042,7 +12042,7 @@ mod tests {
         let test_store = TestStore::new("tcode-dead-parked-stream-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (commands, _receiver) = async_channel::unbounded();
+        let (commands, _receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut parked = live_session(ProviderKind::ClaudeCode, commands.clone());
@@ -12072,8 +12072,8 @@ mod tests {
         let test_store = TestStore::new("tcode-stale-pump-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let (old_commands, _old_receiver) = async_channel::unbounded();
-        let (new_commands, _new_receiver) = async_channel::unbounded();
+        let (old_commands, _old_receiver) = smol::channel::unbounded();
+        let (new_commands, _new_receiver) = smol::channel::unbounded();
 
         state.host_update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::ClaudeCode, new_commands);
@@ -12108,7 +12108,7 @@ mod tests {
         let test_store = TestStore::new("tcode-working-location-test");
         let store = (*test_store).clone();
         let state = cx.new_entity(|_| AppState::new(store));
-        let commands = async_channel::unbounded().0;
+        let commands = smol::channel::unbounded().0;
 
         let mut idle = live_session(ProviderKind::ClaudeCode, commands.clone());
         idle.meta.id = "idle".into();
@@ -12442,7 +12442,7 @@ mod tests {
         let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         let parent_id = parent.id.clone();
         let missing = root.join("missing");
-        let (reply, response) = async_channel::bounded(1);
+        let (reply, response) = smol::channel::bounded(1);
 
         state.host_update(cx, |state, cx| {
             state.sessions.push(parent);

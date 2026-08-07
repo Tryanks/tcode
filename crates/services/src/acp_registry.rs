@@ -31,16 +31,38 @@ const INSTALL_DIR: &str = "acp-agents";
 
 const CACHE_FILE: &str = "acp-registry.json";
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum RegistryError {
-    #[error("could not reach the ACP registry: {0}")]
     Network(String),
-    #[error("the ACP registry returned something unreadable: {0}")]
     Parse(String),
-    #[error("{0}")]
     Install(String),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Network(err) => write!(f, "could not reach the ACP registry: {err}"),
+            Self::Parse(err) => write!(f, "the ACP registry returned something unreadable: {err}"),
+            Self::Install(err) => write!(f, "{err}"),
+            Self::Io(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for RegistryError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
 }
 
 // ---------------------------------------------------------------------------

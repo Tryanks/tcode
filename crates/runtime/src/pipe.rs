@@ -53,16 +53,16 @@ enum LocalImportProgress {
 }
 
 struct HostHandleInner {
-    client_tx: async_channel::Sender<String>,
-    event_rx: async_channel::Receiver<String>,
-    changed_rx: async_channel::Receiver<()>,
-    stopped_rx: async_channel::Receiver<()>,
+    client_tx: smol::channel::Sender<String>,
+    event_rx: smol::channel::Receiver<String>,
+    changed_rx: smol::channel::Receiver<()>,
+    stopped_rx: smol::channel::Receiver<()>,
     #[cfg(feature = "test-support")]
-    test_mailbox: async_channel::Sender<HostMsg>,
+    test_mailbox: smol::channel::Sender<HostMsg>,
     next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, async_channel::Sender<HostMessage>>>>,
-    import_routes: Arc<Mutex<HashMap<u64, async_channel::Sender<ExternalImportUpdate>>>>,
-    preview_requests: Mutex<Option<async_channel::Receiver<preview_mcp::BrokerRequest>>>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    preview_requests: Mutex<Option<smol::channel::Receiver<preview_mcp::BrokerRequest>>>,
     terminals: LocalTerminalRegistry,
 }
 
@@ -95,7 +95,7 @@ impl HostHandle {
 
     async fn request(&self, payload: ClientPayload) -> Result<HostMessage, ProtocolError> {
         let id = self.next_id();
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = smol::channel::bounded(1);
         self.inner.pending.lock().unwrap().insert(id, sender);
         if let Err(error) = self.send_payload(id, payload) {
             self.inner.pending.lock().unwrap().remove(&id);
@@ -183,12 +183,12 @@ impl HostHandle {
     }
 
     /// Serialized event lines consumed by the client-side replica pump.
-    pub fn event_receiver(&self) -> async_channel::Receiver<String> {
+    pub fn event_receiver(&self) -> smol::channel::Receiver<String> {
         self.inner.event_rx.clone()
     }
 
     /// Coalesced notification-only changes consumed by the client-side pump.
-    pub fn changed_receiver(&self) -> async_channel::Receiver<()> {
+    pub fn changed_receiver(&self) -> smol::channel::Receiver<()> {
         self.inner.changed_rx.clone()
     }
 
@@ -199,7 +199,7 @@ impl HostHandle {
     /// A remote transport must replace it with reverse RPC.
     pub fn take_preview_requests(
         &self,
-    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
+    ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
         self.inner.preview_requests.lock().unwrap().take()
     }
 
@@ -219,15 +219,15 @@ impl HostHandle {
         &self,
         project_id: String,
         threads: Vec<tcode_protocol::ExternalThread>,
-    ) -> Result<Option<async_channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
+    ) -> Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
         let id = self.next_id();
-        let (progress_sender, progress_receiver) = async_channel::unbounded();
+        let (progress_sender, progress_receiver) = smol::channel::unbounded();
         self.inner
             .import_routes
             .lock()
             .unwrap()
             .insert(id, progress_sender);
-        let (ack_sender, ack_receiver) = async_channel::bounded(1);
+        let (ack_sender, ack_receiver) = smol::channel::bounded(1);
         self.inner.pending.lock().unwrap().insert(id, ack_sender);
         if let Err(error) = self.send_payload(
             id,
@@ -293,7 +293,7 @@ impl HostHandle {
     where
         R: Send + 'static,
     {
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = smol::channel::bounded(1);
         self.inner
             .test_mailbox
             .send(HostMsg::Enqueued(Box::new(move |state, cx| {
@@ -324,18 +324,18 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     fn assert_send<T: Send>() {}
     assert_send::<AppState>();
 
-    let (client_tx, client_rx) = async_channel::unbounded::<String>();
-    let (raw_host_tx, raw_host_rx) = async_channel::unbounded::<String>();
-    let (event_tx, event_rx) = async_channel::unbounded::<String>();
-    let (changed_tx, changed_rx) = async_channel::bounded(1);
-    let (stopped_tx, stopped_rx) = async_channel::bounded(1);
-    let (mailbox_tx, mailbox_rx) = async_channel::unbounded::<HostMsg>();
-    let (outgoing_tx, outgoing_rx) = async_channel::unbounded::<HostOutput>();
+    let (client_tx, client_rx) = smol::channel::unbounded::<String>();
+    let (raw_host_tx, raw_host_rx) = smol::channel::unbounded::<String>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<String>();
+    let (changed_tx, changed_rx) = smol::channel::bounded(1);
+    let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
+    let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
+    let (outgoing_tx, outgoing_rx) = smol::channel::unbounded::<HostOutput>();
     // Deliberate construction-time local affordance: one progress bus crosses
     // into the host thread. Per-import commands/results remain serialized, and
     // a future remote transport replaces this bus with correlated events.
     let (import_progress_tx, import_progress_rx) =
-        async_channel::unbounded::<LocalImportProgress>();
+        smol::channel::unbounded::<LocalImportProgress>();
     let terminals = LocalTerminalRegistry::default();
     // Deliberate local-transport affordance: the WebView broker request
     // receiver cannot cross serde. Move its single consumer exactly once into
@@ -410,9 +410,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
 }
 
 fn spawn_decoder(
-    client_rx: async_channel::Receiver<String>,
-    mailbox: async_channel::Sender<HostMsg>,
-    outgoing: async_channel::Sender<HostOutput>,
+    client_rx: smol::channel::Receiver<String>,
+    mailbox: smol::channel::Sender<HostMsg>,
+    outgoing: smol::channel::Sender<HostOutput>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("tcode-host-ndjson-decoder".into())
@@ -441,8 +441,8 @@ fn spawn_decoder(
 }
 
 fn spawn_encoder(
-    outgoing: async_channel::Receiver<HostOutput>,
-    raw_host: async_channel::Sender<String>,
+    outgoing: smol::channel::Receiver<HostOutput>,
+    raw_host: smol::channel::Sender<String>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("tcode-host-ndjson-encoder".into())
@@ -475,9 +475,9 @@ fn spawn_encoder(
 }
 
 fn spawn_client_router(
-    raw_host: async_channel::Receiver<String>,
-    events: async_channel::Sender<String>,
-    pending: Arc<Mutex<HashMap<u64, async_channel::Sender<HostMessage>>>>,
+    raw_host: smol::channel::Receiver<String>,
+    events: smol::channel::Sender<String>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("tcode-client-ndjson-router".into())
@@ -509,8 +509,8 @@ fn spawn_client_router(
 }
 
 fn spawn_local_import_router(
-    progress: async_channel::Receiver<LocalImportProgress>,
-    routes: Arc<Mutex<HashMap<u64, async_channel::Sender<ExternalImportUpdate>>>>,
+    progress: smol::channel::Receiver<LocalImportProgress>,
+    routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("tcode-client-local-import-router".into())
@@ -535,8 +535,8 @@ fn spawn_local_import_router(
 async fn host_loop(
     mut state: AppState,
     mut cx: HostCx,
-    mailbox: async_channel::Receiver<HostMsg>,
-    import_progress: async_channel::Sender<LocalImportProgress>,
+    mailbox: smol::channel::Receiver<HostMsg>,
+    import_progress: smol::channel::Sender<LocalImportProgress>,
 ) {
     let mut active_seq = 0_u64;
     let mut last_active: Option<Option<tcode_protocol::SessionStatus>> = None;
@@ -568,7 +568,7 @@ fn handle_client_message(
     state: &mut AppState,
     cx: &mut HostCx,
     message: ClientMessage,
-    import_progress: &async_channel::Sender<LocalImportProgress>,
+    import_progress: &smol::channel::Sender<LocalImportProgress>,
 ) {
     let ClientMessage { id, payload } = message;
     match payload {
@@ -640,7 +640,7 @@ fn handle_client_message(
 
 enum CommandOutcome {
     Immediate(Result<CommandResponse, ProtocolError>),
-    StoreBarrier(async_channel::Receiver<()>),
+    StoreBarrier(smol::channel::Receiver<()>),
 }
 
 fn dispatch_command(
@@ -648,7 +648,7 @@ fn dispatch_command(
     cx: &mut HostCx,
     request_id: u64,
     command: Command,
-    import_progress: &async_channel::Sender<LocalImportProgress>,
+    import_progress: &smol::channel::Sender<LocalImportProgress>,
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
@@ -950,7 +950,7 @@ mod tests {
     use super::*;
 
     fn next_event(
-        events: &async_channel::Receiver<String>,
+        events: &smol::channel::Receiver<String>,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -965,10 +965,10 @@ mod tests {
                         return envelope;
                     }
                 }
-                Err(async_channel::TryRecvError::Empty) => {
+                Err(smol::channel::TryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Err(async_channel::TryRecvError::Closed) => {
+                Err(smol::channel::TryRecvError::Closed) => {
                     panic!("host event stream closed before the expected event")
                 }
             }
