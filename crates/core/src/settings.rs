@@ -185,7 +185,6 @@ impl ProviderSettings {
             .map(|s| s.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default()
     }
-
 }
 
 /// A user-created provider profile (Settings → Providers "+ New profile").

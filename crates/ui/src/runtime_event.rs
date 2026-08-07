@@ -67,9 +67,7 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::DeleteProject { error } => {
                     crate::tr!("errors.delete_project", error = error).into_owned()
                 }
-                RuntimeError::NativeRewindBlocked => {
-                    crate::tr!("chat.rewind_blocked").into_owned()
-                }
+                RuntimeError::NativeRewindBlocked => crate::tr!("chat.rewind_blocked").into_owned(),
                 RuntimeError::PersistEvent { error } => {
                     crate::tr!("errors.persist_event", error = error).into_owned()
                 }
@@ -406,10 +404,7 @@ mod tests {
             },
         ];
 
-        for locale in [
-            crate::LANGUAGE_ENGLISH,
-            crate::LANGUAGE_SIMPLIFIED_CHINESE,
-        ] {
+        for locale in [crate::LANGUAGE_ENGLISH, crate::LANGUAGE_SIMPLIFIED_CHINESE] {
             crate::set_locale(locale);
             for error in &errors {
                 let presented = present_runtime_event(&RuntimeEvent::Error(error.clone()));

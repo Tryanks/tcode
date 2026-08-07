@@ -464,14 +464,10 @@ impl ProviderDialog {
 
     fn render_identity(&self, cx: &mut Context<Self>) -> AnyElement {
         self.section(
-            crate::tr!("providers.dialog.identity")
-                .into_owned()
-                .into(),
+            crate::tr!("providers.dialog.identity").into_owned().into(),
             vec![
                 self.field_block(
-                    crate::tr!("providers.display_name")
-                        .into_owned()
-                        .into(),
+                    crate::tr!("providers.display_name").into_owned().into(),
                     crate::tr!("providers.display_name_help")
                         .into_owned()
                         .into(),
@@ -511,9 +507,8 @@ impl ProviderDialog {
                     .tooltip({
                         let hex = hex.clone();
                         move |window, cx| {
-                            let label =
-                                crate::tr!("providers.accent_select", color = hex.clone())
-                                    .into_owned();
+                            let label = crate::tr!("providers.accent_select", color = hex.clone())
+                                .into_owned();
                             gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                         }
                     })
@@ -590,9 +585,7 @@ impl ProviderDialog {
             blocks.push(
                 self.field_block(
                     crate::tr!("providers.launch_args").into_owned().into(),
-                    crate::tr!("providers.launch_args_help")
-                        .into_owned()
-                        .into(),
+                    crate::tr!("providers.launch_args_help").into_owned().into(),
                     Input::new(&self.launch_args)
                         .rounded(crate::material::radius_input())
                         .into_any_element(),
@@ -762,9 +755,7 @@ impl ProviderDialog {
             );
         }
         self.section(
-            crate::tr!("providers.models.title")
-                .into_owned()
-                .into(),
+            crate::tr!("providers.models.title").into_owned().into(),
             vec![block.into_any_element()],
             cx,
         )

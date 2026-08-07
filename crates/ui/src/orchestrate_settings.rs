@@ -175,9 +175,7 @@ impl OrchestrateSettingsPanel {
                 InputState::new(window, cx)
                     .multi_line(true)
                     .auto_grow(3, 9)
-                    .placeholder(crate::tr!(
-                        "orchestrate.children.description_placeholder"
-                    ))
+                    .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                     .default_value(entry.description)
             });
             self.input_subscriptions
@@ -663,9 +661,7 @@ impl OrchestrateSettingsPanel {
                                 div()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!(
-                                        "orchestrate.child_approval.description"
-                                    )),
+                                    .child(crate::tr!("orchestrate.child_approval.description")),
                             ),
                     )
                     .child(dropdown),
@@ -702,62 +698,63 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
-        let section = v_flex()
-            .w_full()
-            .gap_3()
-            .child(self.section_heading(
-                crate::tr!("orchestrate.identity.title"),
-                crate::tr!("orchestrate.identity.description"),
-                None,
-                cx,
-            ))
-            // Generic identity: a single-row group holding the header, help and
-            // its text area — no slab fill.
-            .child(
-                crate::material::group(cx).child(
-                    v_flex()
-                        .w_full()
-                        .gap_1p5()
-                        .px_3()
-                        .py_3()
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .items_center()
-                                .child(
-                                    div().flex_1().text_size(px(13.)).font_medium().child(
-                                        crate::tr!("orchestrate.generic_identity.title"),
+        let section =
+            v_flex()
+                .w_full()
+                .gap_3()
+                .child(self.section_heading(
+                    crate::tr!("orchestrate.identity.title"),
+                    crate::tr!("orchestrate.identity.description"),
+                    None,
+                    cx,
+                ))
+                // Generic identity: a single-row group holding the header, help and
+                // its text area — no slab fill.
+                .child(
+                    crate::material::group(cx).child(
+                        v_flex()
+                            .w_full()
+                            .gap_1p5()
+                            .px_3()
+                            .py_3()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .child(
+                                        div().flex_1().text_size(px(13.)).font_medium().child(
+                                            crate::tr!("orchestrate.generic_identity.title"),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new("reset-generic-orchestrator-identity")
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::Undo)
+                                            .label(crate::tr!("orchestrate.restore_default"))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.reset_generic_identity(window, cx);
+                                            })),
                                     ),
-                                )
-                                .child(
-                                    Button::new("reset-generic-orchestrator-identity")
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Undo)
-                                        .label(crate::tr!("orchestrate.restore_default"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.reset_generic_identity(window, cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("orchestrate.generic_identity.description")),
-                        )
-                        .child(
-                            Input::new(&self.generic_identity)
-                                .rounded(crate::material::radius_input()),
-                        ),
-                ),
-            )
-            .child(self.section_heading(
-                crate::tr!("orchestrate.model_identity.title"),
-                crate::tr!("orchestrate.model_identity.description"),
-                Some(self.identity_model_picker.clone().into_any_element()),
-                cx,
-            ));
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!("orchestrate.generic_identity.description")),
+                            )
+                            .child(
+                                Input::new(&self.generic_identity)
+                                    .rounded(crate::material::radius_input()),
+                            ),
+                    ),
+                )
+                .child(self.section_heading(
+                    crate::tr!("orchestrate.model_identity.title"),
+                    crate::tr!("orchestrate.model_identity.description"),
+                    Some(self.identity_model_picker.clone().into_any_element()),
+                    cx,
+                ));
 
         if self.identity_rows.is_empty() {
             return section
@@ -831,9 +828,7 @@ impl OrchestrateSettingsPanel {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Delete)
-                                    .tooltip(crate::tr!(
-                                        "orchestrate.model_identity.use_generic"
-                                    ))
+                                    .tooltip(crate::tr!("orchestrate.model_identity.use_generic"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.remove_identity(provider, &model, window, cx);
                                     })),
@@ -882,9 +877,10 @@ impl OrchestrateSettingsPanel {
             };
             let provider = row.provider;
             let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
-            let effort = profile.effort.clone().unwrap_or_else(|| {
-                crate::tr!("orchestrate.children.effort_default").into_owned()
-            });
+            let effort = profile
+                .effort
+                .clone()
+                .unwrap_or_else(|| crate::tr!("orchestrate.children.effort_default").into_owned());
             let subtitle = if let Some(id) = row.profile_id.as_deref() {
                 let profile_settings = self.store.read(cx).provider_profile_settings(id);
                 let profile_name = profile_settings

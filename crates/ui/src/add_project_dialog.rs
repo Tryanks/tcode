@@ -90,11 +90,7 @@ impl AddProjectDialog {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some(
-                crate::tr!("sidebar.select_project")
-                    .into_owned()
-                    .into(),
-            ),
+            prompt: Some(crate::tr!("sidebar.select_project").into_owned().into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(mut paths))) = rx.await

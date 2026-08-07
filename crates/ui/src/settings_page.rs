@@ -993,10 +993,7 @@ impl SettingsPage {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(crate::tr!(
-                    "sidebar.delete_title",
-                    title = title.clone()
-                ))
+                .title(crate::tr!("sidebar.delete_title", title = title.clone()))
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
@@ -1155,8 +1152,8 @@ impl SettingsPage {
     /// The Computer Use "System permissions" group. Non-macOS platforms have
     /// no TCC, so it shows a quiet note instead.
     fn permissions_group(&self, kinds: &[PermissionKind], cx: &mut Context<Self>) -> AnyElement {
-        let col = v_flex()
-            .child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
+        let col =
+            v_flex().child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
         if !cfg!(target_os = "macos") {
             return col
                 .child(
@@ -1565,9 +1562,7 @@ impl SettingsPage {
             "theme-options-menu",
             160.,
             crate::tr!("settings.theme.title").into_owned().into(),
-            crate::tr!("settings.theme.description")
-                .into_owned()
-                .into(),
+            crate::tr!("settings.theme.description").into_owned().into(),
             label.into_owned().into(),
             vec![
                 option(
@@ -1611,9 +1606,7 @@ impl SettingsPage {
             "language-popover",
             "language-options-menu",
             160.,
-            crate::tr!("settings.language.title")
-                .into_owned()
-                .into(),
+            crate::tr!("settings.language.title").into_owned().into(),
             crate::tr!("settings.language.description")
                 .into_owned()
                 .into(),

@@ -75,8 +75,8 @@ impl PlanPanel {
     }
 
     fn render_proposed_plan(&mut self, markdown: String, cx: &mut Context<Self>) -> AnyElement {
-        let title = plan_title(&markdown)
-            .unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
+        let title =
+            plan_title(&markdown).unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
         let md_state = self.sync_markdown(&markdown, cx);
         let copied = self.copied;
 

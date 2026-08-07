@@ -8,9 +8,7 @@ pub fn model_capability_label(capability: ModelCapability) -> String {
     match capability {
         ModelCapability::FastMode => crate::tr!("providers.models.cap_fast").into_owned(),
         ModelCapability::Thinking => crate::tr!("providers.models.cap_thinking").into_owned(),
-        ModelCapability::Reasoning => {
-            crate::tr!("providers.models.cap_reasoning").into_owned()
-        }
+        ModelCapability::Reasoning => crate::tr!("providers.models.cap_reasoning").into_owned(),
     }
 }
 

@@ -21,7 +21,6 @@ pub fn default_program(provider: ProviderKind) -> String {
     }
 }
 
-
 /// Spawn `program args...` and return its trimmed stdout on success.
 pub async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
     run_capture_env(program, args, &[]).await

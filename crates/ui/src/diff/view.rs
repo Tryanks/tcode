@@ -799,9 +799,7 @@ impl DiffPanel {
         let selected_scope = self.selected_scope(&session, cx);
         let turns = self.workspace_store.read(cx).diff_turns();
         let label = match selected_scope {
-            Some(DiffScope::Turn(turn)) => {
-                crate::tr!("diff.turn", count = turn + 1).into_owned()
-            }
+            Some(DiffScope::Turn(turn)) => crate::tr!("diff.turn", count = turn + 1).into_owned(),
             Some(DiffScope::WorkingTree) => crate::tr!("diff.working_tree").into_owned(),
             Some(DiffScope::Branch) => crate::tr!("diff.branch_changes").into_owned(),
             None => crate::tr!("diff.no_changes").into_owned(),
@@ -905,10 +903,9 @@ impl DiffPanel {
                     let panel = panel.clone();
                     let session = session_selector.clone();
                     let is_sel = selected_scope == Some(DiffScope::Turn(turn));
-                    let turn_label: gpui::SharedString =
-                        crate::tr!("diff.turn", count = turn + 1)
-                            .into_owned()
-                            .into();
+                    let turn_label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
+                        .into_owned()
+                        .into();
                     list = list.child(
                         material::accessible_clickable(
                             h_flex(),
@@ -1708,9 +1705,8 @@ impl DiffPanel {
                                 .label(crate::tr!("diff.add_comment"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.comment_input = Some(cx.new(|cx| {
-                                        InputState::new(window, cx).placeholder(crate::tr!(
-                                            "diff.comment_placeholder"
-                                        ))
+                                        InputState::new(window, cx)
+                                            .placeholder(crate::tr!("diff.comment_placeholder"))
                                     }));
                                     this.remeasure_lists();
                                     cx.notify();

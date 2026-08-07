@@ -1485,17 +1485,13 @@ impl ChatView {
         v_flex()
             .w_full()
             .gap_2()
-            .child(
-                self.render_disclosure(
-                    turn,
-                    format!("orchestrate-context-{entry_id}"),
-                    crate::tr!("chat.orchestrate_skill")
-                        .into_owned()
-                        .into(),
-                    context,
-                    cx,
-                ),
-            )
+            .child(self.render_disclosure(
+                turn,
+                format!("orchestrate-context-{entry_id}"),
+                crate::tr!("chat.orchestrate_skill").into_owned().into(),
+                context,
+                cx,
+            ))
             .child(bubble)
             .into_any_element()
     }
@@ -1965,10 +1961,7 @@ impl ChatView {
                             .rounded_full()
                             .bg(cx.theme().muted)
                             .text_size(px(11.))
-                            .child(crate::tr!(
-                                "chat.subagent_count",
-                                count = subagent_count
-                            )),
+                            .child(crate::tr!("chat.subagent_count", count = subagent_count)),
                     )
                 })
                 .child(Icon::new(chevron(expanded)).xsmall()),

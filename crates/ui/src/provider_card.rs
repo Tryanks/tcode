@@ -169,8 +169,7 @@ impl ProviderCard {
             .tooltip({
                 let name = name.clone();
                 move |window, cx| {
-                    let label =
-                        crate::tr!("providers.configure", name = name.clone()).into_owned();
+                    let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
                     gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                 }
             })

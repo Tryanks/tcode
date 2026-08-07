@@ -130,10 +130,7 @@ impl AcpAgentCard {
                     .ghost()
                     .xsmall()
                     .icon(IconName::ChevronDown)
-                    .tooltip(crate::tr!(
-                        "providers.toggle_details",
-                        name = name.clone()
-                    ))
+                    .tooltip(crate::tr!("providers.toggle_details", name = name.clone()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.expanded = !this.expanded;
                         cx.notify();
@@ -318,11 +315,7 @@ impl AcpPanel {
             tp_name: input(KIMI_NAME, window, cx),
             tp_base_url: input(KIMI_BASE_URL, window, cx),
             tp_model: input(KIMI_MODEL, window, cx),
-            tp_key: input(
-                &crate::tr!("providers.third_party.key_hint"),
-                window,
-                cx,
-            ),
+            tp_key: input(&crate::tr!("providers.third_party.key_hint"), window, cx),
             _subscriptions: subscriptions,
         };
         panel

@@ -42,9 +42,7 @@ pub(crate) fn attach_error_message(error: &AttachError) -> String {
         AttachError::UnsupportedType { name } => {
             crate::tr!("attach.unsupported_type", name = name).into_owned()
         }
-        AttachError::TooLarge { name } => {
-            crate::tr!("attach.too_large", name = name).into_owned()
-        }
+        AttachError::TooLarge { name } => crate::tr!("attach.too_large", name = name).into_owned(),
         AttachError::TooMany => crate::tr!("attach.too_many").into_owned(),
     }
 }

@@ -1166,11 +1166,7 @@ impl TerminalDrawer {
                         .top(px(PANE_PADDING))
                         .small()
                         .label(crate::tr!("terminal.add_context"))
-                        .tooltip(format!(
-                            "{} · {}",
-                            label,
-                            crate::tr!("terminal.selection")
-                        ))
+                        .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.dispatch(Command::CaptureTerminalSelection { terminal_id }, cx);

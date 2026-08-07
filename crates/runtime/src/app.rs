@@ -8947,7 +8947,10 @@ mod tests {
 
         let launch_env = LaunchEnv {
             env: vec![("ANTHROPIC_BASE_URL".into(), "https://proxy.test".into())],
-            home: settings.provider(ProviderKind::ClaudeCode).home_path.clone(),
+            home: settings
+                .provider(ProviderKind::ClaudeCode)
+                .home_path
+                .clone(),
         };
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
         let opts = session_options(&meta, &settings, launch_env, None, None, None);

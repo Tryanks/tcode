@@ -1130,9 +1130,7 @@ mod placeholder {
             log::info!(
                 "preview: rejecting op {op:?} for session {session_id} (unsupported on Linux)"
             );
-            let _ = reply.try_send(Err(
-                crate::tr!("preview.unsupported_linux").into_owned()
-            ));
+            let _ = reply.try_send(Err(crate::tr!("preview.unsupported_linux").into_owned()));
         }
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}

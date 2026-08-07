@@ -734,10 +734,7 @@ impl SessionsSidebar {
             let session_ids = session_ids.clone();
             alert
                 .title(crate::tr!("sidebar.archive_all_title"))
-                .description(crate::tr!(
-                    "sidebar.archive_all_description",
-                    count = count
-                ))
+                .description(crate::tr!("sidebar.archive_all_description", count = count))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
@@ -840,10 +837,7 @@ impl SessionsSidebar {
             let session_id = session_id.clone();
             alert
                 .title(crate::tr!("sidebar.archive_title"))
-                .description(crate::tr!(
-                    "sidebar.archive_description",
-                    title = title
-                ))
+                .description(crate::tr!("sidebar.archive_description", title = title))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
@@ -884,10 +878,7 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(crate::tr!(
-                    "sidebar.delete_title",
-                    title = title.clone()
-                ))
+                .title(crate::tr!("sidebar.delete_title", title = title.clone()))
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
@@ -1284,8 +1275,7 @@ impl SessionsSidebar {
             .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
             .tooltip(|window, cx| {
-                Tooltip::new(crate::tr!("sidebar.create_thread").into_owned())
-                    .build(window, cx)
+                Tooltip::new(crate::tr!("sidebar.create_thread").into_owned()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -1518,10 +1508,7 @@ impl SessionsSidebar {
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let (color, label) = if state.waiting_for_approval {
-            (
-                cx.theme().warning,
-                crate::tr!("sidebar.waiting_approval"),
-            )
+            (cx.theme().warning, crate::tr!("sidebar.waiting_approval"))
         } else if state.waiting_for_input {
             (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
         } else if working {
@@ -1747,8 +1734,7 @@ impl SessionsSidebar {
                     .focus(|button| button.opacity(1.).bg(cx.theme().sidebar_accent))
                     .hover(|button| button.bg(cx.theme().sidebar_accent))
                     .tooltip(|window, cx| {
-                        Tooltip::new(crate::tr!("sidebar.archive").into_owned())
-                            .build(window, cx)
+                        Tooltip::new(crate::tr!("sidebar.archive").into_owned()).build(window, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();

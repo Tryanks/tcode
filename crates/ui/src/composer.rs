@@ -631,10 +631,7 @@ impl Composer {
             return;
         }
         if !self.workspace_store.read(cx).composer_has_active_session() {
-            window.push_notification(
-                Notification::info(crate::tr!("composer.no_session")),
-                cx,
-            );
+            window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
             return;
         }
         // Intercept the minimal `/`-command set (S1 §4/§7): `/plan` and
@@ -848,11 +845,7 @@ impl Composer {
                     })
                     .collect();
                 let loading = self.workspace_loading && self.workspace.is_none();
-                (
-                    rows,
-                    crate::tr!("composer.no_files").into_owned(),
-                    loading,
-                )
+                (rows, crate::tr!("composer.no_files").into_owned(), loading)
             }
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
@@ -863,19 +856,16 @@ impl Composer {
                         .into_iter()
                         .map(|c| MenuRow {
                             primary: format!("${}", c.name),
-                            secondary: c.description.clone().unwrap_or_else(|| {
-                                crate::tr!("composer.run_skill").into_owned()
-                            }),
+                            secondary: c
+                                .description
+                                .clone()
+                                .unwrap_or_else(|| crate::tr!("composer.run_skill").into_owned()),
                             icon: MenuIcon::Skill,
                             accept: MenuAccept::InsertSkill(c.name.clone()),
                             group: Some("composer.group_skills"),
                         })
                         .collect();
-                (
-                    rows,
-                    crate::tr!("composer.no_skills").into_owned(),
-                    false,
-                )
+                (rows, crate::tr!("composer.no_skills").into_owned(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
                 let builtins: [(&str, Option<&str>, &str, MenuAccept); 4] = [
@@ -940,11 +930,7 @@ impl Composer {
                         group: Some("composer.group_provider"),
                     }),
                 );
-                (
-                    rows,
-                    crate::tr!("composer.no_command").into_owned(),
-                    false,
-                )
+                (rows, crate::tr!("composer.no_command").into_owned(), false)
             }
         }
     }
@@ -1729,10 +1715,7 @@ impl Composer {
                     .px_1()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(crate::tr!(
-                        "composer.queued_count",
-                        count = queued.len()
-                    )),
+                    .child(crate::tr!("composer.queued_count", count = queued.len())),
             );
 
         for message in queued {
@@ -2066,9 +2049,7 @@ impl Composer {
                                             crate::tr!("plan.implement_titled", title = title)
                                                 .into_owned()
                                         }
-                                        None => {
-                                            crate::tr!("plan.implement_untitled").into_owned()
-                                        }
+                                        None => crate::tr!("plan.implement_untitled").into_owned(),
                                     };
                                     store.dispatch(Command::ImplementPlanInNewThread { title });
                                 });
@@ -2209,16 +2190,11 @@ impl Composer {
                     .child(question.header.clone()),
             )
             .when(total > 1, |this| {
-                this.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(muted)
-                        .child(crate::tr!(
-                            "userinput.question_count",
-                            index = index + 1,
-                            total = total
-                        )),
-                )
+                this.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
+                    "userinput.question_count",
+                    index = index + 1,
+                    total = total
+                )))
             });
 
         // Option rows.
@@ -2866,9 +2842,7 @@ impl Composer {
                     )
                     .child(
                         workspace_row(
-                            crate::tr!("composer.local_checkout")
-                                .into_owned()
-                                .into(),
+                            crate::tr!("composer.local_checkout").into_owned().into(),
                             false,
                             cx,
                         )
@@ -3678,8 +3652,7 @@ fn render_model_row(
     let store_fav = store_entity.clone();
     let popover_fav = popover.clone();
 
-    let accessible_label =
-        crate::tr!("composer.model_option", model = name.clone()).into_owned();
+    let accessible_label = crate::tr!("composer.model_option", model = name.clone()).into_owned();
     h_flex()
         .id(("model-row", index))
         .role(Role::ListBoxOption)
@@ -4270,12 +4243,16 @@ fn render_context_meter_pane(
 
     // "<Provider> automatically compacts its context when needed."
     if let Some(provider) = provider {
-        pane = pane.child(div().pt_1().text_size(px(11.)).text_color(muted).child(
-            crate::tr!(
-                "composer.compacts_automatically",
-                provider = provider_label(provider)
-            ),
-        ));
+        pane = pane.child(
+            div()
+                .pt_1()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(crate::tr!(
+                    "composer.compacts_automatically",
+                    provider = provider_label(provider)
+                )),
+        );
     }
 
     pane.into_any_element()

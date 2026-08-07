@@ -109,8 +109,7 @@ pub fn summarize(
                 )
                 .into_owned(),
                 (Some(_), None) => {
-                    crate::tr!("providers.status.authenticated_as", email = EMAIL_SLOT)
-                        .into_owned()
+                    crate::tr!("providers.status.authenticated_as", email = EMAIL_SLOT).into_owned()
                 }
                 (None, Some(label)) => {
                     crate::tr!("providers.status.authenticated_with_label", label = label)
@@ -179,13 +178,9 @@ pub fn probe_diagnostic_message(
     match diagnostic {
         ProviderProbeDiagnostic::MissingCli => match provider {
             ProviderKind::Codex => crate::tr!("providers.probe.codex_missing").into_owned(),
-            ProviderKind::ClaudeCode => {
-                crate::tr!("providers.probe.claude_missing").into_owned()
-            }
+            ProviderKind::ClaudeCode => crate::tr!("providers.probe.claude_missing").into_owned(),
             ProviderKind::Pi => crate::tr!("providers.probe.pi_missing").into_owned(),
-            ProviderKind::OpenCode => {
-                crate::tr!("providers.probe.opencode_missing").into_owned()
-            }
+            ProviderKind::OpenCode => crate::tr!("providers.probe.opencode_missing").into_owned(),
             ProviderKind::Acp => String::new(),
         },
         ProviderProbeDiagnostic::FailedCli => crate::tr!(

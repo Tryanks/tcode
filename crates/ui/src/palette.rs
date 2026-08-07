@@ -110,9 +110,8 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder"))
-        });
+        let query =
+            cx.new(|cx| InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder")));
 
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
