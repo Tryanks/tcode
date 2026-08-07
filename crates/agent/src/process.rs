@@ -77,25 +77,6 @@ impl StderrTail {
         thread_name: &str,
         log_prefix: &'static str,
     ) -> std::io::Result<()> {
-        self.spawn_inner(reader, thread_name, log_prefix, false)
-    }
-
-    pub(crate) fn spawn_joinable(
-        &self,
-        reader: impl Read + Send + 'static,
-        thread_name: &str,
-        log_prefix: &'static str,
-    ) -> std::io::Result<()> {
-        self.spawn_inner(reader, thread_name, log_prefix, true)
-    }
-
-    fn spawn_inner(
-        &self,
-        reader: impl Read + Send + 'static,
-        thread_name: &str,
-        log_prefix: &'static str,
-        retain_reader: bool,
-    ) -> std::io::Result<()> {
         let tail = self.clone();
         let reader = std::thread::Builder::new()
             .name(thread_name.into())
@@ -105,9 +86,7 @@ impl StderrTail {
                     tail.push(line);
                 }
             })?;
-        if retain_reader {
-            self.readers.lock().unwrap().push(reader);
-        }
+        self.readers.lock().unwrap().push(reader);
         Ok(())
     }
 
@@ -131,15 +110,7 @@ impl StderrTail {
     fn text(&self) -> String {
         let readers = std::mem::take(&mut *self.readers.lock().unwrap());
         for reader in readers {
-            for _ in 0..50 {
-                if reader.is_finished() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            if reader.is_finished() {
-                let _ = reader.join();
-            }
+            let _ = reader.join();
         }
         self.lines.lock().unwrap().join("\n")
     }

@@ -661,7 +661,7 @@ fn spawn_server(
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
     let stderr_tail = StderrTail::default();
     stderr_tail
-        .spawn_joinable(stderr, "codex-app-server-stderr", "codex app-server")
+        .spawn(stderr, "codex-app-server-stderr", "codex app-server")
         .map_err(|err| AgentError::Spawn(err.to_string()))?;
     Ok((child, stdin, rx, stderr_tail))
 }
