@@ -91,12 +91,11 @@ impl SessionStore {
                 // Registry ids are external input and may contain path separators.
                 // Hex keeps the filename reversible and collision-free without
                 // allowing an id to escape the data directory.
-                let mut encoded = String::with_capacity(id.len() * 2);
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                for byte in id.as_bytes() {
-                    encoded.push(HEX[(byte >> 4) as usize] as char);
-                    encoded.push(HEX[(byte & 0x0f) as usize] as char);
-                }
+                let encoded = id
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
                 format!("acp-{encoded}")
             }
         };

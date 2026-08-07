@@ -38,7 +38,7 @@ pub fn summarize(
     snapshot: Option<&ProviderSnapshot>,
     enabled: bool,
 ) -> StatusSummary {
-    let t = |key: &str| tcode_i18n::tr!(key).into_owned();
+    let t = |key: &str| crate::tr!(key).into_owned();
     let checking = || StatusSummary {
         dot: StatusDot::Warning,
         headline: t("providers.status.checking"),
@@ -102,18 +102,18 @@ pub fn summarize(
                 .and_then(|auth| auth.label.as_deref())
                 .filter(|label| !label.is_empty());
             let headline = match (&email, &label) {
-                (Some(_), Some(label)) => tcode_i18n::tr!(
+                (Some(_), Some(label)) => crate::tr!(
                     "providers.status.authenticated_as_with_label",
                     email = EMAIL_SLOT,
                     label = label
                 )
                 .into_owned(),
                 (Some(_), None) => {
-                    tcode_i18n::tr!("providers.status.authenticated_as", email = EMAIL_SLOT)
+                    crate::tr!("providers.status.authenticated_as", email = EMAIL_SLOT)
                         .into_owned()
                 }
                 (None, Some(label)) => {
-                    tcode_i18n::tr!("providers.status.authenticated_with_label", label = label)
+                    crate::tr!("providers.status.authenticated_with_label", label = label)
                         .into_owned()
                 }
                 (None, None) => t("providers.status.authenticated"),
@@ -178,33 +178,33 @@ pub fn probe_diagnostic_message(
 ) -> String {
     match diagnostic {
         ProviderProbeDiagnostic::MissingCli => match provider {
-            ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_missing").into_owned(),
+            ProviderKind::Codex => crate::tr!("providers.probe.codex_missing").into_owned(),
             ProviderKind::ClaudeCode => {
-                tcode_i18n::tr!("providers.probe.claude_missing").into_owned()
+                crate::tr!("providers.probe.claude_missing").into_owned()
             }
-            ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_missing").into_owned(),
+            ProviderKind::Pi => crate::tr!("providers.probe.pi_missing").into_owned(),
             ProviderKind::OpenCode => {
-                tcode_i18n::tr!("providers.probe.opencode_missing").into_owned()
+                crate::tr!("providers.probe.opencode_missing").into_owned()
             }
             ProviderKind::Acp => String::new(),
         },
-        ProviderProbeDiagnostic::FailedCli => tcode_i18n::tr!(
+        ProviderProbeDiagnostic::FailedCli => crate::tr!(
             "providers.probe.failed_run",
             provider = provider_label(provider)
         )
         .into_owned(),
         ProviderProbeDiagnostic::Unauthenticated => match provider {
-            ProviderKind::Codex => tcode_i18n::tr!("providers.probe.codex_signed_out").into_owned(),
+            ProviderKind::Codex => crate::tr!("providers.probe.codex_signed_out").into_owned(),
             ProviderKind::ClaudeCode => {
-                tcode_i18n::tr!("providers.probe.claude_signed_out").into_owned()
+                crate::tr!("providers.probe.claude_signed_out").into_owned()
             }
-            ProviderKind::Pi => tcode_i18n::tr!("providers.probe.pi_signed_out").into_owned(),
+            ProviderKind::Pi => crate::tr!("providers.probe.pi_signed_out").into_owned(),
             ProviderKind::OpenCode => {
-                tcode_i18n::tr!("providers.probe.opencode_signed_out").into_owned()
+                crate::tr!("providers.probe.opencode_signed_out").into_owned()
             }
             ProviderKind::Acp => String::new(),
         },
-        ProviderProbeDiagnostic::IndeterminateAuth => tcode_i18n::tr!(
+        ProviderProbeDiagnostic::IndeterminateAuth => crate::tr!(
             "providers.probe.indeterminate_auth",
             provider = provider_label(provider)
         )
@@ -449,7 +449,7 @@ mod tests {
         let provider = ProviderKind::Codex;
         for (locale, expected) in [
             (
-                tcode_i18n::LANGUAGE_ENGLISH,
+                crate::LANGUAGE_ENGLISH,
                 [
                     "Codex CLI (`codex`) is not installed or not on PATH.",
                     "Codex CLI is installed but failed to run.",
@@ -458,7 +458,7 @@ mod tests {
                 ],
             ),
             (
-                tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE,
+                crate::LANGUAGE_SIMPLIFIED_CHINESE,
                 [
                     "未安装 Codex CLI（`codex`），或其不在 PATH 中。",
                     "Codex CLI 已安装，但运行失败。",
@@ -467,7 +467,7 @@ mod tests {
                 ],
             ),
         ] {
-            tcode_i18n::set_locale(locale);
+            crate::set_locale(locale);
             for (diagnostic, expected) in [
                 ProviderProbeDiagnostic::MissingCli,
                 ProviderProbeDiagnostic::FailedCli,
@@ -480,6 +480,6 @@ mod tests {
                 assert_eq!(probe_diagnostic_message(provider, diagnostic), expected);
             }
         }
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 }

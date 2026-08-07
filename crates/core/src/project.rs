@@ -55,7 +55,7 @@ pub struct WorktreeInfo {
 }
 
 /// Index entry describing one persisted session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub title: String,

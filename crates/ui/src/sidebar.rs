@@ -45,9 +45,9 @@ const THREADS_COLLAPSED_LIMIT: usize = 6;
 fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static, str>> {
     (total > THREADS_COLLAPSED_LIMIT).then(|| {
         if expanded {
-            tcode_i18n::tr!("sidebar.show_less")
+            crate::tr!("sidebar.show_less")
         } else {
-            tcode_i18n::tr!("sidebar.show_more")
+            crate::tr!("sidebar.show_more")
         }
     })
 }
@@ -89,7 +89,7 @@ fn child_count_badge(
             cx.theme().muted_foreground
         })
         .tooltip(move |window, cx| {
-            Tooltip::new(tcode_i18n::tr!("sidebar.child_threads", count = total).into_owned())
+            Tooltip::new(crate::tr!("sidebar.child_threads", count = total).into_owned())
                 .build(window, cx)
         })
         .child(label)
@@ -518,8 +518,8 @@ impl SessionsSidebar {
             let alert = alert.bg(cx.theme().popover);
             let window_state = window_state.clone();
             alert
-                .title(tcode_i18n::tr!("sidebar.auto_archive_dialog.title"))
-                .description(tcode_i18n::tr!(
+                .title(crate::tr!("sidebar.auto_archive_dialog.title"))
+                .description(crate::tr!(
                     "sidebar.auto_archive_dialog.body",
                     count = count,
                     days = days,
@@ -527,8 +527,8 @@ impl SessionsSidebar {
                 ))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text(tcode_i18n::tr!("sidebar.auto_archive_dialog.open_settings"))
-                        .cancel_text(tcode_i18n::tr!("sidebar.auto_archive_dialog.got_it"))
+                        .ok_text(crate::tr!("sidebar.auto_archive_dialog.open_settings"))
+                        .cancel_text(crate::tr!("sidebar.auto_archive_dialog.got_it"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
@@ -612,10 +612,10 @@ impl SessionsSidebar {
         let refusal = match self.store.read(cx).fork_availability(&action.0) {
             ForkAvailability::Available => None,
             ForkAvailability::Unsupported => {
-                Some(tcode_i18n::tr!("sidebar.fork_unsupported").into_owned())
+                Some(crate::tr!("sidebar.fork_unsupported").into_owned())
             }
-            ForkAvailability::Empty => Some(tcode_i18n::tr!("sidebar.fork_empty").into_owned()),
-            ForkAvailability::Running => Some(tcode_i18n::tr!("sidebar.fork_running").into_owned()),
+            ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
+            ForkAvailability::Running => Some(crate::tr!("sidebar.fork_running").into_owned()),
         };
         if let Some(message) = refusal {
             window.push_notification(Notification::error(message), cx);
@@ -733,16 +733,16 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_ids = session_ids.clone();
             alert
-                .title(tcode_i18n::tr!("sidebar.archive_all_title"))
-                .description(tcode_i18n::tr!(
+                .title(crate::tr!("sidebar.archive_all_title"))
+                .description(crate::tr!(
                     "sidebar.archive_all_description",
                     count = count
                 ))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.archive_all_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.archive_all_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
@@ -774,19 +774,19 @@ impl SessionsSidebar {
             let store = store.clone();
             let project_id = project_id.clone();
             alert
-                .title(tcode_i18n::tr!(
+                .title(crate::tr!(
                     "sidebar.remove_project_title",
                     project = project_name.clone()
                 ))
-                .description(tcode_i18n::tr!(
+                .description(crate::tr!(
                     "sidebar.remove_project_description",
                     count = count
                 ))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.remove_project_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.remove_project_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
@@ -839,16 +839,16 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(tcode_i18n::tr!("sidebar.archive_title"))
-                .description(tcode_i18n::tr!(
+                .title(crate::tr!("sidebar.archive_title"))
+                .description(crate::tr!(
                     "sidebar.archive_description",
                     title = title
                 ))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.archive_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.archive_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
@@ -884,16 +884,16 @@ impl SessionsSidebar {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(tcode_i18n::tr!(
+                .title(crate::tr!(
                     "sidebar.delete_title",
                     title = title.clone()
                 ))
-                .description(tcode_i18n::tr!("sidebar.delete_description"))
+                .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("sidebar.delete_action"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("sidebar.delete_action"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
@@ -948,7 +948,7 @@ impl SessionsSidebar {
                 h_flex(),
                 "sidebar-search",
                 Role::Button,
-                tcode_i18n::tr!("sidebar.search"),
+                crate::tr!("sidebar.search"),
                 cx,
             )
             .h(px(32.))
@@ -972,7 +972,7 @@ impl SessionsSidebar {
                     .flex_1()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("sidebar.search")),
+                    .child(crate::tr!("sidebar.search")),
             )
             .child(
                 div()
@@ -990,8 +990,8 @@ impl SessionsSidebar {
 
     fn render_layout_toggle(&self, layout: SidebarLayout, cx: &mut Context<Self>) -> Button {
         let tooltip = match layout {
-            SidebarLayout::Flat => tcode_i18n::tr!("sidebar.layout_grouped"),
-            SidebarLayout::Grouped => tcode_i18n::tr!("sidebar.layout_flat"),
+            SidebarLayout::Flat => crate::tr!("sidebar.layout_grouped"),
+            SidebarLayout::Grouped => crate::tr!("sidebar.layout_flat"),
         };
         Button::new("toggle-sidebar-layout")
             .ghost()
@@ -1025,7 +1025,7 @@ impl SessionsSidebar {
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
                     // Small-caps section label; `to_uppercase` is a no-op on CJK.
-                    .child(tcode_i18n::tr!("sidebar.projects").to_uppercase()),
+                    .child(crate::tr!("sidebar.projects").to_uppercase()),
             )
             .child(
                 h_flex()
@@ -1036,7 +1036,7 @@ impl SessionsSidebar {
                             .xsmall()
                             .compact()
                             .icon(IconName::SortAscending)
-                            .tooltip(tcode_i18n::tr!("sidebar.sort", mode = sort_label))
+                            .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.store.update(cx, |store, _cx| {
                                     store.dispatch(Command::CycleProjectSort);
@@ -1054,7 +1054,7 @@ impl SessionsSidebar {
                                     .path("icons/folder-plus.svg")
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .tooltip(tcode_i18n::tr!("sidebar.add_project"))
+                            .tooltip(crate::tr!("sidebar.add_project"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
@@ -1077,10 +1077,10 @@ impl SessionsSidebar {
             .xsmall()
             .compact()
             .icon(Icon::new(IconName::Folder).text_color(filter_icon_color))
-            .tooltip(tcode_i18n::tr!("sidebar.filter_project"))
+            .tooltip(crate::tr!("sidebar.filter_project"))
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu.menu_with_check(
-                    tcode_i18n::tr!("sidebar.all_projects").into_owned(),
+                    crate::tr!("sidebar.all_projects").into_owned(),
                     filter_for_menu.is_none(),
                     Box::new(FilterProject(String::new())),
                 );
@@ -1107,7 +1107,7 @@ impl SessionsSidebar {
                 .xsmall()
                 .compact()
                 .icon(IconName::Plus)
-                .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
+                .tooltip(crate::tr!("sidebar.create_thread"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.store.update(cx, |store, _cx| {
                         store.dispatch(Command::StartDraft {
@@ -1124,7 +1124,7 @@ impl SessionsSidebar {
                 .xsmall()
                 .compact()
                 .icon(IconName::Plus)
-                .tooltip(tcode_i18n::tr!("sidebar.create_thread"))
+                .tooltip(crate::tr!("sidebar.create_thread"))
                 .dropdown_menu(move |menu, _window, _cx| {
                     let mut menu = menu;
                     for project in &draft_projects {
@@ -1149,7 +1149,7 @@ impl SessionsSidebar {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("sidebar.threads").to_uppercase()),
+                    .child(crate::tr!("sidebar.threads").to_uppercase()),
             )
             .child(
                 h_flex()
@@ -1167,7 +1167,7 @@ impl SessionsSidebar {
                                     .path("icons/folder-plus.svg")
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .tooltip(tcode_i18n::tr!("sidebar.add_project"))
+                            .tooltip(crate::tr!("sidebar.add_project"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
@@ -1207,7 +1207,7 @@ impl SessionsSidebar {
             .any(|meta| !self.store.read(cx).turn_running_for(&meta.id));
 
         let header_label =
-            tcode_i18n::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
+            crate::tr!("sidebar.project", name = group.project.name.clone()).into_owned();
         let header = crate::material::accessible_clickable(
             h_flex(),
             gpui::SharedString::from(format!("project-header-{project_id}")),
@@ -1267,7 +1267,7 @@ impl SessionsSidebar {
                 h_flex(),
                 gpui::SharedString::from(format!("new-thread-{project_id}")),
                 Role::Button,
-                tcode_i18n::tr!("sidebar.create_thread"),
+                crate::tr!("sidebar.create_thread"),
                 cx,
             )
             .size_5()
@@ -1284,7 +1284,7 @@ impl SessionsSidebar {
             .focus(|s| s.opacity(1.).bg(cx.theme().sidebar_accent))
             .hover(|s| s.bg(cx.theme().sidebar_accent))
             .tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.create_thread").into_owned())
+                Tooltip::new(crate::tr!("sidebar.create_thread").into_owned())
                     .build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1306,9 +1306,9 @@ impl SessionsSidebar {
                 .flex_none()
                 .child(header.context_menu(move |menu, _window, _cx| {
                     let id = menu_project_id.clone();
-                    let delete_label = tcode_i18n::tr!("sidebar.remove_project").into_owned();
+                    let delete_label = crate::tr!("sidebar.remove_project").into_owned();
                     menu.menu_with_enable(
-                        tcode_i18n::tr!("sidebar.archive_all").into_owned(),
+                        crate::tr!("sidebar.archive_all").into_owned(),
                         Box::new(ProjectArchiveAll(id.clone())),
                         can_archive,
                     )
@@ -1319,7 +1319,7 @@ impl SessionsSidebar {
                             .child(delete_label.clone())
                     })
                     .menu(
-                        tcode_i18n::tr!("sidebar.reveal_project").into_owned(),
+                        crate::tr!("sidebar.reveal_project").into_owned(),
                         Box::new(ProjectReveal(id)),
                     )
                 }));
@@ -1361,7 +1361,7 @@ impl SessionsSidebar {
                     .as_ref()
                     .filter(|(notice_project, _)| notice_project == &project_id)
             {
-                let label = tcode_i18n::tr!("sidebar.auto_archived", count = *count);
+                let label = crate::tr!("sidebar.auto_archived", count = *count);
                 let window_state = self.window_state.clone();
                 container = container.child(
                     crate::material::accessible_clickable(
@@ -1441,7 +1441,7 @@ impl SessionsSidebar {
             base,
             row_id,
             Role::Button,
-            tcode_i18n::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
+            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
             cx,
         )
         .aria_selected(is_active)
@@ -1471,7 +1471,7 @@ impl SessionsSidebar {
         }))
         .when(state.waiting_for_approval, |row| {
             row.tooltip(|window, cx| {
-                Tooltip::new(tcode_i18n::tr!("sidebar.waiting_approval_tooltip").into_owned())
+                Tooltip::new(crate::tr!("sidebar.waiting_approval_tooltip").into_owned())
                     .build(window, cx)
             })
         })
@@ -1479,7 +1479,7 @@ impl SessionsSidebar {
             state.waiting_for_input && !state.waiting_for_approval,
             |row| {
                 row.tooltip(|window, cx| {
-                    Tooltip::new(tcode_i18n::tr!("sidebar.waiting_input_tooltip").into_owned())
+                    Tooltip::new(crate::tr!("sidebar.waiting_input_tooltip").into_owned())
                         .build(window, cx)
                 })
             },
@@ -1520,12 +1520,12 @@ impl SessionsSidebar {
         let (color, label) = if state.waiting_for_approval {
             (
                 cx.theme().warning,
-                tcode_i18n::tr!("sidebar.waiting_approval"),
+                crate::tr!("sidebar.waiting_approval"),
             )
         } else if state.waiting_for_input {
-            (cx.theme().warning, tcode_i18n::tr!("sidebar.waiting_input"))
+            (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
         } else if working {
-            (cx.theme().success, tcode_i18n::tr!("sidebar.working"))
+            (cx.theme().success, crate::tr!("sidebar.working"))
         } else {
             return None;
         };
@@ -1555,36 +1555,36 @@ impl SessionsSidebar {
         row.context_menu(move |menu, _window, _cx| {
             let id = session_id.clone();
             menu.menu(
-                tcode_i18n::tr!("sidebar.ctx_rename").into_owned(),
+                crate::tr!("sidebar.ctx_rename").into_owned(),
                 Box::new(ThreadRename(id.clone())),
             )
             .when(can_fork, |menu| {
                 menu.menu(
-                    tcode_i18n::tr!("sidebar.ctx_fork").into_owned(),
+                    crate::tr!("sidebar.ctx_fork").into_owned(),
                     Box::new(ThreadFork(id.clone())),
                 )
             })
             .menu(
-                tcode_i18n::tr!("sidebar.ctx_mark_unread").into_owned(),
+                crate::tr!("sidebar.ctx_mark_unread").into_owned(),
                 Box::new(ThreadMarkUnread(id.clone())),
             )
             .separator()
             .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_path").into_owned(),
+                crate::tr!("sidebar.ctx_copy_path").into_owned(),
                 Box::new(ThreadCopyPath(id.clone())),
             )
             .menu(
-                tcode_i18n::tr!("sidebar.ctx_copy_id").into_owned(),
+                crate::tr!("sidebar.ctx_copy_id").into_owned(),
                 Box::new(ThreadCopyId(id.clone())),
             )
             .separator()
             .menu_with_enable(
-                tcode_i18n::tr!("sidebar.archive").into_owned(),
+                crate::tr!("sidebar.archive").into_owned(),
                 Box::new(ThreadArchive(id.clone())),
                 !running,
             )
             .menu(
-                tcode_i18n::tr!("sidebar.ctx_delete").into_owned(),
+                crate::tr!("sidebar.ctx_delete").into_owned(),
                 Box::new(ThreadDelete(id.clone())),
             )
         })
@@ -1731,7 +1731,7 @@ impl SessionsSidebar {
                         h_flex(),
                         gpui::SharedString::from(format!("archive-flat-thread-{session_id}")),
                         Role::Button,
-                        tcode_i18n::tr!("sidebar.archive"),
+                        crate::tr!("sidebar.archive"),
                         cx,
                     )
                     .absolute()
@@ -1747,7 +1747,7 @@ impl SessionsSidebar {
                     .focus(|button| button.opacity(1.).bg(cx.theme().sidebar_accent))
                     .hover(|button| button.bg(cx.theme().sidebar_accent))
                     .tooltip(|window, cx| {
-                        Tooltip::new(tcode_i18n::tr!("sidebar.archive").into_owned())
+                        Tooltip::new(crate::tr!("sidebar.archive").into_owned())
                             .build(window, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1892,7 +1892,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_approval")),
+                            .child(crate::tr!("sidebar.waiting_approval")),
                     )
                 })
                 .when(waiting_for_input && !waiting_for_approval, |line| {
@@ -1900,7 +1900,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .text_color(cx.theme().warning)
-                            .child(tcode_i18n::tr!("sidebar.waiting_input")),
+                            .child(crate::tr!("sidebar.waiting_input")),
                     )
                 })
                 .when(working && !waiting, |line| {
@@ -1908,7 +1908,7 @@ impl SessionsSidebar {
                         div()
                             .flex_none()
                             .text_color(cx.theme().success)
-                            .child(tcode_i18n::tr!("sidebar.working")),
+                            .child(crate::tr!("sidebar.working")),
                     )
                 })
                 .when((waiting || working) && has_project, |line| {
@@ -1958,7 +1958,7 @@ impl SessionsSidebar {
                     h_flex(),
                     "sidebar-settings",
                     Role::Button,
-                    tcode_i18n::tr!("settings.title"),
+                    crate::tr!("settings.title"),
                     cx,
                 )
                 .h(px(40.))
@@ -1980,7 +1980,7 @@ impl SessionsSidebar {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().sidebar_foreground)
-                        .child(tcode_i18n::tr!("settings.title")),
+                        .child(crate::tr!("settings.title")),
                 ),
             )
     }
@@ -2012,16 +2012,16 @@ fn proceed_delete(
         let keep = session_id.clone();
         let store_remove = store.clone();
         alert
-            .title(tcode_i18n::tr!("sidebar.worktree_cleanup_title"))
-            .description(tcode_i18n::tr!(
+            .title(crate::tr!("sidebar.worktree_cleanup_title"))
+            .description(crate::tr!(
                 "sidebar.worktree_cleanup_description",
                 path = path.clone()
             ))
             .button_props(
                 DialogButtonProps::default()
                     .ok_variant(ButtonVariant::Danger)
-                    .ok_text(tcode_i18n::tr!("sidebar.worktree_cleanup_remove"))
-                    .cancel_text(tcode_i18n::tr!("sidebar.worktree_cleanup_keep"))
+                    .ok_text(crate::tr!("sidebar.worktree_cleanup_remove"))
+                    .cancel_text(crate::tr!("sidebar.worktree_cleanup_keep"))
                     .show_cancel(true),
             )
             .on_ok(move |_, _, cx| {
@@ -2067,7 +2067,7 @@ impl Render for SessionsSidebar {
                             .py_3()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("sidebar.empty")),
+                            .child(crate::tr!("sidebar.empty")),
                     );
                 } else {
                     for group in &groups {
@@ -2098,9 +2098,9 @@ impl Render for SessionsSidebar {
                     // An active project filter can empty the list while threads
                     // exist; that state gets its own hint, not the no-projects one.
                     let hint = if sessions.is_empty() {
-                        tcode_i18n::tr!("sidebar.empty")
+                        crate::tr!("sidebar.empty")
                     } else {
-                        tcode_i18n::tr!("sidebar.filter_empty")
+                        crate::tr!("sidebar.filter_empty")
                     };
                     list_content = list_content.child(
                         div()
@@ -2300,7 +2300,7 @@ mod tests {
     #[test]
     fn oversized_thread_list_keeps_its_toggle_after_expanding() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
 
         assert_eq!(thread_list_toggle_label(6, false), None);
         assert_eq!(

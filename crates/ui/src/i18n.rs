@@ -59,7 +59,7 @@ pub fn translate_with_args(
     Cow::Owned(rust_i18n::replace_patterns(&translated, names, values))
 }
 
-/// Translate a key using tcode-i18n's embedded locale backend.
+/// Translate a key using tcode-ui's embedded locale backend.
 #[macro_export]
 macro_rules! tr {
     ($key:expr $(,)?) => {{

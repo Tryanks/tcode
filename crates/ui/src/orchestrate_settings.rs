@@ -63,7 +63,7 @@ impl OrchestrateSettingsPanel {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(4, 14)
-                .placeholder(tcode_i18n::tr!("orchestrate.generic_identity.placeholder"))
+                .placeholder(crate::tr!("orchestrate.generic_identity.placeholder"))
                 .default_value(generic_value)
         });
         let identity_model_picker = cx.new(|cx| {
@@ -71,7 +71,7 @@ impl OrchestrateSettingsPanel {
                 store.clone(),
                 "orchestrate-add-identity-popover",
                 "orchestrate-add-identity",
-                tcode_i18n::tr!("orchestrate.model_identity.add"),
+                crate::tr!("orchestrate.model_identity.add"),
                 cx,
             )
         });
@@ -80,7 +80,7 @@ impl OrchestrateSettingsPanel {
                 store.clone(),
                 "orchestrate-add-child-popover",
                 "orchestrate-add-child",
-                tcode_i18n::tr!("orchestrate.children.add"),
+                crate::tr!("orchestrate.children.add"),
                 cx,
             )
         });
@@ -147,7 +147,7 @@ impl OrchestrateSettingsPanel {
                 InputState::new(window, cx)
                     .multi_line(true)
                     .auto_grow(3, 10)
-                    .placeholder(tcode_i18n::tr!("orchestrate.model_identity.placeholder"))
+                    .placeholder(crate::tr!("orchestrate.model_identity.placeholder"))
                     .default_value(entry.identity)
             });
             let provider = entry.provider;
@@ -168,14 +168,14 @@ impl OrchestrateSettingsPanel {
         for (index, entry) in orchestrate.child_models.into_iter().enumerate() {
             let effort = cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder(tcode_i18n::tr!("orchestrate.children.effort_placeholder"))
+                    .placeholder(crate::tr!("orchestrate.children.effort_placeholder"))
                     .default_value(entry.effort.clone().unwrap_or_default())
             });
             let description = cx.new(|cx| {
                 InputState::new(window, cx)
                     .multi_line(true)
                     .auto_grow(3, 9)
-                    .placeholder(tcode_i18n::tr!(
+                    .placeholder(crate::tr!(
                         "orchestrate.children.description_placeholder"
                     ))
                     .default_value(entry.description)
@@ -529,7 +529,7 @@ impl OrchestrateSettingsPanel {
                         div()
                             .text_size(px(13.))
                             .font_medium()
-                            .child(tcode_i18n::tr!("orchestrate.all_models.title")),
+                            .child(crate::tr!("orchestrate.all_models.title")),
                     ),
             )
             .child(
@@ -537,7 +537,7 @@ impl OrchestrateSettingsPanel {
                     .pl(px(20.))
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("orchestrate.all_models.description")),
+                    .child(crate::tr!("orchestrate.all_models.description")),
             )
             .into_any_element()
     }
@@ -546,12 +546,12 @@ impl OrchestrateSettingsPanel {
         let selected = self.store.read(cx).settings().orchestrate.child_approval;
         let selected_label = match selected {
             ChildApprovalMode::Orchestrator => {
-                tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
+                crate::tr!("orchestrate.child_approval.orchestrator")
             }
             ChildApprovalMode::AlwaysAllow => {
-                tcode_i18n::tr!("orchestrate.child_approval.always_allow")
+                crate::tr!("orchestrate.child_approval.always_allow")
             }
-            ChildApprovalMode::Manual => tcode_i18n::tr!("orchestrate.child_approval.manual"),
+            ChildApprovalMode::Manual => crate::tr!("orchestrate.child_approval.manual"),
         };
         // Ghost, not outline: a quiet resting trigger that only tints on hover,
         // consistent with the General page dropdowns and the composer picker.
@@ -616,7 +616,7 @@ impl OrchestrateSettingsPanel {
                     .child(option(
                         ChildApprovalMode::Orchestrator,
                         "orchestrate-child-approval-orchestrator",
-                        tcode_i18n::tr!("orchestrate.child_approval.orchestrator")
+                        crate::tr!("orchestrate.child_approval.orchestrator")
                             .into_owned()
                             .into(),
                         cx,
@@ -624,7 +624,7 @@ impl OrchestrateSettingsPanel {
                     .child(option(
                         ChildApprovalMode::AlwaysAllow,
                         "orchestrate-child-approval-always-allow",
-                        tcode_i18n::tr!("orchestrate.child_approval.always_allow")
+                        crate::tr!("orchestrate.child_approval.always_allow")
                             .into_owned()
                             .into(),
                         cx,
@@ -632,7 +632,7 @@ impl OrchestrateSettingsPanel {
                     .child(option(
                         ChildApprovalMode::Manual,
                         "orchestrate-child-approval-manual",
-                        tcode_i18n::tr!("orchestrate.child_approval.manual")
+                        crate::tr!("orchestrate.child_approval.manual")
                             .into_owned()
                             .into(),
                         cx,
@@ -657,13 +657,13 @@ impl OrchestrateSettingsPanel {
                                 div()
                                     .text_size(px(13.))
                                     .font_medium()
-                                    .child(tcode_i18n::tr!("orchestrate.child_approval.title")),
+                                    .child(crate::tr!("orchestrate.child_approval.title")),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(tcode_i18n::tr!(
+                                    .child(crate::tr!(
                                         "orchestrate.child_approval.description"
                                     )),
                             ),
@@ -706,8 +706,8 @@ impl OrchestrateSettingsPanel {
             .w_full()
             .gap_3()
             .child(self.section_heading(
-                tcode_i18n::tr!("orchestrate.identity.title"),
-                tcode_i18n::tr!("orchestrate.identity.description"),
+                crate::tr!("orchestrate.identity.title"),
+                crate::tr!("orchestrate.identity.description"),
                 None,
                 cx,
             ))
@@ -726,7 +726,7 @@ impl OrchestrateSettingsPanel {
                                 .items_center()
                                 .child(
                                     div().flex_1().text_size(px(13.)).font_medium().child(
-                                        tcode_i18n::tr!("orchestrate.generic_identity.title"),
+                                        crate::tr!("orchestrate.generic_identity.title"),
                                     ),
                                 )
                                 .child(
@@ -734,7 +734,7 @@ impl OrchestrateSettingsPanel {
                                         .ghost()
                                         .xsmall()
                                         .icon(IconName::Undo)
-                                        .label(tcode_i18n::tr!("orchestrate.restore_default"))
+                                        .label(crate::tr!("orchestrate.restore_default"))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.reset_generic_identity(window, cx);
                                         })),
@@ -744,7 +744,7 @@ impl OrchestrateSettingsPanel {
                             div()
                                 .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(tcode_i18n::tr!("orchestrate.generic_identity.description")),
+                                .child(crate::tr!("orchestrate.generic_identity.description")),
                         )
                         .child(
                             Input::new(&self.generic_identity)
@@ -753,8 +753,8 @@ impl OrchestrateSettingsPanel {
                 ),
             )
             .child(self.section_heading(
-                tcode_i18n::tr!("orchestrate.model_identity.title"),
-                tcode_i18n::tr!("orchestrate.model_identity.description"),
+                crate::tr!("orchestrate.model_identity.title"),
+                crate::tr!("orchestrate.model_identity.description"),
                 Some(self.identity_model_picker.clone().into_any_element()),
                 cx,
             ));
@@ -769,7 +769,7 @@ impl OrchestrateSettingsPanel {
                             .py_3()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("orchestrate.model_identity.empty")),
+                            .child(crate::tr!("orchestrate.model_identity.empty")),
                     ),
                 )
                 .into_any_element();
@@ -816,7 +816,7 @@ impl OrchestrateSettingsPanel {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Undo)
-                                    .label(tcode_i18n::tr!("orchestrate.restore_default"))
+                                    .label(crate::tr!("orchestrate.restore_default"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.reset_model_identity(
                                             provider,
@@ -831,7 +831,7 @@ impl OrchestrateSettingsPanel {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Delete)
-                                    .tooltip(tcode_i18n::tr!(
+                                    .tooltip(crate::tr!(
                                         "orchestrate.model_identity.use_generic"
                                     ))
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -851,8 +851,8 @@ impl OrchestrateSettingsPanel {
     fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
         let settings = self.store.read(cx).settings().orchestrate;
         let mut section = v_flex().w_full().gap_3().child(self.section_heading(
-            tcode_i18n::tr!("orchestrate.children.title"),
-            tcode_i18n::tr!("orchestrate.children.description"),
+            crate::tr!("orchestrate.children.title"),
+            crate::tr!("orchestrate.children.description"),
             Some(self.child_model_picker.clone().into_any_element()),
             cx,
         ));
@@ -860,7 +860,7 @@ impl OrchestrateSettingsPanel {
             return section
                 .child(self.status_note(
                     cx.theme().danger,
-                    tcode_i18n::tr!("orchestrate.children.empty"),
+                    crate::tr!("orchestrate.children.empty"),
                     cx,
                 ))
                 .into_any_element();
@@ -869,7 +869,7 @@ impl OrchestrateSettingsPanel {
         if !settings.child_models.iter().any(|profile| profile.enabled) {
             section = section.child(self.status_note(
                 cx.theme().warning,
-                tcode_i18n::tr!("orchestrate.children.none_enabled"),
+                crate::tr!("orchestrate.children.none_enabled"),
                 cx,
             ));
         }
@@ -883,7 +883,7 @@ impl OrchestrateSettingsPanel {
             let provider = row.provider;
             let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
             let effort = profile.effort.clone().unwrap_or_else(|| {
-                tcode_i18n::tr!("orchestrate.children.effort_default").into_owned()
+                crate::tr!("orchestrate.children.effort_default").into_owned()
             });
             let subtitle = if let Some(id) = row.profile_id.as_deref() {
                 let profile_settings = self.store.read(cx).provider_profile_settings(id);
@@ -938,9 +938,9 @@ impl OrchestrateSettingsPanel {
                                     (cx.theme().muted, cx.theme().muted_foreground)
                                 };
                                 let label = if profile.enabled {
-                                    tcode_i18n::tr!("orchestrate.children.enabled")
+                                    crate::tr!("orchestrate.children.enabled")
                                 } else {
-                                    tcode_i18n::tr!("orchestrate.children.disabled")
+                                    crate::tr!("orchestrate.children.disabled")
                                 };
                                 crate::material::semantic_chip(label, bg, fg)
                             })
@@ -948,9 +948,9 @@ impl OrchestrateSettingsPanel {
                                 Switch::new(("orchestrate-child-enabled", index))
                                     .checked(profile.enabled)
                                     .tooltip(if profile.enabled {
-                                        tcode_i18n::tr!("orchestrate.children.disable")
+                                        crate::tr!("orchestrate.children.disable")
                                     } else {
-                                        tcode_i18n::tr!("orchestrate.children.enable")
+                                        crate::tr!("orchestrate.children.enable")
                                     })
                                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                         this.set_child_enabled(index, *checked, cx);
@@ -961,7 +961,7 @@ impl OrchestrateSettingsPanel {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Undo)
-                                    .label(tcode_i18n::tr!("orchestrate.restore_default"))
+                                    .label(crate::tr!("orchestrate.restore_default"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.reset_child_definition(index, window, cx);
                                     })),
@@ -971,7 +971,7 @@ impl OrchestrateSettingsPanel {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Delete)
-                                    .tooltip(tcode_i18n::tr!("orchestrate.children.remove"))
+                                    .tooltip(crate::tr!("orchestrate.children.remove"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.remove_child(index, window, cx);
                                     })),
@@ -985,7 +985,7 @@ impl OrchestrateSettingsPanel {
                                 div()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(tcode_i18n::tr!("orchestrate.children.effort_label")),
+                                    .child(crate::tr!("orchestrate.children.effort_label")),
                             )
                             .child(
                                 Input::new(&row.effort)
@@ -1018,7 +1018,7 @@ impl Render for OrchestrateSettingsPanel {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("settings.orchestrate_section")),
+                    .child(crate::tr!("settings.orchestrate_section")),
             )
             .child(self.render_intro(cx))
             .child(self.render_child_approval(cx))

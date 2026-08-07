@@ -1,6 +1,6 @@
 //! Persisted application settings presentation with core-owned semantics.
 
-pub use tcode_i18n::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE};
+pub use crate::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE};
 
 #[cfg(test)]
 static TEST_LOCALE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -16,7 +16,7 @@ impl TestLocaleGuard {
         let lock = TEST_LOCALE_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         Self { _lock: lock }
     }
 }
@@ -24,14 +24,14 @@ impl TestLocaleGuard {
 #[cfg(test)]
 impl Drop for TestLocaleGuard {
     fn drop(&mut self) {
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 }
 
 /// Resolve the persisted override against the current system preference and
-/// update the process-global locale shared by tcode-i18n and gpui-component.
+/// update the process-global locale shared by tcode-ui and gpui-component.
 pub fn apply_locale(override_locale: Option<&str>) {
-    let locale = tcode_i18n::apply_locale(override_locale);
+    let locale = crate::apply_locale(override_locale);
     gpui_component::set_locale(locale);
 }
 
@@ -48,7 +48,7 @@ pub const ACCENT_PRESETS: [&str; 6] = [
 /// A localized human label for the sidebar sort button's tooltip.
 pub fn project_sort_label(sort: ProjectSort) -> String {
     match sort {
-        ProjectSort::RecentActivity => tcode_i18n::tr!("sidebar.sort_recent").into_owned(),
-        ProjectSort::NameAsc => tcode_i18n::tr!("sidebar.sort_name").into_owned(),
+        ProjectSort::RecentActivity => crate::tr!("sidebar.sort_recent").into_owned(),
+        ProjectSort::NameAsc => crate::tr!("sidebar.sort_name").into_owned(),
     }
 }

@@ -110,7 +110,7 @@ pub enum AcpLaunch {
 
 /// Provider-shaped opaque state needed to resume a session later
 /// (Codex: `{"thread_id": ...}`; Claude/pi/OpenCode use their native ids).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResumeCursor(pub serde_json::Value);
 
 impl ResumeCursor {
@@ -301,7 +301,7 @@ pub fn claude_mcp_config_json<'a>(
 }
 
 /// One model a provider offers, with its selectable options (T3-style descriptors).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
     pub id: String, // provider-native id sent on the wire
     pub display_name: String,
@@ -309,7 +309,7 @@ pub struct ModelSpec {
     pub options: Vec<OptionDescriptor>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OptionDescriptor {
     Select {
@@ -325,7 +325,7 @@ pub enum OptionDescriptor {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SelectOption {
     pub value: String,
     pub label: String,
@@ -478,7 +478,7 @@ fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
 /// A structured question the agent asks the user (Claude `AskUserQuestion`,
 /// Codex `item/tool/requestUserInput`). Rendered as a multiple-choice (or
 /// free-text) prompt; answers ride back through [`SessionCommand::RespondUserInput`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputQuestion {
     /// The answer key. Claude: the complete question text (the SDK indexes
     /// answers by question text). Codex: the native question id.
@@ -491,7 +491,7 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputOption {
     pub label: String,
     pub description: String,
@@ -768,7 +768,7 @@ pub enum PlanResolution {
     Dismissed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// A tcode-level handoff between providers. This is never emitted by an
@@ -946,7 +946,7 @@ pub enum AgentEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub step: String,
     pub status: PlanStepStatus,
@@ -1018,7 +1018,7 @@ pub enum ItemStatus {
     Declined,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadItem {
     /// Provider-scoped stable id; deltas and later lifecycle events reference it.
     pub id: String,
@@ -1028,7 +1028,7 @@ pub struct ThreadItem {
     pub content: ItemContent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemContent {
     UserMessage {
@@ -1087,7 +1087,7 @@ pub enum ItemContent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
     pub kind: FileChangeKind,
@@ -1189,7 +1189,7 @@ pub fn file_changes_from_unified_diff(diff: &str) -> Result<Vec<FileChange>, Str
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: String,
     pub turn_id: Option<String>,
@@ -1203,7 +1203,7 @@ pub struct ApprovalRequest {
 }
 
 /// One choice offered by an ACP agent's permission request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalOption {
     /// Opaque id echoed back in [`ApprovalDecision::Option`].
     pub id: String,
@@ -1221,7 +1221,7 @@ pub enum ApprovalOptionKind {
     RejectAlways,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalKind {
     ExecCommand {

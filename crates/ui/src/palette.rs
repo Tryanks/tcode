@@ -111,7 +111,7 @@ impl CommandPalette {
         cx: &mut Context<Self>,
     ) -> Self {
         let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tcode_i18n::tr!("palette.placeholder"))
+            InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder"))
         });
 
         let subscriptions = vec![
@@ -191,7 +191,7 @@ impl CommandPalette {
         };
         for group in store.grouped_sessions() {
             push_action(
-                tcode_i18n::tr!("palette.new_thread", project = group.project.name).into_owned(),
+                crate::tr!("palette.new_thread", project = group.project.name).into_owned(),
                 IconName::Plus,
                 Action::NewThread {
                     cwd: group.project.root.clone(),
@@ -200,32 +200,32 @@ impl CommandPalette {
             );
         }
         push_action(
-            tcode_i18n::tr!("palette.open_settings").into_owned(),
+            crate::tr!("palette.open_settings").into_owned(),
             IconName::Settings,
             Action::OpenSettings,
         );
         push_action(
-            tcode_i18n::tr!("palette.toggle_theme").into_owned(),
+            crate::tr!("palette.toggle_theme").into_owned(),
             IconName::Moon,
             Action::ToggleTheme,
         );
         push_action(
-            tcode_i18n::tr!("palette.toggle_diff").into_owned(),
+            crate::tr!("palette.toggle_diff").into_owned(),
             IconName::PanelRight,
             Action::ToggleDiff,
         );
         push_action(
-            tcode_i18n::tr!("palette.toggle_terminal").into_owned(),
+            crate::tr!("palette.toggle_terminal").into_owned(),
             IconName::SquareTerminal,
             Action::ToggleTerminal,
         );
         push_action(
-            tcode_i18n::tr!("palette.open_preview").into_owned(),
+            crate::tr!("palette.open_preview").into_owned(),
             IconName::Globe,
             Action::OpenPreview,
         );
         push_action(
-            tcode_i18n::tr!("palette.check_updates").into_owned(),
+            crate::tr!("palette.check_updates").into_owned(),
             IconName::Inbox,
             Action::CheckUpdates,
         );
@@ -234,7 +234,7 @@ impl CommandPalette {
         let mut groups = Vec::new();
         if !actions.is_empty() {
             groups.push(Group {
-                label: tcode_i18n::tr!("palette.actions").into_owned(),
+                label: crate::tr!("palette.actions").into_owned(),
                 items: actions.into_iter().map(|(_, i)| i).collect(),
             });
         }
@@ -264,7 +264,7 @@ impl CommandPalette {
             threads.sort_by_key(|b| std::cmp::Reverse(b.0));
             if !threads.is_empty() {
                 groups.push(Group {
-                    label: tcode_i18n::tr!("palette.threads").into_owned(),
+                    label: crate::tr!("palette.threads").into_owned(),
                     items: threads.into_iter().map(|(_, i)| i).collect(),
                 });
             }
@@ -465,13 +465,13 @@ impl Render for CommandPalette {
                     .py_4()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("palette.no_matches")),
+                    .child(crate::tr!("palette.no_matches")),
             );
         }
         let list = div()
             .id("palette-list")
             .role(Role::ListBox)
-            .aria_label(tcode_i18n::tr!("palette.results"))
+            .aria_label(crate::tr!("palette.results"))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -512,9 +512,9 @@ impl Render for CommandPalette {
                 .items_center()
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("palette.navigate"))
-                .child(tcode_i18n::tr!("palette.select"))
-                .child(tcode_i18n::tr!("palette.close")),
+                .child(crate::tr!("palette.navigate"))
+                .child(crate::tr!("palette.select"))
+                .child(crate::tr!("palette.close")),
         );
 
         div()

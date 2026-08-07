@@ -707,13 +707,13 @@ impl WorkspaceStore {
     fn conversation_ui_by_key(&self, key: &str) -> Option<&ConversationUiState> {
         self.conversation_ui
             .iter()
-            .find_map(|(destination, ui)| (destination.ui_key() == key).then_some(ui))
+            .find_map(|(destination, ui)| (destination.preference_key() == key).then_some(ui))
     }
 
     fn conversation_ui_by_key_mut(&mut self, key: &str) -> Option<&mut ConversationUiState> {
         self.conversation_ui
             .iter_mut()
-            .find_map(|(destination, ui)| (destination.ui_key() == key).then_some(ui))
+            .find_map(|(destination, ui)| (destination.preference_key() == key).then_some(ui))
     }
 
     pub fn preview_url(&self, key: &str) -> Option<String> {
@@ -982,7 +982,7 @@ impl WorkspaceStore {
 
     pub fn shell_window_title(&self) -> String {
         match self.session_status_replica.as_ref() {
-            Some(status) if status.draft => tcode_i18n::tr!("chat.new_thread").into_owned(),
+            Some(status) if status.draft => crate::tr!("chat.new_thread").into_owned(),
             Some(status) => status.title.clone(),
             None => "tcode".to_string(),
         }
@@ -998,7 +998,7 @@ impl WorkspaceStore {
         self.session_status_replica.as_ref().map(|status| {
             (
                 status.session_id.clone(),
-                Self::destination(status).ui_key(),
+                Self::destination(status).preference_key(),
             )
         })
     }

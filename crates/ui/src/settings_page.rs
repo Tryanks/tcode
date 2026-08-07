@@ -188,7 +188,7 @@ impl SettingsPage {
         let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(tcode_i18n::tr!("browser.home_url.placeholder"))
+                .placeholder(crate::tr!("browser.home_url.placeholder"))
                 .default_value(home_url_value)
         });
         let auto_archive_idle_input = cx.new(|cx| {
@@ -334,7 +334,7 @@ impl SettingsPage {
                 // glass canvas, which lets the page bleed through.
                 .bg(cx.theme().popover)
                 .shadow_xl()
-                .title(tcode_i18n::tr!("providers.acp.add_agent").into_owned())
+                .title(crate::tr!("providers.acp.add_agent").into_owned())
                 .content(move |content, _, _| content.h(px(456.)).child(panel.clone()))
         });
     }
@@ -425,7 +425,7 @@ impl SettingsPage {
                 v_flex()
                     .id("settings-nav-tabs")
                     .role(Role::TabList)
-                    .aria_label(tcode_i18n::tr!("settings.title"))
+                    .aria_label(crate::tr!("settings.title"))
                     .flex_1()
                     .min_h_0()
                     .px_2()
@@ -434,7 +434,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-general",
                         IconName::Settings,
-                        tcode_i18n::tr!("settings.general").into_owned().into(),
+                        crate::tr!("settings.general").into_owned().into(),
                         Section::General,
                         cx,
                     ))
@@ -442,7 +442,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-providers",
                         IconName::Bot,
-                        tcode_i18n::tr!("settings.providers").into_owned().into(),
+                        crate::tr!("settings.providers").into_owned().into(),
                         Section::Providers,
                         cx,
                     ))
@@ -450,7 +450,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-browser",
                         IconName::Globe,
-                        tcode_i18n::tr!("settings.browser").into_owned().into(),
+                        crate::tr!("settings.browser").into_owned().into(),
                         Section::Browser,
                         cx,
                     ))
@@ -458,7 +458,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-computer-use",
                         IconName::LayoutDashboard,
-                        tcode_i18n::tr!("settings.computer_use").into_owned().into(),
+                        crate::tr!("settings.computer_use").into_owned().into(),
                         Section::ComputerUse,
                         cx,
                     ))
@@ -466,7 +466,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-orchestrate",
                         IconName::Map,
-                        tcode_i18n::tr!("settings.orchestrate").into_owned().into(),
+                        crate::tr!("settings.orchestrate").into_owned().into(),
                         Section::Orchestrate,
                         cx,
                     ))
@@ -474,7 +474,7 @@ impl SettingsPage {
                         self,
                         "settings-nav-archived",
                         IconName::Inbox,
-                        tcode_i18n::tr!("settings.archived").into_owned().into(),
+                        crate::tr!("settings.archived").into_owned().into(),
                         Section::Archived,
                         cx,
                     )),
@@ -485,7 +485,7 @@ impl SettingsPage {
                         gpui_component::h_flex(),
                         "settings-back",
                         Role::Button,
-                        tcode_i18n::tr!("settings.back"),
+                        crate::tr!("settings.back"),
                         cx,
                     )
                     // Mirror the main sidebar footer (the "Settings" entry that
@@ -503,7 +503,7 @@ impl SettingsPage {
                             .size_4()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child(tcode_i18n::tr!("settings.back"))
+                    .child(crate::tr!("settings.back"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.window_state
                             .update(cx, |state, cx| state.close_settings(cx));
@@ -561,14 +561,14 @@ impl SettingsPage {
                         .flex_1()
                         .text_size(px(15.))
                         .font_medium()
-                        .child(tcode_i18n::tr!("settings.title")),
+                        .child(crate::tr!("settings.title")),
                 ))
                 .child(
                     Button::new("restore-defaults")
                         .outline()
                         .small()
                         .icon(IconName::Undo)
-                        .label(tcode_i18n::tr!("settings.restore"))
+                        .label(crate::tr!("settings.restore"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_restore(window, cx);
                         })),
@@ -594,13 +594,13 @@ impl SettingsPage {
             let store = store.clone();
             let page = page.clone();
             alert
-                .title(tcode_i18n::tr!("settings.restore_title"))
-                .description(tcode_i18n::tr!("settings.restore_description"))
+                .title(crate::tr!("settings.restore_title"))
+                .description(crate::tr!("settings.restore_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("settings.restore"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("settings.restore"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
@@ -676,16 +676,16 @@ impl SettingsPage {
             self.title_generation_row(cx),
             self.toggle_row(
                 "delete-confirm",
-                tcode_i18n::tr!("settings.delete_confirmation.title"),
-                tcode_i18n::tr!("settings.delete_confirmation.description"),
+                crate::tr!("settings.delete_confirmation.title"),
+                crate::tr!("settings.delete_confirmation.description"),
                 !settings.skip_delete_confirmation,
                 cx,
                 |s, checked| s.skip_delete_confirmation = !checked,
             ),
             self.toggle_row(
                 "auto-open-task-panel",
-                tcode_i18n::tr!("settings.auto_open_task_panel.title"),
-                tcode_i18n::tr!("settings.auto_open_task_panel.description"),
+                crate::tr!("settings.auto_open_task_panel.title"),
+                crate::tr!("settings.auto_open_task_panel.description"),
                 settings.auto_open_task_panel,
                 cx,
                 |s, checked| s.auto_open_task_panel = checked,
@@ -694,16 +694,16 @@ impl SettingsPage {
         let workspace = vec![
             self.toggle_row(
                 "word-wrap",
-                tcode_i18n::tr!("settings.word_wrap.title"),
-                tcode_i18n::tr!("settings.word_wrap.description"),
+                crate::tr!("settings.word_wrap.title"),
+                crate::tr!("settings.word_wrap.description"),
                 settings.word_wrap_diffs,
                 cx,
                 |s, checked| s.word_wrap_diffs = checked,
             ),
             self.toggle_row(
                 "provider-update-checks",
-                tcode_i18n::tr!("settings.provider_updates.title"),
-                tcode_i18n::tr!("settings.provider_updates.description"),
+                crate::tr!("settings.provider_updates.title"),
+                crate::tr!("settings.provider_updates.description"),
                 // Stored inverted: checked = enabled.
                 !settings.provider_update_checks_disabled,
                 cx,
@@ -714,17 +714,17 @@ impl SettingsPage {
             .gap(px(24.))
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("settings.appearance_section"), cx))
+                    .child(self.section_label(crate::tr!("settings.appearance_section"), cx))
                     .child(self.grouped_plain(appearance, cx)),
             )
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("settings.conversation_section"), cx))
+                    .child(self.section_label(crate::tr!("settings.conversation_section"), cx))
                     .child(self.grouped_plain(conversation, cx)),
             )
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("settings.workspace_section"), cx))
+                    .child(self.section_label(crate::tr!("settings.workspace_section"), cx))
                     .child(self.grouped_plain(workspace, cx)),
             )
     }
@@ -732,8 +732,8 @@ impl SettingsPage {
     fn title_generation_row(&self, cx: &mut Context<Self>) -> AnyElement {
         self.row_frame(cx)
             .child(self.row_labels(
-                tcode_i18n::tr!("settings.title_generation.title"),
-                tcode_i18n::tr!("settings.title_generation.description"),
+                crate::tr!("settings.title_generation.title"),
+                crate::tr!("settings.title_generation.description"),
                 cx,
             ))
             .child(self.title_model_picker.clone())
@@ -777,7 +777,7 @@ impl SettingsPage {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("settings.providers_section")),
+                    .child(crate::tr!("settings.providers_section")),
             );
         if let Some(checked_at) = checked_at {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
@@ -785,7 +785,7 @@ impl SettingsPage {
                 div()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("providers.checked", when = ago).into_owned()),
+                    .child(crate::tr!("providers.checked", when = ago).into_owned()),
             );
         }
         header = header.child(
@@ -793,7 +793,7 @@ impl SettingsPage {
                 .outline()
                 .xsmall()
                 .icon(IconName::Plus)
-                .label(tcode_i18n::tr!("providers.acp.add_agent").into_owned())
+                .label(crate::tr!("providers.acp.add_agent").into_owned())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.open_acp_dialog(window, cx);
                 })),
@@ -804,7 +804,7 @@ impl SettingsPage {
                 .xsmall()
                 .loading(checking)
                 .icon(Icon::empty().path("icons/rotate-ccw.svg"))
-                .tooltip(tcode_i18n::tr!("providers.refresh"))
+                .tooltip(crate::tr!("providers.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.store.update(cx, |store, _cx| {
                         store.dispatch(Command::RefreshProviderStatus);
@@ -842,13 +842,13 @@ impl SettingsPage {
         let days = settings.auto_archive_max_idle_days.max(1);
         let keep = settings.auto_archive_keep_count.max(1);
         let controls = v_flex()
-            .child(self.section_label(tcode_i18n::tr!("settings.auto_archive.section"), cx))
+            .child(self.section_label(crate::tr!("settings.auto_archive.section"), cx))
             .child(self.grouped_plain(
                 vec![
                     self.toggle_row(
                         "auto-archive",
-                        tcode_i18n::tr!("settings.auto_archive.title"),
-                        tcode_i18n::tr!(
+                        crate::tr!("settings.auto_archive.title"),
+                        crate::tr!(
                             "settings.auto_archive.description",
                             days = days,
                             keep = keep
@@ -859,8 +859,8 @@ impl SettingsPage {
                     ),
                     self.row_frame(cx)
                         .child(self.row_labels(
-                            tcode_i18n::tr!("settings.auto_archive.idle_days"),
-                            tcode_i18n::tr!("settings.auto_archive.idle_days_description"),
+                            crate::tr!("settings.auto_archive.idle_days"),
+                            crate::tr!("settings.auto_archive.idle_days_description"),
                             cx,
                         ))
                         .child(
@@ -871,8 +871,8 @@ impl SettingsPage {
                         .into_any_element(),
                     self.row_frame(cx)
                         .child(self.row_labels(
-                            tcode_i18n::tr!("settings.auto_archive.keep_count"),
-                            tcode_i18n::tr!("settings.auto_archive.keep_count_description"),
+                            crate::tr!("settings.auto_archive.keep_count"),
+                            crate::tr!("settings.auto_archive.keep_count_description"),
                             cx,
                         ))
                         .child(
@@ -889,7 +889,7 @@ impl SettingsPage {
             return v_flex()
                 .gap(px(20.))
                 .child(controls)
-                .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx))
+                .child(self.section_label(crate::tr!("settings.archived_section"), cx))
                 .child(
                     v_flex()
                         .py(px(48.))
@@ -899,13 +899,13 @@ impl SettingsPage {
                             div()
                                 .text_size(px(15.))
                                 .font_medium()
-                                .child(tcode_i18n::tr!("settings.archived_empty")),
+                                .child(crate::tr!("settings.archived_empty")),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(tcode_i18n::tr!("settings.archived_empty_desc")),
+                                .child(crate::tr!("settings.archived_empty_desc")),
                         ),
                 );
         }
@@ -916,7 +916,7 @@ impl SettingsPage {
         let mut col = v_flex()
             .gap(px(20.))
             .child(controls)
-            .child(self.section_label(tcode_i18n::tr!("settings.archived_section"), cx));
+            .child(self.section_label(crate::tr!("settings.archived_section"), cx));
         for group in groups {
             let mut rows: Vec<AnyElement> = Vec::new();
             for meta in &group.sessions {
@@ -926,8 +926,8 @@ impl SettingsPage {
                 let created_when = humanize_ago(now.saturating_sub(meta.created_at));
                 let desc = format!(
                     "{} · {}",
-                    tcode_i18n::tr!("settings.archived_at", when = archived_when),
-                    tcode_i18n::tr!("settings.archived_created", when = created_when),
+                    crate::tr!("settings.archived_at", when = archived_when),
+                    crate::tr!("settings.archived_created", when = created_when),
                 );
                 let id_unarchive = meta.id.clone();
                 let id_delete = meta.id.clone();
@@ -943,7 +943,7 @@ impl SettingsPage {
                                     Button::new(("unarchive", key))
                                         .outline()
                                         .small()
-                                        .label(tcode_i18n::tr!("settings.unarchive"))
+                                        .label(crate::tr!("settings.unarchive"))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let id = id_unarchive.clone();
                                             this.store.update(cx, |store, _cx| {
@@ -957,7 +957,7 @@ impl SettingsPage {
                                     Button::new(("delete-perm", key))
                                         .danger()
                                         .small()
-                                        .label(tcode_i18n::tr!("settings.delete_permanently"))
+                                        .label(crate::tr!("settings.delete_permanently"))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.confirm_delete_archived(
                                                 &id_delete, &title, window, cx,
@@ -993,16 +993,16 @@ impl SettingsPage {
             let store = store.clone();
             let session_id = session_id.clone();
             alert
-                .title(tcode_i18n::tr!(
+                .title(crate::tr!(
                     "sidebar.delete_title",
                     title = title.clone()
                 ))
-                .description(tcode_i18n::tr!("sidebar.delete_description"))
+                .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
                         .ok_variant(ButtonVariant::Danger)
-                        .ok_text(tcode_i18n::tr!("settings.delete_permanently"))
-                        .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                        .ok_text(crate::tr!("settings.delete_permanently"))
+                        .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
@@ -1024,8 +1024,8 @@ impl SettingsPage {
         let rows = vec![
             self.toggle_row(
                 "cu-enabled",
-                tcode_i18n::tr!("computer_use.enable.title"),
-                tcode_i18n::tr!("computer_use.enable.description"),
+                crate::tr!("computer_use.enable.title"),
+                crate::tr!("computer_use.enable.description"),
                 settings.computer_use.enabled,
                 cx,
                 |s, checked| s.computer_use.enabled = checked,
@@ -1033,8 +1033,8 @@ impl SettingsPage {
             self.image_mode_row(settings.computer_use.image_mode, cx),
             self.toggle_row(
                 "cu-allow-input",
-                tcode_i18n::tr!("computer_use.allow_input.title"),
-                tcode_i18n::tr!("computer_use.allow_input.description"),
+                crate::tr!("computer_use.allow_input.title"),
+                crate::tr!("computer_use.allow_input.description"),
                 settings.computer_use.allow_input,
                 cx,
                 |s, checked| s.computer_use.allow_input = checked,
@@ -1044,7 +1044,7 @@ impl SettingsPage {
             .gap(px(24.))
             .child(
                 v_flex()
-                    .child(self.section_label(tcode_i18n::tr!("computer_use.section"), cx))
+                    .child(self.section_label(crate::tr!("computer_use.section"), cx))
                     .child(self.grouped_plain(rows, cx)),
             )
             .child(self.permissions_group(
@@ -1061,8 +1061,8 @@ impl SettingsPage {
         let rows = vec![
             self.toggle_row(
                 "browser-enabled",
-                tcode_i18n::tr!("browser.enable.title"),
-                tcode_i18n::tr!("browser.enable.description"),
+                crate::tr!("browser.enable.title"),
+                crate::tr!("browser.enable.description"),
                 settings.browser.enabled,
                 cx,
                 |s, checked| s.browser.enabled = checked,
@@ -1070,8 +1070,8 @@ impl SettingsPage {
             self.home_url_row(cx),
             self.toggle_row(
                 "browser-allow-eval",
-                tcode_i18n::tr!("browser.allow_evaluate.title"),
-                tcode_i18n::tr!("browser.allow_evaluate.description"),
+                crate::tr!("browser.allow_evaluate.title"),
+                crate::tr!("browser.allow_evaluate.description"),
                 settings.browser.allow_evaluate,
                 cx,
                 |s, checked| s.browser.allow_evaluate = checked,
@@ -1079,7 +1079,7 @@ impl SettingsPage {
         ];
         v_flex().gap(px(24.)).child(
             v_flex()
-                .child(self.section_label(tcode_i18n::tr!("browser.section"), cx))
+                .child(self.section_label(crate::tr!("browser.section"), cx))
                 .child(self.grouped_plain(rows, cx)),
         )
     }
@@ -1087,8 +1087,8 @@ impl SettingsPage {
     fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {
         self.row_frame(cx)
             .child(self.row_labels(
-                tcode_i18n::tr!("browser.home_url.title"),
-                tcode_i18n::tr!("browser.home_url.description"),
+                crate::tr!("browser.home_url.title"),
+                crate::tr!("browser.home_url.description"),
                 cx,
             ))
             .child(
@@ -1103,15 +1103,15 @@ impl SettingsPage {
 
     fn image_mode_row(&self, mode: ImageMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
-            ImageMode::Auto => tcode_i18n::tr!("computer_use.image_mode.auto"),
-            ImageMode::Always => tcode_i18n::tr!("computer_use.image_mode.always"),
-            ImageMode::Never => tcode_i18n::tr!("computer_use.image_mode.never"),
+            ImageMode::Auto => crate::tr!("computer_use.image_mode.auto"),
+            ImageMode::Always => crate::tr!("computer_use.image_mode.always"),
+            ImageMode::Never => crate::tr!("computer_use.image_mode.never"),
         };
         let option = |value, label_key: &'static str, desc_key: &'static str| SelectRowOption {
             value,
             id: label_key.into(),
-            label: tcode_i18n::tr!(label_key).into_owned().into(),
-            description: Some(tcode_i18n::tr!(desc_key).into_owned().into()),
+            label: crate::tr!(label_key).into_owned().into(),
+            description: Some(crate::tr!(desc_key).into_owned().into()),
             selected: value == mode,
         };
         self.select_row(
@@ -1119,10 +1119,10 @@ impl SettingsPage {
             "cu-image-mode-popover",
             "cu-image-mode-menu",
             260.,
-            tcode_i18n::tr!("computer_use.image_mode.title")
+            crate::tr!("computer_use.image_mode.title")
                 .into_owned()
                 .into(),
-            tcode_i18n::tr!("computer_use.image_mode.description")
+            crate::tr!("computer_use.image_mode.description")
                 .into_owned()
                 .into(),
             label.into_owned().into(),
@@ -1156,7 +1156,7 @@ impl SettingsPage {
     /// no TCC, so it shows a quiet note instead.
     fn permissions_group(&self, kinds: &[PermissionKind], cx: &mut Context<Self>) -> AnyElement {
         let col = v_flex()
-            .child(self.section_label(tcode_i18n::tr!("computer_use.permissions_section"), cx));
+            .child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
         if !cfg!(target_os = "macos") {
             return col
                 .child(
@@ -1167,7 +1167,7 @@ impl SettingsPage {
                             .py_3()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("permissions.unsupported")),
+                            .child(crate::tr!("permissions.unsupported")),
                     ),
                 )
                 .into_any_element();
@@ -1215,7 +1215,7 @@ impl SettingsPage {
                     Button::new(grant_id)
                         .outline()
                         .small()
-                        .label(tcode_i18n::tr!("permissions.grant"))
+                        .label(crate::tr!("permissions.grant"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.grant_permission(kind, cx);
                         })),
@@ -1224,14 +1224,14 @@ impl SettingsPage {
                     Button::new(recheck_id)
                         .ghost()
                         .small()
-                        .label(tcode_i18n::tr!("permissions.recheck"))
+                        .label(crate::tr!("permissions.recheck"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.recheck_permissions(cx);
                         })),
                 );
         }
         self.row_frame(cx)
-            .child(self.row_labels(tcode_i18n::tr!(name_key), tcode_i18n::tr!(why_key), cx))
+            .child(self.row_labels(crate::tr!(name_key), crate::tr!(why_key), cx))
             .child(controls)
             .into_any_element()
     }
@@ -1241,13 +1241,13 @@ impl SettingsPage {
             (
                 cx.theme().success.opacity(0.12),
                 cx.theme().success_foreground,
-                tcode_i18n::tr!("permissions.granted"),
+                crate::tr!("permissions.granted"),
             )
         } else {
             (
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
-                tcode_i18n::tr!("permissions.missing"),
+                crate::tr!("permissions.missing"),
             )
         };
         crate::material::semantic_chip(label, bg, fg).into_any_element()
@@ -1271,13 +1271,13 @@ impl SettingsPage {
                 div()
                     .flex_1()
                     .text_size(px(13.))
-                    .child(tcode_i18n::tr!("permissions.restart_banner")),
+                    .child(crate::tr!("permissions.restart_banner")),
             )
             .child(
                 Button::new("perm-relaunch")
                     .outline()
                     .small()
-                    .label(tcode_i18n::tr!("permissions.relaunch"))
+                    .label(crate::tr!("permissions.relaunch"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.relaunch(window, cx);
                     })),
@@ -1548,14 +1548,14 @@ impl SettingsPage {
 
     fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
-            ThemeMode::System => tcode_i18n::tr!("settings.theme.system"),
-            ThemeMode::Light => tcode_i18n::tr!("settings.theme.light"),
-            ThemeMode::Dark => tcode_i18n::tr!("settings.theme.dark"),
+            ThemeMode::System => crate::tr!("settings.theme.system"),
+            ThemeMode::Light => crate::tr!("settings.theme.light"),
+            ThemeMode::Dark => crate::tr!("settings.theme.dark"),
         };
         let option = |value, id: &'static str, label_key: &'static str| SelectRowOption {
             value,
             id: id.into(),
-            label: tcode_i18n::tr!(label_key).into_owned().into(),
+            label: crate::tr!(label_key).into_owned().into(),
             description: None,
             selected: value == mode,
         };
@@ -1564,8 +1564,8 @@ impl SettingsPage {
             "theme-popover",
             "theme-options-menu",
             160.,
-            tcode_i18n::tr!("settings.theme.title").into_owned().into(),
-            tcode_i18n::tr!("settings.theme.description")
+            crate::tr!("settings.theme.title").into_owned().into(),
+            crate::tr!("settings.theme.description")
                 .into_owned()
                 .into(),
             label.into_owned().into(),
@@ -1595,14 +1595,14 @@ impl SettingsPage {
     fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let selected = language.map(str::to_owned);
         let label = match language {
-            Some(LANGUAGE_ENGLISH) => tcode_i18n::tr!("settings.language.english"),
-            Some(LANGUAGE_SIMPLIFIED_CHINESE) => tcode_i18n::tr!("settings.language.chinese"),
-            _ => tcode_i18n::tr!("settings.language.system"),
+            Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
+            Some(LANGUAGE_SIMPLIFIED_CHINESE) => crate::tr!("settings.language.chinese"),
+            _ => crate::tr!("settings.language.system"),
         };
         let option = |value, key: &'static str| SelectRowOption {
             value,
             id: key.into(),
-            label: tcode_i18n::tr!(key).into_owned().into(),
+            label: crate::tr!(key).into_owned().into(),
             description: None,
             selected: selected.as_deref() == value,
         };
@@ -1611,10 +1611,10 @@ impl SettingsPage {
             "language-popover",
             "language-options-menu",
             160.,
-            tcode_i18n::tr!("settings.language.title")
+            crate::tr!("settings.language.title")
                 .into_owned()
                 .into(),
-            tcode_i18n::tr!("settings.language.description")
+            crate::tr!("settings.language.description")
                 .into_owned()
                 .into(),
             label.into_owned().into(),

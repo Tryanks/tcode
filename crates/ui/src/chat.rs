@@ -105,9 +105,9 @@ fn start_hub_projects(
 fn previous_logs_toggle_label(hidden: usize, expanded: bool) -> Option<Cow<'static, str>> {
     (hidden > 0).then(|| {
         if expanded {
-            tcode_i18n::tr!("chat.hide_previous_logs", count = hidden)
+            crate::tr!("chat.hide_previous_logs", count = hidden)
         } else {
-            tcode_i18n::tr!("chat.previous_logs", count = hidden)
+            crate::tr!("chat.previous_logs", count = hidden)
         }
     })
 }
@@ -248,7 +248,7 @@ fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
     match content {
         EntryContent::Error { message } => Cow::Borrowed(message),
         EntryContent::ProviderStartError { error } => {
-            tcode_i18n::tr!("errors.provider_start", error = error)
+            crate::tr!("errors.provider_start", error = error)
         }
         _ => unreachable!("displayed_error_text requires error timeline content"),
     }
@@ -406,9 +406,9 @@ fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
 fn localized_count(count: usize, one_key: &str, many_key: &str) -> Option<String> {
     (count > 0).then(|| {
         if count == 1 {
-            tcode_i18n::tr!(one_key).into_owned()
+            crate::tr!(one_key).into_owned()
         } else {
-            tcode_i18n::tr!(many_key, count = count).into_owned()
+            crate::tr!(many_key, count = count).into_owned()
         }
     })
 }
@@ -453,7 +453,7 @@ fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
 
 fn turn_work_log_summary(counts: &WorkLogCounts) -> Option<String> {
     work_log_summary_with_command_keys(counts, "chat.total_command_one", "chat.total_commands")
-        .map(|summary| tcode_i18n::tr!("chat.total_summary", summary = summary).into_owned())
+        .map(|summary| crate::tr!("chat.total_summary", summary = summary).into_owned())
 }
 
 fn finished_work_log_label(
@@ -1183,7 +1183,7 @@ impl ChatView {
                     .border_color(border)
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!(
+                    .child(crate::tr!(
                         "chat.relayed",
                         from = from.display_name(),
                         to = to.display_name()
@@ -1203,8 +1203,8 @@ impl ChatView {
     ) -> AnyElement {
         let warning = cx.theme().warning;
         let label = match from {
-            Some(from) => tcode_i18n::tr!("chat.model_changed", from = from, to = to).into_owned(),
-            None => tcode_i18n::tr!("chat.model_changed_to", to = to).into_owned(),
+            Some(from) => crate::tr!("chat.model_changed", from = from, to = to).into_owned(),
+            None => crate::tr!("chat.model_changed_to", to = to).into_owned(),
         };
         let label = match reason {
             Some(reason) if !reason.is_empty() => format!("{label} ({reason})"),
@@ -1251,9 +1251,9 @@ impl ChatView {
             .xsmall()
             .icon(IconName::Undo)
             .tooltip(if disabled {
-                tcode_i18n::tr!("chat.rewind_blocked")
+                crate::tr!("chat.rewind_blocked")
             } else {
-                tcode_i18n::tr!("chat.rewind")
+                crate::tr!("chat.rewind")
             })
             .disabled(disabled);
         let workspace_store = self.workspace_store.clone();
@@ -1269,16 +1269,16 @@ impl ChatView {
                     if turn > 0 {
                         modes.push((
                             RewindMode::FilesAndConversation,
-                            tcode_i18n::tr!("chat.rewind_all").into_owned(),
+                            crate::tr!("chat.rewind_all").into_owned(),
                         ));
                         modes.push((
                             RewindMode::Conversation,
-                            tcode_i18n::tr!("chat.rewind_conversation").into_owned(),
+                            crate::tr!("chat.rewind_conversation").into_owned(),
                         ));
                     }
                     modes.push((
                         RewindMode::Files,
-                        tcode_i18n::tr!("chat.rewind_files").into_owned(),
+                        crate::tr!("chat.rewind_files").into_owned(),
                     ));
                     let mut menu = v_flex()
                         .w(px(240.))
@@ -1286,7 +1286,7 @@ impl ChatView {
                         .gap_0p5()
                         .id(("rewind-options", turn))
                         .role(Role::Menu)
-                        .aria_label(tcode_i18n::tr!("chat.rewind"));
+                        .aria_label(crate::tr!("chat.rewind"));
                     for (index, (mode, label)) in modes.into_iter().enumerate() {
                         let workspace_store = workspace_store.clone();
                         let popover = popover.clone();
@@ -1442,8 +1442,8 @@ impl ChatView {
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .child(match steering {
-                            SteeringStatus::Pending => tcode_i18n::tr!("chat.steering"),
-                            SteeringStatus::Accepted => tcode_i18n::tr!("chat.steered"),
+                            SteeringStatus::Pending => crate::tr!("chat.steering"),
+                            SteeringStatus::Accepted => crate::tr!("chat.steered"),
                         }),
                 )
             })
@@ -1489,7 +1489,7 @@ impl ChatView {
                 self.render_disclosure(
                     turn,
                     format!("orchestrate-context-{entry_id}"),
-                    tcode_i18n::tr!("chat.orchestrate_skill")
+                    crate::tr!("chat.orchestrate_skill")
                         .into_owned()
                         .into(),
                     context,
@@ -1516,7 +1516,7 @@ impl ChatView {
             localized_callback_state(&callback.state)
         ));
         let body = if callback.body.trim().is_empty() {
-            tcode_i18n::tr!("chat.orchestrate_callback_empty").into_owned()
+            crate::tr!("chat.orchestrate_callback_empty").into_owned()
         } else {
             callback.body.clone()
         };
@@ -1705,7 +1705,7 @@ impl ChatView {
                             .text_size(px(11.))
                             .font_medium()
                             .text_color(cx.theme().danger_foreground)
-                            .child(tcode_i18n::tr!("chat.error_label").to_uppercase()),
+                            .child(crate::tr!("chat.error_label").to_uppercase()),
                     )
                     .child(div().flex_1())
                     .child(self.render_copy_button(&format!("error:{id}"), Arc::from(message), cx)),
@@ -1777,9 +1777,9 @@ impl ChatView {
                 IconName::Copy
             })
             .label(if copied {
-                tcode_i18n::tr!("chat.copied")
+                crate::tr!("chat.copied")
             } else {
-                tcode_i18n::tr!("chat.copy")
+                crate::tr!("chat.copy")
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
@@ -1835,7 +1835,7 @@ impl ChatView {
                         .text_size(px(11.))
                         .font_medium()
                         .text_color(muted)
-                        .child(tcode_i18n::tr!("chat.work_log").to_uppercase())
+                        .child(crate::tr!("chat.work_log").to_uppercase())
                         .when(subagent_count > 0, |row| {
                             row.child(
                                 div()
@@ -1843,7 +1843,7 @@ impl ChatView {
                                     .py(px(1.))
                                     .rounded_full()
                                     .bg(cx.theme().muted)
-                                    .child(tcode_i18n::tr!(
+                                    .child(crate::tr!(
                                         "chat.subagent_count",
                                         count = subagent_count
                                     )),
@@ -1925,7 +1925,7 @@ impl ChatView {
                     .text_size(px(13.))
                     .text_color(muted)
                     .child(div().text_color(cx.theme().primary).child("•••"))
-                    .child(tcode_i18n::tr!(
+                    .child(crate::tr!(
                         "chat.working_for",
                         duration = format_duration(secs)
                     ))
@@ -1965,7 +1965,7 @@ impl ChatView {
                             .rounded_full()
                             .bg(cx.theme().muted)
                             .text_size(px(11.))
-                            .child(tcode_i18n::tr!(
+                            .child(crate::tr!(
                                 "chat.subagent_count",
                                 count = subagent_count
                             )),
@@ -2015,7 +2015,7 @@ impl ChatView {
                     .flex_1()
                     .gap_1()
                     .overflow_hidden()
-                    .child(div().flex_none().child(tcode_i18n::tr!("chat.command_run")))
+                    .child(div().flex_none().child(crate::tr!("chat.command_run")))
                     .child(
                         div()
                             .min_w_0()
@@ -2113,7 +2113,7 @@ impl ChatView {
                     .flex_1()
                     .gap_1()
                     .overflow_hidden()
-                    .child(div().flex_none().child(tcode_i18n::tr!("chat.thinking")))
+                    .child(div().flex_none().child(crate::tr!("chat.thinking")))
                     .child(
                         div()
                             .min_w_0()
@@ -2132,7 +2132,7 @@ impl ChatView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("chat.context_compacted"))
+                    .child(crate::tr!("chat.context_compacted"))
                     .into_any_element();
                 (IconName::Minimize, summary)
             }
@@ -2178,7 +2178,7 @@ impl ChatView {
         let finished = !matches!(status, ItemStatus::InProgress);
         let turn = entry.turn;
         let click_key = key.clone();
-        let row_label = tcode_i18n::tr!(
+        let row_label = crate::tr!(
             "chat.subagent_row",
             agent = agent_type.clone(),
             description = one_line(description)
@@ -2242,7 +2242,7 @@ impl ChatView {
                     div()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(tcode_i18n::tr!("chat.earlier_steps_truncated")),
+                        .child(crate::tr!("chat.earlier_steps_truncated")),
                 );
             }
             for child in &children {
@@ -2288,7 +2288,7 @@ impl ChatView {
             EntryContent::Item(ItemContent::FileChange { changes, .. }) => div()
                 .text_size(px(13.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("chat.changed_files", count = changes.len()))
+                .child(crate::tr!("chat.changed_files", count = changes.len()))
                 .into_any_element(),
             _ => self.render_activity_row(entry, true, cx),
         }
@@ -2327,9 +2327,9 @@ impl ChatView {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("chat.changed_files", count = changes.len()))
+                    .child(crate::tr!("chat.changed_files", count = changes.len()))
                     .when(completeness == ChangeCompleteness::Partial, |header| {
-                        header.child(tcode_i18n::tr!("chat.changed_files_partial"))
+                        header.child(crate::tr!("chat.changed_files_partial"))
                     })
                     .child("·")
                     .child(
@@ -2348,9 +2348,9 @@ impl ChatView {
                     .ghost()
                     .xsmall()
                     .label(if collapsed {
-                        tcode_i18n::tr!("chat.expand_all")
+                        crate::tr!("chat.expand_all")
                     } else {
-                        tcode_i18n::tr!("chat.collapse_all")
+                        crate::tr!("chat.collapse_all")
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_expanded(index, &card_key, cx);
@@ -2360,8 +2360,8 @@ impl ChatView {
                 Button::new(("view-diff", index))
                     .outline()
                     .xsmall()
-                    .label(tcode_i18n::tr!("chat.view_diff"))
-                    .tooltip(tcode_i18n::tr!("chat.view_diff_tooltip"))
+                    .label(crate::tr!("chat.view_diff"))
+                    .tooltip(crate::tr!("chat.view_diff_tooltip"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.workspace_store
                             .update(cx, |store, cx| store.open_diff_for_turn(index, cx));
@@ -2407,7 +2407,7 @@ impl ChatView {
                 }
                 for file in files {
                     let path = file.path.clone();
-                    let row_label = format!("{}: {}", tcode_i18n::tr!("chat.view_diff"), file.path);
+                    let row_label = format!("{}: {}", crate::tr!("chat.view_diff"), file.path);
                     body = body.child(
                         crate::material::accessible_clickable(
                             h_flex(),
@@ -2469,7 +2469,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let title = tcode_core::session::plan_title(markdown)
-            .unwrap_or_else(|| tcode_i18n::tr!("plan.proposed_plan").into_owned());
+            .unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned());
         let long = markdown.chars().count() > 900 || markdown.lines().count() > 20;
         let collapse_key = format!("plan-card-{turn}");
         let collapsed = long && self.expanded.contains(&collapse_key);
@@ -2514,7 +2514,7 @@ impl ChatView {
                             .text_color(cx.theme().info_foreground)
                             .text_size(px(11.))
                             .font_medium()
-                            .child(tcode_i18n::tr!("plan.badge")),
+                            .child(crate::tr!("plan.badge")),
                     )
                     .child(
                         div()
@@ -2533,9 +2533,9 @@ impl ChatView {
                                 .ghost()
                                 .xsmall()
                                 .label(if collapsed {
-                                    tcode_i18n::tr!("plan.expand")
+                                    crate::tr!("plan.expand")
                                 } else {
-                                    tcode_i18n::tr!("plan.collapse")
+                                    crate::tr!("plan.collapse")
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle_expanded(turn, &key, cx);
@@ -2555,9 +2555,9 @@ impl ChatView {
                             .xsmall()
                             .icon(IconName::Copy)
                             .label(if copied {
-                                tcode_i18n::tr!("plan.copied")
+                                crate::tr!("plan.copied")
                             } else {
-                                tcode_i18n::tr!("plan.copy")
+                                crate::tr!("plan.copy")
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
@@ -2572,10 +2572,10 @@ impl ChatView {
                             .ghost()
                             .xsmall()
                             .icon(Icon::empty().path("icons/download.svg"))
-                            .label(tcode_i18n::tr!("plan.download"))
+                            .label(crate::tr!("plan.download"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_download.clone();
-                                let fallback = tcode_i18n::tr!("plan.proposed_plan").into_owned();
+                                let fallback = crate::tr!("plan.proposed_plan").into_owned();
                                 this.workspace_store.update(cx, |store, _cx| {
                                     store.dispatch(Command::DownloadPlan {
                                         markdown: md,
@@ -2589,7 +2589,7 @@ impl ChatView {
                             .ghost()
                             .xsmall()
                             .icon(IconName::HardDrive)
-                            .label(tcode_i18n::tr!("plan.save_workspace"))
+                            .label(crate::tr!("plan.save_workspace"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_save.clone();
                                 this.workspace_store.update(cx, |store, _cx| {
@@ -2705,9 +2705,9 @@ impl ChatView {
                 IconName::PanelLeft
             })
             .tooltip(if collapsed {
-                tcode_i18n::tr!("sidebar.expand")
+                crate::tr!("sidebar.expand")
             } else {
-                tcode_i18n::tr!("sidebar.collapse")
+                crate::tr!("sidebar.collapse")
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 let workspace_store = this.workspace_store.clone();
@@ -2727,7 +2727,7 @@ impl ChatView {
                 .text_size(px(15.))
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
-                .child(tcode_i18n::tr!("chat.new_thread"))
+                .child(crate::tr!("chat.new_thread"))
         } else {
             match &title {
                 Some(title) => div()
@@ -2747,7 +2747,7 @@ impl ChatView {
                     .text_size(px(15.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("chat.no_active_thread")),
+                    .child(crate::tr!("chat.no_active_thread")),
             }
         };
 
@@ -2774,7 +2774,7 @@ impl ChatView {
                                     .compact()
                                     .icon(IconName::PanelBottom)
                                     .selected(terminal_open)
-                                    .tooltip(tcode_i18n::tr!("chat.toggle_terminal"))
+                                    .tooltip(crate::tr!("chat.toggle_terminal"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.workspace_store
                                             .update(cx, |store, cx| store.toggle_terminal_panel(cx))
@@ -2787,7 +2787,7 @@ impl ChatView {
                                     .compact()
                                     .icon(IconName::Map)
                                     .selected(plan_showing)
-                                    .tooltip(tcode_i18n::tr!("chat.toggle_plan"))
+                                    .tooltip(crate::tr!("chat.toggle_plan"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.workspace_store
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
@@ -2800,7 +2800,7 @@ impl ChatView {
                                     .compact()
                                     .icon(IconName::Globe)
                                     .selected(preview_showing)
-                                    .tooltip(tcode_i18n::tr!("chat.toggle_preview"))
+                                    .tooltip(crate::tr!("chat.toggle_preview"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.workspace_store
                                             .update(cx, |store, cx| store.toggle_preview_panel(cx));
@@ -2813,7 +2813,7 @@ impl ChatView {
                                     .compact()
                                     .icon(IconName::PanelRight)
                                     .selected(diff_showing)
-                                    .tooltip(tcode_i18n::tr!("chat.toggle_diff"))
+                                    .tooltip(crate::tr!("chat.toggle_diff"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.workspace_store
                                             .update(cx, |store, cx| store.toggle_diff_panel(cx));
@@ -2836,7 +2836,7 @@ impl ChatView {
         let border = cx.theme().border;
 
         // Main action segment.
-        let label: SharedString = tcode_i18n::tr!(git_action_label_key(quick.label))
+        let label: SharedString = crate::tr!(git_action_label_key(quick.label))
             .into_owned()
             .into();
         let main_icon = quick
@@ -2872,7 +2872,7 @@ impl ChatView {
         if quick.disabled {
             main = main.text_color(cx.theme().muted_foreground);
             if let Some(hint) = quick.hint {
-                let text: SharedString = tcode_i18n::tr!(git_hint_key(hint)).into_owned().into();
+                let text: SharedString = crate::tr!(git_hint_key(hint)).into_owned().into();
                 main = main.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
             }
         } else if let Some(action) = quick.action {
@@ -2902,7 +2902,7 @@ impl ChatView {
                 let popover = cx.entity();
                 let mut menu = v_flex().w(px(210.)).p_1().gap_0p5();
                 for (index, item) in items.clone().into_iter().enumerate() {
-                    let label: SharedString = tcode_i18n::tr!(git_action_label_key(item.action))
+                    let label: SharedString = crate::tr!(git_action_label_key(item.action))
                         .into_owned()
                         .into();
                     let action = item.action;
@@ -2924,7 +2924,7 @@ impl ChatView {
                         row = row.text_color(muted);
                         if let Some(hint) = item.hint {
                             let text: SharedString =
-                                tcode_i18n::tr!(git_hint_key(hint)).into_owned().into();
+                                crate::tr!(git_hint_key(hint)).into_owned().into();
                             row = row.tooltip(move |window, cx| {
                                 Tooltip::new(text.clone()).build(window, cx)
                             });
@@ -2995,7 +2995,7 @@ impl ChatView {
         window.open_dialog(cx, move |dlg, window, cx| {
             let content = dialog.clone();
             let footer_dialog = dialog.clone();
-            dlg.title(tcode_i18n::tr!("git.commit.title").into_owned())
+            dlg.title(crate::tr!("git.commit.title").into_owned())
                 .w(px(600.))
                 // Opaque T3 panel over the library's translucent default.
                 .bg(cx.theme().popover)
@@ -3054,7 +3054,7 @@ impl ChatView {
                         menu_item(
                             "open-zed",
                             IconName::ExternalLink,
-                            tcode_i18n::tr!("chat.open_zed").into_owned().into(),
+                            crate::tr!("chat.open_zed").into_owned().into(),
                         )
                         .on_click(move |_, window, cx| {
                             open_in_zed(&zed_cwd, window, cx);
@@ -3065,7 +3065,7 @@ impl ChatView {
                         menu_item(
                             "reveal-in-file-manager",
                             IconName::FolderOpen,
-                            tcode_i18n::tr!("chat.reveal_in_file_manager")
+                            crate::tr!("chat.reveal_in_file_manager")
                                 .into_owned()
                                 .into(),
                         )
@@ -3078,7 +3078,7 @@ impl ChatView {
                         menu_item(
                             "copy-path",
                             IconName::Copy,
-                            tcode_i18n::tr!("chat.copy_path").into_owned().into(),
+                            crate::tr!("chat.copy_path").into_owned().into(),
                         )
                         .on_click(move |_, window, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -3103,7 +3103,7 @@ impl ChatView {
                     h_flex(),
                     "open-main",
                     Role::Button,
-                    tcode_i18n::tr!("chat.open"),
+                    crate::tr!("chat.open"),
                     cx,
                 )
                 .h_full()
@@ -3118,7 +3118,7 @@ impl ChatView {
                         .xsmall()
                         .text_color(cx.theme().muted_foreground),
                 )
-                .child(tcode_i18n::tr!("chat.open"))
+                .child(crate::tr!("chat.open"))
                 .on_click(cx.listener(move |_, _, window, cx| {
                     open_in_zed(&main_cwd, window, cx);
                 })),
@@ -3140,7 +3140,7 @@ impl ChatView {
                     .path("icons/folder-plus.svg")
                     .text_color(cx.theme().muted_foreground),
             )
-            .label(tcode_i18n::tr!("sidebar.add_project"))
+            .label(crate::tr!("sidebar.add_project"))
             .on_click(cx.listener(|this, _, window, cx| {
                 crate::add_project_dialog::open(this.workspace_store.clone(), window, cx);
             }));
@@ -3155,7 +3155,7 @@ impl ChatView {
                 div()
                     .text_size(px(15.))
                     .font_semibold()
-                    .child(tcode_i18n::tr!("chat.empty_title")),
+                    .child(crate::tr!("chat.empty_title")),
             );
         if projects.is_empty() {
             content = content
@@ -3163,7 +3163,7 @@ impl ChatView {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("chat.empty_description")),
+                        .child(crate::tr!("chat.empty_description")),
                 )
                 .child(add_project);
         } else {
@@ -3173,13 +3173,13 @@ impl ChatView {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("chat.start_hub_title").to_uppercase()),
+                    .child(crate::tr!("chat.start_hub_title").to_uppercase()),
             );
             for (project, last_activity) in hub_projects {
                 let project_id = project.id.clone();
                 let cwd = project.root.clone();
                 let row_label =
-                    tcode_i18n::tr!("sidebar.project", name = project.name.clone()).into_owned();
+                    crate::tr!("sidebar.project", name = project.name.clone()).into_owned();
                 launcher = launcher.child(
                     crate::material::accessible_clickable(
                         h_flex(),
@@ -3240,7 +3240,7 @@ impl ChatView {
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!(
+                            .child(crate::tr!(
                                 "chat.palette_hint",
                                 shortcut = format_secondary_shortcut("k")
                             )),
@@ -3267,7 +3267,7 @@ impl ChatView {
                     .outline()
                     .small()
                     .icon(IconName::ChevronDown)
-                    .label(tcode_i18n::tr!("chat.scroll_end"))
+                    .label(crate::tr!("chat.scroll_end"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.list_state.set_follow_mode(FollowMode::Tail);
                         this.list_state.scroll_to_end();
@@ -3444,8 +3444,8 @@ impl Render for ChatView {
 /// `failed`), falling back to the raw provider word for anything unexpected.
 fn localized_callback_state(state: &str) -> Cow<'static, str> {
     match state {
-        "completed" => tcode_i18n::tr!("chat.orchestrate_state_completed"),
-        "failed" => tcode_i18n::tr!("chat.orchestrate_state_failed"),
+        "completed" => crate::tr!("chat.orchestrate_state_completed"),
+        "failed" => crate::tr!("chat.orchestrate_state_failed"),
         other => Cow::Owned(other.to_string()),
     }
 }
@@ -3496,7 +3496,7 @@ fn render_commit_footer(
         .child(
             Button::new("commit-cancel")
                 .ghost()
-                .label(tcode_i18n::tr!("git.commit.cancel"))
+                .label(crate::tr!("git.commit.cancel"))
                 .on_click(move |_, window, cx| {
                     let _ = &cancel_dialog;
                     window.close_dialog(cx);
@@ -3519,7 +3519,7 @@ fn render_commit_footer(
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     if tcode_services::desktop::open_in_zed(cwd).is_err() {
         window.push_notification(
-            Notification::error(tcode_i18n::tr!("errors.zed_cli_missing")),
+            Notification::error(crate::tr!("errors.zed_cli_missing")),
             cx,
         );
     }
@@ -3600,14 +3600,14 @@ fn tool_brief(input: &serde_json::Value) -> String {
 /// Wall-clock duration formatted as "XmYYs" / "YYs".
 fn format_duration(secs: u64) -> String {
     if secs >= 60 {
-        tcode_i18n::tr!(
+        crate::tr!(
             "time.duration_minutes",
             minutes = secs / 60,
             seconds = format!("{:02}", secs % 60)
         )
         .into_owned()
     } else {
-        tcode_i18n::tr!("time.duration_seconds", seconds = secs).into_owned()
+        crate::tr!("time.duration_seconds", seconds = secs).into_owned()
     }
 }
 
@@ -3617,7 +3617,7 @@ fn format_duration(secs: u64) -> String {
 /// time. The live "Working for" indicator keeps [`format_duration`].
 fn format_span(secs: u64) -> String {
     if secs >= 3600 {
-        tcode_i18n::tr!(
+        crate::tr!(
             "time.duration_hours",
             hours = secs / 3600,
             minutes = format!("{:02}", (secs % 3600) / 60),
@@ -3669,9 +3669,9 @@ fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
     let ai = total - tools;
     vec![
         clock,
-        tcode_i18n::tr!("chat.turn_total", duration = format_span(total)).into_owned(),
-        tcode_i18n::tr!("chat.turn_ai", duration = format_span(ai)).into_owned(),
-        tcode_i18n::tr!("chat.turn_tools", duration = format_span(tools)).into_owned(),
+        crate::tr!("chat.turn_total", duration = format_span(total)).into_owned(),
+        crate::tr!("chat.turn_ai", duration = format_span(ai)).into_owned(),
+        crate::tr!("chat.turn_tools", duration = format_span(tools)).into_owned(),
     ]
 }
 
@@ -3957,7 +3957,7 @@ fn file_edit_row(row: &LiveEditRow, style: &FileEditRowStyle) -> Div {
                     div()
                         .flex_none()
                         .whitespace_nowrap()
-                        .child(tcode_i18n::tr!("chat.file_edit")),
+                        .child(crate::tr!("chat.file_edit")),
                 )
                 .child(
                     // `truncate` (nowrap + ellipsis), not just `text_ellipsis`:
@@ -4270,7 +4270,7 @@ This begins after the hard break."#;
             error: "spawn failed".into(),
         };
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             displayed_error_text(&generic).as_bytes(),
             b"generic\0\xe5\x8e\x9f\xe6\xa0\xb7"
@@ -4280,7 +4280,7 @@ This begins after the hard break."#;
             "Failed to start provider: spawn failed"
         );
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             displayed_error_text(&generic).as_bytes(),
             b"generic\0\xe5\x8e\x9f\xe6\xa0\xb7"
@@ -4289,20 +4289,20 @@ This begins after the hard break."#;
             displayed_error_text(&provider_start),
             "启动提供商失败：spawn failed"
         );
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]
     fn steering_status_strings_are_exact_in_both_locales() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
-        assert_eq!(tcode_i18n::tr!("chat.steering"), "Steering…");
-        assert_eq!(tcode_i18n::tr!("chat.steered"), "Steered");
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        assert_eq!(crate::tr!("chat.steering"), "Steering…");
+        assert_eq!(crate::tr!("chat.steered"), "Steered");
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(tcode_i18n::tr!("chat.steering"), "引导中…");
-        assert_eq!(tcode_i18n::tr!("chat.steered"), "已引导");
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(crate::tr!("chat.steering"), "引导中…");
+        assert_eq!(crate::tr!("chat.steered"), "已引导");
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]
@@ -4317,7 +4317,7 @@ This begins after the hard break."#;
     #[test]
     fn previous_log_rows_keep_their_toggle_after_expanding() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
 
         assert_eq!(previous_logs_toggle_label(0, false), None);
         assert_eq!(
@@ -4727,14 +4727,14 @@ This begins after the hard break."#;
             compactions: 1,
         };
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             work_log_summary(&counts).as_deref(),
             Some(
                 "Ran 2 commands · Edited 3 files · Made 1 tool call · Started 2 subagents · Compacted context 1 time"
             )
         );
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             work_log_summary(&counts).as_deref(),
             Some(
@@ -4753,7 +4753,7 @@ This begins after the hard break."#;
             ..WorkLogCounts::default()
         };
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             turn_work_log_summary(&counts).as_deref(),
             Some("共执行 5 条命令 · 编辑 3 个文件 · 调用 2 次工具")
@@ -4768,7 +4768,7 @@ This begins after the hard break."#;
             ..WorkLogCounts::default()
         };
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             work_log_summary(&tools_only).as_deref(),
             Some("Made 2 tool calls")
@@ -4789,7 +4789,7 @@ This begins after the hard break."#;
             ),
             None
         );
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             work_log_summary(&tools_only).as_deref(),
             Some("调用 2 次工具")
@@ -5043,12 +5043,12 @@ This begins after the hard break."#;
     #[test]
     fn live_edit_row_label_is_exact_in_both_locales() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
-        assert_eq!(tcode_i18n::tr!("chat.file_edit"), "Code edit");
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        assert_eq!(crate::tr!("chat.file_edit"), "Code edit");
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(tcode_i18n::tr!("chat.file_edit"), "编辑代码");
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
+        assert_eq!(crate::tr!("chat.file_edit"), "编辑代码");
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]
@@ -5090,7 +5090,7 @@ This begins after the hard break."#;
         };
         let last_activity = *activity_indexes.last().unwrap();
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             labels(last_activity, &counts),
             [
@@ -5098,7 +5098,7 @@ This begins after the hard break."#;
                 "Ran 2 commands · Edited 1 file"
             ]
         );
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             labels(last_activity, &counts),
             [
@@ -5429,7 +5429,7 @@ This begins after the hard break."#;
         use gpui::{VisualTestContext, px, size};
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         let clauses = turn_time_clauses(
             "10:18 AM".into(),
             Some(TurnTiming::new(99_000, 0)),
@@ -5510,7 +5510,7 @@ This begins after the hard break."#;
     #[test]
     fn finished_time_clauses_format_cost_and_only_show_a_divergent_served_model() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
 
         let clauses = turn_time_clauses(
             "3:04 PM".into(),
@@ -5557,7 +5557,7 @@ This begins after the hard break."#;
     #[test]
     fn the_time_row_breaks_into_one_wrappable_unit_per_clause() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         // The footer wraps at clause boundaries, so each clause has to be its
         // own unit — never one string the narrow column would have to clip.
         assert_eq!(
@@ -5599,24 +5599,24 @@ This begins after the hard break."#;
         // 1m 20s total, 35s of it inside tool calls.
         let timing = TurnTiming::new(80_000, 35_000);
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             turn_time_row("3:04 PM".into(), Some(timing)),
             "3:04 PM · Total 1m 20s · AI thinking & response 45s · Tool calls 35s"
         );
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             turn_time_row("3:04 PM".into(), Some(timing)),
             "3:04 PM · 总计 1 分 20 秒 · AI 思考与回答 45 秒 · 工具调用 35 秒"
         );
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]
     fn an_ai_only_turn_still_shows_all_three_durations() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             turn_time_row("9:00 AM".into(), Some(TurnTiming::new(8_000, 0))),
             "9:00 AM · Total 8s · AI thinking & response 8s · Tool calls 0s"
@@ -5626,7 +5626,7 @@ This begins after the hard break."#;
     #[test]
     fn a_turn_without_a_derivable_breakdown_keeps_the_bare_clock() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(turn_time_row("9:00 AM".into(), None), "9:00 AM");
     }
 
@@ -5637,24 +5637,24 @@ This begins after the hard break."#;
         // survive the hour rollup — this row reports real elapsed time.
         let timing = TurnTiming::new(86_459_000, 84_600_000);
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             turn_time_row("1:00 AM".into(), Some(timing)),
             "1:00 AM · Total 24h 00m 59s · AI thinking & response 30m 59s · Tool calls 23h 30m 00s"
         );
 
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_SIMPLIFIED_CHINESE);
+        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             turn_time_row("1:00 AM".into(), Some(timing)),
             "1:00 AM · 总计 24 小时 00 分 59 秒 · AI 思考与回答 30 分 59 秒 · 工具调用 23 小时 30 分 00 秒"
         );
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]
     fn the_live_working_indicator_keeps_its_own_format() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        tcode_i18n::set_locale(tcode_i18n::LANGUAGE_ENGLISH);
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
         // The running row is untouched by the breakdown's hour rollup.
         assert_eq!(format_duration(3_600), "60m 00s");
         assert_eq!(format_duration(90_061), "1501m 01s");

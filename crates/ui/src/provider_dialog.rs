@@ -316,16 +316,16 @@ impl ProviderDialog {
         for seed in seeds {
             let name = cx.new(|cx| {
                 let mut input = InputState::new(window, cx)
-                    .placeholder(tcode_i18n::tr!("providers.env.name_placeholder"));
+                    .placeholder(crate::tr!("providers.env.name_placeholder"));
                 input.set_value(seed.name.clone(), window, cx);
                 input
             });
             let show_stored = seed.sensitive && seed.stored && seed.value.is_empty();
             let value = cx.new(|cx| {
                 let placeholder = if show_stored {
-                    tcode_i18n::tr!("providers.env.stored_secret")
+                    crate::tr!("providers.env.stored_secret")
                 } else {
-                    tcode_i18n::tr!("providers.env.value_placeholder")
+                    crate::tr!("providers.env.value_placeholder")
                 };
                 let mut input = InputState::new(window, cx)
                     .placeholder(placeholder)
@@ -464,15 +464,15 @@ impl ProviderDialog {
 
     fn render_identity(&self, cx: &mut Context<Self>) -> AnyElement {
         self.section(
-            tcode_i18n::tr!("providers.dialog.identity")
+            crate::tr!("providers.dialog.identity")
                 .into_owned()
                 .into(),
             vec![
                 self.field_block(
-                    tcode_i18n::tr!("providers.display_name")
+                    crate::tr!("providers.display_name")
                         .into_owned()
                         .into(),
-                    tcode_i18n::tr!("providers.display_name_help")
+                    crate::tr!("providers.display_name_help")
                         .into_owned()
                         .into(),
                     Input::new(&self.display_name)
@@ -481,8 +481,8 @@ impl ProviderDialog {
                     cx,
                 ),
                 self.field_block(
-                    tcode_i18n::tr!("providers.accent").into_owned().into(),
-                    tcode_i18n::tr!("providers.accent_help").into_owned().into(),
+                    crate::tr!("providers.accent").into_owned().into(),
+                    crate::tr!("providers.accent_help").into_owned().into(),
                     self.render_accent(cx),
                     cx,
                 ),
@@ -512,7 +512,7 @@ impl ProviderDialog {
                         let hex = hex.clone();
                         move |window, cx| {
                             let label =
-                                tcode_i18n::tr!("providers.accent_select", color = hex.clone())
+                                crate::tr!("providers.accent_select", color = hex.clone())
                                     .into_owned();
                             gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                         }
@@ -528,7 +528,7 @@ impl ProviderDialog {
                 .ghost()
                 .xsmall()
                 .icon(IconName::CircleX)
-                .tooltip(tcode_i18n::tr!("providers.accent_clear"))
+                .tooltip(crate::tr!("providers.accent_clear"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.accent = None;
                     cx.notify();
@@ -541,8 +541,8 @@ impl ProviderDialog {
         let provider = self.provider;
         let mut blocks = vec![
             self.field_block(
-                tcode_i18n::tr!("providers.binary_path").into_owned().into(),
-                tcode_i18n::tr!(
+                crate::tr!("providers.binary_path").into_owned().into(),
+                crate::tr!(
                     "providers.binary_path_help",
                     name = provider_label(provider)
                 )
@@ -558,8 +558,8 @@ impl ProviderDialog {
             let &[_, _, home_label, home_help, _, _] = provider_copy(provider);
             blocks.push(
                 self.field_block(
-                    tcode_i18n::tr!(home_label).into_owned().into(),
-                    tcode_i18n::tr!(home_help).into_owned().into(),
+                    crate::tr!(home_label).into_owned().into(),
+                    crate::tr!(home_help).into_owned().into(),
                     Input::new(&self.home)
                         .rounded(crate::material::radius_input())
                         .into_any_element(),
@@ -568,10 +568,10 @@ impl ProviderDialog {
             );
             blocks.push(
                 self.field_block(
-                    tcode_i18n::tr!("providers.pi_native_approvals")
+                    crate::tr!("providers.pi_native_approvals")
                         .into_owned()
                         .into(),
-                    tcode_i18n::tr!("providers.pi_native_approvals_help")
+                    crate::tr!("providers.pi_native_approvals_help")
                         .into_owned()
                         .into(),
                     Switch::new("pi-native-approvals")
@@ -589,8 +589,8 @@ impl ProviderDialog {
         if provider != ProviderKind::Codex {
             blocks.push(
                 self.field_block(
-                    tcode_i18n::tr!("providers.launch_args").into_owned().into(),
-                    tcode_i18n::tr!("providers.launch_args_help")
+                    crate::tr!("providers.launch_args").into_owned().into(),
+                    crate::tr!("providers.launch_args_help")
                         .into_owned()
                         .into(),
                     Input::new(&self.launch_args)
@@ -603,10 +603,10 @@ impl ProviderDialog {
         if provider == ProviderKind::Pi {
             blocks.push(
                 self.field_block(
-                    tcode_i18n::tr!("providers.pi_trust_project_extensions")
+                    crate::tr!("providers.pi_trust_project_extensions")
                         .into_owned()
                         .into(),
-                    tcode_i18n::tr!("providers.pi_trust_project_extensions_help")
+                    crate::tr!("providers.pi_trust_project_extensions_help")
                         .into_owned()
                         .into(),
                     Switch::new("pi-trust-project-extensions")
@@ -621,7 +621,7 @@ impl ProviderDialog {
             );
         }
         self.section(
-            tcode_i18n::tr!("providers.dialog.connection")
+            crate::tr!("providers.dialog.connection")
                 .into_owned()
                 .into(),
             blocks,
@@ -640,14 +640,14 @@ impl ProviderDialog {
                     div()
                         .text_size(px(13.))
                         .font_medium()
-                        .child(tcode_i18n::tr!("providers.env.title")),
+                        .child(crate::tr!("providers.env.title")),
                 )
                 .child(
                     Button::new("env-add")
                         .outline()
                         .xsmall()
                         .icon(IconName::Plus)
-                        .label(tcode_i18n::tr!("providers.env.add"))
+                        .label(crate::tr!("providers.env.add"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.add_env_row(window, cx);
                         })),
@@ -659,7 +659,7 @@ impl ProviderDialog {
                 div()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("providers.env.empty_help")),
+                    .child(crate::tr!("providers.env.empty_help")),
             );
         } else {
             for (index, row) in self.env_rows.iter().enumerate() {
@@ -678,7 +678,7 @@ impl ProviderDialog {
                             .child(
                                 Switch::new(("env-sensitive", index))
                                     .checked(row.sensitive)
-                                    .tooltip(tcode_i18n::tr!("providers.env.sensitive"))
+                                    .tooltip(crate::tr!("providers.env.sensitive"))
                                     .on_click(cx.listener(move |this, _: &bool, window, cx| {
                                         this.toggle_env_sensitive(index, window, cx);
                                     })),
@@ -688,7 +688,7 @@ impl ProviderDialog {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Delete)
-                                    .tooltip(tcode_i18n::tr!("providers.env.remove"))
+                                    .tooltip(crate::tr!("providers.env.remove"))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.remove_env_row(index, window, cx);
                                     })),
@@ -701,7 +701,7 @@ impl ProviderDialog {
                 div()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("providers.env.security_help")),
+                    .child(crate::tr!("providers.env.security_help")),
             )
             .into_any_element()
     }
@@ -720,9 +720,9 @@ impl ProviderDialog {
                 .text_size(px(13.))
                 .text_color(muted)
                 .child(if rows.len() == 1 {
-                    tcode_i18n::tr!("providers.models.count_one", count = 1).into_owned()
+                    crate::tr!("providers.models.count_one", count = 1).into_owned()
                 } else {
-                    tcode_i18n::tr!("providers.models.count", count = rows.len()).into_owned()
+                    crate::tr!("providers.models.count", count = rows.len()).into_owned()
                 }),
         );
 
@@ -747,7 +747,7 @@ impl ProviderDialog {
                         .outline()
                         .small()
                         .icon(IconName::Plus)
-                        .label(tcode_i18n::tr!("providers.models.add"))
+                        .label(crate::tr!("providers.models.add"))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.add_custom_model(window, cx)),
                         ),
@@ -762,7 +762,7 @@ impl ProviderDialog {
             );
         }
         self.section(
-            tcode_i18n::tr!("providers.models.title")
+            crate::tr!("providers.models.title")
                 .into_owned()
                 .into(),
             vec![block.into_any_element()],
@@ -790,14 +790,14 @@ impl ProviderDialog {
         let mut tags = h_flex().gap_1().items_center();
         if row.custom {
             tags = tags.child(crate::material::semantic_chip(
-                tcode_i18n::tr!("providers.models.custom").into_owned(),
+                crate::tr!("providers.models.custom").into_owned(),
                 cx.theme().info.opacity(0.12),
                 cx.theme().info_foreground,
             ));
         }
         if hidden {
             tags = tags.child(crate::material::semantic_chip(
-                tcode_i18n::tr!("providers.models.hidden").into_owned(),
+                crate::tr!("providers.models.hidden").into_owned(),
                 cx.theme().warning.opacity(0.12),
                 cx.theme().warning_foreground,
             ));
@@ -852,9 +852,9 @@ impl ProviderDialog {
                         IconName::Star
                     })
                     .tooltip(if is_fav {
-                        tcode_i18n::tr!("providers.models.unfavorite")
+                        crate::tr!("providers.models.unfavorite")
                     } else {
-                        tcode_i18n::tr!("providers.models.favorite")
+                        crate::tr!("providers.models.favorite")
                     })
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, _cx| {
@@ -877,9 +877,9 @@ impl ProviderDialog {
                         IconName::Eye
                     })
                     .tooltip(if hidden {
-                        tcode_i18n::tr!("providers.models.show")
+                        crate::tr!("providers.models.show")
                     } else {
-                        tcode_i18n::tr!("providers.models.hide")
+                        crate::tr!("providers.models.hide")
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_hidden(&hide_id, cx))),
             )
@@ -889,7 +889,7 @@ impl ProviderDialog {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Delete)
-                        .tooltip(tcode_i18n::tr!("providers.models.remove"))
+                        .tooltip(crate::tr!("providers.models.remove"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.remove_custom_model(&remove_id, cx);
                         })),
@@ -939,7 +939,7 @@ pub fn render_footer(
             Button::new("delete-profile")
                 .danger()
                 .icon(IconName::Delete)
-                .label(tcode_i18n::tr!("providers.delete_profile").into_owned())
+                .label(crate::tr!("providers.delete_profile").into_owned())
                 .on_click(move |_, window, cx| {
                     let delete_id = delete_id.clone();
                     let delete_store = delete_store.clone();
@@ -948,13 +948,13 @@ pub fn render_footer(
                         let delete_id = delete_id.clone();
                         let delete_store = delete_store.clone();
                         alert
-                            .title(tcode_i18n::tr!("providers.delete_confirm_title"))
-                            .description(tcode_i18n::tr!("providers.delete_confirm_body"))
+                            .title(crate::tr!("providers.delete_confirm_title"))
+                            .description(crate::tr!("providers.delete_confirm_body"))
                             .button_props(
                                 DialogButtonProps::default()
                                     .ok_variant(ButtonVariant::Danger)
-                                    .ok_text(tcode_i18n::tr!("providers.delete_profile"))
-                                    .cancel_text(tcode_i18n::tr!("settings.cancel"))
+                                    .ok_text(crate::tr!("providers.delete_profile"))
+                                    .cancel_text(crate::tr!("settings.cancel"))
                                     .show_cancel(true),
                             )
                             .on_ok(move |_, window, cx| {
@@ -980,13 +980,13 @@ pub fn render_footer(
         .child(
             Button::new("provider-cancel")
                 .ghost()
-                .label(tcode_i18n::tr!("settings.cancel").into_owned())
+                .label(crate::tr!("settings.cancel").into_owned())
                 .on_click(|_, window, cx| window.close_dialog(cx)),
         )
         .child(
             Button::new("provider-save")
                 .primary()
-                .label(tcode_i18n::tr!("settings.save").into_owned())
+                .label(crate::tr!("settings.save").into_owned())
                 .on_click(move |_, window, cx| {
                     save_dialog.update(cx, |d, cx| d.apply(cx));
                     window.close_dialog(cx);

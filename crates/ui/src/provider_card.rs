@@ -170,7 +170,7 @@ impl ProviderCard {
                 let name = name.clone();
                 move |window, cx| {
                     let label =
-                        tcode_i18n::tr!("providers.configure", name = name.clone()).into_owned();
+                        crate::tr!("providers.configure", name = name.clone()).into_owned();
                     gpui_component::tooltip::Tooltip::new(label).build(window, cx)
                 }
             })
@@ -192,13 +192,13 @@ impl ProviderCard {
                     .ghost()
                     .xsmall()
                     .icon(IconName::Settings)
-                    .tooltip(tcode_i18n::tr!("providers.configure", name = name.clone()))
+                    .tooltip(crate::tr!("providers.configure", name = name.clone()))
                     .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx))),
             )
             .child(
                 Switch::new("enable-provider")
                     .checked(enabled)
-                    .tooltip(tcode_i18n::tr!("providers.enable", name = name))
+                    .tooltip(crate::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let checked = *checked;
                         let profile_id = this.profile_id.clone();
@@ -278,9 +278,9 @@ impl ProviderCard {
                             .child(shown)
                             .tooltip(move |window, cx| {
                                 let label = if revealed {
-                                    tcode_i18n::tr!("providers.hide_email")
+                                    crate::tr!("providers.hide_email")
                                 } else {
-                                    tcode_i18n::tr!("providers.reveal_email")
+                                    crate::tr!("providers.reveal_email")
                                 }
                                 .into_owned();
                                 gpui_component::tooltip::Tooltip::new(label).build(window, cx)
@@ -316,7 +316,7 @@ impl ProviderCard {
                     .ghost()
                     .xsmall()
                     .icon(Icon::empty().path("icons/download.svg"))
-                    .tooltip(tcode_i18n::tr!("providers.update_aria")),
+                    .tooltip(crate::tr!("providers.update_aria")),
             )
             .content(move |_, _, cx| {
                 let store = store.clone();
@@ -331,13 +331,13 @@ impl ProviderCard {
                         div()
                             .text_size(px(13.))
                             .font_semibold()
-                            .child(tcode_i18n::tr!("providers.update_title")),
+                            .child(crate::tr!("providers.update_title")),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
                             .text_color(muted)
-                            .child(tcode_i18n::tr!("providers.update_message")),
+                            .child(crate::tr!("providers.update_message")),
                     );
                 if command.is_some() {
                     pane = pane.child(
@@ -346,9 +346,9 @@ impl ProviderCard {
                             .small()
                             .loading(updating)
                             .label(if updating {
-                                tcode_i18n::tr!("providers.updating")
+                                crate::tr!("providers.updating")
                             } else {
-                                tcode_i18n::tr!("providers.update_now")
+                                crate::tr!("providers.update_now")
                             })
                             .on_click({
                                 let store = store.clone();
@@ -368,7 +368,7 @@ impl ProviderCard {
                                 .pt_1()
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!("providers.update_manual")),
+                                .child(crate::tr!("providers.update_manual")),
                         )
                         .child(
                             h_flex()
@@ -396,7 +396,7 @@ impl ProviderCard {
                                         .ghost()
                                         .xsmall()
                                         .icon(IconName::Copy)
-                                        .tooltip(tcode_i18n::tr!("providers.copy_command"))
+                                        .tooltip(crate::tr!("providers.copy_command"))
                                         .on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 copy.clone(),

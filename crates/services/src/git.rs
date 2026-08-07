@@ -221,14 +221,7 @@ fn git_branches(cwd: &Path) -> (Vec<String>, Option<String>) {
     let mut branches = git_output(cwd, &args)
         .ok()
         .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+        .map(|output| parse_branch_list(&String::from_utf8_lossy(&output.stdout)))
         .unwrap_or_default();
     let origin_args = vec![
         "symbolic-ref".into(),

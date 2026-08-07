@@ -3,7 +3,6 @@ members = [
     "crates/agent",
     "crates/core",
     "crates/protocol",
-    "crates/i18n",
     "crates/services",
     "crates/runtime",
     "crates/term",

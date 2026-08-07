@@ -57,9 +57,9 @@ pub fn notification(
                 window.use_keyed_state(("toast-detail-expanded", id as usize), cx, |_, _| false);
             let is_expanded = *expanded.read(cx);
             let toggle_label = if is_expanded {
-                tcode_i18n::tr!("toast.hide_details")
+                crate::tr!("toast.hide_details")
             } else {
-                tcode_i18n::tr!("toast.show_details")
+                crate::tr!("toast.show_details")
             };
             let mut content = v_flex().mt_2().gap_2().child(
                 Button::new(("toast-detail-toggle", id as usize))
@@ -93,7 +93,7 @@ pub fn notification(
                             .ghost()
                             .xsmall()
                             .icon(IconName::Copy)
-                            .label(tcode_i18n::tr!("toast.copy_error"))
+                            .label(crate::tr!("toast.copy_error"))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     detail.to_string(),

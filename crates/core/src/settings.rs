@@ -743,18 +743,6 @@ impl Settings {
             .or_default()
     }
 
-    /// The provider's card title: trimmed display-name override, else its label.
-    pub fn provider_display_name(&self, provider: ProviderKind) -> String {
-        let settings = self.provider(provider);
-        settings
-            .display_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| provider_label(provider).to_string())
-    }
-
     /// The built-in profile id for a native protocol (its [`provider_key`]).
     /// This is the id a session carries when it uses the default, non-custom
     /// configuration for its kind.
@@ -957,26 +945,6 @@ mod tests {
             settings.unknown.get("diff_view_mode"),
             Some(&serde_json::Value::String("line".into()))
         );
-    }
-
-    #[test]
-    fn display_name_falls_back_to_driver_label() {
-        let mut settings = Settings::default();
-        assert_eq!(
-            settings.provider_display_name(ProviderKind::ClaudeCode),
-            "Claude"
-        );
-        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
-        assert_eq!(settings.provider_display_name(ProviderKind::Pi), "pi");
-        assert_eq!(
-            settings.provider_display_name(ProviderKind::OpenCode),
-            "OpenCode"
-        );
-        // A blank override is treated as "no override".
-        settings.provider_mut(ProviderKind::Codex).display_name = Some("   ".into());
-        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Codex");
-        settings.provider_mut(ProviderKind::Codex).display_name = Some("Work".into());
-        assert_eq!(settings.provider_display_name(ProviderKind::Codex), "Work");
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
             .border_1()
             .border_color(cx.theme().border)
             .shadow_xl()
-            .title(tcode_i18n::tr!("sidebar.add_project").into_owned())
+            .title(crate::tr!("sidebar.add_project").into_owned())
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
             .footer(render_add_footer(&footer, window, cx))
     });
@@ -62,7 +62,7 @@ impl AddProjectDialog {
     fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let path_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(tcode_i18n::tr!("sidebar.path_placeholder").into_owned())
+                .placeholder(crate::tr!("sidebar.path_placeholder").into_owned())
         });
         Self {
             store,
@@ -91,7 +91,7 @@ impl AddProjectDialog {
             directories: true,
             multiple: false,
             prompt: Some(
-                tcode_i18n::tr!("sidebar.select_project")
+                crate::tr!("sidebar.select_project")
                     .into_owned()
                     .into(),
             ),
@@ -197,7 +197,7 @@ impl AddProjectDialog {
                         .border_1()
                         .border_color(cx.theme().border)
                         .shadow_xl()
-                        .title(tcode_i18n::tr!("sidebar.importing").into_owned())
+                        .title(crate::tr!("sidebar.importing").into_owned())
                         .close_button(false)
                         .overlay_closable(false)
                         .keyboard(false)
@@ -215,14 +215,14 @@ impl AddProjectDialog {
                 .py_4()
                 .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
-                .child(tcode_i18n::tr!("sidebar.recent_loading"))
+                .child(crate::tr!("sidebar.recent_loading"))
                 .child(Progress::new("recent-directories-loading").loading(true))
                 .into_any_element(),
             RecentState::Ready(recent) if recent.is_empty() => div()
                 .py_4()
                 .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
-                .child(tcode_i18n::tr!("sidebar.recent_empty"))
+                .child(crate::tr!("sidebar.recent_empty"))
                 .into_any_element(),
             RecentState::Ready(recent) => {
                 // Keep the viewport and the flex column separate. Putting the
@@ -233,7 +233,7 @@ impl AddProjectDialog {
                     let selected = recent.clone();
                     let name = directory_name(&recent.path);
                     let accessible_name =
-                        tcode_i18n::tr!("sidebar.open_recent", name = name.clone()).into_owned();
+                        crate::tr!("sidebar.open_recent", name = name.clone()).into_owned();
                     let path = middle_truncate(&recent.path, 76);
                     let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
                     let counts = tool_counts(&recent.threads);
@@ -310,7 +310,7 @@ impl Render for AddProjectDialog {
                         div()
                             .text_size(px(13.))
                             .font_semibold()
-                            .child(tcode_i18n::tr!("sidebar.recent_activity")),
+                            .child(crate::tr!("sidebar.recent_activity")),
                     )
                     .child(self.render_recent(cx)),
             )
@@ -329,7 +329,7 @@ impl Render for AddProjectDialog {
                             .child(
                                 Button::new("browse-project-directory")
                                     .rounded(crate::material::radius_button())
-                                    .label(tcode_i18n::tr!("sidebar.browse"))
+                                    .label(crate::tr!("sidebar.browse"))
                                     .on_click(cx.listener(|dialog, _, window, cx| {
                                         dialog.browse(window, cx);
                                     })),
@@ -340,7 +340,7 @@ impl Render for AddProjectDialog {
                             div()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().danger)
-                                .child(tcode_i18n::tr!("sidebar.invalid_path")),
+                                .child(crate::tr!("sidebar.invalid_path")),
                         )
                     }),
             )
@@ -423,7 +423,7 @@ impl Render for ImportProgress {
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!(
+                    .child(crate::tr!(
                         "sidebar.import_progress",
                         done = self.done,
                         total = self.total,
@@ -437,7 +437,7 @@ impl Render for ImportProgress {
                             .text_size(px(13.))
                             .font_semibold()
                             .text_color(cx.theme().foreground)
-                            .child(tcode_i18n::tr!(
+                            .child(crate::tr!(
                                 "sidebar.import_summary",
                                 imported = imported,
                                 skipped = skipped
@@ -448,7 +448,7 @@ impl Render for ImportProgress {
                             Button::new("external-import-ok")
                                 .rounded(crate::material::radius_button())
                                 .primary()
-                                .label(tcode_i18n::tr!("sidebar.import_ok"))
+                                .label(crate::tr!("sidebar.import_ok"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         ),
                     )
@@ -466,7 +466,7 @@ fn render_add_footer(
         .child(
             Button::new("add-project-cancel")
                 .rounded(crate::material::radius_button())
-                .label(tcode_i18n::tr!("sidebar.cancel"))
+                .label(crate::tr!("sidebar.cancel"))
                 .on_click(move |_, window, cx| {
                     window.close_dialog(cx);
                 }),
@@ -475,7 +475,7 @@ fn render_add_footer(
             Button::new("add-project-open")
                 .rounded(crate::material::radius_button())
                 .primary()
-                .label(tcode_i18n::tr!("sidebar.open"))
+                .label(crate::tr!("sidebar.open"))
                 .on_click(move |_, window, cx| {
                     open.update(cx, |dialog, cx| dialog.open_typed_path(window, cx));
                 }),

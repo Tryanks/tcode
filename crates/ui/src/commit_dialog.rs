@@ -52,7 +52,7 @@ impl CommitDialog {
             InputState::new(window, cx)
                 .multi_line(true)
                 .auto_grow(3, 10)
-                .placeholder(tcode_i18n::tr!("git.commit.message_placeholder"))
+                .placeholder(crate::tr!("git.commit.message_placeholder"))
         });
         let mut this = Self {
             store,
@@ -150,11 +150,11 @@ impl CommitDialog {
                     .next()
                     .unwrap_or("update"),
             );
-            return tcode_i18n::tr!("git.commit.confirm_feature", branch = branch).into_owned();
+            return crate::tr!("git.commit.confirm_feature", branch = branch).into_owned();
         }
         match self.action {
-            GitAction::CommitPush => tcode_i18n::tr!("git.commit.confirm_push").into_owned(),
-            _ => tcode_i18n::tr!("git.commit.confirm").into_owned(),
+            GitAction::CommitPush => crate::tr!("git.commit.confirm_push").into_owned(),
+            _ => crate::tr!("git.commit.confirm").into_owned(),
         }
     }
 
@@ -219,7 +219,7 @@ impl Render for CommitDialog {
         let branch_label = self
             .branch
             .clone()
-            .unwrap_or_else(|| tcode_i18n::tr!("git.commit.detached").into_owned());
+            .unwrap_or_else(|| crate::tr!("git.commit.detached").into_owned());
         let branch_row = h_flex()
             .w_full()
             .gap_1p5()
@@ -232,7 +232,7 @@ impl Render for CommitDialog {
                     .xsmall()
                     .text_color(muted),
             )
-            .child(tcode_i18n::tr!("git.commit.branch"))
+            .child(crate::tr!("git.commit.branch"))
             .child(
                 div()
                     .font_family(cx.theme().mono_font_family.clone())
@@ -262,18 +262,18 @@ impl Render for CommitDialog {
                             .font_medium()
                             .text_color(cx.theme().warning)
                             .child(Icon::new(IconName::TriangleAlert).xsmall())
-                            .child(tcode_i18n::tr!("git.commit.default_warning_title")),
+                            .child(crate::tr!("git.commit.default_warning_title")),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
                             .text_color(muted)
-                            .child(tcode_i18n::tr!("git.commit.default_warning_body")),
+                            .child(crate::tr!("git.commit.default_warning_body")),
                     )
                     .child(
                         Checkbox::new("commit-feature-branch")
                             .checked(create)
-                            .label(tcode_i18n::tr!("git.commit.create_feature_branch").into_owned())
+                            .label(crate::tr!("git.commit.create_feature_branch").into_owned())
                             .on_click(cx.listener(|dialog, checked: &bool, _window, cx| {
                                 dialog.create_feature_branch = *checked;
                                 cx.notify();
@@ -288,7 +288,7 @@ impl Render for CommitDialog {
                 .text_size(px(11.))
                 .font_medium()
                 .text_color(muted)
-                .child(tcode_i18n::tr!(
+                .child(crate::tr!(
                     "git.commit.files_count",
                     count = self.files.len()
                 )),
@@ -300,7 +300,7 @@ impl Render for CommitDialog {
                     .p_2()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("git.commit.no_changes")),
+                    .child(crate::tr!("git.commit.no_changes")),
             );
         } else {
             for (index, file) in self.files.iter().enumerate() {
@@ -336,7 +336,7 @@ impl Render for CommitDialog {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("git.commit.message_label")),
+                    .child(crate::tr!("git.commit.message_label")),
             )
             .child(
                 Button::new("commit-regenerate")
@@ -345,9 +345,9 @@ impl Render for CommitDialog {
                     .xsmall()
                     .icon(IconName::Undo)
                     .label(if self.generating {
-                        tcode_i18n::tr!("git.commit.generating")
+                        crate::tr!("git.commit.generating")
                     } else {
-                        tcode_i18n::tr!("git.commit.regenerate")
+                        crate::tr!("git.commit.regenerate")
                     })
                     .disabled(self.generating)
                     .on_click(cx.listener(|dialog, _, window, cx| {

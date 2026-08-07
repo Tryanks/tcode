@@ -143,7 +143,7 @@ mod native {
             cx: &mut Context<Self>,
         ) -> Self {
             let url_input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tcode_i18n::tr!("preview.url_placeholder"))
+                InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
             });
             let subscriptions = vec![
                 cx.observe(&store, |this, _, cx| {
@@ -430,12 +430,12 @@ mod native {
             // `allow_evaluate` gates only `preview_evaluate`.
             let browser = self.store.read(cx).preview_browser_settings();
             if !browser.enabled {
-                let _ = reply.try_send(Err(tcode_i18n::tr!("browser.disabled_error").into_owned()));
+                let _ = reply.try_send(Err(crate::tr!("browser.disabled_error").into_owned()));
                 return;
             }
             if matches!(&op, PreviewOp::Evaluate { .. }) && !browser.allow_evaluate {
                 let _ = reply.try_send(Err(
-                    tcode_i18n::tr!("browser.evaluate_disabled_error").into_owned()
+                    crate::tr!("browser.evaluate_disabled_error").into_owned()
                 ));
                 return;
             }
@@ -897,7 +897,7 @@ mod native {
                     .px_8()
                     .text_center()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("browser.disabled_panel"));
+                    .child(crate::tr!("browser.disabled_panel"));
             }
             let active = self.active_key(cx);
 
@@ -944,11 +944,11 @@ mod native {
                         .px_8()
                         .text_center()
                         .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("preview.unavailable"))
+                        .child(crate::tr!("preview.unavailable"))
                         .child(
                             div()
                                 .text_size(gpui::px(13.))
-                                .child(tcode_i18n::tr!("preview.unavailable_hint")),
+                                .child(crate::tr!("preview.unavailable_hint")),
                         )
                         .into_any_element(),
                 },
@@ -957,7 +957,7 @@ mod native {
                     .items_center()
                     .justify_center()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("preview.no_session"))
+                    .child(crate::tr!("preview.no_session"))
                     .into_any_element(),
             };
 
@@ -1007,7 +1007,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::ArrowLeft)
-                        .tooltip(tcode_i18n::tr!("preview.back"))
+                        .tooltip(crate::tr!("preview.back"))
                         .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
                 )
                 .child(
@@ -1016,7 +1016,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::ArrowRight)
-                        .tooltip(tcode_i18n::tr!("preview.forward"))
+                        .tooltip(crate::tr!("preview.forward"))
                         .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
                 )
                 .child(
@@ -1025,7 +1025,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::Replace)
-                        .tooltip(tcode_i18n::tr!("preview.reload"))
+                        .tooltip(crate::tr!("preview.reload"))
                         .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
                 )
                 .child(div().flex_1().min_w_0().child(Input::new(&self.url_input)))
@@ -1035,7 +1035,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::Globe)
-                        .tooltip(tcode_i18n::tr!("preview.scan_ports"))
+                        .tooltip(crate::tr!("preview.scan_ports"))
                         .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
                 )
                 .child(
@@ -1044,7 +1044,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::ExternalLink)
-                        .tooltip(tcode_i18n::tr!("preview.open_external"))
+                        .tooltip(crate::tr!("preview.open_external"))
                         .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
                 )
                 .child(
@@ -1053,7 +1053,7 @@ mod native {
                         .small()
                         .compact()
                         .icon(IconName::Close)
-                        .tooltip(tcode_i18n::tr!("preview.close"))
+                        .tooltip(crate::tr!("preview.close"))
                         .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
                 // Last child, so the chrome's own controls stay to its left.
@@ -1131,7 +1131,7 @@ mod placeholder {
                 "preview: rejecting op {op:?} for session {session_id} (unsupported on Linux)"
             );
             let _ = reply.try_send(Err(
-                tcode_i18n::tr!("preview.unsupported_linux").into_owned()
+                crate::tr!("preview.unsupported_linux").into_owned()
             ));
         }
 
@@ -1145,7 +1145,7 @@ mod placeholder {
                 .items_center()
                 .justify_center()
                 .text_color(cx.theme().muted_foreground)
-                .child(tcode_i18n::tr!("preview.unsupported_linux"))
+                .child(crate::tr!("preview.unsupported_linux"))
         }
     }
 }

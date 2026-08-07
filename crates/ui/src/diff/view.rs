@@ -651,9 +651,9 @@ impl DiffPanel {
         // The second tab is "Plan" when a plan exists or the session is in Plan
         // mode, else "Tasks" (S1 §6).
         let plan_label = if plan_tab_active {
-            tcode_i18n::tr!("plan.tab_plan")
+            crate::tr!("plan.tab_plan")
         } else {
-            tcode_i18n::tr!("plan.tab_tasks")
+            crate::tr!("plan.tab_tasks")
         };
         let store = self.workspace_store.clone();
         let store_close = self.workspace_store.clone();
@@ -689,7 +689,7 @@ impl DiffPanel {
         h_flex()
             .id("right-panel-tabs")
             .role(Role::TabList)
-            .aria_label(tcode_i18n::tr!("diff.panel_tabs"))
+            .aria_label(crate::tr!("diff.panel_tabs"))
             .flex_none()
             .h(px(if hosts_caption {
                 window_caption::CAPTION_STRIP_HEIGHT
@@ -705,7 +705,7 @@ impl DiffPanel {
                 tab(
                     "diff-tab",
                     IconName::File,
-                    tcode_i18n::tr!("diff.title").into_owned().into(),
+                    crate::tr!("diff.title").into_owned().into(),
                     active == RightTab::Diff,
                     cx,
                 )
@@ -752,9 +752,9 @@ impl DiffPanel {
                         IconName::Maximize
                     })
                     .tooltip(if expanded {
-                        tcode_i18n::tr!("diff.restore_width")
+                        crate::tr!("diff.restore_width")
                     } else {
-                        tcode_i18n::tr!("diff.expand_width")
+                        crate::tr!("diff.expand_width")
                     })
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, cx| {
@@ -768,7 +768,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::PanelRight)
-                    .tooltip(tcode_i18n::tr!("diff.layout_soon")),
+                    .tooltip(crate::tr!("diff.layout_soon")),
             )
             .child(
                 Button::new("diff-close")
@@ -776,7 +776,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip(tcode_i18n::tr!("diff.close"))
+                    .tooltip(crate::tr!("diff.close"))
                     .on_click(move |_, _, cx| {
                         store_close.update(cx, |store, cx| {
                             store.close_diff_panel(cx);
@@ -800,11 +800,11 @@ impl DiffPanel {
         let turns = self.workspace_store.read(cx).diff_turns();
         let label = match selected_scope {
             Some(DiffScope::Turn(turn)) => {
-                tcode_i18n::tr!("diff.turn", count = turn + 1).into_owned()
+                crate::tr!("diff.turn", count = turn + 1).into_owned()
             }
-            Some(DiffScope::WorkingTree) => tcode_i18n::tr!("diff.working_tree").into_owned(),
-            Some(DiffScope::Branch) => tcode_i18n::tr!("diff.branch_changes").into_owned(),
-            None => tcode_i18n::tr!("diff.no_changes").into_owned(),
+            Some(DiffScope::WorkingTree) => crate::tr!("diff.working_tree").into_owned(),
+            Some(DiffScope::Branch) => crate::tr!("diff.branch_changes").into_owned(),
+            None => crate::tr!("diff.no_changes").into_owned(),
         };
         let muted = cx.theme().muted_foreground;
         let panel = cx.entity();
@@ -879,13 +879,13 @@ impl DiffPanel {
                     .gap_0p5()
                     .child(scope_row(
                         "diff-scope-working",
-                        tcode_i18n::tr!("diff.working_tree").into_owned().into(),
+                        crate::tr!("diff.working_tree").into_owned().into(),
                         DiffScope::WorkingTree,
                         cx,
                     ))
                     .child(scope_row(
                         "diff-scope-branch",
-                        tcode_i18n::tr!("diff.branch_changes").into_owned().into(),
+                        crate::tr!("diff.branch_changes").into_owned().into(),
                         DiffScope::Branch,
                         cx,
                     ))
@@ -897,7 +897,7 @@ impl DiffPanel {
                             .pb_1()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("diff.turns")),
+                            .child(crate::tr!("diff.turns")),
                     );
                 let mut items = turns.clone();
                 items.reverse();
@@ -906,7 +906,7 @@ impl DiffPanel {
                     let session = session_selector.clone();
                     let is_sel = selected_scope == Some(DiffScope::Turn(turn));
                     let turn_label: gpui::SharedString =
-                        tcode_i18n::tr!("diff.turn", count = turn + 1)
+                        crate::tr!("diff.turn", count = turn + 1)
                             .into_owned()
                             .into();
                     list = list.child(
@@ -953,7 +953,7 @@ impl DiffPanel {
                 div()
                     .id("diff-turn-list")
                     .role(Role::Menu)
-                    .aria_label(tcode_i18n::tr!("diff.scope_menu"))
+                    .aria_label(crate::tr!("diff.scope_menu"))
                     .min_w(px(190.))
                     .max_h(px(320.))
                     .overflow_y_scroll()
@@ -987,9 +987,9 @@ impl DiffPanel {
                     .icon(IconName::PanelLeft)
                     .selected(split_on)
                     .tooltip(if split_on {
-                        tcode_i18n::tr!("diff.unified_view")
+                        crate::tr!("diff.unified_view")
                     } else {
-                        tcode_i18n::tr!("diff.split_view")
+                        crate::tr!("diff.split_view")
                     })
                     .on_click(move |_, _, cx| {
                         panel_split.update(cx, |this, cx| {
@@ -1007,7 +1007,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::Menu)
                     .selected(wrap_on)
-                    .tooltip(tcode_i18n::tr!("diff.toggle_wrap"))
+                    .tooltip(crate::tr!("diff.toggle_wrap"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace_store
                             .update(cx, |store, cx| store.toggle_diff_wrap(cx));
@@ -1022,7 +1022,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::Eye)
                     .selected(ignore_ws)
-                    .tooltip(tcode_i18n::tr!("diff.toggle_whitespace"))
+                    .tooltip(crate::tr!("diff.toggle_whitespace"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.ignore_ws = !this.ignore_ws;
                         this.git_preview = None;
@@ -1037,7 +1037,7 @@ impl DiffPanel {
                     .compact()
                     .icon(IconName::CaseSensitive)
                     .selected(show_invisibles)
-                    .tooltip(tcode_i18n::tr!("diff.toggle_invisibles"))
+                    .tooltip(crate::tr!("diff.toggle_invisibles"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_invisibles = !this.show_invisibles;
                         this.cache = None;
@@ -1085,7 +1085,7 @@ impl DiffPanel {
                             let chosen = branch.clone();
                             let selected = branch == current;
                             let accessible_label =
-                                tcode_i18n::tr!("diff.base_branch", branch = branch.clone())
+                                crate::tr!("diff.base_branch", branch = branch.clone())
                                     .into_owned();
                             list = list.child(
                                 material::accessible_clickable(
@@ -1125,7 +1125,7 @@ impl DiffPanel {
                         div()
                             .id("diff-base-list")
                             .role(Role::Menu)
-                            .aria_label(tcode_i18n::tr!("diff.base_branches"))
+                            .aria_label(crate::tr!("diff.base_branches"))
                             .min_w(px(180.))
                             .max_h(px(280.))
                             .overflow_y_scroll()
@@ -1299,7 +1299,7 @@ impl DiffPanel {
     fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(cache) = self.cache.as_ref() else {
             if self.loading_key.is_some() || self.render_loading_key.is_some() {
-                return self.render_status(tcode_i18n::tr!("diff.loading").into_owned(), cx);
+                return self.render_status(crate::tr!("diff.loading").into_owned(), cx);
             }
             return self.render_empty(cx);
         };
@@ -1350,7 +1350,7 @@ impl DiffPanel {
         {
             if preview.result.truncated {
                 content = content
-                    .child(self.render_notice(tcode_i18n::tr!("diff.truncated").into_owned(), cx));
+                    .child(self.render_notice(crate::tr!("diff.truncated").into_owned(), cx));
             }
             if let Some(error) = &preview.result.error {
                 content = content.child(self.render_notice(error.clone(), cx));
@@ -1452,17 +1452,17 @@ impl DiffPanel {
         };
         let kind_label = match file.kind {
             FileChangeKind::Create => Some((
-                tcode_i18n::tr!("diff.created"),
+                crate::tr!("diff.created"),
                 cx.theme().success.opacity(0.12),
                 cx.theme().success_foreground,
             )),
             FileChangeKind::Delete => Some((
-                tcode_i18n::tr!("diff.deleted"),
+                crate::tr!("diff.deleted"),
                 cx.theme().danger.opacity(0.12),
                 cx.theme().danger_foreground,
             )),
             FileChangeKind::Rename => Some((
-                tcode_i18n::tr!("diff.renamed"),
+                crate::tr!("diff.renamed"),
                 cx.theme().info.opacity(0.12),
                 cx.theme().info_foreground,
             )),
@@ -1547,7 +1547,7 @@ impl DiffPanel {
             .font_family(cx.theme().font_family.clone());
         if !expandable {
             return row
-                .child(tcode_i18n::tr!("diff.unmodified_lines", count = count))
+                .child(crate::tr!("diff.unmodified_lines", count = count))
                 .into_any_element();
         }
 
@@ -1561,7 +1561,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::ChevronUp)
-                    .tooltip(tcode_i18n::tr!("diff.expand_gap_up"))
+                    .tooltip(crate::tr!("diff.expand_gap_up"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.expand_gap(file_index, up_lines.clone(), ExpandDir::Up, cx);
                     })),
@@ -1571,8 +1571,8 @@ impl DiffPanel {
                     .ghost()
                     .small()
                     .compact()
-                    .label(tcode_i18n::tr!("diff.unmodified_lines", count = count))
-                    .tooltip(tcode_i18n::tr!("diff.expand_gap_all"))
+                    .label(crate::tr!("diff.unmodified_lines", count = count))
+                    .tooltip(crate::tr!("diff.expand_gap_all"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.expand_gap(file_index, all_lines.clone(), ExpandDir::All, cx);
                     })),
@@ -1583,7 +1583,7 @@ impl DiffPanel {
                     .small()
                     .compact()
                     .icon(IconName::ChevronDown)
-                    .tooltip(tcode_i18n::tr!("diff.expand_gap_down"))
+                    .tooltip(crate::tr!("diff.expand_gap_down"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.expand_gap(file_index, new_lines.clone(), ExpandDir::Down, cx);
                     })),
@@ -1684,7 +1684,7 @@ impl DiffPanel {
                                 Button::new("diff-submit-comment")
                                     .primary()
                                     .small()
-                                    .label(tcode_i18n::tr!("diff.submit_comment"))
+                                    .label(crate::tr!("diff.submit_comment"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.submit_comment(cx);
                                     })),
@@ -1705,10 +1705,10 @@ impl DiffPanel {
                             Button::new("diff-add-comment")
                                 .ghost()
                                 .small()
-                                .label(tcode_i18n::tr!("diff.add_comment"))
+                                .label(crate::tr!("diff.add_comment"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.comment_input = Some(cx.new(|cx| {
-                                        InputState::new(window, cx).placeholder(tcode_i18n::tr!(
+                                        InputState::new(window, cx).placeholder(crate::tr!(
                                             "diff.comment_placeholder"
                                         ))
                                     }));
@@ -1931,7 +1931,7 @@ impl DiffPanel {
                 div()
                     .text_size(px(15.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("diff.empty")),
+                    .child(crate::tr!("diff.empty")),
             )
             .into_any_element()
     }

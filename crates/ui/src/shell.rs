@@ -290,7 +290,7 @@ impl AppShell {
         let action = presented.retry.map(|request| {
             let store = self.store.clone();
             ToastAction {
-                label: tcode_i18n::tr!("git.toast.retry").into_owned().into(),
+                label: crate::tr!("git.toast.retry").into_owned().into(),
                 handler: Rc::new(move |window, cx| {
                     window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
                     let request = request.clone();

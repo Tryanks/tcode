@@ -254,7 +254,7 @@ impl Render for ProviderModelPicker {
                             .p_4()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("model_picker.no_models")),
+                            .child(crate::tr!("model_picker.no_models")),
                     );
                 } else {
                     for (index, option) in available.into_iter().enumerate() {

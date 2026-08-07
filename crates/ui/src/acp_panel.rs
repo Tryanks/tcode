@@ -41,13 +41,13 @@ impl AcpAgentCard {
     ) -> Self {
         let args = cx.new(|cx| {
             let mut input =
-                InputState::new(window, cx).placeholder(tcode_i18n::tr!("providers.acp.args_hint"));
+                InputState::new(window, cx).placeholder(crate::tr!("providers.acp.args_hint"));
             input.set_value(agent.launch_args.clone().unwrap_or_default(), window, cx);
             input
         });
         let env = cx.new(|cx| {
             let mut input =
-                InputState::new(window, cx).placeholder(tcode_i18n::tr!("providers.acp.env_hint"));
+                InputState::new(window, cx).placeholder(crate::tr!("providers.acp.env_hint"));
             input.set_value(format_env(&agent.env), window, cx);
             input
         });
@@ -130,7 +130,7 @@ impl AcpAgentCard {
                     .ghost()
                     .xsmall()
                     .icon(IconName::ChevronDown)
-                    .tooltip(tcode_i18n::tr!(
+                    .tooltip(crate::tr!(
                         "providers.toggle_details",
                         name = name.clone()
                     ))
@@ -142,7 +142,7 @@ impl AcpAgentCard {
             .child(
                 Switch::new(gpui::SharedString::from(format!("acp-enable-{id}")))
                     .checked(agent.enabled)
-                    .tooltip(tcode_i18n::tr!("providers.enable", name = name))
+                    .tooltip(crate::tr!("providers.enable", name = name))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let (id, checked) = (toggle_id.clone(), *checked);
                         this.store.update(cx, |store, _cx| {
@@ -176,13 +176,13 @@ impl AcpAgentCard {
         v_flex()
             .w_full()
             .child(self.field_block(
-                tcode_i18n::tr!("providers.acp.args").into_owned(),
+                crate::tr!("providers.acp.args").into_owned(),
                 Input::new(&self.args).xsmall().into_any_element(),
                 cx,
             ))
             .child(
                 self.field_block(
-                    tcode_i18n::tr!("providers.acp.env").into_owned(),
+                    crate::tr!("providers.acp.env").into_owned(),
                     v_flex()
                         .w_full()
                         .gap_2()
@@ -194,7 +194,7 @@ impl AcpAgentCard {
                                 )))
                                 .outline()
                                 .xsmall()
-                                .label(tcode_i18n::tr!("providers.acp.save").into_owned())
+                                .label(crate::tr!("providers.acp.save").into_owned())
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         let launch_args = args.read(cx).value().trim().to_string();
@@ -225,7 +225,7 @@ impl AcpAgentCard {
                         .outline()
                         .danger()
                         .small()
-                        .label(tcode_i18n::tr!("providers.acp.remove").into_owned())
+                        .label(crate::tr!("providers.acp.remove").into_owned())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let id = remove_id.clone();
                             this.store.update(cx, |store, _cx| {
@@ -301,7 +301,7 @@ impl AcpPanel {
         let input = |placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
-        let search = input(&tcode_i18n::tr!("providers.acp.search"), window, cx);
+        let search = input(&crate::tr!("providers.acp.search"), window, cx);
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&search, |_, _, cx| cx.notify()),
@@ -319,7 +319,7 @@ impl AcpPanel {
             tp_base_url: input(KIMI_BASE_URL, window, cx),
             tp_model: input(KIMI_MODEL, window, cx),
             tp_key: input(
-                &tcode_i18n::tr!("providers.third_party.key_hint"),
+                &crate::tr!("providers.third_party.key_hint"),
                 window,
                 cx,
             ),
@@ -406,7 +406,7 @@ impl AcpPanel {
                     .bg(cx.theme().success.opacity(0.12))
                     .text_size(px(13.))
                     .text_color(cx.theme().success_foreground)
-                    .child(tcode_i18n::tr!("providers.acp.installed").into_owned())
+                    .child(crate::tr!("providers.acp.installed").into_owned())
                     .into_any_element()
             } else if !agent.supported {
                 div()
@@ -414,7 +414,7 @@ impl AcpPanel {
                     .bg(cx.theme().muted)
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("providers.acp.unsupported").into_owned())
+                    .child(crate::tr!("providers.acp.unsupported").into_owned())
                     .into_any_element()
             } else {
                 Button::new(gpui::SharedString::from(format!(
@@ -424,7 +424,7 @@ impl AcpPanel {
                 .outline()
                 .xsmall()
                 .loading(agent.installing)
-                .label(tcode_i18n::tr!("providers.acp.install").into_owned())
+                .label(crate::tr!("providers.acp.install").into_owned())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = id.clone();
                     this.store.update(cx, |store, _cx| {
@@ -470,7 +470,7 @@ impl AcpPanel {
                     .p_3()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("providers.acp.loading").into_owned()),
+                    .child(crate::tr!("providers.acp.loading").into_owned()),
             );
         }
         for agent in &market {
@@ -506,7 +506,7 @@ impl AcpPanel {
                     .child(
                         div()
                             .text_size(px(13.))
-                            .child(tcode_i18n::tr!("providers.acp.custom").into_owned()),
+                            .child(crate::tr!("providers.acp.custom").into_owned()),
                     )
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.view = PanelView::CustomAcp;
@@ -574,7 +574,7 @@ impl AcpPanel {
                         .text_size(px(12.))
                         .bg(cx.theme().muted)
                         .text_color(muted)
-                        .child(tcode_i18n::tr!("providers.third_party.soon").into_owned()),
+                        .child(crate::tr!("providers.third_party.soon").into_owned()),
                 );
             }
             row.into_any_element()
@@ -588,21 +588,21 @@ impl AcpPanel {
                     .text_size(px(12.))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("providers.third_party.section").into_owned()),
+                    .child(crate::tr!("providers.third_party.section").into_owned()),
             )
             .child(entry(
                 "provider-entry-claude",
                 crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode).small(),
-                tcode_i18n::tr!("providers.third_party.claude_title").into_owned(),
-                tcode_i18n::tr!("providers.third_party.claude_subtitle").into_owned(),
+                crate::tr!("providers.third_party.claude_title").into_owned(),
+                crate::tr!("providers.third_party.claude_subtitle").into_owned(),
                 true,
                 cx,
             ))
             .child(entry(
                 "provider-entry-codex",
                 crate::provider_card::provider_glyph(agent::ProviderKind::Codex).small(),
-                tcode_i18n::tr!("providers.third_party.codex_title").into_owned(),
-                tcode_i18n::tr!("providers.third_party.codex_subtitle").into_owned(),
+                crate::tr!("providers.third_party.codex_title").into_owned(),
+                crate::tr!("providers.third_party.codex_subtitle").into_owned(),
                 false,
                 cx,
             ))
@@ -651,7 +651,7 @@ impl AcpPanel {
                     .ghost()
                     .xsmall()
                     .icon(IconName::ArrowLeft)
-                    .label(tcode_i18n::tr!("settings.back").into_owned())
+                    .label(crate::tr!("settings.back").into_owned())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.view = PanelView::Home;
                         cx.notify();
@@ -670,7 +670,7 @@ impl AcpPanel {
                     .child(preset_tab(
                         self,
                         "tp-preset-custom",
-                        tcode_i18n::tr!("providers.acp.custom").into_owned(),
+                        crate::tr!("providers.acp.custom").into_owned(),
                         TpPreset::Custom,
                         cx,
                     )),
@@ -680,26 +680,26 @@ impl AcpPanel {
                     .text_size(px(13.))
                     .text_color(muted)
                     .child(if is_kimi {
-                        tcode_i18n::tr!("providers.third_party.kimi_help").into_owned()
+                        crate::tr!("providers.third_party.kimi_help").into_owned()
                     } else {
-                        tcode_i18n::tr!("providers.third_party.custom_help").into_owned()
+                        crate::tr!("providers.third_party.custom_help").into_owned()
                     }),
             )
             .child(field(
-                tcode_i18n::tr!("providers.third_party.name").into_owned(),
+                crate::tr!("providers.third_party.name").into_owned(),
                 Input::new(&self.tp_name).xsmall().into_any_element(),
             ))
             .child(field(
-                tcode_i18n::tr!("providers.third_party.base_url").into_owned(),
+                crate::tr!("providers.third_party.base_url").into_owned(),
                 Input::new(&self.tp_base_url).xsmall().into_any_element(),
             ))
             .child(field(
-                tcode_i18n::tr!("providers.third_party.model").into_owned(),
+                crate::tr!("providers.third_party.model").into_owned(),
                 Input::new(&self.tp_model).xsmall().into_any_element(),
             ))
             // The API key is the point of the whole flow — give it prominence.
             .child(field(
-                tcode_i18n::tr!("providers.third_party.key").into_owned(),
+                crate::tr!("providers.third_party.key").into_owned(),
                 Input::new(&self.tp_key).small().into_any_element(),
             ))
             .child(
@@ -711,14 +711,14 @@ impl AcpPanel {
                         Button::new("tp-cancel")
                             .ghost()
                             .xsmall()
-                            .label(tcode_i18n::tr!("settings.cancel").into_owned())
+                            .label(crate::tr!("settings.cancel").into_owned())
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
                         Button::new("tp-add")
                             .with_variant(ButtonVariant::Primary)
                             .xsmall()
-                            .label(tcode_i18n::tr!("providers.third_party.connect").into_owned())
+                            .label(crate::tr!("providers.third_party.connect").into_owned())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let name = this.tp_name.read(cx).value().to_string();
                                 let base_url = this.tp_base_url.read(cx).value().to_string();
@@ -760,7 +760,7 @@ impl AcpPanel {
                     .ghost()
                     .xsmall()
                     .icon(IconName::ArrowLeft)
-                    .label(tcode_i18n::tr!("settings.back").into_owned())
+                    .label(crate::tr!("settings.back").into_owned())
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.view = PanelView::Home;
                         cx.notify();
@@ -770,13 +770,13 @@ impl AcpPanel {
                 div()
                     .text_size(px(13.))
                     .font_medium()
-                    .child(tcode_i18n::tr!("providers.acp.custom").into_owned()),
+                    .child(crate::tr!("providers.acp.custom").into_owned()),
             )
             .child(
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tcode_i18n::tr!("providers.acp.custom_help").into_owned()),
+                    .child(crate::tr!("providers.acp.custom_help").into_owned()),
             )
             .child(Input::new(&self.custom_name).xsmall())
             .child(Input::new(&self.custom_command).xsmall())
@@ -791,14 +791,14 @@ impl AcpPanel {
                         Button::new("acp-custom-cancel")
                             .ghost()
                             .xsmall()
-                            .label(tcode_i18n::tr!("settings.cancel").into_owned())
+                            .label(crate::tr!("settings.cancel").into_owned())
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
                         Button::new("acp-custom-add")
                             .with_variant(ButtonVariant::Primary)
                             .xsmall()
-                            .label(tcode_i18n::tr!("providers.acp.add").into_owned())
+                            .label(crate::tr!("providers.acp.add").into_owned())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let name = name.read(cx).value().to_string();
                                 let command = command.read(cx).value().to_string();

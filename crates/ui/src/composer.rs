@@ -154,7 +154,7 @@ fn approval_mode_meta(mode: ApprovalMode) -> (String, &'static str) {
         .iter()
         .find(|(m, ..)| *m == mode)
         .expect("every ApprovalMode is present in APPROVAL_MODES");
-    (tcode_i18n::tr!(*label_key).into_owned(), icon)
+    (crate::tr!(*label_key).into_owned(), icon)
 }
 
 /// Which rail filter the model picker is showing.
@@ -458,15 +458,15 @@ impl Composer {
                 .multi_line(true)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder(tcode_i18n::tr!("composer.placeholder"))
+                .placeholder(crate::tr!("composer.placeholder"))
         });
         let model_search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tcode_i18n::tr!("composer.search_models"))
+            InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
         });
         let user_input_custom = cx.new(|cx| {
             InputState::new(window, cx)
                 .submit_on_enter(true)
-                .placeholder(tcode_i18n::tr!("userinput.custom_placeholder"))
+                .placeholder(crate::tr!("userinput.custom_placeholder"))
         });
 
         let subscriptions = vec![
@@ -533,7 +533,7 @@ impl Composer {
             ui_request_id: None,
             ui_question_index: 0,
             ui_selections: std::collections::HashMap::new(),
-            applied_placeholder: tcode_i18n::tr!("composer.placeholder").into_owned(),
+            applied_placeholder: crate::tr!("composer.placeholder").into_owned(),
             model_picker_token: 0,
             control_width: Rc::new(Cell::new(None)),
             prev_seen_width: None,
@@ -632,7 +632,7 @@ impl Composer {
         }
         if !self.workspace_store.read(cx).composer_has_active_session() {
             window.push_notification(
-                Notification::info(tcode_i18n::tr!("composer.no_session")),
+                Notification::info(crate::tr!("composer.no_session")),
                 cx,
             );
             return;
@@ -680,16 +680,16 @@ impl Composer {
                 let sent_text = sent_text.clone();
                 let attachment_paths = attachment_paths.clone();
                 alert
-                    .title(tcode_i18n::tr!("composer.relay_title"))
-                    .description(tcode_i18n::tr!(
+                    .title(crate::tr!("composer.relay_title"))
+                    .description(crate::tr!(
                         "composer.relay_description",
                         from = from,
                         to = to
                     ))
                     .button_props(
                         DialogButtonProps::default()
-                            .ok_text(tcode_i18n::tr!("composer.relay_confirm"))
-                            .cancel_text(tcode_i18n::tr!("composer.relay_cancel"))
+                            .ok_text(crate::tr!("composer.relay_confirm"))
+                            .cancel_text(crate::tr!("composer.relay_cancel"))
                             .show_cancel(true),
                     )
                     .on_ok(move |_, window, cx| {
@@ -850,7 +850,7 @@ impl Composer {
                 let loading = self.workspace_loading && self.workspace.is_none();
                 (
                     rows,
-                    tcode_i18n::tr!("composer.no_files").into_owned(),
+                    crate::tr!("composer.no_files").into_owned(),
                     loading,
                 )
             }
@@ -864,7 +864,7 @@ impl Composer {
                         .map(|c| MenuRow {
                             primary: format!("${}", c.name),
                             secondary: c.description.clone().unwrap_or_else(|| {
-                                tcode_i18n::tr!("composer.run_skill").into_owned()
+                                crate::tr!("composer.run_skill").into_owned()
                             }),
                             icon: MenuIcon::Skill,
                             accept: MenuAccept::InsertSkill(c.name.clone()),
@@ -873,7 +873,7 @@ impl Composer {
                         .collect();
                 (
                     rows,
-                    tcode_i18n::tr!("composer.no_skills").into_owned(),
+                    crate::tr!("composer.no_skills").into_owned(),
                     false,
                 )
             }
@@ -911,10 +911,10 @@ impl Composer {
                         primary: format!(
                             "/{}",
                             label
-                                .map(|key| tcode_i18n::tr!(key).into_owned())
+                                .map(|key| crate::tr!(key).into_owned())
                                 .unwrap_or_else(|| name.to_string())
                         ),
-                        secondary: tcode_i18n::tr!(desc).into_owned(),
+                        secondary: crate::tr!(desc).into_owned(),
                         icon: MenuIcon::Command,
                         accept,
                         group: Some("composer.group_builtin"),
@@ -933,7 +933,7 @@ impl Composer {
                     .map(|c| MenuRow {
                         primary: format!("/{}", c.name),
                         secondary: c.description.clone().unwrap_or_else(|| {
-                            tcode_i18n::tr!("composer.run_provider_command").into_owned()
+                            crate::tr!("composer.run_provider_command").into_owned()
                         }),
                         icon: MenuIcon::Command,
                         accept: MenuAccept::InsertCommand(c.name.clone()),
@@ -942,7 +942,7 @@ impl Composer {
                 );
                 (
                     rows,
-                    tcode_i18n::tr!("composer.no_command").into_owned(),
+                    crate::tr!("composer.no_command").into_owned(),
                     false,
                 )
             }
@@ -1107,7 +1107,7 @@ impl Composer {
                         .push_notification(Notification::error(attach_error_message(&err)), cx),
                     Err(AddImageError::Persist(err)) => window.push_notification(
                         Notification::error(
-                            tcode_i18n::tr!("errors.persist_event", error = err).into_owned(),
+                            crate::tr!("errors.persist_event", error = err).into_owned(),
                         ),
                         cx,
                     ),
@@ -1444,13 +1444,13 @@ impl Composer {
         let (icon, label, tooltip) = match mode {
             InteractionMode::Build => (
                 "icons/box.svg",
-                tcode_i18n::tr!("composer.build"),
-                tcode_i18n::tr!("composer.build_tooltip"),
+                crate::tr!("composer.build"),
+                crate::tr!("composer.build_tooltip"),
             ),
             InteractionMode::Plan => (
                 "icons/ruler.svg",
-                tcode_i18n::tr!("composer.plan"),
-                tcode_i18n::tr!("composer.plan_tooltip"),
+                crate::tr!("composer.plan"),
+                crate::tr!("composer.plan_tooltip"),
             ),
         };
         Button::new("mode-chip")
@@ -1557,7 +1557,7 @@ impl Composer {
         let trigger = Button::new("overflow-controls")
             .ghost()
             .compact()
-            .tooltip(tcode_i18n::tr!("composer.more_controls"))
+            .tooltip(crate::tr!("composer.more_controls"))
             .child(Icon::new(IconName::Ellipsis).small().text_color(muted));
 
         crate::material::overlay_popover("overflow-popover")
@@ -1591,7 +1591,7 @@ impl Composer {
                     .text_size(px(13.))
                     .text_color(muted)
                     .child(if loading {
-                        tcode_i18n::tr!("composer.searching").into_owned()
+                        crate::tr!("composer.searching").into_owned()
                     } else {
                         empty_text
                     }),
@@ -1616,7 +1616,7 @@ impl Composer {
                             .text_size(px(11.))
                             .font_medium()
                             .text_color(muted)
-                            .child(tcode_i18n::tr!(group).into_owned()),
+                            .child(crate::tr!(group).into_owned()),
                     );
                 }
                 let is_active = index == highlight;
@@ -1626,7 +1626,7 @@ impl Composer {
                     MenuIcon::Command => Icon::empty().path("icons/box.svg"),
                     MenuIcon::Skill => Icon::empty().path("icons/ruler.svg"),
                 };
-                let accessible_label = tcode_i18n::tr!(
+                let accessible_label = crate::tr!(
                     "composer.trigger_option",
                     primary = row.primary.clone(),
                     secondary = row.secondary.clone()
@@ -1686,7 +1686,7 @@ impl Composer {
             div()
                 .id("composer-trigger-menu")
                 .role(Role::ListBox)
-                .aria_label(tcode_i18n::tr!("composer.trigger_results"))
+                .aria_label(crate::tr!("composer.trigger_results"))
                 .w_full()
                 .max_h(px(288.))
                 .overflow_y_scroll()
@@ -1729,7 +1729,7 @@ impl Composer {
                     .px_1()
                     .text_size(px(11.))
                     .text_color(muted)
-                    .child(tcode_i18n::tr!(
+                    .child(crate::tr!(
                         "composer.queued_count",
                         count = queued.len()
                     )),
@@ -1738,9 +1738,9 @@ impl Composer {
         for message in queued {
             let id = message.id;
             let steer_tooltip = if can_steer {
-                tcode_i18n::tr!("composer.steer_queued").into_owned()
+                crate::tr!("composer.steer_queued").into_owned()
             } else {
-                tcode_i18n::tr!("composer.steer_unsupported_tooltip", agent = agent).into_owned()
+                crate::tr!("composer.steer_unsupported_tooltip", agent = agent).into_owned()
             };
             strip = strip.child(
                 h_flex()
@@ -1778,7 +1778,7 @@ impl Composer {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .tooltip(tcode_i18n::tr!("composer.drop_queued"))
+                            .tooltip(crate::tr!("composer.drop_queued"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace_store.update(cx, |store, _cx| {
                                     store.dispatch(Command::DropQueued { id })
@@ -1885,7 +1885,7 @@ impl Composer {
                         div(),
                         "steer-turn",
                         Role::Button,
-                        tcode_i18n::tr!("composer.steer_tooltip"),
+                        crate::tr!("composer.steer_tooltip"),
                         cx,
                     )
                     .size(px(36.))
@@ -1898,7 +1898,7 @@ impl Composer {
                     .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
                     .tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(
-                            tcode_i18n::tr!("composer.steer_tooltip").into_owned(),
+                            crate::tr!("composer.steer_tooltip").into_owned(),
                         )
                         .build(window, cx)
                     })
@@ -1916,7 +1916,7 @@ impl Composer {
                         div(),
                         "stop-turn",
                         Role::Button,
-                        tcode_i18n::tr!("composer.stop"),
+                        crate::tr!("composer.stop"),
                         cx,
                     )
                     .size(px(36.))
@@ -1947,7 +1947,7 @@ impl Composer {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!("composer.preparing_worktree")),
+                        .child(crate::tr!("composer.preparing_worktree")),
                 )
                 .into_any_element();
         }
@@ -1962,7 +1962,7 @@ impl Composer {
             div(),
             "send-message",
             Role::Button,
-            tcode_i18n::tr!("composer.send"),
+            crate::tr!("composer.send"),
             cx,
         )
         .size(px(36.))
@@ -1998,7 +1998,7 @@ impl Composer {
                 // while the session is in Plan mode continues planning).
                 return Button::new("plan-refine")
                     .primary()
-                    .label(tcode_i18n::tr!("plan.refine"))
+                    .label(crate::tr!("plan.refine"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let input = this.input.clone();
                         this.submit(&input, false, window, cx);
@@ -2054,7 +2054,7 @@ impl Composer {
                             .text_size(px(13.))
                             .hover(|s| s.bg(cx.theme().muted))
                             .child(Icon::new(IconName::Plus).xsmall())
-                            .child(tcode_i18n::tr!("plan.implement_new_thread"))
+                            .child(crate::tr!("plan.implement_new_thread"))
                             .on_click(move |_, window, cx| {
                                 store.update(cx, |store, _cx| {
                                     let Some(markdown) = store.composer_plan_ready_markdown()
@@ -2063,11 +2063,11 @@ impl Composer {
                                     };
                                     let title = match tcode_core::session::plan_title(&markdown) {
                                         Some(title) => {
-                                            tcode_i18n::tr!("plan.implement_titled", title = title)
+                                            crate::tr!("plan.implement_titled", title = title)
                                                 .into_owned()
                                         }
                                         None => {
-                                            tcode_i18n::tr!("plan.implement_untitled").into_owned()
+                                            crate::tr!("plan.implement_untitled").into_owned()
                                         }
                                     };
                                     store.dispatch(Command::ImplementPlanInNewThread { title });
@@ -2098,7 +2098,7 @@ impl Composer {
                     .text_size(px(13.))
                     .font_medium()
                     .hover(|s| s.opacity(0.9))
-                    .child(tcode_i18n::tr!("plan.implement"))
+                    .child(crate::tr!("plan.implement"))
                     .on_click(cx.listener(move |_, _, _, cx| {
                         store_impl.update(cx, |store, _cx| store.dispatch(Command::ImplementPlan));
                     })),
@@ -2129,7 +2129,7 @@ impl Composer {
                     .text_color(cx.theme().primary_foreground)
                     .text_size(px(11.))
                     .font_medium()
-                    .child(tcode_i18n::tr!("plan.ready")),
+                    .child(crate::tr!("plan.ready")),
             )
             .child(
                 div()
@@ -2146,7 +2146,7 @@ impl Composer {
                     .ghost()
                     .compact()
                     .icon(IconName::Close)
-                    .tooltip(tcode_i18n::tr!("plan.dismiss"))
+                    .tooltip(crate::tr!("plan.dismiss"))
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, _cx| store.dispatch(Command::DismissPlan));
                     }),
@@ -2213,7 +2213,7 @@ impl Composer {
                     div()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(tcode_i18n::tr!(
+                        .child(crate::tr!(
                             "userinput.question_count",
                             index = index + 1,
                             total = total
@@ -2337,7 +2337,7 @@ impl Composer {
                     div(),
                     "ui-custom-answer-submit",
                     Role::Button,
-                    tcode_i18n::tr!("userinput.submit_custom"),
+                    crate::tr!("userinput.submit_custom"),
                     cx,
                 )
                 .size(px(28.))
@@ -2381,7 +2381,7 @@ impl Composer {
                 Button::new("ui-prev")
                     .ghost()
                     .small()
-                    .label(tcode_i18n::tr!("userinput.previous"))
+                    .label(crate::tr!("userinput.previous"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_go(-1, &questions_previous, window, cx)
                     })),
@@ -2394,7 +2394,7 @@ impl Composer {
                 Button::new("ui-next")
                     .outline()
                     .small()
-                    .label(tcode_i18n::tr!("userinput.next_question"))
+                    .label(crate::tr!("userinput.next_question"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_go(1, &questions_next, window, cx)
                     })),
@@ -2405,7 +2405,7 @@ impl Composer {
                 Button::new("ui-done")
                     .primary()
                     .small()
-                    .label(tcode_i18n::tr!("userinput.done"))
+                    .label(crate::tr!("userinput.done"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
                     })),
@@ -2454,7 +2454,7 @@ impl Composer {
                     div()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(tcode_i18n::tr!("userinput.multi_hint")),
+                        .child(crate::tr!("userinput.multi_hint")),
                 )
             })
             .child(actions)
@@ -2630,7 +2630,7 @@ impl Composer {
             Button::new("branch-picker")
                 .ghost()
                 .compact()
-                .tooltip(tcode_i18n::tr!("composer.wait_turn"))
+                .tooltip(crate::tr!("composer.wait_turn"))
                 .child(
                     h_flex()
                         .gap_1p5()
@@ -2679,7 +2679,7 @@ impl Composer {
                                 .text_size(px(11.))
                                 .font_medium()
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!("composer.worktree_base")),
+                                .child(crate::tr!("composer.worktree_base")),
                         );
                     }
                     if branches.is_empty() {
@@ -2690,7 +2690,7 @@ impl Composer {
                                 .py_1p5()
                                 .text_size(px(13.))
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!("composer.loading")),
+                                .child(crate::tr!("composer.loading")),
                         );
                     } else {
                         for (index, name) in branches.iter().enumerate() {
@@ -2790,9 +2790,9 @@ impl Composer {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let label = if worktree_mode || has_worktree {
-            tcode_i18n::tr!("composer.new_worktree")
+            crate::tr!("composer.new_worktree")
         } else {
-            tcode_i18n::tr!("composer.local_checkout")
+            crate::tr!("composer.local_checkout")
         };
 
         // Started sessions show a static, locked workspace label.
@@ -2862,11 +2862,11 @@ impl Composer {
                             .text_size(px(11.))
                             .font_medium()
                             .text_color(cx.theme().muted_foreground)
-                            .child(tcode_i18n::tr!("composer.workspace")),
+                            .child(crate::tr!("composer.workspace")),
                     )
                     .child(
                         workspace_row(
-                            tcode_i18n::tr!("composer.local_checkout")
+                            crate::tr!("composer.local_checkout")
                                 .into_owned()
                                 .into(),
                             false,
@@ -2884,7 +2884,7 @@ impl Composer {
                     )
                     .child(
                         workspace_row(
-                            tcode_i18n::tr!("composer.new_worktree").into_owned().into(),
+                            crate::tr!("composer.new_worktree").into_owned().into(),
                             false,
                             cx,
                         )
@@ -2911,10 +2911,10 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summary = match &request.kind {
-            ApprovalKind::ExecCommand { .. } => tcode_i18n::tr!("approval.command_requested"),
-            ApprovalKind::FileRead { .. } => tcode_i18n::tr!("approval.file_read_requested"),
-            ApprovalKind::FileChange { .. } => tcode_i18n::tr!("approval.file_requested"),
-            ApprovalKind::ToolUse { .. } => tcode_i18n::tr!("approval.tool_requested"),
+            ApprovalKind::ExecCommand { .. } => crate::tr!("approval.command_requested"),
+            ApprovalKind::FileRead { .. } => crate::tr!("approval.file_read_requested"),
+            ApprovalKind::FileChange { .. } => crate::tr!("approval.file_requested"),
+            ApprovalKind::ToolUse { .. } => crate::tr!("approval.tool_requested"),
         };
         let muted = cx.theme().muted_foreground;
 
@@ -2932,7 +2932,7 @@ impl Composer {
                         div()
                             .text_size(px(11.))
                             .text_color(muted)
-                            .child(tcode_i18n::tr!("approval.in_directory", cwd = cwd)),
+                            .child(crate::tr!("approval.in_directory", cwd = cwd)),
                     )
                 })
                 .into_any_element(),
@@ -2992,7 +2992,7 @@ impl Composer {
                             .text_size(px(11.))
                             .font_medium()
                             .text_color(muted)
-                            .child(tcode_i18n::tr!("approval.pending")),
+                            .child(crate::tr!("approval.pending")),
                     )
                     .child(
                         div()
@@ -3092,7 +3092,7 @@ impl Composer {
                             Button::new("approval-cancel")
                                 .ghost()
                                 .small()
-                                .label(tcode_i18n::tr!("approval.cancel_turn"))
+                                .label(crate::tr!("approval.cancel_turn"))
                                 .text_color(cx.theme().muted_foreground)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
@@ -3103,7 +3103,7 @@ impl Composer {
                             Button::new("approval-deny")
                                 .ghost()
                                 .small()
-                                .label(tcode_i18n::tr!("approval.decline"))
+                                .label(crate::tr!("approval.decline"))
                                 .text_color(cx.theme().danger)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
@@ -3113,7 +3113,7 @@ impl Composer {
                             Button::new("approval-always")
                                 .ghost()
                                 .small()
-                                .label(tcode_i18n::tr!("approval.always_allow_session"))
+                                .label(crate::tr!("approval.always_allow_session"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond(
                                         always_id.clone(),
@@ -3126,7 +3126,7 @@ impl Composer {
                             Button::new("approval-approve")
                                 .primary()
                                 .small()
-                                .label(tcode_i18n::tr!("approval.approve_once"))
+                                .label(crate::tr!("approval.approve_once"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
                                 })),
@@ -3232,14 +3232,14 @@ impl Render for Composer {
             .composer_plan_ready_markdown()
             .map(|md| {
                 tcode_core::session::plan_title(&md)
-                    .unwrap_or_else(|| tcode_i18n::tr!("plan.proposed_plan").into_owned())
+                    .unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned())
             });
         // Only Plan mode refines: in Build a typed message is an ordinary build
         // turn, so promising refinement there would misdescribe what Enter does.
         let desired_placeholder = if plan_ready_title.is_some() && self.refines_the_plan(cx) {
-            tcode_i18n::tr!("plan.refine_placeholder").into_owned()
+            crate::tr!("plan.refine_placeholder").into_owned()
         } else {
-            tcode_i18n::tr!("composer.placeholder").into_owned()
+            crate::tr!("composer.placeholder").into_owned()
         };
         if self.applied_placeholder != desired_placeholder {
             self.applied_placeholder = desired_placeholder.clone();
@@ -3386,7 +3386,7 @@ impl Render for Composer {
                         .px_4()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(tcode_i18n::tr!(
+                        .child(crate::tr!(
                             "composer.queue_hint",
                             shortcut = format_secondary_shortcut("enter")
                         )),
@@ -3495,7 +3495,7 @@ fn render_model_pane(
 
     let mut rail_col = v_flex().w_full().py_2().px_1p5().gap_1().child(rail_icon(
         "rail-fav".into(),
-        tcode_i18n::tr!("composer.favorites").into_owned().into(),
+        crate::tr!("composer.favorites").into_owned().into(),
         Icon::new(IconName::Star),
         rail == PickerRail::Favorites,
         PickerRail::Favorites,
@@ -3542,7 +3542,7 @@ fn render_model_pane(
     let rail = div()
         .id("model-provider-rail")
         .role(Role::TabList)
-        .aria_label(tcode_i18n::tr!("composer.model_sources"))
+        .aria_label(crate::tr!("composer.model_sources"))
         .flex_none()
         .w(px(44.))
         .h_full()
@@ -3572,9 +3572,9 @@ fn render_model_pane(
                 .text_size(px(13.))
                 .text_color(muted)
                 .child(if loading {
-                    tcode_i18n::tr!("composer.loading_models")
+                    crate::tr!("composer.loading_models")
                 } else {
-                    tcode_i18n::tr!("composer.no_models")
+                    crate::tr!("composer.no_models")
                 }),
         );
     }
@@ -3596,7 +3596,7 @@ fn render_model_pane(
             div()
                 .id("model-picker-list")
                 .role(Role::ListBox)
-                .aria_label(tcode_i18n::tr!("composer.model_results"))
+                .aria_label(crate::tr!("composer.model_results"))
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
@@ -3611,7 +3611,7 @@ fn render_model_pane(
                 .border_color(cx.theme().border)
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("composer.restart_note")),
+                .child(crate::tr!("composer.restart_note")),
         );
     }
 
@@ -3679,7 +3679,7 @@ fn render_model_row(
     let popover_fav = popover.clone();
 
     let accessible_label =
-        tcode_i18n::tr!("composer.model_option", model = name.clone()).into_owned();
+        crate::tr!("composer.model_option", model = name.clone()).into_owned();
     h_flex()
         .id(("model-row", index))
         .role(Role::ListBoxOption)
@@ -3760,9 +3760,9 @@ fn render_model_row(
                 ("model-fav", index),
                 Role::Button,
                 if is_fav {
-                    tcode_i18n::tr!("composer.remove_favorite")
+                    crate::tr!("composer.remove_favorite")
                 } else {
-                    tcode_i18n::tr!("composer.add_favorite")
+                    crate::tr!("composer.add_favorite")
                 },
                 cx,
             )
@@ -3814,7 +3814,7 @@ fn render_permission_pane(
     let mut list = v_flex()
         .id("permission-menu")
         .role(Role::Menu)
-        .aria_label(tcode_i18n::tr!("approval.choose_mode"))
+        .aria_label(crate::tr!("approval.choose_mode"))
         .w_full()
         .p_1()
         .gap_0p5();
@@ -3828,14 +3828,14 @@ fn render_permission_pane(
             );
         let store = store_entity.clone();
         let popover = popover.clone();
-        let disabled_hint = tcode_i18n::tr!("approval.pi_native_approvals_required");
-        let accessible_label = tcode_i18n::tr!(
+        let disabled_hint = crate::tr!("approval.pi_native_approvals_required");
+        let accessible_label = crate::tr!(
             "approval.mode_option",
-            label = tcode_i18n::tr!(*label),
+            label = crate::tr!(*label),
             description = if is_disabled {
-                format!("{} {}", tcode_i18n::tr!(*description), disabled_hint)
+                format!("{} {}", crate::tr!(*description), disabled_hint)
             } else {
-                tcode_i18n::tr!(*description).into_owned()
+                crate::tr!(*description).into_owned()
             }
         )
         .into_owned();
@@ -3879,7 +3879,7 @@ fn render_permission_pane(
                                 .gap_1p5()
                                 .items_center()
                                 .text_size(px(13.))
-                                .child(div().font_medium().child(tcode_i18n::tr!(*label)))
+                                .child(div().font_medium().child(crate::tr!(*label)))
                                 .when(is_current, |this| {
                                     this.child(
                                         Icon::new(IconName::Check).xsmall().text_color(primary),
@@ -3891,7 +3891,7 @@ fn render_permission_pane(
                                 .gap_0p5()
                                 .text_size(px(11.))
                                 .text_color(muted)
-                                .child(tcode_i18n::tr!(*description))
+                                .child(crate::tr!(*description))
                                 .when(is_disabled, |text| text.child(disabled_hint)),
                         ),
                 ),
@@ -3908,7 +3908,7 @@ fn render_permission_pane(
                 .border_color(cx.theme().border)
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("composer.restart_note")),
+                .child(crate::tr!("composer.restart_note")),
         );
     }
     pane.into_any_element()
@@ -3930,7 +3930,7 @@ fn render_traits_pane(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let primary = cx.theme().primary;
-    let default_suffix = tcode_i18n::tr!("composer.option_default").into_owned();
+    let default_suffix = crate::tr!("composer.option_default").into_owned();
 
     let section_header = |label: &str, cx: &mut Context<PopoverState>| -> AnyElement {
         div()
@@ -3965,7 +3965,7 @@ fn render_traits_pane(
                             .py_1p5()
                             .text_size(px(13.))
                             .text_color(muted)
-                            .child(tcode_i18n::tr!("composer.ultrathink_locked")),
+                            .child(crate::tr!("composer.ultrathink_locked")),
                     );
                     continue;
                 }
@@ -4032,8 +4032,8 @@ fn render_traits_pane(
                 pane = pane.child(section_header(label, cx));
                 let on = option_selection_bool(selections, id).unwrap_or(*default_value);
                 for (index, (value, text)) in [
-                    (true, tcode_i18n::tr!("composer.on").into_owned()),
-                    (false, tcode_i18n::tr!("composer.off").into_owned()),
+                    (true, crate::tr!("composer.on").into_owned()),
+                    (false, crate::tr!("composer.off").into_owned()),
                 ]
                 .into_iter()
                 .enumerate()
@@ -4085,7 +4085,7 @@ fn render_traits_pane(
                 .border_color(cx.theme().border)
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("composer.restart_note")),
+                .child(crate::tr!("composer.restart_note")),
         );
     }
     div()
@@ -4126,8 +4126,8 @@ fn render_overflow_pane(
 
     let (mode_label, mode_icon) = approval_mode_meta(mode);
     let (interaction_icon, interaction_label) = match interaction {
-        InteractionMode::Build => ("icons/box.svg", tcode_i18n::tr!("composer.build")),
-        InteractionMode::Plan => ("icons/ruler.svg", tcode_i18n::tr!("composer.plan")),
+        InteractionMode::Build => ("icons/box.svg", crate::tr!("composer.build")),
+        InteractionMode::Plan => ("icons/ruler.svg", crate::tr!("composer.plan")),
     };
     let next_interaction = match interaction {
         InteractionMode::Build => InteractionMode::Plan,
@@ -4228,7 +4228,7 @@ fn render_context_meter_pane(
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(muted)
-                    .child(tcode_i18n::tr!("composer.context_window_title")),
+                    .child(crate::tr!("composer.context_window_title")),
             )
             .child(stat),
     );
@@ -4263,7 +4263,7 @@ fn render_context_meter_pane(
                 .gap_3()
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(tcode_i18n::tr!("composer.total_processed"))
+                .child(crate::tr!("composer.total_processed"))
                 .child(context_meter::format_tokens(Some(total))),
         );
     }
@@ -4271,7 +4271,7 @@ fn render_context_meter_pane(
     // "<Provider> automatically compacts its context when needed."
     if let Some(provider) = provider {
         pane = pane.child(div().pt_1().text_size(px(11.)).text_color(muted).child(
-            tcode_i18n::tr!(
+            crate::tr!(
                 "composer.compacts_automatically",
                 provider = provider_label(provider)
             ),
@@ -4411,7 +4411,7 @@ fn traits_chip_label(
                 let on = option_selection_bool(selections, id).unwrap_or(*default_value);
                 if id == "fastMode" {
                     parts.push(
-                        tcode_i18n::tr!(if on {
+                        crate::tr!(if on {
                             "composer.trait_fast"
                         } else {
                             "composer.trait_normal"
@@ -4419,7 +4419,7 @@ fn traits_chip_label(
                         .into_owned(),
                     );
                 } else {
-                    let state = tcode_i18n::tr!(if on { "composer.on" } else { "composer.off" });
+                    let state = crate::tr!(if on { "composer.on" } else { "composer.off" });
                     parts.push(format!("{label} {state}"));
                 }
             }
@@ -4511,7 +4511,7 @@ fn current_model_name(catalog: &[ModelSpec], model: Option<&str>) -> String {
             .find(|m| m.id == id)
             .map(|m| m.display_name.clone())
             .unwrap_or_else(|| id.to_string()),
-        None => tcode_i18n::tr!("composer.default_model").into_owned(),
+        None => crate::tr!("composer.default_model").into_owned(),
     }
 }
 
@@ -4523,7 +4523,7 @@ fn current_model_name_resolved(
     model: Option<&str>,
 ) -> String {
     let Some(id) = model else {
-        return tcode_i18n::tr!("composer.default_model").into_owned();
+        return crate::tr!("composer.default_model").into_owned();
     };
     resolved
         .iter()
@@ -4549,10 +4549,10 @@ fn context_label(usage: Option<TokenUsage>) -> String {
                 }
                 (Some(used), None) => context_meter::format_tokens(Some(used)),
                 (None, Some(window)) => context_meter::format_tokens(Some(window)),
-                (None, None) => tcode_i18n::tr!("composer.context").into_owned(),
+                (None, None) => crate::tr!("composer.context").into_owned(),
             }
         }
-        None => tcode_i18n::tr!("composer.context").into_owned(),
+        None => crate::tr!("composer.context").into_owned(),
     }
 }
 

@@ -425,6 +425,13 @@ fn round_trips_event_and_snapshot_families() {
             turn_id: "turn-1".into(),
         },
     };
+    assert_eq!(
+        serde_json::to_value(&stored).unwrap(),
+        json!({
+            "ts": 123,
+            "event": { "type": "turn_started", "turn_id": "turn-1" }
+        })
+    );
     round_trip(&stored);
     round_trip(&ServerEvent::SessionEvent(stored.clone()));
     round_trip(&ServerEvent::SessionSnapshot(vec![stored]));

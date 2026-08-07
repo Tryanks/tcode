@@ -70,7 +70,7 @@ pub struct GitFileText {
 }
 
 /// Result of loading a Git diff.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDiffResult {
     pub changes: Vec<FileChange>,
     pub texts: Vec<GitFileText>,
@@ -79,14 +79,6 @@ pub struct GitDiffResult {
     pub branches: Vec<String>,
     pub default_base: Option<String>,
 }
-
-impl PartialEq for GitDiffResult {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-
-impl Eq for GitDiffResult {}
 
 /// One listable workspace entry (relative to the workspace root).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

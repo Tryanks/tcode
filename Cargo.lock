@@ -8457,7 +8457,6 @@ dependencies = [
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
- "tcode-i18n",
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
@@ -8473,14 +8472,6 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
-]
-
-[[package]]
-name = "tcode-i18n"
-version = "0.1.0"
-dependencies = [
- "rust-i18n",
- "sys-locale",
 ]
 
 [[package]]
@@ -8561,12 +8552,13 @@ dependencies = [
  "preview-mcp",
  "raw-window-handle",
  "rushdown",
+ "rust-i18n",
  "serde",
  "serde_json",
  "smol",
  "syntect",
+ "sys-locale",
  "tcode-core",
- "tcode-i18n",
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",

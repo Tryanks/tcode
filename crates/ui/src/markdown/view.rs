@@ -181,16 +181,16 @@ impl Element for MarkdownView {
                     match pending.target {
                         LinkTarget::Web(url) => menu
                             .menu(
-                                tcode_i18n::tr!("markdown.link_open").into_owned(),
+                                crate::tr!("markdown.link_open").into_owned(),
                                 Box::new(OpenLink(url)),
                             )
                             .separator()
                             .menu(
-                                tcode_i18n::tr!("markdown.link_copy_address").into_owned(),
+                                crate::tr!("markdown.link_copy_address").into_owned(),
                                 Box::new(CopyLinkAddress(pending.raw_url.to_string())),
                             )
                             .menu(
-                                tcode_i18n::tr!("markdown.link_copy_text").into_owned(),
+                                crate::tr!("markdown.link_copy_text").into_owned(),
                                 Box::new(CopyLinkText(pending.text.to_string())),
                             ),
                         LinkTarget::Local(path) => {
@@ -199,27 +199,27 @@ impl Element for MarkdownView {
                                 tcode_services::user_files::relativize_to_workspace(&path, base_dir)
                             });
                             menu.menu(
-                                tcode_i18n::tr!("chat.open").into_owned(),
+                                crate::tr!("chat.open").into_owned(),
                                 Box::new(OpenPath(path.clone())),
                             )
                             .menu(
-                                tcode_i18n::tr!("chat.open_zed").into_owned(),
+                                crate::tr!("chat.open_zed").into_owned(),
                                 Box::new(OpenPathInZed(path.clone())),
                             )
                             .menu(
-                                tcode_i18n::tr!("chat.reveal_in_file_manager").into_owned(),
+                                crate::tr!("chat.reveal_in_file_manager").into_owned(),
                                 Box::new(RevealPath(path.clone())),
                             )
                             .separator()
                             .menu(
-                                tcode_i18n::tr!("chat.copy_path").into_owned(),
+                                crate::tr!("chat.copy_path").into_owned(),
                                 Box::new(CopyPath(path)),
                             )
                             .when_some(
                                 relative_path,
                                 |menu, relative_path| {
                                     menu.menu(
-                                        tcode_i18n::tr!("markdown.path_copy_relative").into_owned(),
+                                        crate::tr!("markdown.path_copy_relative").into_owned(),
                                         Box::new(CopyRelativePath(relative_path)),
                                     )
                                 },
@@ -281,7 +281,7 @@ impl Element for MarkdownView {
 fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
     if tcode_services::desktop::open_in_zed(path).is_err() {
         window.push_notification(
-            Notification::error(tcode_i18n::tr!("errors.zed_cli_missing")),
+            Notification::error(crate::tr!("errors.zed_cli_missing")),
             cx,
         );
     }

@@ -11,6 +11,7 @@ mod conversation_ui;
 pub(crate) mod diff;
 pub(crate) mod git;
 mod highlight;
+pub mod i18n;
 pub mod markdown;
 pub(crate) mod material;
 mod orchestrate_settings;
@@ -37,6 +38,10 @@ mod window_caption;
 mod window_state;
 mod workspace_walk;
 
+pub use i18n::{
+    LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale, resolve_locale, set_locale,
+    translate, translate_with_args,
+};
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, TogglePalette};
 pub use window_state::WindowState;

@@ -13,7 +13,6 @@ identifier = "com.tryanks.tcode"
 icon = ["../../assets/icons/app/tcode.icns"]
 
 [dependencies]
-tcode-i18n = { path = "../i18n" }
 tcode-services = { path = "../services" }
 tcode-protocol = { path = "../protocol" }
 tcode-runtime = { path = "../runtime" }

@@ -109,8 +109,8 @@ fn handle_quit(
                 let enter_state = enter_state.clone();
                 let escape_state = escape_state.clone();
                 alert
-                    .title(tcode_i18n::tr!("quit.title"))
-                    .description(tcode_i18n::tr!("quit.description", count = count))
+                    .title(tcode_ui::tr!("quit.title"))
+                    .description(tcode_ui::tr!("quit.description", count = count))
                     // The stock alert maps Enter to OK. A custom footer keeps
                     // both Enter and Escape safe while retaining the alert's
                     // normal visual style and explicit danger action.
@@ -118,7 +118,7 @@ fn handle_quit(
                         DialogFooter::new()
                             .child(
                                 Button::new("quit-working-sessions")
-                                    .label(tcode_i18n::tr!("quit.confirm"))
+                                    .label(tcode_ui::tr!("quit.confirm"))
                                     .danger()
                                     .on_click(move |_, window, cx| {
                                         finish_quit_prompt(&quit_state, epoch, cx);
@@ -128,7 +128,7 @@ fn handle_quit(
                             )
                             .child(
                                 Button::new("cancel-quit")
-                                    .label(tcode_i18n::tr!("settings.cancel"))
+                                    .label(tcode_ui::tr!("settings.cancel"))
                                     .primary()
                                     .on_click(move |_, window, cx| {
                                         finish_quit_prompt(&cancel_state, epoch, cx);
@@ -263,7 +263,7 @@ fn main() {
             settings::apply_locale(initial_settings.language.as_deref());
             #[cfg(target_os = "macos")]
             cx.set_menus([gpui::Menu::new("tcode").items([gpui::MenuItem::action(
-                tcode_i18n::tr!("quit.menu_item"),
+                tcode_ui::tr!("quit.menu_item"),
                 Quit,
             )])]);
             match initial_settings.theme_mode {

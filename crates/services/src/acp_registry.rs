@@ -101,7 +101,7 @@ pub struct Distribution {
     pub binary: BTreeMap<String, BinaryDistribution>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NpxDistribution {
     /// `name@version`, passed to `npm exec`.
     pub package: String,
@@ -160,11 +160,7 @@ pub fn platform_key() -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Recipe {
     /// No install step: npm resolves the package at launch.
-    Npx {
-        package: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-    },
+    Npx(NpxDistribution),
     /// Needs a download + extract first (see [`install`]).
     Binary(BinaryDistribution),
 }
@@ -176,11 +172,7 @@ pub fn resolve_recipe(agent: &RegistryAgent, platform: &str) -> Option<Recipe> {
     if let Some(binary) = agent.distribution.binary.get(platform) {
         return Some(Recipe::Binary(binary.clone()));
     }
-    agent.distribution.npx.as_ref().map(|npx| Recipe::Npx {
-        package: npx.package.clone(),
-        args: npx.args.clone(),
-        env: pairs(&npx.env),
-    })
+    agent.distribution.npx.clone().map(Recipe::Npx)
 }
 
 fn pairs(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
@@ -314,7 +306,11 @@ pub fn install(
     })?;
 
     let launch = match recipe {
-        Recipe::Npx { package, args, env } => AcpLaunch::Npx { package, args, env },
+        Recipe::Npx(npx) => AcpLaunch::Npx {
+            package: npx.package,
+            args: npx.args,
+            env: pairs(&npx.env),
+        },
         Recipe::Binary(binary) => {
             let dir = install_dir(data_dir, &agent.id, &agent.version);
             // A fresh install every time: a half-extracted tree from a failed
@@ -649,9 +645,9 @@ mod tests {
         }
         // …but a platform with no binary build falls back to npx.
         match resolve_recipe(kilo, "linux-aarch64") {
-            Some(Recipe::Npx { package, args, .. }) => {
-                assert_eq!(package, "@kilocode/cli@7.4.5");
-                assert_eq!(args, vec!["acp".to_string()]);
+            Some(Recipe::Npx(npx)) => {
+                assert_eq!(npx.package, "@kilocode/cli@7.4.5");
+                assert_eq!(npx.args, vec!["acp".to_string()]);
             }
             other => panic!("expected the npx recipe, got {other:?}"),
         }
@@ -676,8 +672,8 @@ mod tests {
         )
         .unwrap();
         match resolve_recipe(&agent, "linux-x86_64") {
-            Some(Recipe::Npx { env, .. }) => {
-                assert_eq!(env, vec![("X_ACP".to_string(), "1".to_string())]);
+            Some(Recipe::Npx(npx)) => {
+                assert_eq!(npx.env.get("X_ACP").map(String::as_str), Some("1"));
             }
             other => panic!("expected an npx recipe, got {other:?}"),
         }
