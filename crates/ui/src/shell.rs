@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
@@ -21,16 +22,14 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
-use crate::settings_page::SettingsPage;
-use crate::sidebar::SessionsSidebar;
-use crate::store::WorkspaceStore;
-use crate::toast::ToastCenter;
-
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastDisposition, apply_runtime_effect, present_runtime_event,
     present_runtime_toast,
 };
-use crate::toast::{ToastAction, ToastId, ToastKind, ToastSpec};
+use crate::settings_page::SettingsPage;
+use crate::sidebar::SessionsSidebar;
+use crate::store::WorkspaceStore;
+use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_state::{Route, WindowState};
 
 actions!(tcode, [Quit, TogglePalette]);
@@ -103,8 +102,9 @@ pub struct AppShell {
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
-    toasts: Entity<ToastCenter>,
     operation_toasts: HashMap<RuntimeOperationId, ToastId>,
+    toast_kinds: HashMap<ToastId, ToastKind>,
+    next_toast_id: ToastId,
     /// Tracks the palette's open state across frames so it can be focused on the
     /// open transition.
     palette_was_open: bool,
@@ -172,7 +172,6 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let toasts = cx.new(|_| ToastCenter::default());
         window.set_window_title(&workspace_store.read(cx).shell_window_title());
         let subscription = cx.observe_in(&workspace_store, window, move |_, store, window, cx| {
             window.set_window_title(&store.read(cx).shell_window_title());
@@ -230,8 +229,9 @@ impl AppShell {
             palette: cx.new(|cx| {
                 CommandPalette::new(workspace_store.clone(), window_state.clone(), window, cx)
             }),
-            toasts,
             operation_toasts: HashMap::new(),
+            toast_kinds: HashMap::new(),
+            next_toast_id: 1,
             store: workspace_store,
             window_state,
             palette_was_open: false,
@@ -277,52 +277,24 @@ impl AppShell {
 
         let presented = present_runtime_toast(toast);
         let toast_id = match presented.disposition {
-            RuntimeToastDisposition::Push => self.toasts.update(cx, |center, cx| {
-                center.push(
-                    toast_spec(presented.kind, presented.title, presented.detail),
-                    cx,
-                )
-            }),
+            RuntimeToastDisposition::Push => self.take_toast_id(),
             RuntimeToastDisposition::Start(operation) => {
-                let toast_id = self.toasts.update(cx, |center, cx| {
-                    center.push(
-                        toast_spec(presented.kind, presented.title, presented.detail),
-                        cx,
-                    )
-                });
+                let toast_id = self.take_toast_id();
                 self.operation_toasts.insert(operation, toast_id);
                 toast_id
             }
-            RuntimeToastDisposition::Finish(operation) => {
-                if let Some(toast_id) = self.operation_toasts.remove(&operation) {
-                    self.toasts.update(cx, |center, cx| {
-                        center.update(
-                            toast_id,
-                            presented.kind,
-                            presented.title,
-                            presented.detail.map(Into::into),
-                            cx,
-                        );
-                    });
-                    toast_id
-                } else {
-                    self.toasts.update(cx, |center, cx| {
-                        center.push(
-                            toast_spec(presented.kind, presented.title, presented.detail),
-                            cx,
-                        )
-                    })
-                }
-            }
+            RuntimeToastDisposition::Finish(operation) => self
+                .operation_toasts
+                .remove(&operation)
+                .unwrap_or_else(|| self.take_toast_id()),
         };
 
-        if let Some(request) = presented.retry {
-            let toasts = self.toasts.clone();
+        let action = presented.retry.map(|request| {
             let store = self.store.clone();
-            let retry = ToastAction::new(
-                tcode_i18n::tr!("git.toast.retry").into_owned(),
-                move |_window, cx| {
-                    toasts.update(cx, |center, cx| center.dismiss(toast_id, cx));
+            ToastAction {
+                label: tcode_i18n::tr!("git.toast.retry").into_owned().into(),
+                handler: Rc::new(move |window, cx| {
+                    window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
                     let request = request.clone();
                     store.update(cx, |store, _cx| {
                         store.dispatch(Command::RunGitAction {
@@ -332,11 +304,59 @@ impl AppShell {
                             feature_branch: request.feature_branch,
                         });
                     });
-                },
-            );
-            self.toasts.update(cx, |center, cx| {
-                center.set_actions(toast_id, vec![retry], cx)
-            });
+                }),
+            }
+        });
+        self.show_toast(
+            toast_id,
+            presented.kind,
+            (presented.title, presented.detail),
+            action,
+            window,
+            cx,
+        );
+    }
+
+    fn take_toast_id(&mut self) -> ToastId {
+        let id = self.next_toast_id;
+        self.next_toast_id += 1;
+        id
+    }
+
+    fn show_toast(
+        &mut self,
+        id: ToastId,
+        kind: ToastKind,
+        content: (String, Option<String>),
+        action: Option<ToastAction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, detail) = content;
+        window.push_notification(
+            crate::toast::notification(id, kind, title, detail.map(Into::into), action),
+            cx,
+        );
+
+        let delay = match kind {
+            ToastKind::Success | ToastKind::Info => Some(Duration::from_secs(4)),
+            ToastKind::Warning => Some(Duration::from_secs(6)),
+            ToastKind::Error | ToastKind::Loading => None,
+        };
+        if let Some(delay) = delay {
+            self.toast_kinds.insert(id, kind);
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                _ = this.update_in(cx, |this, window, cx| {
+                    if this.toast_kinds.get(&id) == Some(&kind) {
+                        this.toast_kinds.remove(&id);
+                        window.remove_notification1::<RuntimeToastNotification>(id as usize, cx);
+                    }
+                });
+            })
+            .detach();
+        } else {
+            self.toast_kinds.remove(&id);
         }
     }
 
@@ -348,18 +368,6 @@ impl AppShell {
     ) {
         self.window_state
             .update(cx, |state, cx| state.toggle_palette(cx));
-    }
-}
-
-fn toast_spec(kind: ToastKind, title: String, detail: Option<String>) -> ToastSpec {
-    let spec = if matches!(kind, ToastKind::Loading) {
-        ToastSpec::loading(title)
-    } else {
-        ToastSpec::new(kind, title)
-    };
-    match detail {
-        Some(detail) => spec.detail(detail),
-        None => spec,
     }
 }
 
@@ -423,7 +431,6 @@ impl Render for AppShell {
                         .overflow_hidden()
                         .child(self.settings_page.clone()),
                 )
-                .child(self.toasts.clone())
                 .children(sheet_layer)
                 .children(dialog_layer)
                 .children(notification_layer);
@@ -657,7 +664,6 @@ impl Render for AppShell {
                     .child(workspace),
             )
             .when(palette_open, |this| this.child(self.palette.clone()))
-            .child(self.toasts.clone())
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)

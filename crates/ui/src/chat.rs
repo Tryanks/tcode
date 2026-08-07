@@ -3543,18 +3543,12 @@ fn activity_icon(status: ItemStatus) -> IconName {
 /// row's `text_ellipsis`.
 fn one_line(text: &str) -> String {
     const MAX_CHARS: usize = 600;
-    let mut out = String::new();
-    for word in text.split_whitespace() {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
-        if out.chars().count() >= MAX_CHARS {
-            out = out.chars().take(MAX_CHARS).collect();
-            break;
-        }
-    }
-    out
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_CHARS)
+        .collect()
 }
 
 /// Like [`one_line`], but line breaks stay visible: each break between

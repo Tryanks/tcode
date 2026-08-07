@@ -1,11 +1,5 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::{StatusCode, header::AUTHORIZATION};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -296,7 +290,6 @@ impl ServerHandler for ComputerUseTools {
 }
 
 pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
-pub type Services = HashMap<String, Service>;
 
 pub fn service() -> Service {
     StreamableHttpService::new(
@@ -304,35 +297,6 @@ pub fn service() -> Service {
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
-}
-
-pub async fn serve(
-    listener: std::net::TcpListener,
-    services: Arc<RwLock<Services>>,
-) -> std::io::Result<()> {
-    let app = Router::new()
-        .route("/mcp", any(handle))
-        .with_state(services);
-    listener.set_nonblocking(true)?;
-    axum::serve(tokio::net::TcpListener::from_std(listener)?, app).await
-}
-
-async fn handle(
-    State(services): State<Arc<RwLock<Services>>>,
-    req: axum::extract::Request,
-) -> Response {
-    let token = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let service = token.and_then(|token| services.read().unwrap().get(token).cloned());
-    let Some(service) = service else {
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    };
-    let response = service.handle(req).await;
-    let (parts, body) = response.into_parts();
-    Response::from_parts(parts, axum::body::Body::new(body))
 }
 
 mod dispatch {

@@ -104,26 +104,34 @@ impl ProviderDialog {
             window,
             cx,
         );
+        let &[
+            binary_name,
+            home_placeholder,
+            _,
+            _,
+            launch_args_placeholder,
+            custom_model_placeholder,
+        ] = provider_copy(provider);
         let binary = text_input(
-            default_binary_name(provider).to_string(),
+            binary_name.to_string(),
             path_string(&settings.binary_path),
             window,
             cx,
         );
         let home = text_input(
-            home_placeholder(provider).to_string(),
+            home_placeholder.to_string(),
             path_string(&settings.home_path),
             window,
             cx,
         );
         let launch_args = text_input(
-            launch_args_placeholder(provider).to_string(),
+            launch_args_placeholder.to_string(),
             settings.launch_args.clone().unwrap_or_default(),
             window,
             cx,
         );
         let custom_model = text_input(
-            custom_model_placeholder(provider).to_string(),
+            custom_model_placeholder.to_string(),
             String::new(),
             window,
             cx,
@@ -547,10 +555,11 @@ impl ProviderDialog {
             ),
         ];
         if provider != ProviderKind::OpenCode {
+            let &[_, _, home_label, home_help, _, _] = provider_copy(provider);
             blocks.push(
                 self.field_block(
-                    home_label(provider).into(),
-                    home_help(provider).into(),
+                    tcode_i18n::tr!(home_label).into_owned().into(),
+                    tcode_i18n::tr!(home_help).into_owned().into(),
                     Input::new(&self.home)
                         .rounded(crate::material::radius_input())
                         .into_any_element(),
@@ -1006,30 +1015,6 @@ fn provider_copy(provider: ProviderKind) -> &'static ProviderCopy {
         .iter()
         .find_map(|(kind, copy)| (*kind == provider).then_some(copy))
         .expect("every provider has dialog copy")
-}
-
-fn default_binary_name(provider: ProviderKind) -> &'static str {
-    provider_copy(provider)[0]
-}
-
-fn home_placeholder(provider: ProviderKind) -> &'static str {
-    provider_copy(provider)[1]
-}
-
-fn home_label(provider: ProviderKind) -> String {
-    tcode_i18n::tr!(provider_copy(provider)[2]).into_owned()
-}
-
-fn home_help(provider: ProviderKind) -> String {
-    tcode_i18n::tr!(provider_copy(provider)[3]).into_owned()
-}
-
-fn launch_args_placeholder(provider: ProviderKind) -> &'static str {
-    provider_copy(provider)[4]
-}
-
-fn custom_model_placeholder(provider: ProviderKind) -> &'static str {
-    provider_copy(provider)[5]
 }
 
 fn path_string(path: &Option<std::path::PathBuf>) -> String {

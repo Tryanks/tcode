@@ -29,7 +29,7 @@ use tcode_runtime::{
 
 use crate::{
     composer::Composer,
-    conversation_ui::{ConversationUi, DiffFocus},
+    conversation_ui::{ConversationUiState, DiffFocus},
     terminal_drawer::TerminalDrawer,
     window_state::WindowState,
 };
@@ -50,7 +50,7 @@ pub struct WorkspaceStore {
     background_session_flags: HashMap<String, (bool, bool, bool)>,
     active_destination: Option<ConversationDestination>,
     native_rewind_prefills: HashMap<String, String>,
-    conversation_ui: ConversationUi,
+    conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +115,7 @@ impl WorkspaceStore {
             background_session_flags: HashMap::new(),
             active_destination: None,
             native_rewind_prefills: HashMap::new(),
-            conversation_ui: ConversationUi::default(),
+            conversation_ui: HashMap::new(),
         };
 
         // Construction seeding is itself protocol traffic: subscribe, then
@@ -229,12 +229,13 @@ impl WorkspaceStore {
             .clone()
             .zip(self.session_status_replica.as_ref())
         {
-            self.conversation_ui.ensure(
-                destination,
-                self.settings_replica.word_wrap_diffs,
-                status.terminal_open,
-                status.terminal_height,
-            );
+            self.conversation_ui.entry(destination).or_insert_with(|| {
+                ConversationUiState::new(
+                    self.settings_replica.word_wrap_diffs,
+                    status.terminal_open,
+                    status.terminal_height,
+                )
+            });
         }
         self.active_destination = destination;
     }
@@ -289,16 +290,21 @@ impl WorkspaceStore {
                             && matches!(previous, ConversationDestination::ProjectDraft(_))
                             && matches!(destination, ConversationDestination::Thread(_))
                     }) && let Some(previous) = previous.as_ref()
+                        && let Some(state) = self.conversation_ui.remove(previous)
                     {
                         self.conversation_ui
-                            .move_entry(previous, destination.clone());
+                            .entry(destination.clone())
+                            .or_insert(state);
                     }
-                    self.conversation_ui.ensure(
-                        destination.clone(),
-                        self.settings_replica.word_wrap_diffs,
-                        status.terminal_open,
-                        status.terminal_height,
-                    );
+                    self.conversation_ui
+                        .entry(destination.clone())
+                        .or_insert_with(|| {
+                            ConversationUiState::new(
+                                self.settings_replica.word_wrap_diffs,
+                                status.terminal_open,
+                                status.terminal_height,
+                            )
+                        });
                     self.background_session_flags.remove(&status.session_id);
                 }
                 self.active_destination = destination;
@@ -710,27 +716,40 @@ impl WorkspaceStore {
         } else {
             ConversationDestination::Thread(session_id.to_string())
         };
-        self.conversation_ui
-            .open_preview_for(destination, self.settings_replica.word_wrap_diffs);
+        let ui = self.conversation_ui.entry(destination).or_insert_with(|| {
+            ConversationUiState::new(self.settings_replica.word_wrap_diffs, false, 240.)
+        });
+        ui.right_panel_open = true;
+        ui.right_tab = RightTab::Preview;
         cx.notify();
     }
 
-    pub fn preview_url(&self, key: &str) -> Option<String> {
+    fn conversation_ui_by_key(&self, key: &str) -> Option<&ConversationUiState> {
         self.conversation_ui
-            .get_by_key(key)
+            .iter()
+            .find_map(|(destination, ui)| (destination.ui_key() == key).then_some(ui))
+    }
+
+    fn conversation_ui_by_key_mut(&mut self, key: &str) -> Option<&mut ConversationUiState> {
+        self.conversation_ui
+            .iter_mut()
+            .find_map(|(destination, ui)| (destination.ui_key() == key).then_some(ui))
+    }
+
+    pub fn preview_url(&self, key: &str) -> Option<String> {
+        self.conversation_ui_by_key(key)
             .and_then(|ui| ui.preview_url.clone())
     }
 
     pub fn set_preview_url(&mut self, key: &str, url: String, cx: &mut Context<Self>) {
-        if let Some(ui) = self.conversation_ui.get_mut_by_key(key) {
+        if let Some(ui) = self.conversation_ui_by_key_mut(key) {
             ui.preview_url = Some(url);
             cx.notify();
         }
     }
 
     pub fn preview_canvas(&self, key: &str) -> Option<(u32, u32)> {
-        self.conversation_ui
-            .get_by_key(key)
+        self.conversation_ui_by_key(key)
             .and_then(|ui| ui.preview_canvas)
     }
 
@@ -740,14 +759,14 @@ impl WorkspaceStore {
         canvas: Option<(u32, u32)>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ui) = self.conversation_ui.get_mut_by_key(key) {
+        if let Some(ui) = self.conversation_ui_by_key_mut(key) {
             ui.preview_canvas = canvas;
             cx.notify();
         }
     }
 
     pub fn clear_preview_chrome(&mut self, key: &str, cx: &mut Context<Self>) {
-        if let Some(ui) = self.conversation_ui.get_mut_by_key(key) {
+        if let Some(ui) = self.conversation_ui_by_key_mut(key) {
             ui.preview_url = None;
             ui.preview_canvas = None;
             cx.notify();

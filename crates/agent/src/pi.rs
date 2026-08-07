@@ -43,13 +43,7 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    crate::blocking_result(
-        "pi-model-discovery",
-        "spawning pi model discovery",
-        "pi model discovery worker exited without a result",
-        move || list_models_blocking(binary_path.as_deref(), &launch_env),
-    )
-    .await
+    smol::unblock(move || list_models_blocking(binary_path.as_deref(), &launch_env)).await
 }
 
 fn list_models_blocking(

@@ -94,18 +94,6 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
         )))
 }
 
-/// Primary buttons get a faint top light so they read as physical controls:
-/// a barely-brighter wash over the top of the plain primary fill.
-pub fn primary_button_fill(cx: &App) -> gpui::Background {
-    let base = cx.theme().primary;
-    let lit = base.blend(gpui::white().opacity(0.10));
-    linear_gradient(
-        180.,
-        linear_color_stop(lit, 0.),
-        linear_color_stop(base, 0.6),
-    )
-}
-
 /// Applies the T3 overlay contour: fully opaque fill, hairline border and a
 /// large soft shadow. Radius stays the caller's choice (`radius_overlay`).
 pub fn overlay_contour(el: Div, cx: &App) -> Div {

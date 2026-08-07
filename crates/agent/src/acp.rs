@@ -583,7 +583,7 @@ async fn connected_actor(
             model: session.model.clone(),
         })
         .await;
-    emit_provider_options(state, events).await;
+    emit_provider_options(state, events, false).await;
     if ready.send(Ok(())).await.is_err() {
         return Ok(None);
     }
@@ -1202,7 +1202,7 @@ async fn handle_command(
                             state.options.select(&id, value);
                         }
                     }
-                    emit_provider_options(state, events).await;
+                    emit_provider_options(state, events, false).await;
                 }
                 Err(err) => {
                     let _ = events
@@ -1325,14 +1325,14 @@ async fn apply_interaction_mode<F, Fut>(
             .await;
         // Republish the actual selection so the runtime rolls back its
         // optimistic Build/Plan toggle instead of leaving a lying chip.
-        emit_provider_options_even_if_empty(state, events).await;
+        emit_provider_options(state, events, true).await;
         return;
     };
 
     match set_mode(target.clone()).await {
         Ok(_) => {
             state.lock().unwrap().select_mode(target);
-            emit_provider_options(state, events).await;
+            emit_provider_options(state, events, false).await;
         }
         Err(err) => {
             let _ = events
@@ -1340,7 +1340,7 @@ async fn apply_interaction_mode<F, Fut>(
                     message: format!("could not switch this agent's mode: {}", describe(&err)),
                 })
                 .await;
-            emit_provider_options_even_if_empty(state, events).await;
+            emit_provider_options(state, events, true).await;
         }
     }
 }
@@ -1470,30 +1470,18 @@ fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<acp::ContentBloc
     blocks
 }
 
-async fn emit_provider_options(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) {
-    let (descriptors, selections) = {
-        let state = state.lock().unwrap();
-        (state.options.descriptors(), state.options.selections())
-    };
-    if descriptors.is_empty() {
-        return;
-    }
-    let _ = events
-        .send(AgentEvent::ProviderOptions {
-            descriptors,
-            selections,
-        })
-        .await;
-}
-
-async fn emit_provider_options_even_if_empty(
+async fn emit_provider_options(
     state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
+    emit_empty: bool,
 ) {
     let (descriptors, selections) = {
         let state = state.lock().unwrap();
         (state.options.descriptors(), state.options.selections())
     };
+    if descriptors.is_empty() && !emit_empty {
+        return;
+    }
     let _ = events
         .send(AgentEvent::ProviderOptions {
             descriptors,

@@ -204,19 +204,6 @@ impl McpRegistration {
     pub const SERVER_NAME_ORCHESTRATE: &'static str = "tcode_orchestrate";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
 
-    /// Claude Code `--mcp-config` JSON: a single `mcpServers` map entry for an
-    /// HTTP server carrying the bearer token as an `Authorization` header.
-    /// Verified shape for `claude` 2.1.x (`.mcp.json` `type: "http"`).
-    pub fn claude_mcp_entry(&self) -> serde_json::Value {
-        serde_json::json!({
-                    "type": "http",
-                    "url": self.url,
-                    "headers": {
-                        "Authorization": format!("Bearer {}", self.bearer_token),
-                    }
-        })
-    }
-
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
     /// rides in `http_headers.Authorization` instead (verified against
@@ -238,7 +225,18 @@ pub fn claude_mcp_config_json<'a>(
 ) -> String {
     let servers: serde_json::Map<String, serde_json::Value> = registrations
         .into_iter()
-        .map(|registration| (registration.name.clone(), registration.claude_mcp_entry()))
+        .map(|registration| {
+            (
+                registration.name.clone(),
+                serde_json::json!({
+                    "type": "http",
+                    "url": registration.url,
+                    "headers": {
+                        "Authorization": format!("Bearer {}", registration.bearer_token),
+                    }
+                }),
+            )
+        })
         .collect();
     serde_json::json!({ "mcpServers": servers }).to_string()
 }
@@ -680,29 +678,6 @@ where
         commands,
         events,
     })
-}
-
-async fn blocking_result<T, F>(
-    thread_name: &str,
-    spawn_error: &'static str,
-    missing_result: &'static str,
-    work: F,
-) -> Result<T, AgentError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, AgentError> + Send + 'static,
-{
-    let (sender, receiver) = smol::channel::bounded(1);
-    std::thread::Builder::new()
-        .name(thread_name.into())
-        .spawn(move || {
-            let _ = sender.send_blocking(work());
-        })
-        .map_err(|error| AgentError::Spawn(format!("{spawn_error}: {error}")))?;
-    receiver
-        .recv()
-        .await
-        .map_err(|_| AgentError::Protocol(missing_result.into()))?
 }
 
 /// Start a new (or resumed) session with the given provider.

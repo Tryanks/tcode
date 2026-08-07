@@ -1423,13 +1423,11 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 name = "computer-use-mcp"
 version = "0.1.0"
 dependencies = [
- "axum",
  "base64 0.23.0",
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
  "log",
  "mcp-host",
- "objc2-foundation 0.3.2",
  "rmcp",
  "schemars 1.2.2",
  "serde",
@@ -8450,7 +8448,6 @@ dependencies = [
 name = "tcode"
 version = "0.1.0"
 dependencies = [
- "agent",
  "computer-use-mcp",
  "embed-resource",
  "env_logger",
@@ -8461,7 +8458,6 @@ dependencies = [
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
- "smol",
  "tcode-i18n",
  "tcode-protocol",
  "tcode-runtime",
@@ -8795,7 +8791,6 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

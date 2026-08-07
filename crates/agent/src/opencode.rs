@@ -40,31 +40,26 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    crate::blocking_result(
-        "opencode-model-discovery",
-        "spawning OpenCode model discovery",
-        "OpenCode model discovery worker exited without a result",
-        move || {
-            let cwd = std::env::current_dir()?;
-            let mut server = OpenCodeServer::spawn(
-                binary_path.as_deref(),
-                &cwd,
-                &launch_env,
-                ApprovalMode::FullAccess,
-                &[],
-                &[],
-            )?;
-            let result = (|| {
-                server.wait_healthy()?;
-                let provider_state = server.http.get_json("/provider")?;
-                let mut catalog = server.http.get_json("/config/providers")?;
-                reconcile_provider_catalog(&mut catalog, &provider_state);
-                Ok(map_models(&catalog))
-            })();
-            server.stop();
-            result
-        },
-    )
+    smol::unblock(move || {
+        let cwd = std::env::current_dir()?;
+        let mut server = OpenCodeServer::spawn(
+            binary_path.as_deref(),
+            &cwd,
+            &launch_env,
+            ApprovalMode::FullAccess,
+            &[],
+            &[],
+        )?;
+        let result = (|| {
+            server.wait_healthy()?;
+            let provider_state = server.http.get_json("/provider")?;
+            let mut catalog = server.http.get_json("/config/providers")?;
+            reconcile_provider_catalog(&mut catalog, &provider_state);
+            Ok(map_models(&catalog))
+        })();
+        server.stop();
+        result
+    })
     .await
 }
 
