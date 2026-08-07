@@ -16,8 +16,7 @@ use crate::{
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
     PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption,
     SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnOptions, TurnStatus,
-    UserInputOption, UserInputQuestion, file_changes_from_unified_diff, selection_bool,
-    selection_str,
+    UserInputOption, UserInputQuestion, file_changes_from_unified_diff, selection_str,
 };
 
 mod developer_instructions;
@@ -84,16 +83,15 @@ pub async fn list_models(
     let status = result
         .is_err()
         .then(|| settle_child_exit(&mut child))
-        .flatten()
-        .or_else(|| child.try_wait().ok().flatten());
+        .flatten();
     stop_child(&mut child, stdin);
     result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
 }
 
-async fn collect_models(
+async fn initialize(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
-) -> Result<Vec<ModelSpec>, AgentError> {
+) -> Result<(), AgentError> {
     send_json(
         stdin,
         &json!({
@@ -106,7 +104,14 @@ async fn collect_models(
         }),
     )?;
     wait_for_response(lines, 1).await?;
-    send_json(stdin, &json!({ "method": "initialized" }))?;
+    send_json(stdin, &json!({ "method": "initialized" }))
+}
+
+async fn collect_models(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+) -> Result<Vec<ModelSpec>, AgentError> {
+    initialize(stdin, lines).await?;
 
     let mut models = Vec::new();
     let mut cursor: Option<String> = None;
@@ -204,12 +209,12 @@ fn map_model(model: &Value) -> Option<ModelSpec> {
 
     let tiers = service_tiers(model);
     if !tiers.is_empty() {
-        let catalog_default = model
+        let default_value = model
             .get("defaultServiceTier")
             .and_then(Value::as_str)
             .filter(|d| tiers.iter().any(|t| t.value == *d))
-            .map(str::to_owned);
-        let default_value = catalog_default.unwrap_or_else(|| "default".into());
+            .map(str::to_owned)
+            .unwrap_or_else(|| "default".into());
         let mut select_options = Vec::with_capacity(tiers.len() + 1);
         select_options.push(SelectOption {
             value: "default".into(),
@@ -284,11 +289,7 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
 
 /// `gpt…` → `GPT…`, and capitalize the letter after each hyphen (T3 transform).
 fn codex_display_name(raw: &str) -> String {
-    let base = if raw
-        .get(..3)
-        .map(|p| p.eq_ignore_ascii_case("gpt"))
-        .unwrap_or(false)
-    {
+    let base = if raw.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("gpt")) {
         format!("GPT{}", &raw[3..])
     } else {
         raw.to_owned()
@@ -326,12 +327,9 @@ fn codex_effort(selections: &[OptionSelection]) -> Option<String> {
     selection_str(selections, "reasoningEffort")
 }
 
-/// Selected service tier (option id `serviceTier`), with the legacy
-/// `fastMode: true` → `fast` fallback (T3 `getCodexServiceTierOptionValue`).
+/// Selected service tier (option id `serviceTier`).
 fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
-    selection_str(selections, "serviceTier").or_else(|| {
-        (selection_bool(selections, "fastMode") == Some(true)).then(|| "fast".to_owned())
-    })
+    selection_str(selections, "serviceTier")
 }
 
 enum ChildOutput {
@@ -381,7 +379,7 @@ struct Actor {
     interaction_mode: InteractionMode,
     /// Session reasoning effort (`reasoningEffort` selection), if any.
     effort: Option<String>,
-    /// Session service tier (`serviceTier` selection / legacy fastMode), if any.
+    /// Session service tier (`serviceTier` selection), if any.
     service_tier: Option<String>,
     next_id: i64,
     pending_requests: HashMap<i64, PendingRequest>,
@@ -673,19 +671,7 @@ async fn initialize_and_open_thread(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,
 ) -> Result<(String, Option<String>, i64, Vec<ProviderCommand>), AgentError> {
-    send_json(
-        stdin,
-        &json!({
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": { "name": "tcode", "title": "tcode", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "experimentalApi": true }
-            }
-        }),
-    )?;
-    wait_for_response(lines, 1).await?;
-    send_json(stdin, &json!({ "method": "initialized" }))?;
+    initialize(stdin, lines).await?;
 
     let cwd = opts.cwd.to_string_lossy();
     let (approval_policy, sandbox) = approval_knobs(opts.approval_mode);
@@ -825,20 +811,12 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
 }
 
 /// Resolve the Codex data home exactly as the spawned provider sees it: the
-/// dedicated home override wins, then an explicit environment row, then the
-/// inherited process variables, finally `$HOME/.codex`.
+/// dedicated home override wins, then the inherited process variables, finally
+/// `$HOME/.codex`.
 fn codex_home(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .home
         .clone()
-        .or_else(|| {
-            launch_env
-                .env
-                .iter()
-                .rev()
-                .find(|(key, _)| key == "CODEX_HOME")
-                .map(|(_, value)| PathBuf::from(value))
-        })
         .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
 }
@@ -1130,7 +1108,7 @@ impl Actor {
                     let mut wire_answers = serde_json::Map::new();
                     for (qid, value) in &answers {
                         wire_answers
-                            .insert(qid.clone(), json!({ "answers": answer_strings(value) }));
+                            .insert(qid.clone(), json!({ "answers": strings(Some(value)) }));
                     }
                     send_json(
                         &mut self.stdin,
@@ -1474,12 +1452,7 @@ impl Actor {
                 .await;
             }
             "turn/diff/updated" => {
-                let turn_id = params
-                    .get("turnId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| self.active_turn.clone())
-                    .unwrap_or_default();
+                let turn_id = notification_turn_id(params, &self.active_turn).unwrap_or_default();
                 let diff = params
                     .get("diff")
                     .and_then(Value::as_str)
@@ -1503,34 +1476,29 @@ impl Actor {
             }
             "item/started" | "item/updated" | "item/completed" => {
                 let item_value = params.get("item");
-                // Proposed-plan item (`ThreadItem::Plan { id, text }`): a
-                // completed plan item is the finalized `<proposed_plan>` block.
-                if item_value
-                    .and_then(|i| i.get("type"))
+                match item_value
+                    .and_then(|item| item.get("type"))
                     .and_then(Value::as_str)
-                    == Some("plan")
                 {
-                    if method == "item/completed"
-                        && let Some(item) = item_value
-                    {
-                        let markdown = string_field(item, "text");
-                        let item_id = string_field(item, "id");
-                        self.emit(AgentEvent::ProposedPlan { item_id, markdown })
+                    Some("plan") => {
+                        if method == "item/completed"
+                            && let Some(item) = item_value
+                        {
+                            self.emit(AgentEvent::ProposedPlan {
+                                item_id: string_field(item, "id"),
+                                markdown: string_field(item, "text"),
+                            })
                             .await;
+                        }
+                        return;
                     }
-                    return;
-                }
-                // Context-compaction marker item (`type: "contextCompaction"`):
-                // surface the "Context compacted" work-log row once, on completion.
-                if item_value
-                    .and_then(|i| i.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("contextCompaction")
-                {
-                    if method == "item/completed" {
-                        self.emit(AgentEvent::ContextCompacted).await;
+                    Some("contextCompaction") => {
+                        if method == "item/completed" {
+                            self.emit(AgentEvent::ContextCompacted).await;
+                        }
+                        return;
                     }
-                    return;
+                    _ => {}
                 }
                 if let Some(mut item) = item_value.and_then(map_item) {
                     if let Some(subagent) = self.subagents.get(&item.id) {
@@ -1574,11 +1542,7 @@ impl Actor {
                 }
             }
             "turn/plan/updated" => {
-                let turn_id = params
-                    .get("turnId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| self.active_turn.clone());
+                let turn_id = notification_turn_id(params, &self.active_turn);
                 let explanation = params
                     .get("explanation")
                     .and_then(Value::as_str)
@@ -1748,24 +1712,16 @@ impl Actor {
     /// Settle every outstanding native user-input request and MCP elicitation
     /// on teardown, replying with the protocol's empty/cancel outcome.
     async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let pending: Vec<(String, Value)> = self.user_inputs.drain().collect();
-        for (request_id, rpc_id) in pending {
-            let _ = send_json(
-                &mut self.stdin,
-                &json!({ "id": rpc_id, "result": { "answers": {} } }),
-            );
-            self.emit(AgentEvent::UserInputResolved {
-                request_id,
-                answers: serde_json::Map::new(),
-            })
-            .await;
-        }
-        let elicitations: Vec<(String, PendingElicitation)> = self.elicitations.drain().collect();
-        for (request_id, pending) in elicitations {
-            let _ = send_json(
-                &mut self.stdin,
-                &json!({ "id": pending.rpc_id, "result": { "action": "cancel" } }),
-            );
+        let mut pending = self
+            .user_inputs
+            .drain()
+            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
+            .collect::<Vec<_>>();
+        pending.extend(self.elicitations.drain().map(|(request_id, pending)| {
+            (request_id, pending.rpc_id, json!({ "action": "cancel" }))
+        }));
+        for (request_id, rpc_id, result) in pending {
+            let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
             self.emit(AgentEvent::UserInputResolved {
                 request_id,
                 answers: serde_json::Map::new(),
@@ -1821,7 +1777,10 @@ fn request_id_string(id: &Value) -> String {
 /// Normalize a canonical answer value into the wire array shape. A single
 /// string becomes a 1-element array; an array of strings is kept; anything
 /// else yields an empty array (S2 §3.2).
-fn answer_strings(value: &Value) -> Vec<String> {
+fn strings(value: Option<&Value>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
     match value {
         Value::String(s) => vec![s.clone()],
         Value::Array(items) => items
@@ -1833,7 +1792,7 @@ fn answer_strings(value: &Value) -> Vec<String> {
 }
 
 fn non_empty_string(value: &Value) -> Option<String> {
-    answer_strings(value)
+    strings(Some(value))
         .into_iter()
         .find(|answer| !answer.is_empty())
 }
@@ -1855,13 +1814,7 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
         };
         let value = match field.kind {
             ElicitFieldKind::Text => non_empty_string(answer).map(Value::String),
-            ElicitFieldKind::Enum => non_empty_string(answer).and_then(|answer| {
-                if field.values.is_empty() {
-                    Some(Value::String(answer))
-                } else {
-                    field.values.get(&answer).cloned().map(Value::String)
-                }
-            }),
+            ElicitFieldKind::Enum => elicitation_enum_values(field, answer).into_iter().next(),
             ElicitFieldKind::Number => non_empty_string(answer)
                 .and_then(|answer| answer.parse::<f64>().ok())
                 .and_then(serde_json::Number::from_f64)
@@ -1877,17 +1830,7 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
                 }
             }),
             ElicitFieldKind::MultiEnum => {
-                let values = answer_strings(answer)
-                    .into_iter()
-                    .filter(|answer| !answer.is_empty())
-                    .filter_map(|answer| {
-                        if field.values.is_empty() {
-                            Some(Value::String(answer))
-                        } else {
-                            field.values.get(&answer).cloned().map(Value::String)
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let values = elicitation_enum_values(field, answer);
                 (!values.is_empty()).then_some(Value::Array(values))
             }
             ElicitFieldKind::UrlAck => None,
@@ -1902,6 +1845,20 @@ fn elicitation_result(fields: &[ElicitField], answers: &serde_json::Map<String, 
     } else {
         json!({ "action": "accept", "content": content })
     }
+}
+
+fn elicitation_enum_values(field: &ElicitField, answer: &Value) -> Vec<Value> {
+    strings(Some(answer))
+        .into_iter()
+        .filter(|answer| !answer.is_empty())
+        .filter_map(|answer| {
+            if field.values.is_empty() {
+                Some(Value::String(answer))
+            } else {
+                field.values.get(&answer).cloned().map(Value::String)
+            }
+        })
+        .collect()
 }
 
 fn elicit_option(label: &str) -> UserInputOption {
@@ -1919,17 +1876,24 @@ fn schema_text<'a>(schema: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn titled_enum(entries: Option<&Vec<Value>>) -> (Vec<UserInputOption>, HashMap<String, String>) {
+    enum_options(entries.into_iter().flatten().filter_map(|entry| {
+        Some((
+            schema_text(entry, "title")?.to_owned(),
+            entry.get("const").and_then(Value::as_str)?.to_owned(),
+        ))
+    }))
+}
+
+fn enum_options(
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> (Vec<UserInputOption>, HashMap<String, String>) {
     let mut options = Vec::new();
     let mut values = HashMap::new();
-    for entry in entries.into_iter().flatten() {
-        let Some(wire_value) = entry.get("const").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(label) = schema_text(entry, "title") else {
-            continue;
-        };
-        options.push(elicit_option(label));
-        values.insert(label.to_owned(), wire_value.to_owned());
+    for (label, wire_value) in entries {
+        if !label.is_empty() {
+            options.push(elicit_option(&label));
+            values.insert(label, wire_value);
+        }
     }
     (options, values)
 }
@@ -1952,59 +1916,46 @@ fn parse_elicitation_form(
     // declaration-order tests below will catch it.
     for (key, schema) in properties {
         let schema_type = schema.get("type").and_then(Value::as_str);
-        let (kind, options, multi_select, values) = match schema_type {
+        let (kind, options, values) = match schema_type {
             Some("boolean") => (
                 ElicitFieldKind::Boolean,
                 vec![elicit_option("Yes"), elicit_option("No")],
-                false,
                 HashMap::new(),
             ),
             Some("string") if schema.get("oneOf").is_some() => {
                 let (options, values) = titled_enum(schema.get("oneOf").and_then(Value::as_array));
-                (ElicitFieldKind::Enum, options, false, values)
+                (ElicitFieldKind::Enum, options, values)
             }
             Some("string") if schema.get("enum").is_some() => {
                 let wire_values = strings(schema.get("enum"));
                 let names = strings(schema.get("enumNames"));
                 if names.len() == wire_values.len() {
-                    let mut values = HashMap::new();
-                    let options = names
-                        .into_iter()
-                        .zip(wire_values)
-                        .filter_map(|(label, wire_value)| {
-                            if label.is_empty() {
-                                None
-                            } else {
-                                values.insert(label.to_owned(), wire_value.to_owned());
-                                Some(elicit_option(label))
-                            }
-                        })
-                        .collect();
-                    (ElicitFieldKind::Enum, options, false, values)
+                    let (options, values) = enum_options(names.into_iter().zip(wire_values));
+                    (ElicitFieldKind::Enum, options, values)
                 } else {
                     let options = wire_values
                         .into_iter()
                         .filter(|label| !label.is_empty())
-                        .map(elicit_option)
+                        .map(|label| elicit_option(&label))
                         .collect();
-                    (ElicitFieldKind::Enum, options, false, HashMap::new())
+                    (ElicitFieldKind::Enum, options, HashMap::new())
                 }
             }
-            Some("string") => (ElicitFieldKind::Text, Vec::new(), false, HashMap::new()),
-            Some("number") => (ElicitFieldKind::Number, Vec::new(), false, HashMap::new()),
-            Some("integer") => (ElicitFieldKind::Integer, Vec::new(), false, HashMap::new()),
+            Some("string") => (ElicitFieldKind::Text, Vec::new(), HashMap::new()),
+            Some("number") => (ElicitFieldKind::Number, Vec::new(), HashMap::new()),
+            Some("integer") => (ElicitFieldKind::Integer, Vec::new(), HashMap::new()),
             Some("array") if schema.pointer("/items/anyOf").is_some() => {
                 let (options, values) =
                     titled_enum(schema.pointer("/items/anyOf").and_then(Value::as_array));
-                (ElicitFieldKind::MultiEnum, options, true, values)
+                (ElicitFieldKind::MultiEnum, options, values)
             }
             Some("array") if schema.pointer("/items/enum").is_some() => {
                 let options = strings(schema.pointer("/items/enum"))
                     .into_iter()
                     .filter(|label| !label.is_empty())
-                    .map(elicit_option)
+                    .map(|label| elicit_option(&label))
                     .collect();
-                (ElicitFieldKind::MultiEnum, options, true, HashMap::new())
+                (ElicitFieldKind::MultiEnum, options, HashMap::new())
             }
             _ => {
                 log::debug!("codex: dropping unsupported elicitation field {key}");
@@ -2020,7 +1971,7 @@ fn parse_elicitation_form(
             header: format!("{server_name}: {title}"),
             question: question.to_owned(),
             options,
-            multi_select,
+            multi_select: matches!(kind, ElicitFieldKind::MultiEnum),
             prefill: None,
         });
         fields.push(ElicitField {
@@ -2167,23 +2118,24 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
                 .unwrap_or_default(),
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
-        "mcpToolCall" => ItemContent::ToolCall {
-            name: format!(
-                "{}/{}",
-                string_field(item, "server"),
+        "mcpToolCall" | "dynamicToolCall" => ItemContent::ToolCall {
+            name: if provider_kind == "mcpToolCall" {
+                format!(
+                    "{}/{}",
+                    string_field(item, "server"),
+                    string_field(item, "tool")
+                )
+            } else {
                 string_field(item, "tool")
-            ),
+            },
             input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            output: tool_output(item),
-            status: map_status(item.get("status").and_then(Value::as_str)),
-        },
-        "dynamicToolCall" => ItemContent::ToolCall {
-            name: string_field(item, "tool"),
-            input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            output: item
-                .get("contentItems")
-                .filter(|v| !v.is_null())
-                .map(Value::to_string),
+            output: if provider_kind == "mcpToolCall" {
+                tool_output(item)
+            } else {
+                item.get("contentItems")
+                    .filter(|v| !v.is_null())
+                    .map(Value::to_string)
+            },
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
         "webSearch" => ItemContent::WebSearch {
@@ -2202,22 +2154,16 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
 }
 
 fn find_subagent_activity(value: &Value) -> Option<&Value> {
-    if value.get("type").and_then(Value::as_str) == Some("sub_agent_activity") {
-        return Some(value);
-    }
-    match value {
-        Value::Object(fields) => fields.values().find_map(find_subagent_activity),
-        Value::Array(values) => values.iter().find_map(find_subagent_activity),
-        _ => None,
-    }
+    value
+        .pointer("/event/payload")
+        .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity"))
 }
 
 fn item_status(content: &ItemContent) -> ItemStatus {
     match content {
         ItemContent::CommandExecution { status, .. }
         | ItemContent::FileChange { status, .. }
-        | ItemContent::ToolCall { status, .. }
-        | ItemContent::Subagent { status, .. } => *status,
+        | ItemContent::ToolCall { status, .. } => *status,
         _ => ItemStatus::Completed,
     }
 }
@@ -2227,16 +2173,8 @@ fn item_summary(content: &ItemContent) -> Option<String> {
         ItemContent::ToolCall { output, .. } => output
             .as_deref()
             .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" ")),
-        ItemContent::Subagent { summary, .. } => summary.clone(),
         _ => None,
     }
-}
-
-fn strings(value: Option<&Value>) -> Vec<&str> {
-    value
-        .and_then(Value::as_array)
-        .map(|values| values.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default()
 }
 
 fn string_field(value: &Value, field: &str) -> String {
@@ -2245,6 +2183,14 @@ fn string_field(value: &Value, field: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+fn notification_turn_id(params: &Value, active_turn: &Option<String>) -> Option<String> {
+    params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| active_turn.clone())
 }
 
 fn tool_output(item: &Value) -> Option<String> {
@@ -2330,12 +2276,6 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
 }
 
 fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
-    // Read both spellings while app-server versions transition between Rust
-    // protocol names and JSON camelCase.
-    let _from = params
-        .get("fromModel")
-        .or_else(|| params.get("from_model"))
-        .and_then(Value::as_str);
     let to = params
         .get("toModel")
         .or_else(|| params.get("to_model"))
@@ -3072,12 +3012,12 @@ mod tests {
     }
 
     #[test]
-    fn service_tier_falls_back_to_fast_for_legacy_fast_mode() {
+    fn service_tier_uses_explicit_selection_only() {
         let selections = vec![OptionSelection {
             id: "fastMode".into(),
             value: json!(true),
         }];
-        assert_eq!(codex_service_tier(&selections).as_deref(), Some("fast"));
+        assert_eq!(codex_service_tier(&selections), None);
         let explicit = vec![OptionSelection {
             id: "serviceTier".into(),
             value: json!("flex"),

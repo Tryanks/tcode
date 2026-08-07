@@ -23,6 +23,7 @@
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -246,12 +247,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     });
 
     let session_config = SessionConfig {
-        ultrathink: launch.ultrathink,
-        interaction_mode: opts.interaction_mode,
-        base_permission_mode,
-        applied_permission_mode,
-        approval_mode: opts.approval_mode,
-        native_rewind,
         claude_dir: opts
             .launch_env
             .home
@@ -274,6 +269,12 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         line_rx,
         event_tx,
         session_config,
+        launch.ultrathink,
+        opts.interaction_mode,
+        base_permission_mode,
+        applied_permission_mode,
+        opts.approval_mode,
+        native_rewind,
         stderr_tail,
         stderr_task,
     ))
@@ -298,7 +299,6 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 }
 
 /// Model-scoped launch flags resolved from the session's option selections.
-#[derive(Debug, Default)]
 struct ClaudeLaunchOptions {
     /// Model id with a `[1m]` suffix appended for the 1M context window.
     model_id: Option<String>,
@@ -368,27 +368,17 @@ impl ClaudeLaunchOptions {
 }
 
 /// Per-session config threaded into the actor loop / mapper.
-#[derive(Debug, Clone)]
 struct SessionConfig {
-    ultrathink: bool,
-    interaction_mode: InteractionMode,
-    base_permission_mode: &'static str,
-    applied_permission_mode: String,
-    approval_mode: ApprovalMode,
-    native_rewind: bool,
     claude_dir: Option<PathBuf>,
 }
 
-fn resume_session_id(resume: &Option<ResumeCursor>) -> Option<String> {
-    resume
-        .as_ref()
-        .and_then(|c| c.0.get("session_id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
-    let Some(session_id) = resume_session_id(resume) else {
+    let Some(session_id) = resume
+        .as_ref()
+        .and_then(|cursor| cursor.0.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         return Vec::new();
     };
     let mut args = vec!["--resume".into(), session_id];
@@ -406,12 +396,24 @@ async fn actor_loop(
     line_rx: smol::channel::Receiver<String>,
     event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
+    ultrathink: bool,
+    interaction_mode: InteractionMode,
+    base_permission_mode: &'static str,
+    applied_permission_mode: String,
+    approval_mode: ApprovalMode,
+    native_rewind: bool,
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
-    let mut mapper = Mapper::new();
+    let mut mapper = Mapper::new_configured(
+        ultrathink,
+        interaction_mode,
+        base_permission_mode,
+        applied_permission_mode,
+        approval_mode,
+        native_rewind,
+    );
     let claude_dir = config.claude_dir.clone();
-    mapper.configure(config);
     let mut tailers = HashMap::new();
 
     // Set when the child died on its own (stdout EOF): only then do its exit
@@ -427,7 +429,7 @@ async fn actor_loop(
 
         match sel {
             Sel::Cmd(Some(command)) => {
-                if let Flow::Break(reason) =
+                if let ControlFlow::Break(reason) =
                     handle_command(command, &mut mapper, &mut stdin, &event_tx, &mut child).await
                 {
                     break Some(reason.into());
@@ -611,19 +613,13 @@ async fn run_subagent_tail(
     }
 }
 
-/// Whether the actor loop should stop.
-enum Flow {
-    Continue,
-    Break(&'static str),
-}
-
 async fn handle_command(
     command: SessionCommand,
     mapper: &mut Mapper,
     stdin: &mut smol::process::ChildStdin,
     event_tx: &smol::channel::Sender<AgentEvent>,
     child: &mut smol::process::Child,
-) -> Flow {
+) -> ControlFlow<&'static str> {
     match command {
         SessionCommand::SendTurn {
             delivery_id,
@@ -650,16 +646,12 @@ async fn handle_command(
                             fatal: true,
                         })
                         .await;
-                    return Flow::Break("provider stdin write failed");
+                    return ControlFlow::Break("provider stdin write failed");
                 }
             }
 
             // `ultrathink` is a prompt-prefix mode, not a `--effort` value.
-            let text = if mapper.ultrathink {
-                format!("Ultrathink:\n{text}")
-            } else {
-                text
-            };
+            let text = turn_text(text, mapper.ultrathink);
             let msg = user_message(&text, &attachments);
             if write_turn_message(stdin, &msg, delivery_id, event_tx)
                 .await
@@ -671,56 +663,60 @@ async fn handle_command(
                         fatal: true,
                     })
                     .await;
-                return Flow::Break("provider stdin write failed");
+                return ControlFlow::Break("provider stdin write failed");
             }
             let turn_id = mapper.start_turn();
             let _ = event_tx.send(AgentEvent::TurnStarted { turn_id }).await;
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::SetInteractionMode(mode) => {
             // Stored now; the `set_permission_mode` switch is issued before the
             // next `SendTurn` (matching T3's per-message application).
             mapper.interaction_mode = mode;
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::Interrupt => {
             let msg = mapper.interrupt_request();
             let _ = write_line(stdin, &msg).await;
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::RespondApproval {
             request_id,
             decision,
         } => {
-            if let Some(response) = mapper.build_approval_response(&request_id, decision.clone()) {
-                let _ = write_line(stdin, &response).await;
-                let _ = event_tx
-                    .send(AgentEvent::ApprovalResolved {
-                        request_id,
-                        decision,
-                    })
-                    .await;
-            } else {
-                log::debug!("claude: RespondApproval for unknown request {request_id}");
-            }
-            Flow::Continue
+            let response = mapper.build_approval_response(&request_id, decision.clone());
+            resolve_response(
+                stdin,
+                event_tx,
+                request_id,
+                decision,
+                response,
+                |request_id, decision| AgentEvent::ApprovalResolved {
+                    request_id,
+                    decision,
+                },
+            )
+            .await;
+            ControlFlow::Continue(())
         }
         SessionCommand::RespondUserInput {
             request_id,
             answers,
         } => {
-            if let Some(response) = mapper.build_user_input_response(&request_id, &answers) {
-                let _ = write_line(stdin, &response).await;
-                let _ = event_tx
-                    .send(AgentEvent::UserInputResolved {
-                        request_id,
-                        answers,
-                    })
-                    .await;
-            } else {
-                log::debug!("claude: RespondUserInput for unknown request {request_id}");
-            }
-            Flow::Continue
+            let response = mapper.build_user_input_response(&request_id, &answers);
+            resolve_response(
+                stdin,
+                event_tx,
+                request_id,
+                answers,
+                response,
+                |request_id, answers| AgentEvent::UserInputResolved {
+                    request_id,
+                    answers,
+                },
+            )
+            .await;
+            ControlFlow::Continue(())
         }
         SessionCommand::SetApprovalMode(mode) => {
             // The CLI's control protocol switches permission mode live via a
@@ -731,7 +727,7 @@ async fn handle_command(
             mapper.base_permission_mode = flag;
             mapper.approval_mode = mode;
             if mapper.interaction_mode == InteractionMode::Build {
-                let msg = mapper.set_permission_mode_request(mode);
+                let msg = mapper.set_permission_mode_request_str(permission_mode_flag(mode));
                 if write_line(stdin, &msg).await.is_err() {
                     if let Some(request_id) = msg.get("request_id").and_then(Value::as_str) {
                         mapper.pending_permission_modes.remove(request_id);
@@ -745,11 +741,11 @@ async fn handle_command(
                         .await;
                 }
             }
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::SetOption { id, .. } => {
             log::debug!("claude: ignoring ACP-only SetOption {id}");
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::Rewind {
             checkpoint_id,
@@ -776,7 +772,7 @@ async fn handle_command(
                         .await;
                 }
             }
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::Steer {
             request_id,
@@ -796,14 +792,10 @@ async fn handle_command(
             //
             // Verified live (examples/steer_probe.rs): 1 `TurnStarted`,
             // 1 `TurnCompleted` across a steered turn.
-            let text = if mapper.ultrathink {
-                format!("Ultrathink:\n{text}")
-            } else {
-                text
-            };
+            let text = turn_text(text, mapper.ultrathink);
             let msg = user_message(&text, &attachments);
             write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
-            Flow::Continue
+            ControlFlow::Continue(())
         }
         SessionCommand::Shutdown => {
             // Settle any pending AskUserQuestion prompts: deny the callback with
@@ -819,9 +811,44 @@ async fn handle_command(
             }
             let _ = stdin.close().await;
             let _ = child.kill();
-            Flow::Break("shutdown requested")
+            ControlFlow::Break("shutdown requested")
         }
     }
+}
+
+async fn resolve_response<T>(
+    stdin: &mut smol::process::ChildStdin,
+    event_tx: &smol::channel::Sender<AgentEvent>,
+    request_id: String,
+    value: T,
+    response: Option<Value>,
+    resolved: impl FnOnce(String, T) -> AgentEvent,
+) {
+    if let Some(response) = response {
+        let _ = write_line(stdin, &response).await;
+        let _ = event_tx.send(resolved(request_id, value)).await;
+    } else {
+        log::debug!("claude: response for unknown request {request_id}");
+    }
+}
+
+fn turn_text(text: String, ultrathink: bool) -> String {
+    if ultrathink {
+        format!("Ultrathink:\n{text}")
+    } else {
+        text
+    }
+}
+
+fn control_response(request_id: &str, body: Value) -> Value {
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": body,
+        }
+    })
 }
 
 async fn write_turn_message<W: AsyncWrite + Unpin>(
@@ -897,7 +924,6 @@ fn user_message(text: &str, attachments: &[Attachment]) -> Value {
 
 /// Remembers what kind of tool-use item a `tool_use_id` refers to, so that when
 /// the matching `tool_result` arrives we can emit the right `ItemCompleted`.
-#[derive(Debug, Clone)]
 enum ToolItem {
     Command {
         command: String,
@@ -917,7 +943,6 @@ enum ToolItem {
     },
 }
 
-#[derive(Debug)]
 enum TailRequest {
     Start {
         parent_id: String,
@@ -936,7 +961,6 @@ enum TailRequest {
 /// A pending permission prompt, kept so `RespondApproval` can echo the tool's
 /// (possibly updated) input and, for "approve for session", forward the SDK's
 /// `permission_suggestions` verbatim.
-#[derive(Debug, Clone)]
 struct PendingApproval {
     input: Value,
     /// `permission_suggestions` from the `can_use_tool` control_request,
@@ -945,16 +969,10 @@ struct PendingApproval {
     suggestions: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
-enum PendingRewind {
-    Files {
-        checkpoint_id: String,
-        mode: RewindMode,
-    },
-    Conversation {
-        checkpoint_id: String,
-        mode: RewindMode,
-    },
+struct PendingRewind {
+    checkpoint_id: String,
+    mode: RewindMode,
+    conversation: bool,
 }
 
 pub(crate) struct Mapper {
@@ -1032,7 +1050,26 @@ pub(crate) struct Mapper {
 }
 
 impl Mapper {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::new_configured(
+            false,
+            InteractionMode::Build,
+            "default",
+            "default".to_owned(),
+            ApprovalMode::Supervised,
+            false,
+        )
+    }
+
+    fn new_configured(
+        ultrathink: bool,
+        interaction_mode: InteractionMode,
+        base_permission_mode: &'static str,
+        applied_permission_mode: String,
+        approval_mode: ApprovalMode,
+        native_rewind: bool,
+    ) -> Self {
         Mapper {
             session_started: false,
             current_message_id: None,
@@ -1047,12 +1084,12 @@ impl Mapper {
             tail_requests: Vec::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
-            approval_mode: ApprovalMode::Supervised,
+            approval_mode,
             interrupt_pending: false,
-            ultrathink: false,
-            interaction_mode: InteractionMode::Build,
-            base_permission_mode: "default",
-            applied_permission_mode: "default".to_string(),
+            ultrathink,
+            interaction_mode,
+            base_permission_mode,
+            applied_permission_mode,
             pending_permission_modes: HashMap::new(),
             exit_plan_captured: false,
             outgoing: Vec::new(),
@@ -1062,20 +1099,11 @@ impl Mapper {
             background_tasks: HashSet::new(),
             background_task_history: HashSet::new(),
             pending_rewinds: HashMap::new(),
-            native_rewind: false,
+            native_rewind,
             last_served_model: None,
             stop_reason: None,
             warned_stop_reason: None,
         }
-    }
-
-    fn configure(&mut self, config: SessionConfig) {
-        self.ultrathink = config.ultrathink;
-        self.interaction_mode = config.interaction_mode;
-        self.base_permission_mode = config.base_permission_mode;
-        self.applied_permission_mode = config.applied_permission_mode;
-        self.approval_mode = config.approval_mode;
-        self.native_rewind = config.native_rewind;
     }
 
     /// Drain queued control-response writes for the actor to send.
@@ -1099,18 +1127,6 @@ impl Mapper {
         id
     }
 
-    /// Start a turn initiated by the CLI itself (for example, after a background
-    /// task notification). These turns have no user-message rewind checkpoint.
-    fn start_synthesized_turn(&mut self) -> String {
-        self.turn_counter += 1;
-        let id = format!("turn-{}", self.turn_counter);
-        self.current_turn_id = Some(id.clone());
-        self.exit_plan_captured = false;
-        self.stop_reason = None;
-        self.warned_stop_reason = None;
-        id
-    }
-
     fn next_control_id(&mut self) -> String {
         self.control_counter += 1;
         format!("tcode-ctrl-{}", self.control_counter)
@@ -1120,49 +1136,45 @@ impl Mapper {
         if !self.native_rewind {
             return Err("this Claude Code version does not expose native rewind controls".into());
         }
-        Ok(if mode.includes_files() {
-            self.rewind_files_request(checkpoint_id, mode)
-        } else {
-            self.rewind_conversation_request(checkpoint_id, mode)
-        })
+        Ok(self.rewind_request(checkpoint_id, mode, !mode.includes_files()))
     }
 
-    fn rewind_files_request(&mut self, checkpoint_id: String, mode: RewindMode) -> Value {
-        let request_id = self.next_control_id();
-        self.pending_rewinds.insert(
-            request_id.clone(),
-            PendingRewind::Files {
-                checkpoint_id: checkpoint_id.clone(),
-                mode,
-            },
-        );
-        json!({
-            "type": "control_request",
-            "request_id": request_id,
-            "request": {
-                "subtype": "rewind_files",
-                "user_message_id": checkpoint_id,
-            }
-        })
-    }
-
-    fn rewind_conversation_request(&mut self, checkpoint_id: String, mode: RewindMode) -> Value {
-        let request_id = self.next_control_id();
-        self.pending_rewinds.insert(
-            request_id.clone(),
-            PendingRewind::Conversation {
-                checkpoint_id: checkpoint_id.clone(),
-                mode,
-            },
-        );
-        json!({
-            "type": "control_request",
-            "request_id": request_id,
-            "request": {
+    fn rewind_request(
+        &mut self,
+        checkpoint_id: String,
+        mode: RewindMode,
+        conversation: bool,
+    ) -> Value {
+        let request = if conversation {
+            json!({
                 "subtype": "rewind_conversation",
                 "target_message_uuid": checkpoint_id,
                 "interrupt_if_running": false,
-            }
+            })
+        } else {
+            json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
+        };
+        let message = self.control_request(request);
+        let request_id = message["request_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        self.pending_rewinds.insert(
+            request_id,
+            PendingRewind {
+                checkpoint_id,
+                mode,
+                conversation,
+            },
+        );
+        message
+    }
+
+    fn control_request(&mut self, request: Value) -> Value {
+        json!({
+            "type": "control_request",
+            "request_id": self.next_control_id(),
+            "request": request,
         })
     }
 
@@ -1171,11 +1183,7 @@ impl Mapper {
         if self.current_turn_id.is_some() {
             self.interrupt_pending = true;
         }
-        json!({
-            "type": "control_request",
-            "request_id": self.next_control_id(),
-            "request": { "subtype": "interrupt" }
-        })
+        self.control_request(json!({ "subtype": "interrupt" }))
     }
 
     /// Client → CLI `set_permission_mode` control request. Wire shape verified
@@ -1183,23 +1191,19 @@ impl Mapper {
     /// `request(e)` wraps the payload as
     /// `{request_id, type:"control_request", request:e}`, and
     /// `setPermissionMode(m)` sends `{subtype:"set_permission_mode", mode:m}`.
-    fn set_permission_mode_request(&mut self, mode: ApprovalMode) -> Value {
-        self.set_permission_mode_request_str(permission_mode_flag(mode))
-    }
-
     /// `set_permission_mode` with a raw wire mode string (e.g. `"plan"`).
     fn set_permission_mode_request_str(&mut self, mode: &str) -> Value {
-        let request_id = self.next_control_id();
+        let message = self.control_request(json!({
+            "subtype": "set_permission_mode",
+            "mode": mode,
+        }));
+        let request_id = message["request_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         self.pending_permission_modes
-            .insert(request_id.clone(), mode.to_owned());
-        json!({
-            "type": "control_request",
-            "request_id": request_id,
-            "request": {
-                "subtype": "set_permission_mode",
-                "mode": mode,
-            }
-        })
+            .insert(request_id, mode.to_owned());
+        message
     }
 
     /// Build the `control_response` answering a pending `can_use_tool` prompt.
@@ -1246,14 +1250,7 @@ impl Mapper {
                 "message": "User cancelled tool execution.",
             }),
         };
-        Some(json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": response,
-            }
-        }))
+        Some(control_response(request_id, response))
     }
 
     /// Build the `control_response` allowing a pending `AskUserQuestion` prompt,
@@ -1265,20 +1262,13 @@ impl Mapper {
         answers: &serde_json::Map<String, Value>,
     ) -> Option<Value> {
         let questions = self.pending_user_input.remove(request_id)?;
-        Some(json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": {
-                    "behavior": "allow",
-                    "updatedInput": {
-                        "questions": questions,
-                        "answers": answers,
-                    }
-                }
-            }
-        }))
+        Some(control_response(
+            request_id,
+            json!({
+                "behavior": "allow",
+                "updatedInput": { "questions": questions, "answers": answers }
+            }),
+        ))
     }
 
     /// Drain every pending `AskUserQuestion`, producing `(request_id, deny
@@ -1289,17 +1279,13 @@ impl Mapper {
             .into_iter()
             .map(|request_id| {
                 self.pending_user_input.remove(&request_id);
-                let response = json!({
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": request_id,
-                        "response": {
-                            "behavior": "deny",
-                            "message": "User cancelled tool execution.",
-                        }
-                    }
-                });
+                let response = control_response(
+                    &request_id,
+                    json!({
+                        "behavior": "deny",
+                        "message": "User cancelled tool execution.",
+                    }),
+                );
                 (request_id, response)
             })
             .collect()
@@ -1368,7 +1354,8 @@ impl Mapper {
 
     fn synthesized_turn_started(&mut self) -> Vec<AgentEvent> {
         if self.session_started && self.current_turn_id.is_none() {
-            let turn_id = self.start_synthesized_turn();
+            let turn_id = self.start_turn();
+            self.awaiting_turn_checkpoint = false;
             vec![AgentEvent::TurnStarted { turn_id }]
         } else {
             Vec::new()
@@ -1445,7 +1432,7 @@ impl Mapper {
                 });
             }
         }
-        self.update_subagent(tool_use_id, ItemStatus::InProgress, None, false)
+        self.update_subagent(tool_use_id, ItemStatus::InProgress, None)
     }
 
     fn on_background_tasks_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1490,7 +1477,7 @@ impl Mapper {
                 parent_id: tool_use_id.clone(),
             });
         }
-        self.update_subagent(&tool_use_id, status, None, false)
+        self.update_subagent(&tool_use_id, status, None)
     }
 
     fn on_task_notification(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1537,7 +1524,7 @@ impl Mapper {
         if is_background_bash {
             self.complete_background_command(&tool_use_id, status, summary)
         } else {
-            self.update_subagent(&tool_use_id, status, summary, false)
+            self.update_subagent(&tool_use_id, status, summary)
         }
     }
 
@@ -1576,7 +1563,6 @@ impl Mapper {
         tool_use_id: &str,
         status: ItemStatus,
         summary: Option<String>,
-        completed_event: bool,
     ) -> Vec<AgentEvent> {
         let Some(ToolItem::Subagent {
             agent_type,
@@ -1589,7 +1575,7 @@ impl Mapper {
         if summary.is_some() {
             *saved_summary = summary;
         }
-        let item = ThreadItem {
+        vec![AgentEvent::ItemUpdated(ThreadItem {
             id: tool_use_id.to_owned(),
             parent_item_id: None,
             content: ItemContent::Subagent {
@@ -1598,12 +1584,7 @@ impl Mapper {
                 status,
                 summary: saved_summary.clone(),
             },
-        };
-        vec![if completed_event {
-            AgentEvent::ItemCompleted(item)
-        } else {
-            AgentEvent::ItemUpdated(item)
-        }]
+        })]
     }
 
     fn on_stream_event(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1809,18 +1790,7 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .unwrap_or("subagent")
                 .to_owned();
-            let description = input
-                .get("description")
-                .and_then(Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    input
-                        .get("prompt")
-                        .and_then(Value::as_str)
-                        .map(|prompt| prompt.chars().take(200).collect())
-                        .unwrap_or_default()
-                });
+            let description = subagent_description(&input);
             (
                 ToolItem::Subagent {
                     agent_type: agent_type.clone(),
@@ -2038,16 +2008,8 @@ impl Mapper {
         let Some(pending) = self.pending_rewinds.remove(request_id) else {
             return Vec::new();
         };
-        let (checkpoint_id, mode) = match &pending {
-            PendingRewind::Files {
-                checkpoint_id,
-                mode,
-            }
-            | PendingRewind::Conversation {
-                checkpoint_id,
-                mode,
-            } => (checkpoint_id.clone(), *mode),
-        };
+        let checkpoint_id = pending.checkpoint_id.clone();
+        let mode = pending.mode;
         if response.get("subtype").and_then(Value::as_str) != Some("success") {
             let error = response
                 .get("error")
@@ -2061,74 +2023,48 @@ impl Mapper {
             }];
         }
         let result = response.get("response").unwrap_or(&Value::Null);
-        match pending {
-            PendingRewind::Files {
-                checkpoint_id,
-                mode: RewindMode::FilesAndConversation,
-            } => {
-                if result.get("canRewind").and_then(Value::as_bool) == Some(false) {
-                    return vec![AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        error: result
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Claude Code could not restore files")
-                            .to_owned(),
-                    }];
-                }
-                let request = self
-                    .rewind_conversation_request(checkpoint_id, RewindMode::FilesAndConversation);
+        if !pending.conversation {
+            if result.get("canRewind").and_then(Value::as_bool) == Some(false) {
+                return vec![AgentEvent::RewindFailed {
+                    checkpoint_id,
+                    mode,
+                    error: result
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Claude Code could not restore files")
+                        .to_owned(),
+                }];
+            }
+            if mode == RewindMode::FilesAndConversation {
+                let request = self.rewind_request(checkpoint_id, mode, true);
                 self.outgoing.push(request);
-                Vec::new()
+                return Vec::new();
             }
-            PendingRewind::Files {
+            return vec![AgentEvent::RewindCompleted {
                 checkpoint_id,
                 mode,
-            } => {
-                if result.get("canRewind").and_then(Value::as_bool) == Some(false) {
-                    vec![AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        error: result
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Claude Code could not restore files")
-                            .to_owned(),
-                    }]
-                } else {
-                    vec![AgentEvent::RewindCompleted {
-                        checkpoint_id,
-                        mode,
-                        prefill: None,
-                    }]
-                }
-            }
-            PendingRewind::Conversation {
+                prefill: None,
+            }];
+        }
+        if result.get("rewound").and_then(Value::as_bool) != Some(true) {
+            vec![AgentEvent::RewindFailed {
                 checkpoint_id,
                 mode,
-            } => {
-                if result.get("rewound").and_then(Value::as_bool) != Some(true) {
-                    vec![AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        error: result
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Claude Code could not restore the conversation")
-                            .to_owned(),
-                    }]
-                } else {
-                    vec![AgentEvent::RewindCompleted {
-                        checkpoint_id,
-                        mode,
-                        prefill: result
-                            .get("prefillText")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    }]
-                }
-            }
+                error: result
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Claude Code could not restore the conversation")
+                    .to_owned(),
+            }]
+        } else {
+            vec![AgentEvent::RewindCompleted {
+                checkpoint_id,
+                mode,
+                prefill: result
+                    .get("prefillText")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }]
         }
     }
 
@@ -2186,61 +2122,28 @@ impl Mapper {
             {
                 events.push(event);
             }
-            self.outgoing.push(json!({
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": request_id,
-                    "response": {
-                        "behavior": "deny",
-                        "message": EXIT_PLAN_DENY_MESSAGE,
-                    }
-                }
-            }));
+            self.outgoing.push(control_response(
+                &request_id,
+                json!({ "behavior": "deny", "message": EXIT_PLAN_DENY_MESSAGE }),
+            ));
             return events;
         }
 
-        // (c) Full-access: ordinary SDK permission checks are bypassed, but the
-        // callback stays installed. Any non-special tool that reaches it is
-        // auto-allowed with no approval event (S2 §1.1/§1.2 "full-access allow").
-        if self.approval_mode == ApprovalMode::FullAccess {
-            self.outgoing.push(json!({
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": request_id,
-                    "response": {
-                        "behavior": "allow",
-                        "updatedInput": input,
-                    }
-                }
-            }));
-            return Vec::new();
-        }
-
-        // (d) Classify per the T3 substring matrix (S2 §1.3).
+        // (c) Classify per the T3 substring matrix (S2 §1.3).
         let request_type = classify_claude_tool(&tool_name);
 
-        // (e) Read-only: native read tools proceed without prompting. Commands
-        // and every other tool still fall through to the ordinary approval flow.
+        // (d) Full-access allows ordinary tools; read-only allows native reads.
         let read_only_allow = self.approval_mode == ApprovalMode::ReadOnly
             && request_type == ClaudeRequestType::FileRead;
-        if read_only_allow {
-            self.outgoing.push(json!({
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": request_id,
-                    "response": {
-                        "behavior": "allow",
-                        "updatedInput": input,
-                    }
-                }
-            }));
+        if self.approval_mode == ApprovalMode::FullAccess || read_only_allow {
+            self.outgoing.push(control_response(
+                &request_id,
+                json!({ "behavior": "allow", "updatedInput": input }),
+            ));
             return Vec::new();
         }
 
-        // (f) Everything else becomes a user-visible approval request.
+        // (e) Everything else becomes a user-visible approval request.
         let detail = approval_detail(&tool_name, &input);
         let kind = match request_type {
             ClaudeRequestType::FileRead => ApprovalKind::FileRead { detail },
@@ -2267,7 +2170,7 @@ impl Mapper {
 
         let suggestions = request
             .get("permission_suggestions")
-            .filter(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+            .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
             .cloned();
         self.pending_approvals
             .insert(request_id.clone(), PendingApproval { input, suggestions });
@@ -2377,6 +2280,21 @@ fn is_agent_tool(normalized: &str) -> bool {
     normalized.contains("agent") || normalized == "task"
 }
 
+fn subagent_description(input: &Value) -> String {
+    input
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            input
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(|prompt| prompt.chars().take(200).collect())
+                .unwrap_or_default()
+        })
+}
+
 /// Classify a tool name into its canonical approval request type using T3's
 /// ordered, substring-based matcher (S2 §1.3). The read-only predicate is
 /// checked first (so `WebSearch` → `FileRead` via `"search"`), then the ordered
@@ -2430,17 +2348,7 @@ fn approval_detail(tool_name: &str, input: &Value) -> String {
     // 2. Collab/subagent item: description, else first 200 chars of prompt,
     //    prefixed with `subagent_type: ` when present.
     if is_agent_tool(&tool_name.to_lowercase()) {
-        let body = input
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                input
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .map(|p| p.chars().take(200).collect())
-                    .unwrap_or_default()
-            });
+        let body = subagent_description(input);
         return match input
             .get("subagent_type")
             .and_then(Value::as_str)
@@ -2610,8 +2518,6 @@ fn tool_result_text(content: Option<&Value>) -> String {
             for block in blocks {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     parts.push(text.to_string());
-                } else if block.get("type").and_then(Value::as_str) == Some("text") {
-                    // no-op: handled above
                 } else {
                     parts.push(block.to_string());
                 }
@@ -3021,7 +2927,7 @@ fn model_available(id: &str, version: Option<(u32, u32, u32)>) -> bool {
 }
 
 fn version_ge(version: Option<(u32, u32, u32)>, min: (u32, u32, u32)) -> bool {
-    version.map(|v| v >= min).unwrap_or(false)
+    version.is_some_and(|v| v >= min)
 }
 
 /// Parse a `MAJOR.MINOR.PATCH` triple from `claude --version` output
@@ -3422,16 +3328,14 @@ mod tests {
         let launch_mode = initial_permission_mode(ApprovalMode::Supervised, InteractionMode::Plan);
         assert_eq!(launch_mode, "plan");
 
-        let mut m = Mapper::new();
-        m.configure(SessionConfig {
-            ultrathink: false,
-            interaction_mode: InteractionMode::Plan,
-            base_permission_mode: "default",
-            applied_permission_mode: launch_mode.into(),
-            approval_mode: ApprovalMode::Supervised,
-            native_rewind: false,
-            claude_dir: None,
-        });
+        let m = Mapper::new_configured(
+            false,
+            InteractionMode::Plan,
+            "default",
+            launch_mode.into(),
+            ApprovalMode::Supervised,
+            false,
+        );
 
         assert_eq!(m.applied_permission_mode, "plan");
     }
@@ -3459,7 +3363,7 @@ mod tests {
             )
             .await;
 
-            assert!(matches!(flow, Flow::Continue));
+            assert!(matches!(flow, ControlFlow::Continue(())));
             assert_eq!(m.base_permission_mode, "bypassPermissions");
             assert_eq!(m.applied_permission_mode, "plan");
             assert!(m.pending_permission_modes.is_empty());
@@ -4541,7 +4445,8 @@ mod tests {
     #[test]
     fn set_permission_mode_request_shape() {
         let mut m = Mapper::new();
-        let req = m.set_permission_mode_request(ApprovalMode::AutoAcceptEdits);
+        let req =
+            m.set_permission_mode_request_str(permission_mode_flag(ApprovalMode::AutoAcceptEdits));
         let request_id = req["request_id"].as_str().unwrap().to_owned();
         assert_eq!(req["type"], "control_request");
         assert!(req["request_id"].is_string());
@@ -4561,7 +4466,7 @@ mod tests {
         assert_eq!(m.applied_permission_mode, "acceptEdits");
 
         // FullAccess maps to bypassPermissions on the wire.
-        let req = m.set_permission_mode_request(ApprovalMode::FullAccess);
+        let req = m.set_permission_mode_request_str(permission_mode_flag(ApprovalMode::FullAccess));
         assert_eq!(req["request"]["mode"], "bypassPermissions");
         let events = m.on_message(json!({
             "type": "control_response",
