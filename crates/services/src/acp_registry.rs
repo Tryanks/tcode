@@ -72,8 +72,6 @@ impl From<std::io::Error> for RegistryError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
-    pub version: String,
-    #[serde(default)]
     pub agents: Vec<RegistryAgent>,
 }
 
@@ -85,12 +83,6 @@ pub struct RegistryAgent {
     pub version: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub repository: Option<String>,
-    #[serde(default)]
-    pub website: Option<String>,
-    #[serde(default)]
-    pub license: Option<String>,
     /// Icon URL (an SVG on the same CDN).
     #[serde(default)]
     pub icon: Option<String>,
@@ -606,13 +598,11 @@ mod tests {
     #[test]
     fn parses_the_registry_schema() {
         let registry = registry();
-        assert_eq!(registry.version, "1.0.0");
         assert_eq!(registry.agents.len(), 7);
 
         let gemini = &registry.agents[0];
         assert_eq!(gemini.name, "Gemini CLI");
         assert_eq!(gemini.version, "0.50.0");
-        assert_eq!(gemini.license.as_deref(), Some("Apache-2.0"));
         assert!(gemini.icon.as_deref().unwrap().ends_with("gemini.svg"));
         let npx = gemini.distribution.npx.as_ref().unwrap();
         assert_eq!(npx.package, "@google/gemini-cli@0.50.0");

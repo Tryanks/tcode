@@ -17,15 +17,15 @@ use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
 use tcode_protocol::{
     Command, EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
     ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, QueuedMessageStatus, RecentDir,
-    ServerEvent, SessionStatus, Subscription, Topic, decode_host_line,
+    ServerEvent, SessionStatus, Subscription, Topic,
 };
 use tcode_runtime::{
     app::ProjectGroup,
     event::RuntimeEvent,
     pipe::HostHandle,
     terminal::{LocalTerminalRegistry, TerminalContext, TerminalWorkspace},
-    ui_facade::ExternalImportUpdate,
 };
+use tcode_services::import::ExternalImportUpdate;
 
 use crate::{
     composer::Composer,
@@ -119,7 +119,7 @@ impl WorkspaceStore {
         };
 
         // Construction seeding is itself protocol traffic: subscribe, then
-        // deserialize each snapshot event. No live AppState read exists here.
+        // apply each snapshot event. No live AppState read exists here.
         if let Err(error) = host.hello(env!("CARGO_PKG_VERSION")) {
             log::error!("failed to send host hello: {}", error.message);
         }
@@ -143,31 +143,27 @@ impl WorkspaceStore {
         let mut seeded = HashSet::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
-            let Ok(line) = events.try_recv() else {
+            let Ok(message) = events.try_recv() else {
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 continue;
             };
-            match decode_host_line(&line) {
-                Ok(HostMessage::Event(envelope)) => {
-                    match (&envelope.topic, &envelope.event) {
-                        (Topic::Index, ServerEvent::IndexSnapshot(_))
-                        | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
-                        | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
-                        | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
-                        | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_))
-                        | (Topic::RuntimeEvents, ServerEvent::RuntimeSnapshot(_)) => {
-                            seeded.insert(envelope.topic.clone());
-                        }
-                        _ => {}
+            if let HostMessage::Event(envelope) = message {
+                match (&envelope.topic, &envelope.event) {
+                    (Topic::Index, ServerEvent::IndexSnapshot(_))
+                    | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
+                    | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
+                    | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
+                    | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_))
+                    | (Topic::RuntimeEvents, ServerEvent::RuntimeSnapshot(_)) => {
+                        seeded.insert(envelope.topic.clone());
                     }
-                    if let ServerEvent::Runtime(event) = &envelope.event {
-                        cx.emit(event.clone());
-                    } else {
-                        store.apply_domain_event(&envelope);
-                    }
+                    _ => {}
                 }
-                Ok(_) => {}
-                Err(error) => log::error!("failed to decode seed event: {}", error.message),
+                if let ServerEvent::Runtime(event) = &envelope.event {
+                    cx.emit(event.clone());
+                } else {
+                    store.apply_domain_event(&envelope);
+                }
             }
         }
         if seeded.len() != seed_topics.len() {
@@ -180,16 +176,9 @@ impl WorkspaceStore {
 
         #[cfg(not(test))]
         {
-            let event_lines = events;
+            let event_messages = events;
             cx.spawn(async move |this, cx| {
-                while let Ok(line) = event_lines.recv().await {
-                    let message = match decode_host_line(&line) {
-                        Ok(message) => message,
-                        Err(error) => {
-                            log::error!("failed to decode host event: {}", error.message);
-                            continue;
-                        }
-                    };
+                while let Ok(message) = event_messages.recv().await {
                     let HostMessage::Event(envelope) = message else {
                         continue;
                     };
@@ -490,7 +479,7 @@ impl WorkspaceStore {
         }
     }
 
-    /// Dispatch a serializable backend mutation.
+    /// Dispatch a typed backend mutation.
     pub fn dispatch(&mut self, command: Command) {
         if let Err(error) = self.host.dispatch(command) {
             log::error!("failed to dispatch host command: {}", error.message);
@@ -517,8 +506,8 @@ impl WorkspaceStore {
     #[cfg(test)]
     fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
         let events = self.host.event_receiver();
-        while let Ok(line) = events.try_recv() {
-            let Ok(HostMessage::Event(envelope)) = decode_host_line(&line) else {
+        while let Ok(message) = events.try_recv() {
+            let HostMessage::Event(envelope) = message else {
                 continue;
             };
             if let ServerEvent::Runtime(event) = &envelope.event {
@@ -1046,7 +1035,7 @@ impl WorkspaceStore {
 
     /// Local-handle crossing: take the preview broker receiver exactly once.
     ///
-    /// Commands and preview registration metadata remain serialized; this
+    /// Commands and preview registration metadata remain typed; this
     /// receiver carries native WebView reply senders and is the deliberate
     /// reverse-RPC affordance documented by [`HostHandle::take_preview_requests`].
     pub fn take_preview_requests(
@@ -1224,7 +1213,7 @@ impl WorkspaceStore {
         )
     }
 
-    /// Starts the serialized import command, then returns a client-local
+    /// Starts the typed import command, then returns a client-local
     /// receiver fed by the single construction-time progress bus. See
     /// [`HostHandle::start_external_import`] for the remote replacement
     /// (correlated progress events).
@@ -1468,7 +1457,7 @@ impl WorkspaceStore {
         self.session_status_replica.is_some()
     }
 
-    /// Consumes a prefill already delivered by the serialized
+    /// Consumes a prefill already delivered by the typed
     /// `NativeRewindPrefill` event; no backend consuming read remains.
     pub fn take_native_rewind_prefill(&mut self) -> Option<String> {
         let active_id = self.session_status_replica.as_ref()?.session_id.clone();
@@ -1984,7 +1973,7 @@ mod tests {
     }
 
     fn command(host: &HostHandle, command: Command) {
-        smol::block_on(host.command(command)).expect("serialized host command");
+        smol::block_on(host.command(command)).expect("typed host command");
     }
 
     fn shutdown_test_host(host: &HostHandle) {

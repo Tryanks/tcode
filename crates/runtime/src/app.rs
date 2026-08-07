@@ -38,9 +38,10 @@ use tcode_core::settings::{
 };
 pub use tcode_core::ui::{ConversationDestination, RightTab, WorkspaceMode};
 use tcode_protocol::{
-    EventEnvelope, GitStatusStatus, ProviderVersionStatus as ProtocolProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, ServerEvent, SessionEventRecord, SessionStatus,
-    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, PathEntry,
+    ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
+    RecentDir, ServerEvent, SessionEventRecord, SessionStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -52,7 +53,8 @@ use tcode_services::git::{
     worktree_path_for,
 };
 use tcode_services::import::{
-    ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
+    ExternalImportUpdate, ExternalRoots, ImportOutcome, existing_external_ids, import_thread,
+    scan_recent_dirs,
 };
 use tcode_services::provider_probe::{
     default_program, probe_provider, run_capture, run_capture_env, run_status, which_in_path,
@@ -65,10 +67,6 @@ use tcode_services::version_check::{
     update_command, update_command_string,
 };
 use tcode_services::workspace::list_workspace;
-
-use crate::ui_facade::{
-    AcpMarketplaceItem, ExternalImportUpdate, ExternalThread, PathEntry, RecentDir,
-};
 
 #[rustfmt::skip]
 pub use tcode_core::project::{group_sessions, ProjectGroup};
@@ -2880,17 +2878,6 @@ impl AppState {
     pub fn models_loading(&self, provider: ProviderKind) -> bool {
         self.models_loading.get(&provider).copied().unwrap_or(false)
             && self.models_for(provider).is_empty()
-    }
-
-    /// The [`ModelSpec`] for the active session's selected model, if the catalog
-    /// contains it (drives the traits picker's descriptors).
-    pub fn active_model_spec(&self) -> Option<ModelSpec> {
-        let active = self.active.as_ref()?;
-        let model = active.meta.model.as_deref()?;
-        self.models_for(active.meta.provider)
-            .iter()
-            .find(|m| m.id == model)
-            .cloned()
     }
 
     pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut HostCx) {
@@ -8061,8 +8048,11 @@ mod tests {
     use std::cell::RefCell;
     use std::ops::Deref;
     use std::rc::{Rc, Weak};
+    use std::sync::{Arc, Mutex};
 
-    use crate::host::{HostMsg, HostOutput};
+    use tcode_protocol::HostMessage;
+
+    use crate::host::HostMsg;
 
     struct TestStore(SessionStore);
 
@@ -8095,8 +8085,9 @@ mod tests {
     struct TestAppContext {
         mailbox_tx: smol::channel::Sender<HostMsg>,
         mailbox_rx: smol::channel::Receiver<HostMsg>,
-        outgoing_tx: smol::channel::Sender<crate::host::HostOutput>,
-        outgoing_rx: smol::channel::Receiver<crate::host::HostOutput>,
+        outgoing_tx: smol::channel::Sender<HostMessage>,
+        outgoing_rx: smol::channel::Receiver<HostMessage>,
+        pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
         changed_tx: smol::channel::Sender<()>,
         changed_rx: smol::channel::Receiver<()>,
         state: Option<Weak<RefCell<AppState>>>,
@@ -8112,6 +8103,7 @@ mod tests {
                 mailbox_rx,
                 outgoing_tx,
                 outgoing_rx,
+                pending: Arc::new(Mutex::new(HashMap::new())),
                 changed_tx,
                 changed_rx,
                 state: None,
@@ -8130,6 +8122,7 @@ mod tests {
             HostCx::new(
                 self.mailbox_tx.clone(),
                 self.outgoing_tx.clone(),
+                self.pending.clone(),
                 self.changed_tx.clone(),
             )
         }
@@ -8153,12 +8146,6 @@ mod tests {
                             let mut state = state.borrow_mut();
                             completion(&mut state, &mut host_cx);
                             state.sync_terminal_handles();
-                        }
-                        HostMsg::DecodedClient(_) => {
-                            panic!("unit test harness received a protocol client message")
-                        }
-                        HostMsg::ClientClosed => {
-                            panic!("unit test harness received a client-close message")
                         }
                     }
                 }
@@ -10667,10 +10654,10 @@ mod tests {
         });
         let mut serialized_prefill = None;
         while let Ok(output) = cx.outgoing_rx.try_recv() {
-            if let HostOutput::Event(HostEvent::Domain(EventEnvelope {
+            if let HostMessage::Event(EventEnvelope {
                 event: ServerEvent::NativeRewindPrefill { session_id, text },
                 ..
-            })) = output
+            }) = output
                 && session_id == "claude-session"
             {
                 serialized_prefill = Some(text);

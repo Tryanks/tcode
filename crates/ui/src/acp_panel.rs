@@ -16,8 +16,8 @@ use gpui_component::{
 };
 
 use tcode_core::acp::InstalledAcpAgent;
+use tcode_protocol::AcpMarketplaceItem;
 use tcode_protocol::Command;
-use tcode_runtime::ui_facade::AcpMarketplaceItem;
 
 use crate::material;
 use crate::store::WorkspaceStore;

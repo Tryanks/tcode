@@ -6,4 +6,3 @@ pub mod event;
 pub mod host;
 pub mod pipe;
 pub mod terminal;
-pub mod ui_facade;

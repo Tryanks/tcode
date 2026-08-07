@@ -217,26 +217,6 @@ impl TurnTiming {
     pub fn ai_ms(&self) -> u64 {
         self.total_ms - self.tool_ms
     }
-
-    /// The three durations in whole seconds. Truncation is absorbed by the AI
-    /// part so the rendered parts still sum to the rendered total.
-    pub fn secs(&self) -> TurnTimingSecs {
-        let total = self.total_ms / 1000;
-        let tools = (self.tool_ms / 1000).min(total);
-        TurnTimingSecs {
-            total,
-            ai: total - tools,
-            tools,
-        }
-    }
-}
-
-/// A [`TurnTiming`] rounded down to whole seconds for display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TurnTimingSecs {
-    pub total: u64,
-    pub ai: u64,
-    pub tools: u64,
 }
 
 /// Running union-of-intervals accounting for the tool-like items of the open
@@ -3232,25 +3212,6 @@ mod tests {
         // The second turn starts from a clean clock — no leakage across turns.
         assert_eq!(timeline.turns[1].timing.unwrap().tool_ms, 0);
         assert_eq!(timeline.turns[1].timing.unwrap().total_ms, 4_000);
-    }
-
-    #[test]
-    fn rendered_second_parts_sum_to_the_rendered_total() {
-        let timing = TurnTiming::new(10_500, 3_600);
-        let secs = timing.secs();
-        assert_eq!((secs.total, secs.ai, secs.tools), (10, 7, 3));
-        assert_eq!(secs.ai + secs.tools, secs.total);
-
-        // Tool time is clamped into the observed total, so the invariant holds
-        // even for a nonsensical accumulation.
-        let clamped = TurnTiming::new(1_000, 5_000);
-        assert_eq!(clamped.tool_ms, 1_000);
-        assert_eq!(clamped.ai_ms(), 0);
-        let clamped_secs = clamped.secs();
-        assert_eq!(
-            (clamped_secs.total, clamped_secs.ai, clamped_secs.tools),
-            (1, 0, 1)
-        );
     }
 
     #[test]

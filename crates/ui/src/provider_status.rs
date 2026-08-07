@@ -8,13 +8,11 @@ use agent::ProviderKind;
 
 use crate::settings::provider_label;
 
-use tcode_core::provider_status::{ProviderProbeDiagnostic, derive_summary};
-pub use tcode_core::provider_status::{
-    ProviderSnapshot, ProviderSummary, ProviderSummaryDetail, ProviderSummaryHeadline, StatusDot,
-};
+use tcode_core::provider_status::{AuthStatus, ProviderProbeDiagnostic, ProviderStatusKind};
+pub use tcode_core::provider_status::{ProviderSnapshot, StatusDot};
 
 #[cfg(test)]
-use tcode_core::provider_status::{AuthStatus, ProviderAuth, ProviderStatusKind};
+use tcode_core::provider_status::ProviderAuth;
 
 /// The derived card summary: dot + headline + detail (+ the email that the
 /// headline embeds, so the card can render it with the reveal control).
@@ -41,29 +39,68 @@ pub fn summarize(
     enabled: bool,
 ) -> StatusSummary {
     let t = |key: &str| tcode_i18n::tr!(key).into_owned();
-    let summary: ProviderSummary = derive_summary(snapshot, enabled);
-    let detail = match summary.detail {
-        ProviderSummaryDetail::None => String::new(),
-        ProviderSummaryDetail::Message(message) => message,
-        ProviderSummaryDetail::Diagnostic(diagnostic) => {
-            probe_diagnostic_message(provider, diagnostic)
-        }
-        ProviderSummaryDetail::Fallback => match &summary.headline {
-            ProviderSummaryHeadline::Checking => t("providers.status.checking_detail"),
-            ProviderSummaryHeadline::Disabled => t("providers.status.disabled_detail"),
-            ProviderSummaryHeadline::NotFound => t("providers.status.not_found_detail"),
-            ProviderSummaryHeadline::NeedsAttention => t("providers.status.needs_attention_detail"),
-            ProviderSummaryHeadline::Unavailable => t("providers.status.unavailable_detail"),
-            ProviderSummaryHeadline::Available => t("providers.status.available_detail"),
-            ProviderSummaryHeadline::Authenticated { .. }
-            | ProviderSummaryHeadline::NotAuthenticated => String::new(),
-        },
+    let checking = || StatusSummary {
+        dot: StatusDot::Warning,
+        headline: t("providers.status.checking"),
+        detail: t("providers.status.checking_detail"),
+        email: None,
     };
-    let (headline, email) = match summary.headline {
-        ProviderSummaryHeadline::Checking => (t("providers.status.checking"), None),
-        ProviderSummaryHeadline::Disabled => (t("providers.status.disabled"), None),
-        ProviderSummaryHeadline::NotFound => (t("providers.status.not_found"), None),
-        ProviderSummaryHeadline::Authenticated { label, email } => {
+    let Some(snapshot) = snapshot else {
+        return checking();
+    };
+    let Some(status) = snapshot.status else {
+        return checking();
+    };
+    let detail_or = |fallback: &str| {
+        snapshot
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                snapshot
+                    .diagnostic
+                    .map(|diagnostic| probe_diagnostic_message(provider, diagnostic))
+            })
+            .unwrap_or_else(|| {
+                if fallback.is_empty() {
+                    String::new()
+                } else {
+                    t(fallback)
+                }
+            })
+    };
+    if !enabled {
+        return StatusSummary {
+            dot: StatusDot::Amber,
+            headline: t("providers.status.disabled"),
+            detail: detail_or("providers.status.disabled_detail"),
+            email: None,
+        };
+    }
+    if !snapshot.installed {
+        return StatusSummary {
+            dot: StatusDot::Error,
+            headline: t("providers.status.not_found"),
+            detail: detail_or("providers.status.not_found_detail"),
+            email: None,
+        };
+    }
+    let dot = match status {
+        ProviderStatusKind::Ready => StatusDot::Success,
+        ProviderStatusKind::Warning => StatusDot::Warning,
+        ProviderStatusKind::Error => StatusDot::Error,
+    };
+    let auth = snapshot.auth.as_ref();
+    match auth.map(|auth| auth.status) {
+        Some(AuthStatus::Authenticated) => {
+            let email = auth
+                .and_then(|auth| auth.email.clone())
+                .filter(|email| !email.is_empty());
+            let label = auth
+                .and_then(|auth| auth.label.as_deref())
+                .filter(|label| !label.is_empty());
             let headline = match (&email, &label) {
                 (Some(_), Some(label)) => tcode_i18n::tr!(
                     "providers.status.authenticated_as_with_label",
@@ -81,20 +118,41 @@ pub fn summarize(
                 }
                 (None, None) => t("providers.status.authenticated"),
             };
-            (headline, email)
+            StatusSummary {
+                dot,
+                headline,
+                detail: detail_or(""),
+                email,
+            }
         }
-        ProviderSummaryHeadline::NotAuthenticated => {
-            (t("providers.status.not_authenticated"), None)
+        Some(AuthStatus::Unauthenticated) => StatusSummary {
+            dot,
+            headline: t("providers.status.not_authenticated"),
+            detail: detail_or(""),
+            email: None,
+        },
+        _ => {
+            let (headline, detail) = match status {
+                ProviderStatusKind::Warning => (
+                    "providers.status.needs_attention",
+                    "providers.status.needs_attention_detail",
+                ),
+                ProviderStatusKind::Error => (
+                    "providers.status.unavailable",
+                    "providers.status.unavailable_detail",
+                ),
+                ProviderStatusKind::Ready => (
+                    "providers.status.available",
+                    "providers.status.available_detail",
+                ),
+            };
+            StatusSummary {
+                dot,
+                headline: t(headline),
+                detail: detail_or(detail),
+                email: None,
+            }
         }
-        ProviderSummaryHeadline::NeedsAttention => (t("providers.status.needs_attention"), None),
-        ProviderSummaryHeadline::Unavailable => (t("providers.status.unavailable"), None),
-        ProviderSummaryHeadline::Available => (t("providers.status.available"), None),
-    };
-    StatusSummary {
-        dot: summary.dot,
-        headline,
-        detail,
-        email,
     }
 }
 
@@ -220,6 +278,19 @@ mod tests {
         );
         assert_eq!(s.email.as_deref(), Some("dev@example.com"));
 
+        // Blank auth metadata behaves like absent metadata.
+        let blank_auth = ProviderSnapshot {
+            auth: Some(ProviderAuth {
+                status: AuthStatus::Authenticated,
+                label: Some(String::new()),
+                email: Some(String::new()),
+            }),
+            ..snapshot()
+        };
+        let s = summarize(Some(&blank_auth), true);
+        assert_eq!(s.headline, "Authenticated");
+        assert_eq!(s.email, None);
+
         // Authenticated, label only.
         let label_only = ProviderSnapshot {
             auth: Some(ProviderAuth {
@@ -295,11 +366,17 @@ mod tests {
         // simply not known yet.
         let in_flight = ProviderSnapshot {
             checking: true,
+            message: Some("ignored".into()),
+            diagnostic: Some(ProviderProbeDiagnostic::IndeterminateAuth),
             ..ProviderSnapshot::default()
         };
-        let s = summarize(Some(&in_flight), true);
+        let s = summarize(Some(&in_flight), false);
         assert_eq!(s.dot, StatusDot::Warning);
         assert_eq!(s.headline, "Checking provider status");
+        assert_eq!(
+            s.detail,
+            "Waiting for the server to report installation and authentication details."
+        );
 
         // A server message always replaces the fallback detail.
         let with_message = ProviderSnapshot {
@@ -309,6 +386,51 @@ mod tests {
         assert_eq!(
             summarize(Some(&with_message), true).detail,
             "custom diagnostic"
+        );
+
+        let disabled_message = ProviderSnapshot {
+            message: Some(" custom disabled ".into()),
+            ..snapshot()
+        };
+        assert_eq!(
+            summarize(Some(&disabled_message), false).detail,
+            "custom disabled"
+        );
+        let missing_message = ProviderSnapshot {
+            status: Some(ProviderStatusKind::Error),
+            message: Some(" custom missing ".into()),
+            ..ProviderSnapshot::default()
+        };
+        assert_eq!(
+            summarize(Some(&missing_message), true).detail,
+            "custom missing"
+        );
+        let blank_message = ProviderSnapshot {
+            message: Some("  ".into()),
+            ..snapshot()
+        };
+        assert_eq!(
+            summarize(Some(&blank_message), true).detail,
+            "Installed and ready, but authentication could not be verified."
+        );
+
+        let diagnostic = ProviderSnapshot {
+            diagnostic: Some(ProviderProbeDiagnostic::Unauthenticated),
+            message: Some("  ".into()),
+            ..snapshot()
+        };
+        assert_eq!(
+            summarize(Some(&diagnostic), true).detail,
+            "Codex CLI is not authenticated. Run `codex login` and try again."
+        );
+        let diagnostic_with_message = ProviderSnapshot {
+            diagnostic: Some(ProviderProbeDiagnostic::FailedCli),
+            message: Some(" precise message ".into()),
+            ..snapshot()
+        };
+        assert_eq!(
+            summarize(Some(&diagnostic_with_message), true).detail,
+            "precise message"
         );
     }
 

@@ -3519,7 +3519,7 @@ fn render_commit_footer(
 }
 
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
-    if tcode_runtime::ui_facade::open_in_zed(cwd).is_err() {
+    if tcode_services::desktop::open_in_zed(cwd).is_err() {
         window.push_notification(
             Notification::error(tcode_i18n::tr!("errors.zed_cli_missing")),
             cx,
@@ -3666,12 +3666,14 @@ fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
     let Some(timing) = timing else {
         return vec![clock];
     };
-    let parts = timing.secs();
+    let total = timing.total_ms / 1000;
+    let tools = (timing.tool_ms / 1000).min(total);
+    let ai = total - tools;
     vec![
         clock,
-        tcode_i18n::tr!("chat.turn_total", duration = format_span(parts.total)).into_owned(),
-        tcode_i18n::tr!("chat.turn_ai", duration = format_span(parts.ai)).into_owned(),
-        tcode_i18n::tr!("chat.turn_tools", duration = format_span(parts.tools)).into_owned(),
+        tcode_i18n::tr!("chat.turn_total", duration = format_span(total)).into_owned(),
+        tcode_i18n::tr!("chat.turn_ai", duration = format_span(ai)).into_owned(),
+        tcode_i18n::tr!("chat.turn_tools", duration = format_span(tools)).into_owned(),
     ]
 }
 
@@ -3827,7 +3829,7 @@ fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEditRow> {
     changes
         .iter()
         .map(|change| LiveEditRow {
-            path: tcode_runtime::ui_facade::relativize_to_workspace(&change.path, cwd),
+            path: tcode_services::user_files::relativize_to_workspace(&change.path, cwd),
             counts: live_edit_counts(change.diff.as_deref()),
         })
         .collect()
@@ -3880,7 +3882,7 @@ fn work_log_row_entries<'a>(
 fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>)> {
     let mut groups: Vec<(String, Vec<FileRow>)> = Vec::new();
     for change in changes {
-        let display = tcode_runtime::ui_facade::relativize_to_workspace(&change.path, cwd);
+        let display = tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
         let (dir, name) = match display.rsplit_once('/') {
             Some((dir, name)) => (dir.to_string(), name.to_string()),
             None => (String::new(), display.clone()),
@@ -5131,21 +5133,21 @@ This begins after the hard break."#;
     fn relativize_strips_cwd_prefix() {
         let cwd = Path::new("/tmp/proj");
         assert_eq!(
-            tcode_runtime::ui_facade::relativize_to_workspace("/tmp/proj/src/a.rs", cwd),
+            tcode_services::user_files::relativize_to_workspace("/tmp/proj/src/a.rs", cwd),
             "src/a.rs"
         );
         assert_eq!(
-            tcode_runtime::ui_facade::relativize_to_workspace("/tmp/proj/a.rs", cwd),
+            tcode_services::user_files::relativize_to_workspace("/tmp/proj/a.rs", cwd),
             "a.rs"
         );
         // Outside the cwd stays absolute.
         assert_eq!(
-            tcode_runtime::ui_facade::relativize_to_workspace("/other/x.rs", cwd),
+            tcode_services::user_files::relativize_to_workspace("/other/x.rs", cwd),
             "/other/x.rs"
         );
         // Already-relative paths are left as-is.
         assert_eq!(
-            tcode_runtime::ui_facade::relativize_to_workspace("src/b.rs", cwd),
+            tcode_services::user_files::relativize_to_workspace("src/b.rs", cwd),
             "src/b.rs"
         );
     }
@@ -5570,6 +5572,15 @@ This begins after the hard break."#;
                 "Total 1m 20s",
                 "AI thinking & response 45s",
                 "Tool calls 35s",
+            ]
+        );
+        assert_eq!(
+            turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(10_500, 3_600))),
+            vec![
+                "3:04 PM",
+                "Total 10s",
+                "AI thinking & response 7s",
+                "Tool calls 3s",
             ]
         );
         // No clause carries a separator of its own: the row's dots belong to the

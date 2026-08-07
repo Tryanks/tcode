@@ -39,7 +39,7 @@ use tcode_core::{
     ui::RightTab,
 };
 use tcode_protocol::{Command, GitDiffResult, GitDiffScope, GitFileText};
-use tcode_runtime::ui_facade::relativize_to_workspace;
+use tcode_services::user_files::relativize_to_workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DiffScope {

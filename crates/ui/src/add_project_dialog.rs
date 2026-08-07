@@ -20,7 +20,7 @@ use gpui_component::{
 use crate::store::WorkspaceStore;
 use crate::time::{humanize_ago, now_secs};
 use tcode_protocol::{Command, ExternalThread, RecentDir, SourceTool};
-use tcode_runtime::ui_facade::ExternalImportUpdate;
+use tcode_services::import::ExternalImportUpdate;
 
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;

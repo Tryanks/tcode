@@ -68,6 +68,19 @@ pub enum ImportOutcome {
     Failed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalImportUpdate {
+    Progress {
+        done: usize,
+        total: usize,
+        tool: String,
+    },
+    Finished {
+        imported: usize,
+        skipped: usize,
+    },
+}
+
 #[derive(Debug)]
 struct ConvertedThread {
     external_id: String,

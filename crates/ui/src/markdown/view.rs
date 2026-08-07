@@ -196,7 +196,7 @@ impl Element for MarkdownView {
                         LinkTarget::Local(path) => {
                             let path = path.to_string_lossy().into_owned();
                             let relative_path = markdown.base_dir().map(|base_dir| {
-                                tcode_runtime::ui_facade::relativize_to_workspace(&path, base_dir)
+                                tcode_services::user_files::relativize_to_workspace(&path, base_dir)
                             });
                             menu.menu(
                                 tcode_i18n::tr!("chat.open").into_owned(),
@@ -279,7 +279,7 @@ impl Element for MarkdownView {
 }
 
 fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
-    if tcode_runtime::ui_facade::open_in_zed(path).is_err() {
+    if tcode_services::desktop::open_in_zed(path).is_err() {
         window.push_notification(
             Notification::error(tcode_i18n::tr!("errors.zed_cli_missing")),
             cx,
