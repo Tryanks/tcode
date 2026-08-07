@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use agent::{ChangeCompleteness, FileChange, ItemStatus, RewindMode};
+use agent::{ChangeCompleteness, FileChange, ItemContent, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, FollowMode,
     HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState,
@@ -254,6 +254,25 @@ fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
     }
 }
 
+type UserContent<'a> = (&'a str, Option<SteeringStatus>, Option<usize>, &'a [String]);
+
+fn user_content(content: &EntryContent) -> Option<UserContent<'_>> {
+    match content {
+        EntryContent::Item(ItemContent::UserMessage {
+            text,
+            context_len,
+            attachments,
+        }) => Some((text, None, *context_len, attachments)),
+        EntryContent::Steer {
+            text,
+            status,
+            context_len,
+            attachments,
+        } => Some((text, Some(*status), *context_len, attachments)),
+        _ => None,
+    }
+}
+
 /// Coalesce only adjacent activity entries, leaving messages and errors at
 /// their exact positions in the timeline.
 fn segment_entries<'a>(
@@ -268,15 +287,20 @@ fn segment_entries<'a>(
             entries.iter().rposition(|entry| {
                 !matches!(
                     entry.content,
-                    EntryContent::User {
-                        steering: Some(SteeringStatus::Pending),
+                    EntryContent::Steer {
+                        status: SteeringStatus::Pending,
                         ..
                     }
                 )
             })
         })
         .flatten()
-        .filter(|index| matches!(entries[*index].content, EntryContent::Reasoning { .. }));
+        .filter(|index| {
+            matches!(
+                entries[*index].content,
+                EntryContent::Item(ItemContent::Reasoning { .. })
+            )
+        });
 
     let flush_activities = |segments: &mut Vec<Segment<'a>>,
                             activities: &mut Vec<&'a TimelineEntry>| {
@@ -290,8 +314,8 @@ fn segment_entries<'a>(
         if turn_running
             && matches!(
                 entry.content,
-                EntryContent::User {
-                    steering: Some(SteeringStatus::Pending),
+                EntryContent::Steer {
+                    status: SteeringStatus::Pending,
                     ..
                 }
             )
@@ -300,17 +324,19 @@ fn segment_entries<'a>(
             continue;
         }
         match &entry.content {
-            EntryContent::Command { .. }
-            | EntryContent::Tool { .. }
-            | EntryContent::Subagent { .. }
+            EntryContent::Item(ItemContent::CommandExecution { .. })
+            | EntryContent::Item(ItemContent::ToolCall { .. })
+            | EntryContent::Item(ItemContent::Subagent { .. })
+            | EntryContent::Item(ItemContent::WebSearch { .. })
+            | EntryContent::Item(ItemContent::Other { .. })
             | EntryContent::ContextCompacted
-            | EntryContent::FileChange { .. } => activities.push(entry),
-            EntryContent::Reasoning { .. } => {
+            | EntryContent::Item(ItemContent::FileChange { .. }) => activities.push(entry),
+            EntryContent::Item(ItemContent::Reasoning { .. }) => {
                 if live_reasoning_index == Some(entry_index) {
                     activities.push(entry);
                 }
             }
-            EntryContent::User { .. } => {
+            EntryContent::Item(ItemContent::UserMessage { .. }) | EntryContent::Steer { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::User(entry));
             }
@@ -322,7 +348,7 @@ fn segment_entries<'a>(
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::ModelChange(entry));
             }
-            EntryContent::Assistant { .. } => {
+            EntryContent::Item(ItemContent::AssistantMessage { .. }) => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::Assistant(entry));
             }
@@ -354,16 +380,19 @@ fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
 
     for entry in entries {
         match &entry.content {
-            EntryContent::Command { .. } => counts.commands += 1,
-            EntryContent::FileChange { changes } => {
+            EntryContent::Item(ItemContent::CommandExecution { .. }) => counts.commands += 1,
+            EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
                 files.extend(changes.iter().map(|change| change.path.as_str()));
             }
-            EntryContent::Tool { .. } => counts.tools += 1,
-            EntryContent::Subagent { .. } => counts.subagents += 1,
+            EntryContent::Item(ItemContent::ToolCall { .. })
+            | EntryContent::Item(ItemContent::WebSearch { .. })
+            | EntryContent::Item(ItemContent::Other { .. }) => counts.tools += 1,
+            EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
             EntryContent::ContextCompacted => counts.compactions += 1,
-            EntryContent::User { .. }
-            | EntryContent::Assistant { .. }
-            | EntryContent::Reasoning { .. }
+            EntryContent::Steer { .. }
+            | EntryContent::Item(ItemContent::UserMessage { .. })
+            | EntryContent::Item(ItemContent::AssistantMessage { .. })
+            | EntryContent::Item(ItemContent::Reasoning { .. })
             | EntryContent::Error { .. }
             | EntryContent::ProviderStartError { .. }
             | EntryContent::ProviderRelay { .. }
@@ -498,7 +527,10 @@ fn index_turns(
                 std::mem::discriminant(&entry.content).hash(&mut content);
                 entry.ts.hash(&mut content);
                 hash_entry_shape(&entry.content, &mut content);
-                if matches!(&entry.content, EntryContent::Subagent { .. }) {
+                if matches!(
+                    &entry.content,
+                    EntryContent::Item(ItemContent::Subagent { .. })
+                ) {
                     let subagent_expanded = expanded.contains(&format!("subagent-{}", entry.id));
                     subagent_expanded.hash(&mut content);
                     if subagent_expanded {
@@ -552,71 +584,83 @@ fn index_turns(
 /// `context_len`) or a child-thread callback (whose text parses as one). `None`
 /// for an ordinary user message, which stays a plain bubble.
 fn disclosure_key(content: &EntryContent, entry_id: &str) -> Option<String> {
-    match content {
-        EntryContent::User {
-            context_len: Some(_),
-            ..
-        } => Some(format!("orchestrate-context-{entry_id}")),
-        EntryContent::User { text, .. } if parse_orchestrate_callback(text).is_some() => {
-            Some(format!("orchestrate-callback-{entry_id}"))
-        }
-        _ => None,
+    let (text, _, context_len, _) = user_content(content)?;
+    if context_len.is_some() {
+        Some(format!("orchestrate-context-{entry_id}"))
+    } else if parse_orchestrate_callback(text).is_some() {
+        Some(format!("orchestrate-callback-{entry_id}"))
+    } else {
+        None
     }
 }
 
 /// Hash only data that can alter a turn's layout. Text lengths make streaming
 /// updates O(number of entries) without repeatedly hashing growing markdown.
 fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
+    if let EntryContent::Item(item) = content {
+        std::mem::discriminant(item).hash(hash);
+    }
     match content {
-        EntryContent::User {
+        EntryContent::Item(ItemContent::UserMessage {
             text,
-            steering,
+            context_len,
+            attachments,
+        }) => {
+            attachments.len().hash(hash);
+            text.len().hash(hash);
+            Option::<SteeringStatus>::None.hash(hash);
+            context_len.hash(hash);
+        }
+        EntryContent::Steer {
+            text,
+            status,
             context_len,
             attachments,
         } => {
             attachments.len().hash(hash);
             text.len().hash(hash);
-            steering.hash(hash);
+            status.hash(hash);
             context_len.hash(hash);
         }
-        EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
+        EntryContent::Item(ItemContent::AssistantMessage { text })
+        | EntryContent::Item(ItemContent::Reasoning { text }) => {
             text.len().hash(hash);
         }
-        EntryContent::Command {
+        EntryContent::Item(ItemContent::CommandExecution {
             command,
             output,
             exit_code,
             status,
-        } => {
+        }) => {
             command.len().hash(hash);
             output.len().hash(hash);
             exit_code.hash(hash);
             std::mem::discriminant(status).hash(hash);
         }
-        EntryContent::FileChange { changes } => {
+        EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
             changes.len().hash(hash);
             for change in changes {
                 change.path.len().hash(hash);
                 change.diff.as_ref().map(String::len).hash(hash);
             }
         }
-        EntryContent::Tool {
+        EntryContent::Item(ItemContent::ToolCall {
             name,
             input,
             output,
             status,
-        } => {
+        }) => {
             name.len().hash(hash);
             input.to_string().len().hash(hash);
             output.as_ref().map(String::len).hash(hash);
             std::mem::discriminant(status).hash(hash);
         }
-        EntryContent::Subagent {
+        EntryContent::Item(ItemContent::Subagent {
             agent_type,
             description,
             status,
             summary,
-        } => {
+        }) => {
             agent_type.len().hash(hash);
             description.len().hash(hash);
             std::mem::discriminant(status).hash(hash);
@@ -638,6 +682,27 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             reason.hash(hash);
         }
         EntryContent::ContextCompacted => {}
+        EntryContent::Item(ItemContent::WebSearch { query }) => {
+            "web_search".len().hash(hash);
+            serde_json::json!({ "query": query })
+                .to_string()
+                .len()
+                .hash(hash);
+            Option::<usize>::None.hash(hash);
+            std::mem::discriminant(&ItemStatus::Completed).hash(hash);
+        }
+        EntryContent::Item(ItemContent::Other {
+            provider_kind,
+            summary,
+        }) => {
+            provider_kind.len().hash(hash);
+            serde_json::json!({ "summary": summary })
+                .to_string()
+                .len()
+                .hash(hash);
+            Option::<usize>::None.hash(hash);
+            std::mem::discriminant(&ItemStatus::Completed).hash(hash);
+        }
     }
 }
 
@@ -786,15 +851,17 @@ impl ChatView {
                 );
                 for entry in &timeline.entries {
                     match &entry.content {
-                        EntryContent::Assistant { text } | EntryContent::Reasoning { text } => {
+                        EntryContent::Item(ItemContent::AssistantMessage { text })
+                        | EntryContent::Item(ItemContent::Reasoning { text }) => {
                             texts.push((entry.id.clone(), text.clone()));
                         }
-                        EntryContent::User {
-                            text, context_len, ..
-                        } => texts.push((
-                            entry.id.clone(),
-                            plain_text_as_markdown(user_visible_text(text, *context_len)),
-                        )),
+                        content if user_content(content).is_some() => {
+                            let (text, _, context_len, _) = user_content(content).unwrap();
+                            texts.push((
+                                entry.id.clone(),
+                                plain_text_as_markdown(user_visible_text(text, context_len)),
+                            ));
+                        }
                         _ => {}
                     }
                 }
@@ -898,7 +965,11 @@ impl ChatView {
         let turn_entries: Vec<&TimelineEntry> = entries.iter().map(AsRef::as_ref).collect();
         let turn_counts = work_log_counts(&turn_entries);
         let last_assistant_id = entries.iter().rev().find_map(|entry| {
-            matches!(entry.content, EntryContent::Assistant { .. }).then_some(entry.id.as_str())
+            matches!(
+                entry.content,
+                EntryContent::Item(ItemContent::AssistantMessage { .. })
+            )
+            .then_some(entry.id.as_str())
         });
         let last_segment_is_activity = matches!(segments.last(), Some(Segment::ActivityRun(_)));
         let append_tail_work_log = turn.running && !last_segment_is_activity;
@@ -954,15 +1025,8 @@ impl ChatView {
                     ));
                 }
                 Segment::User(entry) => {
-                    let EntryContent::User {
-                        text,
-                        steering,
-                        context_len,
-                        attachments,
-                    } = &entry.content
-                    else {
-                        unreachable!();
-                    };
+                    let (text, steering, context_len, attachments) =
+                        user_content(&entry.content).expect("user segment");
                     // A child-thread callback (never annotated with a split) is a
                     // centered disclosure row, not a bubble, and carries no
                     // action row.
@@ -979,9 +1043,9 @@ impl ChatView {
                             &entry.id,
                             text,
                             cwd,
-                            *context_len,
+                            context_len,
                             attachments,
-                            *steering,
+                            steering,
                             pinned.0 == Some(entry.id.as_str()),
                             window,
                             cx,
@@ -989,7 +1053,8 @@ impl ChatView {
                     }
                 }
                 Segment::Assistant(entry) => {
-                    let EntryContent::Assistant { text } = &entry.content else {
+                    let EntryContent::Item(ItemContent::AssistantMessage { text }) = &entry.content
+                    else {
                         unreachable!();
                     };
                     let streaming =
@@ -1069,9 +1134,9 @@ impl ChatView {
         // Keeping them separate from `segments` preserves FIFO order without
         // making their request-time position look model-visible.
         for entry in segmented.pending_steers {
-            let EntryContent::User {
+            let EntryContent::Steer {
                 text,
-                steering,
+                status,
                 context_len,
                 attachments,
             } = &entry.content
@@ -1085,7 +1150,7 @@ impl ChatView {
                 cwd,
                 *context_len,
                 attachments,
-                *steering,
+                Some(*status),
                 pinned.0 == Some(entry.id.as_str()),
                 window,
                 cx,
@@ -1753,7 +1818,12 @@ impl ChatView {
         let muted = cx.theme().muted_foreground;
         let subagent_count = activities
             .iter()
-            .filter(|entry| matches!(entry.content, EntryContent::Subagent { .. }))
+            .filter(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::Subagent { .. })
+                )
+            })
             .count();
         let segment_counts = work_log_counts(activities);
 
@@ -1798,7 +1868,8 @@ impl ChatView {
             for entry in &visible {
                 // A file-change entry is a snapshot of several files; each one
                 // gets its own row so the log names what was edited.
-                if let EntryContent::FileChange { changes } = &entry.content {
+                if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content
+                {
                     for row in live_edit_rows(changes, cwd) {
                         section = section.child(self.render_file_edit_row(&row, cx));
                     }
@@ -1921,14 +1992,17 @@ impl ChatView {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if matches!(&entry.content, EntryContent::Subagent { .. }) {
+        if matches!(
+            &entry.content,
+            EntryContent::Item(ItemContent::Subagent { .. })
+        ) {
             return self.render_subagent_row(entry, cx);
         }
         let muted = cx.theme().muted_foreground;
         let (icon, summary): (IconName, AnyElement) = match &entry.content {
-            EntryContent::Command {
+            EntryContent::Item(ItemContent::CommandExecution {
                 command, status, ..
-            } => {
+            }) => {
                 let icon = if matches!(status, ItemStatus::InProgress) {
                     IconName::SquareTerminal
                 } else {
@@ -1959,12 +2033,12 @@ impl ChatView {
                     .into_any_element();
                 (icon, summary)
             }
-            EntryContent::Tool {
+            EntryContent::Item(ItemContent::ToolCall {
                 name,
                 input,
                 output,
                 status,
-            } => {
+            }) => {
                 // Prefer an input summary; fall back to a snippet of the output.
                 let mut brief = tool_brief(input);
                 if brief.is_empty()
@@ -1991,7 +2065,52 @@ impl ChatView {
                     .into_any_element();
                 (activity_icon(*status), summary)
             }
-            EntryContent::Reasoning { text } => {
+            EntryContent::Item(ItemContent::WebSearch { query }) => {
+                let brief = one_line(query);
+                let summary = h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1()
+                    .overflow_hidden()
+                    .child(div().flex_none().child("web_search"))
+                    .when(!brief.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(muted)
+                                .child(brief),
+                        )
+                    })
+                    .into_any_element();
+                (activity_icon(ItemStatus::Completed), summary)
+            }
+            EntryContent::Item(ItemContent::Other {
+                provider_kind,
+                summary: item_summary,
+            }) => {
+                let brief = one_line(item_summary);
+                let summary = h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1()
+                    .overflow_hidden()
+                    .child(div().flex_none().child(provider_kind.clone()))
+                    .when(!brief.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(muted)
+                                .child(brief),
+                        )
+                    })
+                    .into_any_element();
+                (activity_icon(ItemStatus::Completed), summary)
+            }
+            EntryContent::Item(ItemContent::Reasoning { text }) => {
                 let summary = h_flex()
                     .min_w_0()
                     .flex_1()
@@ -2036,12 +2155,12 @@ impl ChatView {
     }
 
     fn render_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
-        let EntryContent::Subagent {
+        let EntryContent::Item(ItemContent::Subagent {
             agent_type,
             description,
             status,
             summary,
-        } = &entry.content
+        }) = &entry.content
         else {
             unreachable!();
         };
@@ -2140,7 +2259,8 @@ impl ChatView {
     fn render_subagent_child(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         match &entry.content {
-            EntryContent::User { text, .. } => h_flex()
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+            | EntryContent::Steer { text, .. } => h_flex()
                 .w_full()
                 .justify_end()
                 .child(
@@ -2155,7 +2275,7 @@ impl ChatView {
                         .child(text.clone()),
                 )
                 .into_any_element(),
-            EntryContent::Assistant { text } => div()
+            EntryContent::Item(ItemContent::AssistantMessage { text }) => div()
                 .w_full()
                 .text_size(px(13.))
                 .line_height(px(19.))
@@ -2168,7 +2288,7 @@ impl ChatView {
                 .text_color(cx.theme().danger)
                 .child(displayed_error_text(&entry.content).into_owned())
                 .into_any_element(),
-            EntryContent::FileChange { changes } => div()
+            EntryContent::Item(ItemContent::FileChange { changes, .. }) => div()
                 .text_size(px(13.))
                 .text_color(muted)
                 .child(tcode_i18n::tr!("chat.changed_files", count = changes.len()))
@@ -3173,21 +3293,6 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Screenshot-only: `--debug-git-dialog` opens the commit dialog once the
-        // background git status has landed (a header click is not drivable
-        // headlessly). Consumed once.
-        let git_status_loaded = self.workspace_store.read(cx).chat_git_status_loaded(cx);
-        let open_commit_dialog = self.window_state.update(cx, |state, _| {
-            let armed = state.debug_open_commit_dialog && git_status_loaded;
-            if armed {
-                state.debug_open_commit_dialog = false;
-            }
-            armed
-        });
-        if open_commit_dialog {
-            self.open_commit_dialog(GitAction::Commit, window, cx);
-        }
-
         let active = self.workspace_store.read(cx).chat_active_session(cx);
 
         let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
@@ -3219,13 +3324,24 @@ impl Render for ChatView {
                         .entries
                         .iter()
                         .rev()
-                        .find(|entry| matches!(entry.content, EntryContent::User { .. }))
+                        .find(|entry| {
+                            matches!(
+                                entry.content,
+                                EntryContent::Item(ItemContent::UserMessage { .. })
+                                    | EntryContent::Steer { .. }
+                            )
+                        })
                         .map(|entry| entry.id.clone()),
                     timeline
                         .entries
                         .iter()
                         .rev()
-                        .find(|entry| matches!(entry.content, EntryContent::Assistant { .. }))
+                        .find(|entry| {
+                            matches!(
+                                entry.content,
+                                EntryContent::Item(ItemContent::AssistantMessage { .. })
+                            )
+                        })
                         .map(|entry| entry.id.clone()),
                 )
             })
@@ -3744,9 +3860,12 @@ fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEditRow> {
 fn work_log_auto_expands(activities: &[&TimelineEntry], turn_running: bool, is_last: bool) -> bool {
     turn_running
         && (is_last
-            || activities
-                .iter()
-                .any(|entry| matches!(entry.content, EntryContent::FileChange { .. })))
+            || activities.iter().any(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::FileChange { .. })
+                )
+            }))
 }
 
 /// The activity entries a Work Log segment renders as rows.
@@ -3762,7 +3881,13 @@ fn work_log_row_entries<'a>(
     activities
         .iter()
         .copied()
-        .filter(|entry| turn_running || !matches!(entry.content, EntryContent::FileChange { .. }))
+        .filter(|entry| {
+            turn_running
+                || !matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::FileChange { .. })
+                )
+        })
         .collect()
 }
 
@@ -3901,7 +4026,7 @@ mod tests {
     };
     use crate::markdown::MarkdownState;
     use crate::window_state::WindowState;
-    use agent::{FileChange, FileChangeKind, ItemStatus, ProviderKind};
+    use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind};
     use gpui::{AppContext as _, Entity, TestAppContext};
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -4071,21 +4196,8 @@ This begins after the hard break."#;
             active.timeline = Timeline::default();
             active.timeline.turns = vec![TurnMeta::default()];
             active.timeline.entries = vec![
-                entry(
-                    "user",
-                    EntryContent::User {
-                        text: "render a long document".into(),
-                        steering: None,
-                        context_len: None,
-                        attachments: Vec::new(),
-                    },
-                ),
-                entry(
-                    "assistant",
-                    EntryContent::Assistant {
-                        text: DEMO_MARKDOWN.into(),
-                    },
-                ),
+                entry("user", user_item("render a long document")),
+                entry("assistant", assistant(DEMO_MARKDOWN)),
             ];
             active.draft = false;
             (active.meta.id.clone(), active.timeline.clone())
@@ -4147,6 +4259,22 @@ This begins after the hard break."#;
             ts: None,
             turn: 0,
         })
+    }
+
+    fn user_item(text: &str) -> EntryContent {
+        EntryContent::Item(ItemContent::UserMessage {
+            text: text.into(),
+            context_len: None,
+            attachments: Vec::new(),
+        })
+    }
+
+    fn assistant(text: &str) -> EntryContent {
+        EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
+    }
+
+    fn reasoning(text: &str) -> EntryContent {
+        EntryContent::Item(ItemContent::Reasoning { text: text.into() })
     }
 
     #[test]
@@ -4222,12 +4350,12 @@ This begins after the hard break."#;
     fn command(id: &str) -> Arc<TimelineEntry> {
         entry(
             id,
-            EntryContent::Command {
+            EntryContent::Item(ItemContent::CommandExecution {
                 command: id.to_string(),
                 output: String::new(),
                 exit_code: Some(0),
                 status: ItemStatus::Completed,
-            },
+            }),
         )
     }
 
@@ -4242,21 +4370,8 @@ This begins after the hard break."#;
         let children = HashMap::new();
         let expanded = HashSet::new();
         let mut entries = vec![
-            entry(
-                "user-0",
-                EntryContent::User {
-                    text: "go".into(),
-                    steering: None,
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            ),
-            entry(
-                "assistant-0",
-                EntryContent::Assistant {
-                    text: "working".into(),
-                },
-            ),
+            entry("user-0", user_item("go")),
+            entry("assistant-0", assistant("working")),
         ];
         let initial = index_turns(&turns, &entries, None, &children, &expanded);
         assert_eq!(initial.len(), 1);
@@ -4278,18 +4393,7 @@ This begins after the hard break."#;
         // A new turn adds exactly one list item. The former tail is also
         // remeasured because it gains the visual inter-turn gap.
         let turns = vec![TurnMeta::default(), TurnMeta::default()];
-        entries.push(at_turn(
-            entry(
-                "user-1",
-                EntryContent::User {
-                    text: "next".into(),
-                    steering: None,
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            ),
-            1,
-        ));
+        entries.push(at_turn(entry("user-1", user_item("next")), 1));
         let new_turn = index_turns(&turns, &entries, None, &children, &expanded);
         assert_eq!(new_turn[0].entry_range, 0..3);
         assert_eq!(new_turn[1].entry_range, 3..4);
@@ -4318,12 +4422,12 @@ This begins after the hard break."#;
         let turns = vec![TurnMeta::default()];
         let entries = vec![entry(
             "spawn",
-            EntryContent::Subagent {
+            EntryContent::Item(ItemContent::Subagent {
                 agent_type: "researcher".into(),
                 description: "Inspect the protocol".into(),
                 status: ItemStatus::InProgress,
                 summary: None,
-            },
+            }),
         )];
         let mut children = HashMap::new();
         let collapsed = index_turns(&turns, &entries, None, &children, &HashSet::new());
@@ -4340,12 +4444,7 @@ This begins after the hard break."#;
 
         children.insert(
             "spawn".to_string(),
-            vec![entry(
-                "spawn:child",
-                EntryContent::Assistant {
-                    text: "Found the event envelope".into(),
-                },
-            )],
+            vec![entry("spawn:child", assistant("Found the event envelope"))],
         );
         let with_child = index_turns(&turns, &entries, None, &children, &expanded_keys);
         assert_eq!(
@@ -4360,30 +4459,12 @@ This begins after the hard break."#;
     #[test]
     fn segment_entries_preserves_interleaved_timeline_order() {
         let entries = [
-            entry(
-                "user",
-                EntryContent::User {
-                    text: "go".into(),
-                    steering: None,
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            ),
+            entry("user", user_item("go")),
             command("cmd-1"),
             command("cmd-2"),
-            entry(
-                "assistant-1",
-                EntryContent::Assistant {
-                    text: "first".into(),
-                },
-            ),
+            entry("assistant-1", assistant("first")),
             command("cmd-3"),
-            entry(
-                "assistant-2",
-                EntryContent::Assistant {
-                    text: "second".into(),
-                },
-            ),
+            entry("assistant-2", assistant("second")),
             entry(
                 "error",
                 EntryContent::Error {
@@ -4434,20 +4515,20 @@ This begins after the hard break."#;
         let pending = |id: &str| {
             entry(
                 id,
-                EntryContent::User {
+                EntryContent::Steer {
                     text: id.into(),
-                    steering: Some(SteeringStatus::Pending),
+                    status: SteeringStatus::Pending,
                     context_len: None,
                     attachments: Vec::new(),
                 },
             )
         };
         let entries = [
-            entry("assistant-a", EntryContent::Assistant { text: "a".into() }),
+            entry("assistant-a", assistant("a")),
             pending("steer-a"),
             command("command"),
             pending("steer-b"),
-            entry("assistant-b", EntryContent::Assistant { text: "b".into() }),
+            entry("assistant-b", assistant("b")),
         ];
 
         let live = segment_entries(&entries, true);
@@ -4483,19 +4564,14 @@ This begins after the hard break."#;
         let expanded = HashSet::new();
         let pending = entry(
             "steer",
-            EntryContent::User {
+            EntryContent::Steer {
                 text: "redirect".into(),
-                steering: Some(SteeringStatus::Pending),
+                status: SteeringStatus::Pending,
                 context_len: None,
                 attachments: Vec::new(),
             },
         );
-        let assistant = entry(
-            "assistant",
-            EntryContent::Assistant {
-                text: "working".into(),
-            },
-        );
+        let assistant = entry("assistant", assistant("working"));
         let before = index_turns(
             &turns,
             &[pending.clone(), assistant.clone()],
@@ -4505,8 +4581,8 @@ This begins after the hard break."#;
         );
 
         let mut accepted = pending;
-        if let EntryContent::User { steering, .. } = &mut Arc::make_mut(&mut accepted).content {
-            *steering = Some(SteeringStatus::Accepted);
+        if let EntryContent::Steer { status, .. } = &mut Arc::make_mut(&mut accepted).content {
+            *status = SteeringStatus::Accepted;
         }
         let status_changed = index_turns(
             &turns,
@@ -4536,7 +4612,13 @@ This begins after the hard break."#;
     fn segment_entries_keeps_activity_runs_continuous_across_file_changes() {
         let entries = [
             command("cmd-1"),
-            entry("edit", EntryContent::FileChange { changes: vec![] }),
+            entry(
+                "edit",
+                EntryContent::Item(ItemContent::FileChange {
+                    changes: vec![],
+                    status: ItemStatus::Completed,
+                }),
+            ),
             command("cmd-2"),
         ];
         let segments = segment_entries(&entries, false).flow;
@@ -4552,18 +4634,8 @@ This begins after the hard break."#;
     #[test]
     fn only_latest_live_reasoning_is_visible() {
         let entries = [
-            entry(
-                "reason-1",
-                EntryContent::Reasoning {
-                    text: "first".into(),
-                },
-            ),
-            entry(
-                "reason-2",
-                EntryContent::Reasoning {
-                    text: "latest".into(),
-                },
-            ),
+            entry("reason-1", reasoning("first")),
+            entry("reason-2", reasoning("latest")),
         ];
 
         let segments = segment_entries(&entries, true).flow;
@@ -4576,12 +4648,7 @@ This begins after the hard break."#;
     #[test]
     fn later_activity_removes_live_reasoning() {
         let entries = [
-            entry(
-                "reason",
-                EntryContent::Reasoning {
-                    text: "thinking".into(),
-                },
-            ),
+            entry("reason", reasoning("thinking")),
             command("later-command"),
         ];
 
@@ -4592,18 +4659,8 @@ This begins after the hard break."#;
         ));
 
         let entries = [
-            entry(
-                "reason",
-                EntryContent::Reasoning {
-                    text: "thinking".into(),
-                },
-            ),
-            entry(
-                "assistant",
-                EntryContent::Assistant {
-                    text: "answer".into(),
-                },
-            ),
+            entry("reason", reasoning("thinking")),
+            entry("assistant", assistant("answer")),
         ];
         let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
@@ -4614,12 +4671,7 @@ This begins after the hard break."#;
 
     #[test]
     fn completion_removes_reasoning_from_history() {
-        let entries = [entry(
-            "reason",
-            EntryContent::Reasoning {
-                text: "finished thinking".into(),
-            },
-        )];
+        let entries = [entry("reason", reasoning("finished thinking"))];
 
         assert!(segment_entries(&entries, false).flow.is_empty());
     }
@@ -4627,7 +4679,7 @@ This begins after the hard break."#;
     fn file_change(id: &str, paths: &[&str]) -> Arc<TimelineEntry> {
         entry(
             id,
-            EntryContent::FileChange {
+            EntryContent::Item(ItemContent::FileChange {
                 changes: paths
                     .iter()
                     .map(|path| FileChange {
@@ -4636,7 +4688,8 @@ This begins after the hard break."#;
                         diff: None,
                     })
                     .collect(),
-            },
+                status: ItemStatus::Completed,
+            }),
         )
     }
 
@@ -5021,12 +5074,7 @@ This begins after the hard break."#;
         let entries = [
             command("command-1"),
             file_change("files-1", &["src/shared.rs"]),
-            entry(
-                "assistant",
-                EntryContent::Assistant {
-                    text: "intermediate output".into(),
-                },
-            ),
+            entry("assistant", assistant("intermediate output")),
             command("command-2"),
             file_change("files-2", &["src/shared.rs"]),
         ];

@@ -11,8 +11,6 @@ pub struct WindowState {
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
     pub pending_settings_section: Option<String>,
-    pub debug_open_commit_dialog: bool,
-    pub pending_preview_url: Option<String>,
 }
 
 impl WindowState {
@@ -24,8 +22,6 @@ impl WindowState {
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
-            debug_open_commit_dialog: false,
-            pending_preview_url: None,
         }
     }
 

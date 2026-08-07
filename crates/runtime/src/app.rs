@@ -7465,7 +7465,12 @@ fn final_assistant_message(timeline: &Timeline) -> String {
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, entry)| matches!(&entry.content, EntryContent::Assistant { .. }))
+        .find(|(_, entry)| {
+            matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::AssistantMessage { .. })
+            )
+        })
     else {
         return String::new();
     };
@@ -7480,7 +7485,7 @@ fn final_assistant_message(timeline: &Timeline) -> String {
             break;
         }
         match &entry.content {
-            EntryContent::Assistant { text } => parts.push(text.as_str()),
+            EntryContent::Item(ItemContent::AssistantMessage { text }) => parts.push(text.as_str()),
             _ => break,
         }
     }
@@ -8696,11 +8701,11 @@ mod tests {
                 .entries
                 .iter()
                 .find_map(|entry| match &entry.content {
-                    EntryContent::User {
+                    EntryContent::Item(ItemContent::UserMessage {
                         text,
                         context_len: Some(len),
                         ..
-                    } => Some((text.clone(), *len)),
+                    }) => Some((text.clone(), *len)),
                     _ => None,
                 })
                 .expect("folded user entry carries the split");
@@ -10128,9 +10133,9 @@ mod tests {
             let timeline = Timeline::fold_events(state.store.read_events("parent"));
             assert!(timeline.entries.iter().any(|entry| matches!(
                 &entry.content,
-                EntryContent::User {
+                EntryContent::Steer {
                     text,
-                    steering: Some(tcode_core::session::SteeringStatus::Pending),
+                    status: tcode_core::session::SteeringStatus::Pending,
                     ..
                 } if entry.id == recorded_request_id && text.contains("child-a completed")
             )));
@@ -10170,9 +10175,9 @@ mod tests {
             let active = state.active.as_ref().unwrap();
             assert!(active.timeline.entries.iter().any(|entry| matches!(
                 &entry.content,
-                EntryContent::User {
+                EntryContent::Steer {
                     text,
-                    steering: Some(tcode_core::session::SteeringStatus::Pending),
+                    status: tcode_core::session::SteeringStatus::Pending,
                     ..
                 } if entry.id == request_id && text == "redirect"
             )));
@@ -10190,9 +10195,9 @@ mod tests {
             assert!(active.queue.is_empty());
             assert!(active.timeline.entries.iter().any(|entry| matches!(
                 &entry.content,
-                EntryContent::User {
+                EntryContent::Steer {
                     text,
-                    steering: Some(tcode_core::session::SteeringStatus::Pending),
+                    status: tcode_core::session::SteeringStatus::Pending,
                     ..
                 } if entry.id == request_id && text == "queued redirect"
             )));
@@ -11669,7 +11674,7 @@ mod tests {
 
         state.update(cx, |state, _| {
             assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "persisted cold output")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "persisted cold output")
             ));
         });
     }
@@ -11705,7 +11710,7 @@ mod tests {
 
         state.update(cx, |state, _| {
             assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "while parked")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "while parked")
             ));
         });
     }
@@ -11740,10 +11745,10 @@ mod tests {
             let active = state.active.as_ref().unwrap();
             assert_eq!(active.meta.id, id_b);
             assert!(active.timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "only session B")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "only session B")
             ));
             assert!(!active.timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "only session A")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "only session A")
             ));
         });
     }
@@ -11771,10 +11776,10 @@ mod tests {
         state.update(cx, |state, _| {
             let timeline = &state.active.as_ref().unwrap().timeline;
             assert!(timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "before load")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "before load")
             ));
             assert!(timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::Assistant { text } if text == "raced append")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "raced append")
             ));
         });
     }
@@ -11826,7 +11831,7 @@ mod tests {
                 cx,
             );
             assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
-                |entry| matches!(&entry.content, EntryContent::User { text, .. } if text == "first message")
+                |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "first message")
             ));
 
             state.on_event(
@@ -11896,7 +11901,7 @@ mod tests {
                 .entries
                 .iter()
                 .filter_map(|e| match &e.content {
-                    EntryContent::User { text, .. } => Some(text.as_str()),
+                    EntryContent::Item(ItemContent::UserMessage { text, .. }) => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -11921,7 +11926,7 @@ mod tests {
             // And it is durable: a replay of the JSONL shows the same thing.
             let replayed = Timeline::fold_events(state.store.read_events(&id_b));
             assert!(replayed.entries.iter().any(
-                |e| matches!(&e.content, EntryContent::User { text, .. } if text == "second message")
+                |e| matches!(&e.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "second message")
             ));
         });
 
@@ -12272,11 +12277,11 @@ mod tests {
             assert!(active.turn_in_flight);
             assert!(active.timeline.entries.iter().any(|e| matches!(
                 &e.content,
-                EntryContent::Assistant { text } if text == "Migration step 1 done."
+                EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Migration step 1 done."
             )));
             assert!(active.timeline.entries.iter().any(|e| matches!(
                 &e.content,
-                EntryContent::User { text, .. } if text == "queued follow-up"
+                EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "queued follow-up"
             )));
 
             // The second turn completes with nothing queued: NOW the provider

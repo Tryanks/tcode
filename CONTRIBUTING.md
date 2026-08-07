@@ -57,17 +57,6 @@ visual contract: when the code and the doc disagree, one of them is a bug.
 
 ## Verifying real behaviour
 
-Unit tests don't prove a provider works. There are headless paths for that.
-
-**End-to-end smoke** (spawns the real CLI in a throwaway directory,
-auto-approves, exits non-zero on failure):
-
-```sh
-git init /tmp/smoke
-cargo run -- --smoke "claude|/tmp/smoke|Reply with exactly: PONG"
-cargo run -- --smoke "codex|/tmp/smoke|Reply with exactly: PONG"
-```
-
 **Provider-layer probes** (no GUI — print the raw canonical event trace):
 
 ```sh
@@ -82,13 +71,9 @@ cargo run -p agent --example image_probe -- claude /tmp/blue.png \
 and installed ACP agents) — useful for demos, screenshots and trying a change
 without touching your real threads.
 
-**Launch flags** for driving surfaces that need a running app:
-`--open-latest`, `--open-diff`, `--open-settings`, `--open-palette`,
-`--open-draft <project>`; and for screenshots, `--debug-compose <text>`,
-`--debug-image <path>`, `--debug-live`, `--debug-send <text>`,
-`--debug-palette <query>`,
-`--debug-settings-section <general|providers|orchestrate|archived>`,
-`--debug-queue "msg1|msg2"`.
+**Launch flags** for driving surfaces that need a running app: `--open-latest`,
+`--open-diff`, `--open-settings`, `--open-palette`, and
+`--open-draft <project>`.
 
 ## Code layout
 

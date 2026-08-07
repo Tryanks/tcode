@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use agent::ItemContent;
 use tcode_core::session::{EntryContent, Timeline};
 use tcode_services::store::SessionStore;
 
@@ -120,15 +121,15 @@ fn visual_test_fixture_replays_through_session_store() {
 
     assert!(matches!(
         &timeline.entries[0].content,
-        EntryContent::User { text, .. } if text == USER_MESSAGE
+        EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == USER_MESSAGE
     ));
     assert!(timeline.entries.iter().any(|entry| matches!(
         &entry.content,
-        EntryContent::Assistant { text } if text == ASSISTANT_MARKDOWN
+        EntryContent::Item(ItemContent::AssistantMessage { text }) if text == ASSISTANT_MARKDOWN
     )));
     assert!(timeline.entries.iter().any(|entry| matches!(
         &entry.content,
-        EntryContent::Reasoning { text }
+        EntryContent::Item(ItemContent::Reasoning { text })
             if text == "I’ll assemble a compact markdown showcase and verify each requested construct."
     )));
     assert_eq!(

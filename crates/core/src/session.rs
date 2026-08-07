@@ -413,10 +413,14 @@ pub struct TurnChangeSet {
 
 #[derive(Debug, Clone)]
 pub enum EntryContent {
-    User {
+    Item(ItemContent),
+    /// A user message injected into an already-open turn. Provider-originated
+    /// user messages live in [`EntryContent::Item`]; this tcode-only variant
+    /// carries the local delivery state that [`ItemContent`] does not model.
+    Steer {
         text: String,
         /// Delivery state for a message injected into an already-open turn.
-        steering: Option<SteeringStatus>,
+        status: SteeringStatus,
         /// Byte length of an injected context prefix folded into `text` (the
         /// orchestrate guidance + configuration composed ahead of the user's own
         /// words). When present, the UI renders `text[..context_len]` as a
@@ -426,33 +430,6 @@ pub enum EntryContent {
         /// Local paths of the image attachments sent with this message (empty
         /// for text-only messages and for logs predating the field).
         attachments: Vec<String>,
-    },
-    Assistant {
-        text: String,
-    },
-    Reasoning {
-        text: String,
-    },
-    Command {
-        command: String,
-        output: String,
-        exit_code: Option<i32>,
-        status: ItemStatus,
-    },
-    FileChange {
-        changes: Vec<FileChange>,
-    },
-    Tool {
-        name: String,
-        input: serde_json::Value,
-        output: Option<String>,
-        status: ItemStatus,
-    },
-    Subagent {
-        agent_type: String,
-        description: String,
-        status: ItemStatus,
-        summary: Option<String>,
     },
     Error {
         message: String,
@@ -590,7 +567,8 @@ impl Timeline {
     /// First user message in the timeline, if any (used for session titles).
     pub fn first_user_message(&self) -> Option<&str> {
         self.entries.iter().find_map(|entry| match &entry.content {
-            EntryContent::User { text, .. } => Some(text.as_str()),
+            EntryContent::Item(ItemContent::UserMessage { text, .. })
+            | EntryContent::Steer { text, .. } => Some(text.as_str()),
             _ => None,
         })
     }
@@ -1067,7 +1045,9 @@ impl Timeline {
                 return None;
             }
             match &entry.content {
-                EntryContent::FileChange { changes } => Some(changes.as_slice()),
+                EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
+                    Some(changes.as_slice())
+                }
                 _ => None,
             }
         });
@@ -1087,7 +1067,7 @@ impl Timeline {
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
-        let mut incoming = Self::content_from_item(&item.content);
+        let mut incoming = EntryContent::Item(item.content.clone());
         if let Some(parent_id) = &item.parent_item_id {
             let turn = self.ensure_turn(ts);
             let children = self.children.entry(parent_id.clone()).or_default();
@@ -1118,16 +1098,35 @@ impl Timeline {
                 incoming,
             );
         } else {
-            let turn = if matches!(incoming, EntryContent::User { .. }) {
+            let turn = if matches!(
+                incoming,
+                EntryContent::Item(ItemContent::UserMessage { .. })
+            ) {
                 let turn = self.begin_user_turn(ts);
-                if let EntryContent::User { steering, .. } = &mut incoming
-                    && self.entries.iter().any(|entry| {
-                        entry.turn == turn && matches!(entry.content, EntryContent::User { .. })
-                    })
-                {
+                if self.entries.iter().any(|entry| {
+                    entry.turn == turn
+                        && matches!(
+                            entry.content,
+                            EntryContent::Item(ItemContent::UserMessage { .. })
+                                | EntryContent::Steer { .. }
+                        )
+                }) {
                     // Legacy logs represented a steer as a second UserMessage
                     // item. Preserve their historical accepted rendering.
-                    *steering = Some(SteeringStatus::Accepted);
+                    let EntryContent::Item(ItemContent::UserMessage {
+                        text,
+                        context_len,
+                        attachments,
+                    }) = incoming
+                    else {
+                        unreachable!();
+                    };
+                    incoming = EntryContent::Steer {
+                        text,
+                        status: SteeringStatus::Accepted,
+                        context_len,
+                        attachments,
+                    };
                 }
                 turn
             } else {
@@ -1155,9 +1154,9 @@ impl Timeline {
         let turn = self.ensure_turn(ts);
         self.entries.push(Arc::new(TimelineEntry {
             id: request_id.to_owned(),
-            content: EntryContent::User {
+            content: EntryContent::Steer {
                 text: text.to_owned(),
-                steering: Some(SteeringStatus::Pending),
+                status: SteeringStatus::Pending,
                 context_len: None,
                 attachments: attachments.to_vec(),
             },
@@ -1172,8 +1171,8 @@ impl Timeline {
         };
         if !matches!(
             self.entries[position].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Pending),
+            EntryContent::Steer {
+                status: SteeringStatus::Pending,
                 ..
             }
         ) {
@@ -1182,12 +1181,12 @@ impl Timeline {
 
         let mut entry = self.entries.remove(position);
         let current_turn = self.turns.iter().rposition(|turn| turn.running);
-        if let EntryContent::User {
-            steering: steering @ Some(SteeringStatus::Pending),
+        if let EntryContent::Steer {
+            status: status @ SteeringStatus::Pending,
             ..
         } = &mut Arc::make_mut(&mut entry).content
         {
-            *steering = Some(SteeringStatus::Accepted);
+            *status = SteeringStatus::Accepted;
         }
         if let Some(turn) = current_turn {
             Arc::make_mut(&mut entry).turn = turn;
@@ -1195,85 +1194,24 @@ impl Timeline {
         self.entries.push(entry);
     }
 
-    fn content_from_item(content: &ItemContent) -> EntryContent {
-        match content {
-            ItemContent::UserMessage {
-                text,
-                context_len,
-                attachments,
-            } => EntryContent::User {
-                text: text.clone(),
-                steering: None,
-                context_len: *context_len,
-                attachments: attachments.clone(),
-            },
-            ItemContent::AssistantMessage { text } => {
-                EntryContent::Assistant { text: text.clone() }
-            }
-            ItemContent::Reasoning { text } => EntryContent::Reasoning { text: text.clone() },
-            ItemContent::CommandExecution {
-                command,
-                output,
-                exit_code,
-                status,
-            } => EntryContent::Command {
-                command: command.clone(),
-                output: output.clone(),
-                exit_code: *exit_code,
-                status: *status,
-            },
-            ItemContent::FileChange { changes, .. } => EntryContent::FileChange {
-                changes: changes.clone(),
-            },
-            ItemContent::ToolCall {
-                name,
-                input,
-                output,
-                status,
-            } => EntryContent::Tool {
-                name: name.clone(),
-                input: input.clone(),
-                output: output.clone(),
-                status: *status,
-            },
-            ItemContent::Subagent {
-                agent_type,
-                description,
-                status,
-                summary,
-            } => EntryContent::Subagent {
-                agent_type: agent_type.clone(),
-                description: description.clone(),
-                status: *status,
-                summary: summary.clone(),
-            },
-            ItemContent::WebSearch { query } => EntryContent::Tool {
-                name: "web_search".into(),
-                input: serde_json::json!({ "query": query }),
-                output: None,
-                status: ItemStatus::Completed,
-            },
-            ItemContent::Other {
-                provider_kind,
-                summary,
-            } => EntryContent::Tool {
-                name: provider_kind.clone(),
-                input: serde_json::json!({ "summary": summary }),
-                output: None,
-                status: ItemStatus::Completed,
-            },
-        }
-    }
-
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item_id) {
             let entry = Arc::make_mut(entry);
             match (&mut entry.content, kind) {
-                (EntryContent::Assistant { text: existing }, DeltaKind::AssistantText)
-                | (EntryContent::Reasoning { text: existing }, DeltaKind::ReasoningText) => {
+                (
+                    EntryContent::Item(ItemContent::AssistantMessage { text: existing }),
+                    DeltaKind::AssistantText,
+                )
+                | (
+                    EntryContent::Item(ItemContent::Reasoning { text: existing }),
+                    DeltaKind::ReasoningText,
+                ) => {
                     existing.push_str(text);
                 }
-                (EntryContent::Command { output, .. }, DeltaKind::CommandOutput) => {
+                (
+                    EntryContent::Item(ItemContent::CommandExecution { output, .. }),
+                    DeltaKind::CommandOutput,
+                ) => {
                     output.push_str(text);
                 }
                 _ => log::warn!("delta kind {kind:?} does not match item {item_id}"),
@@ -1282,14 +1220,18 @@ impl Timeline {
         }
         // Providers may stream deltas before announcing the item: create lazily.
         let content = match kind {
-            DeltaKind::AssistantText => EntryContent::Assistant { text: text.into() },
-            DeltaKind::ReasoningText => EntryContent::Reasoning { text: text.into() },
-            DeltaKind::CommandOutput => EntryContent::Command {
+            DeltaKind::AssistantText => {
+                EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
+            }
+            DeltaKind::ReasoningText => {
+                EntryContent::Item(ItemContent::Reasoning { text: text.into() })
+            }
+            DeltaKind::CommandOutput => EntryContent::Item(ItemContent::CommandExecution {
                 command: String::new(),
                 output: text.into(),
                 exit_code: None,
                 status: ItemStatus::InProgress,
-            },
+            }),
         };
         let turn = self.ensure_turn(ts);
         self.entries.push(Arc::new(TimelineEntry {
@@ -1379,62 +1321,63 @@ pub fn parse_orchestrate_callback(text: &str) -> Option<OrchestrateCallback> {
 fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
         (
-            EntryContent::User { steering, .. },
-            EntryContent::User {
+            EntryContent::Steer { status, .. },
+            EntryContent::Item(ItemContent::UserMessage {
                 text,
                 context_len,
                 attachments,
-                ..
-            },
-        ) => EntryContent::User {
+            }),
+        ) => EntryContent::Steer {
             text,
-            steering,
+            status,
             context_len,
             attachments,
         },
-        (EntryContent::Assistant { text: old }, EntryContent::Assistant { text: new }) => {
-            EntryContent::Assistant {
-                text: merge_text(old, new),
-            }
-        }
-        (EntryContent::Reasoning { text: old }, EntryContent::Reasoning { text: new }) => {
-            EntryContent::Reasoning {
-                text: merge_text(old, new),
-            }
-        }
         (
-            EntryContent::Command {
+            EntryContent::Item(ItemContent::AssistantMessage { text: old }),
+            EntryContent::Item(ItemContent::AssistantMessage { text: new }),
+        ) => EntryContent::Item(ItemContent::AssistantMessage {
+            text: merge_text(old, new),
+        }),
+        (
+            EntryContent::Item(ItemContent::Reasoning { text: old }),
+            EntryContent::Item(ItemContent::Reasoning { text: new }),
+        ) => EntryContent::Item(ItemContent::Reasoning {
+            text: merge_text(old, new),
+        }),
+        (
+            EntryContent::Item(ItemContent::CommandExecution {
                 output: old_output, ..
-            },
-            EntryContent::Command {
+            }),
+            EntryContent::Item(ItemContent::CommandExecution {
                 command,
                 output,
                 exit_code,
                 status,
-            },
-        ) => EntryContent::Command {
+            }),
+        ) => EntryContent::Item(ItemContent::CommandExecution {
             command,
             output: merge_text(old_output, output),
             exit_code,
             status,
-        },
+        }),
         (
-            EntryContent::Subagent {
+            EntryContent::Item(ItemContent::Subagent {
                 summary: old_summary,
                 ..
-            },
-            EntryContent::Subagent {
+            }),
+            EntryContent::Item(ItemContent::Subagent {
                 agent_type,
                 description,
                 status,
                 summary,
-            },
-        ) => EntryContent::Subagent {
+            }),
+        ) => EntryContent::Item(ItemContent::Subagent {
             agent_type,
             description,
             status,
             summary: summary.or(old_summary),
-        },
+        }),
         (_, incoming) => incoming,
     }
 }
@@ -1509,7 +1452,7 @@ mod tests {
         assert_eq!(timeline.entries[1].turn, timeline.entries[2].turn);
         assert!(matches!(
             &timeline.entries[2].content,
-            EntryContent::User { text, .. } if text == "after"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
         ));
     }
 
@@ -1544,7 +1487,7 @@ mod tests {
         assert_eq!(timeline.entries.len(), 1);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, .. } if text == "prompt 1"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "prompt 1"
         ));
         assert_eq!(
             timeline.turns[0].provider_checkpoint_id.as_deref(),
@@ -1557,7 +1500,7 @@ mod tests {
         assert_eq!(timeline.turns.len(), 2);
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::User { text, .. } if text == "replacement prompt"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "replacement prompt"
         ));
     }
 
@@ -1573,11 +1516,11 @@ mod tests {
         assert!(!Arc::ptr_eq(&timeline.entries[0], &snapshot.entries[0]));
         assert!(matches!(
             &snapshot.entries[0].content,
-            EntryContent::User { text, .. } if text == "before"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "before"
         ));
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, .. } if text == "after"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
         ));
     }
 
@@ -1783,11 +1726,11 @@ mod tests {
         assert_eq!(timeline.entries.len(), 2);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, .. } if text == "hi"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "hi"
         ));
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Assistant { text } if text == "Hi! How can I help you today?"
+            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "Hi! How can I help you today?"
         ));
         assert!(!timeline.turn_running);
         assert_eq!(timeline.last_turn_status, Some(TurnStatus::Completed));
@@ -1827,7 +1770,10 @@ mod tests {
             .entries
             .iter()
             .filter_map(|entry| match &entry.content {
-                EntryContent::User { text, steering, .. } => Some((text.as_str(), *steering)),
+                EntryContent::Item(ItemContent::UserMessage { text, .. }) => {
+                    Some((text.as_str(), None))
+                }
+                EntryContent::Steer { text, status, .. } => Some((text.as_str(), Some(*status))),
                 _ => None,
             })
             .collect();
@@ -1861,9 +1807,9 @@ mod tests {
 
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::User {
+            EntryContent::Steer {
                 text,
-                steering: Some(SteeringStatus::Pending),
+                status: SteeringStatus::Pending,
                 ..
             } if text == "change direction"
         ));
@@ -1876,8 +1822,8 @@ mod tests {
         );
         assert!(matches!(
             timeline.entries[1].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Pending),
+            EntryContent::Steer {
+                status: SteeringStatus::Pending,
                 ..
             }
         ));
@@ -1890,8 +1836,8 @@ mod tests {
         timeline.apply_at(None, &accepted);
         assert!(matches!(
             timeline.entries[1].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
@@ -1908,8 +1854,8 @@ mod tests {
         ]);
         assert!(matches!(
             replayed.entries[1].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
@@ -1959,15 +1905,15 @@ mod tests {
         assert_eq!(replayed_ids, live_ids);
         assert!(matches!(
             live.entries[3].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
         assert!(matches!(
             replayed.entries[3].content,
-            EntryContent::User {
-                steering: Some(SteeringStatus::Accepted),
+            EntryContent::Steer {
+                status: SteeringStatus::Accepted,
                 ..
             }
         ));
@@ -1996,7 +1942,7 @@ mod tests {
             .iter()
             .find(|e| e.id == id)
             .map(|e| match &e.content {
-                EntryContent::Assistant { text } => text.clone(),
+                EntryContent::Item(ItemContent::AssistantMessage { text }) => text.clone(),
                 other => panic!("entry {id} is not assistant text: {other:?}"),
             })
             .unwrap_or_else(|| panic!("no entry {id}"))
@@ -2154,20 +2100,20 @@ mod tests {
         assert_eq!(timeline.entries.len(), 4);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::FileChange { changes }
+            EntryContent::Item(ItemContent::FileChange { changes, .. })
                 if changes.len() == 1 && changes[0].path.ends_with("hello.txt")
         ));
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Assistant { text } if text == "PONG"
+            EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "PONG"
         ));
         assert!(matches!(
             &timeline.entries[2].content,
-            EntryContent::Reasoning { text } if text == "Checking"
+            EntryContent::Item(ItemContent::Reasoning { text }) if text == "Checking"
         ));
         assert!(matches!(
             &timeline.entries[3].content,
-            EntryContent::Command { output, .. } if output == "ok\n"
+            EntryContent::Item(ItemContent::CommandExecution { output, .. }) if output == "ok\n"
         ));
         assert_eq!(timeline.usage.unwrap().used_tokens, Some(123));
     }
@@ -2212,7 +2158,7 @@ mod tests {
 
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::Command { command, output, exit_code: Some(0), status: ItemStatus::Completed }
+            EntryContent::Item(ItemContent::CommandExecution { command, output, exit_code: Some(0), status: ItemStatus::Completed })
                 if command == "echo hi" && output == "hi\n"
         ));
     }
@@ -2279,7 +2225,7 @@ mod tests {
         let u2 = timeline
             .entries
             .iter()
-            .find(|e| matches!(&e.content, EntryContent::User { text, .. } if text == "second"))
+            .find(|e| matches!(&e.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "second"))
             .unwrap();
         assert_eq!(u2.turn, 1);
 
@@ -2666,13 +2612,13 @@ mod tests {
         assert_eq!(timeline.entries[0].id, "spawn");
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
+            EntryContent::Item(ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. })
                 if summary == "pong"
         ));
         assert_eq!(timeline.children("spawn").len(), 1);
         assert!(matches!(
             &timeline.children("spawn")[0].content,
-            EntryContent::User { text, .. } if text == "ping"
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "ping"
         ));
     }
 
@@ -2758,7 +2704,7 @@ mod tests {
         let timeline = Timeline::fold_events([decoded]);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, context_len: Some(8), .. } if text == "PREFIX\n\nvisible"
+            EntryContent::Item(ItemContent::UserMessage { text, context_len: Some(8), .. }) if text == "PREFIX\n\nvisible"
         ));
 
         // …and omitted entirely when absent (skip_serializing_if).
@@ -2775,7 +2721,7 @@ mod tests {
         let timeline = Timeline::fold_events([event]);
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::User { text, context_len: None, .. } if text == "just words"
+            EntryContent::Item(ItemContent::UserMessage { text, context_len: None, .. }) if text == "just words"
         ));
     }
 

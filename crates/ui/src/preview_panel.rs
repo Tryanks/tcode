@@ -901,15 +901,6 @@ mod native {
             }
             let active = self.active_key(cx);
 
-            // Honor a queued `--open-preview <url>` navigation once a session exists.
-            if active.is_some()
-                && let Some(url) = self
-                    .window_state
-                    .update(cx, |state, _| state.pending_preview_url.take())
-            {
-                self.navigate(active.as_deref().unwrap(), &url, window, cx);
-            }
-
             // Mirror the active session's URL into the address bar when it changes.
             if active != self.mirrored {
                 let value = active

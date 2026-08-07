@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use agent::{ItemStatus, PlanStepStatus, ProviderKind};
+use agent::{ItemContent, ItemStatus, PlanStepStatus, ProviderKind};
 
 use crate::session::{EntryContent, Timeline, TimelineEntry};
 
@@ -150,7 +150,10 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
     let mut body = String::new();
     for entry in entries {
         match &entry.content {
-            EntryContent::User {
+            EntryContent::Item(ItemContent::UserMessage {
+                text, context_len, ..
+            })
+            | EntryContent::Steer {
                 text, context_len, ..
             } => {
                 let visible = context_len.and_then(|len| text.get(len..)).unwrap_or(text);
@@ -160,18 +163,20 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
                     body.push_str("\n\n");
                 }
             }
-            EntryContent::Assistant { text } if !text.trim().is_empty() => {
+            EntryContent::Item(ItemContent::AssistantMessage { text })
+                if !text.trim().is_empty() =>
+            {
                 body.push_str("### Assistant\n\n");
                 body.push_str(text);
                 body.push_str("\n\n");
             }
-            EntryContent::Assistant { .. } => {}
-            EntryContent::Command {
+            EntryContent::Item(ItemContent::AssistantMessage { .. }) => {}
+            EntryContent::Item(ItemContent::CommandExecution {
                 command,
                 output,
                 exit_code,
                 status,
-            } => {
+            }) => {
                 let outcome = if let Some(code) = exit_code {
                     format!("exit {code}: {}", one_line(output))
                 } else {
@@ -179,7 +184,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
                 };
                 activity(&mut body, "command", &one_line(command), &outcome);
             }
-            EntryContent::FileChange { changes } => {
+            EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
                 let target = changes
                     .iter()
                     .map(|change| change.path.as_str())
@@ -192,22 +197,22 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
                     &format!("{} file(s) changed", changes.len()),
                 );
             }
-            EntryContent::Tool {
+            EntryContent::Item(ItemContent::ToolCall {
                 name,
                 input,
                 output,
                 status,
-            } => {
+            }) => {
                 let target = tool_target(input);
                 let outcome = status_outcome(*status, output.as_deref().unwrap_or(""));
                 activity(&mut body, name, &target, &outcome);
             }
-            EntryContent::Subagent {
+            EntryContent::Item(ItemContent::Subagent {
                 agent_type,
                 description,
                 status,
                 summary,
-            } => {
+            }) => {
                 let outcome = status_outcome(*status, summary.as_deref().unwrap_or(""));
                 activity(&mut body, agent_type, &one_line(description), &outcome);
             }
@@ -230,7 +235,22 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
                 activity(&mut body, "context", "provider", "compacted")
             }
             EntryContent::ModelChanged { .. } => {}
-            EntryContent::Reasoning { .. } => {}
+            EntryContent::Item(ItemContent::WebSearch { query }) => activity(
+                &mut body,
+                "web_search",
+                &tool_target(&serde_json::json!({ "query": query })),
+                &status_outcome(ItemStatus::Completed, ""),
+            ),
+            EntryContent::Item(ItemContent::Other {
+                provider_kind,
+                summary,
+            }) => activity(
+                &mut body,
+                provider_kind,
+                &tool_target(&serde_json::json!({ "summary": summary })),
+                &status_outcome(ItemStatus::Completed, ""),
+            ),
+            EntryContent::Item(ItemContent::Reasoning { .. }) => {}
         }
     }
     if let Some(plan) = timeline
