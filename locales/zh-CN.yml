@@ -276,6 +276,9 @@ orchestrate:
     orchestrator: "决策层审批"
     always_allow: "永久允许"
     manual: "手动审批"
+  auto_archive:
+    title: "自动归档已完成的子线程"
+    description: "子线程的结果送达主线程后自动将其归档。失败的子线程始终保留可见，向已归档的子线程发送 send 会自动恢复它，每次派发也可通过 archive_on_complete 单独覆盖。"
   all_models:
     title: "内建 /orchestrate 命令"
     description: "这里控制发送 /orchestrate 时 tcode 注入的内容：当前模型如何理解自己的主决策角色，以及编排 MCP 可以把任务派发给哪些子模型。所有主模型都能使用该命令；没有专属覆盖时会继承通用自我认知。"

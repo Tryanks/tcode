@@ -28,8 +28,14 @@ struct DispatchParams {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Override the auto-archive policy for this child. By default (per Settings → Orchestrate) a completed child is archived once its terminal result reaches you; failed children always stay visible. Set false to keep a completed child in the sidebar; send to an archived child unarchives it."
+    )]
     archive_on_complete: Option<bool>,
     #[serde(default)]
+    #[schemars(
+        description = "Character cap for the inline result text in the completion callback (default 1200; 0 = unlimited). Raise it or pass 0 when you will need the full report anyway — cheaper than a follow-up result call."
+    )]
     result_max_chars: Option<u32>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -76,7 +82,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts)."
+        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries."
     )]
     async fn dispatch(
         &self,
@@ -155,7 +161,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Archive a batch of this session's child threads by id. Archived threads vanish from the user's sidebar but are fully recoverable in Settings → Archived Threads, and their transcripts remain readable via status/result. Archiving a running child shuts it down; cancel first for a clean stop."
+        description = "Archive a batch of this session's child threads by id. Completed children are auto-archived by default, so this is mainly for failed children you will not retry and children dispatched with archive_on_complete: false. Archived threads vanish from the user's sidebar but are fully recoverable in Settings → Archived Threads, and their transcripts remain readable via status/result. Archiving a running child shuts it down; cancel first for a clean stop."
     )]
     async fn archive(
         &self,

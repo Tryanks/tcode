@@ -276,6 +276,9 @@ orchestrate:
     orchestrator: "Decision-layer approval"
     always_allow: "Always allow"
     manual: "Manual approval"
+  auto_archive:
+    title: "Auto-archive completed children"
+    description: "Archive a dispatched child thread automatically once its result has been delivered to the lead thread. Failed children always stay visible, a follow-up send restores an archived child, and a dispatch can override this per child with archive_on_complete."
   all_models:
     title: "Built-in /orchestrate command"
     description: "These settings control what tcode injects when you send /orchestrate: how the current model understands its lead role, and which configured child models the orchestration MCP may dispatch work to. Every main model can use the command; models without an override inherit the generic identity."
