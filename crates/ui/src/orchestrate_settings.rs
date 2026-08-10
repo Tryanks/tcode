@@ -669,6 +669,57 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
+    fn render_auto_archive(&self, cx: &mut Context<Self>) -> AnyElement {
+        let checked = self
+            .store
+            .read(cx)
+            .settings()
+            .orchestrate
+            .archive_on_complete;
+        crate::material::group(cx)
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_h(px(56.))
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_medium()
+                                    .child(crate::tr!("orchestrate.auto_archive.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(crate::tr!("orchestrate.auto_archive.description")),
+                            ),
+                    )
+                    .child(
+                        Switch::new("orchestrate-auto-archive")
+                            .checked(checked)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                let checked = *checked;
+                                this.update_settings(
+                                    move |settings| {
+                                        settings.orchestrate.archive_on_complete = checked
+                                    },
+                                    cx,
+                                );
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn section_heading(
         &self,
         title: impl Into<gpui::SharedString>,
@@ -1018,6 +1069,7 @@ impl Render for OrchestrateSettingsPanel {
             )
             .child(self.render_intro(cx))
             .child(self.render_child_approval(cx))
+            .child(self.render_auto_archive(cx))
             .child(self.render_identities(cx))
             .child(self.render_children(cx))
     }
