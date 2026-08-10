@@ -320,6 +320,11 @@ pub struct OrchestrateSettings {
     pub child_models: Vec<OrchestrateChildModel>,
     #[serde(default)]
     pub child_approval: ChildApprovalMode,
+    /// Archive completed children automatically once their terminal result has
+    /// been delivered to the parent. Per-dispatch `archive_on_complete`
+    /// overrides this; failed children always stay visible for retries.
+    #[serde(default = "default_true")]
+    pub archive_on_complete: bool,
 }
 
 fn default_orchestrator_identity() -> String {
@@ -385,6 +390,7 @@ impl Default for OrchestrateSettings {
                 },
             ],
             child_approval: ChildApprovalMode::default(),
+            archive_on_complete: true,
         }
     }
 }

@@ -1848,6 +1848,8 @@ impl AppState {
                         return;
                     }
                 };
+                let archive_on_complete =
+                    archive_on_complete.unwrap_or(self.settings.orchestrate.archive_on_complete);
                 let Some(cwd) = cwd else {
                     let result = self
                         .create_child_session(
@@ -1860,7 +1862,7 @@ impl AppState {
                             title,
                             None,
                             brief,
-                            archive_on_complete.unwrap_or(false),
+                            archive_on_complete,
                             result_max_chars,
                             cx,
                         )
@@ -1904,7 +1906,7 @@ impl AppState {
                                     title,
                                     Some(cwd),
                                     brief,
-                                    archive_on_complete.unwrap_or(false),
+                                    archive_on_complete,
                                     result_max_chars,
                                     cx,
                                 )
@@ -1923,7 +1925,15 @@ impl AppState {
                 message,
             } => {
                 let result = (|| {
-                    self.require_child(&parent_id, &thread_id)?;
+                    let archived = self
+                        .require_child(&parent_id, &thread_id)?
+                        .archived_at
+                        .is_some();
+                    // A follow-up revives an archived child: it returns to the
+                    // sidebar so the user can watch the retry it just received.
+                    if archived {
+                        self.unarchive_session(&thread_id, cx);
+                    }
                     // A live turn accepts the message right away — same routing as
                     // parent callbacks. Queueing a mid-turn correction until the
                     // turn ends would deliver it after the work it was meant to
@@ -5325,7 +5335,10 @@ impl AppState {
         let child_id = child_id.to_string();
         let parent_id = child.parent_session_id.clone().unwrap();
         let title = child.title;
-        let archive_on_complete = child.archive_on_complete;
+        // Failed and interrupted children stay visible: they are retry
+        // candidates, and archiving would hide exactly the threads that need
+        // attention.
+        let auto_archive = child.archive_on_complete && matches!(status, TurnStatus::Completed);
         let result_max_chars = child.result_max_chars;
         let store = self.store.clone();
         let host_cx = cx.clone();
@@ -5353,10 +5366,11 @@ impl AppState {
                     &final_assistant_message(&timeline),
                     timeline.usage.as_ref(),
                     result_max_chars,
+                    auto_archive,
                 );
                 state.callback_last_turn.insert(child_id.clone(), turn);
                 state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
-                if archive_on_complete {
+                if auto_archive {
                     state.archive_session_ids(&[child_id], now_secs(), cx);
                 }
             });
@@ -7501,8 +7515,10 @@ fn assemble_callback_text(
     final_message: &str,
     usage: Option<&agent::TokenUsage>,
     max_chars: Option<u32>,
+    archived: bool,
 ) -> String {
     let state = match status {
+        TurnStatus::Completed if archived => "completed (auto-archived; send revives it)",
         TurnStatus::Completed => "completed",
         TurnStatus::Failed | TurnStatus::Interrupted => "failed",
     };
@@ -7537,7 +7553,7 @@ fn assemble_callback_text(
             final_message.to_string()
         } else {
             format!(
-                "Final output tail ({count} chars total — call result {child_id} for the full report):\n{}",
+                "Final output tail ({count} chars total; the tail plus the diff is usually enough — result {child_id} has the full text):\n{}",
                 tail_chars(final_message, 600.min(cap))
             )
         }
@@ -9679,15 +9695,41 @@ mod tests {
 
     #[test]
     fn callback_text_is_a_compact_digest_with_usage() {
-        let text =
-            assemble_callback_text("child", "Title", TurnStatus::Completed, "done", None, None);
+        let text = assemble_callback_text(
+            "child",
+            "Title",
+            TurnStatus::Completed,
+            "done",
+            None,
+            None,
+            false,
+        );
         assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
         assert!(text.ends_with("\ndone"));
         assert!(!text.contains("tokens:"));
         assert!(
-            assemble_callback_text("child", "Title", TurnStatus::Completed, "", None, None)
-                .ends_with("\n(no assistant output)")
+            assemble_callback_text(
+                "child",
+                "Title",
+                TurnStatus::Completed,
+                "",
+                None,
+                None,
+                false
+            )
+            .ends_with("\n(no assistant output)")
         );
+
+        let archived = assemble_callback_text(
+            "child",
+            "Title",
+            TurnStatus::Completed,
+            "done",
+            None,
+            None,
+            true,
+        );
+        assert!(archived.contains("completed (auto-archived; send revives it)."));
 
         let long = assemble_callback_text(
             "child",
@@ -9696,9 +9738,10 @@ mod tests {
             &"x".repeat(5000),
             None,
             None,
+            false,
         );
         assert!(long.contains(
-            "Final output tail (5000 chars total — call result child for the full report):"
+            "Final output tail (5000 chars total; the tail plus the diff is usually enough — result child has the full text):"
         ));
         assert_eq!(long.lines().last().unwrap().chars().count(), 600);
 
@@ -9709,9 +9752,10 @@ mod tests {
             &"x".repeat(5000),
             None,
             Some(0),
+            false,
         );
         assert_eq!(unlimited.lines().last().unwrap().chars().count(), 5000);
-        assert!(!unlimited.contains("call result"));
+        assert!(!unlimited.contains("Final output tail"));
 
         let capped = assemble_callback_text(
             "child",
@@ -9720,9 +9764,10 @@ mod tests {
             &"x".repeat(5000),
             None,
             Some(300),
+            false,
         );
         assert!(capped.contains(
-            "Final output tail (5000 chars total — call result child for the full report):"
+            "Final output tail (5000 chars total; the tail plus the diff is usually enough — result child has the full text):"
         ));
         assert_eq!(capped.lines().last().unwrap().chars().count(), 300);
 
@@ -9740,6 +9785,7 @@ mod tests {
             "done",
             Some(&usage),
             None,
+            false,
         );
         assert!(failed.starts_with("[orchestrate] thread child (\"Title\") failed. tokens:"));
         assert!(failed.ends_with("\ndone"));
@@ -9760,7 +9806,11 @@ mod tests {
             parent.turn_in_flight = true;
             state.background.insert(parent.meta.id.clone(), parent);
 
-            for (id, archive_on_complete) in [("auto", true), ("keep", false)] {
+            for (id, archive_on_complete, status) in [
+                ("auto", true, TurnStatus::Completed),
+                ("keep", false, TurnStatus::Completed),
+                ("retry", true, TurnStatus::Failed),
+            ] {
                 let (commands, _receiver) = smol::channel::unbounded();
                 let mut child = live_session(ProviderKind::Codex, commands);
                 child.meta.id = id.into();
@@ -9775,7 +9825,7 @@ mod tests {
                     id,
                     AgentEvent::TurnCompleted {
                         turn_id: format!("turn-{id}"),
-                        status: TurnStatus::Completed,
+                        status,
                         usage: None,
                     },
                     cx,
@@ -9793,6 +9843,45 @@ mod tests {
             assert!(
                 state.find_meta("keep").unwrap().archived_at.is_none(),
                 "control child should remain unarchived"
+            );
+            assert!(
+                state.find_meta("retry").unwrap().archived_at.is_none(),
+                "failed child should stay visible for retries"
+            );
+        });
+    }
+
+    #[test]
+    fn orchestrate_send_unarchives_the_child() {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-orchestrate-send-unarchive-test");
+        let store = (*test_store).clone();
+        let state = cx.new_entity(|_| AppState::new(store));
+        let (commands, _receiver) = smol::channel::unbounded();
+
+        state.host_update(cx, |state, cx| {
+            let mut child = live_session(ProviderKind::Codex, commands);
+            child.meta.id = "child".into();
+            child.meta.parent_session_id = Some("parent".into());
+            child.meta.archived_at = Some(1);
+            child.turn_in_flight = true;
+            state.sessions.push(child.meta.clone());
+            state.background.insert(child.meta.id.clone(), child);
+
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Send {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    message: "retry with the failing test".into(),
+                },
+                reply,
+                cx,
+            );
+            assert!(response.try_recv().unwrap().is_ok());
+            assert!(
+                state.find_meta("child").unwrap().archived_at.is_none(),
+                "send should revive an archived child"
             );
         });
     }
