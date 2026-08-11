@@ -1503,7 +1503,10 @@ impl ChatView {
                         .px_3()
                         .py_2()
                         .rounded(px(12.))
-                        .bg(crate::material::content_surface(cx))
+                        // Reference bubble is `field`, not surface white; derive
+                        // from foreground so both themes keep contrast with the
+                        // canvas (muted ≈ canvas in light and would vanish).
+                        .bg(cx.theme().foreground.opacity(0.08))
                         .when(pending, |bubble| {
                             bubble
                                 .border_1()

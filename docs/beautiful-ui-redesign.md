@@ -80,7 +80,8 @@ spinner 旋转 / 像素网格脉冲；pop-in（opacity+scale）；计时器文�
 
 ### chat.rs — 气泡与回答（对应 chat-composer / streaming-text）
 
-- 用户气泡：右对齐、surface 表面、12px 圆角、13px 字号、最大宽度约 76%。
+- 用户气泡：右对齐、field 灰填充（前景色 8% 透明度派生，不用 surface 白）、
+  12px 圆角、13px 字号、最大宽度约 76%。
 - 回答完成后才显示操作行（淡入 400ms opacity；流式中不渲染）。
 - 错误卡对齐 red-tint 卡片样式。
 
