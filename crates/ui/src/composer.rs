@@ -18,7 +18,7 @@ use chrono::{DateTime, Local, NaiveDate, TimeZone as _};
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClipboardEntry,
     Context, Entity, EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathBuilder, Pixels, Render, Role, SharedString,
+    IntoElement, ParentElement as _, PathBuilder, Pixels, Render, Role,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas, div, img,
     point, prelude::FluentBuilder as _, px, rgb,
 };
@@ -99,16 +99,6 @@ fn truncate_queued(text: &str) -> String {
     }
     let clipped: String = normalized.chars().take(MAX).collect();
     format!("{clipped}…")
-}
-
-/// GPUI has no letter-spacing primitive, so reproduce the design system's
-/// 0.08em tracking for the 10.5px queue section label with 0.84px glyph gaps.
-fn tracked_queue_header(text: &str) -> gpui::Div {
-    h_flex().gap(px(0.84)).children(
-        text.to_uppercase()
-            .chars()
-            .map(|character| div().child(character.to_string())),
-    )
 }
 
 /// The provider glyph tinted with the accent configured on its Settings →
@@ -1907,21 +1897,20 @@ impl Composer {
         let muted = cx.theme().muted_foreground;
         let mut strip = v_flex()
             .w_full()
-            .items_end()
-            .gap_1p5()
-            .when(queued.len() > 2, |strip| {
-                strip.child(
-                    div()
-                        .flex_none()
-                        .px_1()
-                        .text_size(px(10.5))
-                        .text_color(muted)
-                        .child(tracked_queue_header(&crate::tr!(
-                            "composer.queued_count",
-                            count = queued.len()
-                        ))),
-                )
-            });
+            .gap_1()
+            .p_2()
+            .rounded(crate::material::radius_card())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.5))
+            .child(
+                div()
+                    .flex_none()
+                    .px_1()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(crate::tr!("composer.queued_count", count = queued.len())),
+            );
 
         for message in queued {
             let id = message.id;
@@ -1940,68 +1929,59 @@ impl Composer {
                     .as_secs();
                 format_countdown(fire_at.saturating_sub(now))
             });
-            let group_key = SharedString::from(format!("queued-message-{id}"));
             strip = strip.child(
-                h_flex().flex_none().w_full().justify_end().child(
-                    v_flex()
-                        .group(group_key.clone())
-                        .flex_none()
-                        .max_w_3_4()
-                        .gap_1()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(12.))
-                        .bg(cx.theme().foreground.opacity(0.08))
-                        .opacity(0.55)
-                        .text_size(px(13.))
-                        .text_color(cx.theme().foreground)
-                        .child(div().min_w_0().child(truncate_queued(&message.text)))
-                        .when_some(countdown, |bubble, countdown| {
-                            bubble.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_color(muted)
-                                    .child(countdown),
-                            )
-                        })
-                        .child(
-                            h_flex()
-                                .h(px(22.))
-                                .gap_1()
-                                .justify_end()
-                                .opacity(0.)
-                                .group_hover(group_key, |style| style.opacity(1.))
-                                .child(
-                                    Button::new(("queue-steer", id as usize))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::ArrowUp)
-                                        // Scheduled rows always support send-now: the
-                                        // runtime removes the deadline and uses the normal
-                                        // send/queue path even when native steering is absent.
-                                        .disabled(!scheduled && !can_steer)
-                                        .tooltip(steer_tooltip)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.workspace_store.update(cx, |store, _cx| {
-                                                store.dispatch(Command::SteerQueued { id })
-                                            });
-                                        })),
-                                )
-                                .child(
-                                    Button::new(("queue-drop", id as usize))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Close)
-                                        .tooltip(crate::tr!("composer.drop_queued"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.workspace_store.update(cx, |store, _cx| {
-                                                store.dispatch(Command::DropQueued { id })
-                                            });
-                                        })),
-                                ),
-                        ),
-                ),
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .gap_1()
+                    .items_center()
+                    .px_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().foreground)
+                            .child(truncate_queued(&message.text)),
+                    )
+                    .when_some(countdown, |row, countdown| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(countdown),
+                        )
+                    })
+                    .child(
+                        Button::new(("queue-steer", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ArrowUp)
+                            // Scheduled rows always support send-now: the
+                            // runtime removes the deadline and uses the normal
+                            // send/queue path even when native steering is absent.
+                            .disabled(!scheduled && !can_steer)
+                            .tooltip(steer_tooltip)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::SteerQueued { id })
+                                });
+                            })),
+                    )
+                    .child(
+                        Button::new(("queue-drop", id as usize))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(crate::tr!("composer.drop_queued"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.dispatch(Command::DropQueued { id })
+                                });
+                            })),
+                    ),
             );
         }
         Some(
