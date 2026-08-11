@@ -111,6 +111,29 @@ spinner 旋转 / 像素网格脉冲；pop-in（opacity+scale）；计时器文�
 
 判断标准：截图与参照站组件并排对比时，行密度和字号层级应当无法一眼区分。
 
+## 四·六、有机取舍裁决（Phase 4 —— 图标 / 动画 / 用词）
+
+**采纳 BUI，替换现状：**
+- 工作指示器 = **像素矩阵三件套**：3×3 网格（格 4px、间距 1.5px、圆角 1px）逐格
+  opacity 脉冲（pixel-on 650ms ease-in-out infinite，delay 按 MOTION-SPEC loading-state
+  的索引表）+ shimmer 标签 + 0.1s 精度 mono 计时（100ms interval）。纯 opacity，
+  符合动效政策。
+- 图标语义：settled = **muted 灰勾**（成功不上绿色，颜色只留给异常）；active = spinner
+  环；failed = 红色 + 重试符号。尺寸统一 12–15px。禁止装饰性图标、禁止语义错配
+  （如失败态用 Loader 图标）。
+- 计数摘要**只报非零项**："0 处编辑"这类零计数一律省略；条目顺序按重要性
+  （工具 → 编辑 → 命令）。i18n 两语言同步。
+- 时间/费用行压缩为单行安静 mono："1:28 PM · 3m50s · $23.79"；分项耗时
+  （思考/工具）从常显移入该行的展开或悬停详情。
+
+**保留 tcode，拒绝照搬 BUI：**
+- 错误卡完整展示原则（永不截断、永不折叠进工作日志）。
+- 成本/token 透明度（信息保留，呈现压缩）。
+- 已更改文件的可点 diff 功能；≤3 个文件时扁平 chip 行，不渲染文件夹树。
+- relay 分隔线、steering 队列、orchestrate 回调行：tcode 特有构件，按本规范的
+  视觉词汇（安静居中行 / chip / 胶囊）重绘，不删除。
+- 中英 i18n、DM Sans + SF Mono、720px 内容列。
+
 ## 五、验收
 
 每个 piece：`cargo check --workspace` 与 `cargo clippy --workspace -- -D warnings`
