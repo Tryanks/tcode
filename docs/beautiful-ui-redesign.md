@@ -18,9 +18,14 @@ chat.rs / composer.rs**。sidebar、terminal drawer、settings、diff 面板本�
 4. **证据物化为 chip**：文件改动 `+74 -41` 等宽胶囊、来源 pill、内联引用。
 5. **历史自压缩**：进行中自动展开，完成后自动折叠成一行；流里只有当前工作是展开的。
 
-## 二、Token 映射（Phase 1）
+## 二、Token 映射（Phase 1）—— **已撤销**
 
-Beautiful UI 语义 token → `themes/tcode.json`（gpui-component schema）。两套主题都改。
+**（2026-08-11 裁决）照抄 BUI 色值的策略已废弃：色表是 tcode 的身份，复刻目标只限
+组件样式与行为。`themes/tcode.json` 与 material.rs 的颜色层保持 tcode 原生
+（毛玻璃画布 + 暖纸面 + 藏青/蓝主色），本节色值仅作语义对照参考。半径体系
+（chip 6 / control 8 / card 10 / composer 14）属于组件样式，保留。**
+
+原映射表（仅参考，不再应用）：
 
 | BUI token | Light | Dark | 语义 |
 |---|---|---|---|
