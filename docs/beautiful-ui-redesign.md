@@ -95,6 +95,22 @@ spinner 旋转 / 像素网格脉冲；pop-in（opacity+scale）；计时器文�
   accent 填充）、多问题时底部圆点翻页器、内联自定义输入行、发送后绿勾 + 摘要。
   保持现有键盘流。
 
+## 四·五、比例与密度（Phase 3 —— 观感的决定层）
+
+色板只是皮，Beautiful UI 的观感由紧凑的比例决定。以下数值为硬规范：
+
+- **内容列宽**：消息流内容列 max-width 720px 水平居中（画布可以更宽，内容不拉伸）。
+- **正文**：assistant/user 散文 13.5px / 行高 21px（替换现有 15/26）。markdown 标题
+  相应降档（h1≈17px h2≈15px h3≈13.5px semibold）。
+- **元数据**：时间/费用/统计行 11px mono muted；大写小节标签 10.5px tracking 0.08em。
+- **工作日志胶囊**：头部行高 30px、文字 12.5px medium；活动行 min-height 28px、
+  文字 12.5px、图标 13px；下钻详情 inset、11.5px、内边距 10–12px。
+- **气泡**：13px / 行高 1.4、padding 10×6px。
+- **间距**：turn 内元素 gap 8–10px（替换 gap_4=16px）；turn 之间 ≤24px。
+- **chip**：高 22px、11.5px、mono（路径/数字）已定，全部落实为实际值而非近似。
+
+判断标准：截图与参照站组件并排对比时，行密度和字号层级应当无法一眼区分。
+
 ## 五、验收
 
 每个 piece：`cargo check --workspace` 与 `cargo clippy --workspace -- -D warnings`
