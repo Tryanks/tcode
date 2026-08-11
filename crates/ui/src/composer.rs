@@ -16,11 +16,11 @@ use agent::{
 };
 use chrono::{DateTime, Local, NaiveDate, TimeZone as _};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Bounds, ClipboardEntry, Context, Entity,
-    EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathBuilder, Pixels, Render, Role, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, canvas, div, img, point, prelude::FluentBuilder as _,
-    px, rgb,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Bounds, ClipboardEntry,
+    Context, Entity, EventEmitter, ExternalPaths, Focusable as _, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathBuilder, Pixels, Render, Role,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas, div, img,
+    point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Sizable as _,
@@ -1460,19 +1460,24 @@ impl Composer {
             .map(|agent| (agent.id.clone(), agent.name.clone()))
             .collect();
 
-        let trigger = Button::new("model-picker").ghost().compact().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_size(px(13.))
-                .child(tinted_provider_glyph(provider, store).small())
-                .child(div().font_medium().child(display))
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                ),
-        );
+        let trigger = Button::new("model-picker")
+            .ghost()
+            .compact()
+            .h(px(28.))
+            .rounded(crate::material::radius_input())
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .child(tinted_provider_glyph(provider, store).small())
+                    .child(div().font_medium().child(display))
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+            );
 
         crate::material::overlay_popover(("model-picker-popover", self.model_picker_token))
             .anchor(Anchor::BottomLeft)
@@ -1540,15 +1545,20 @@ impl Composer {
             .contains("ultrathink");
         let pending_restart = store.composer_options_pending_restart();
 
-        let trigger = Button::new("traits-chip").ghost().compact().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-        );
+        let trigger = Button::new("traits-chip")
+            .ghost()
+            .compact()
+            .h(px(28.))
+            .rounded(crate::material::radius_chip())
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(label)
+                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+            );
 
         let store_entity = self.workspace_store.clone();
         crate::material::overlay_popover("traits-popover")
@@ -1588,12 +1598,14 @@ impl Composer {
         Button::new("mode-chip")
             .ghost()
             .compact()
+            .h(px(28.))
+            .rounded(crate::material::radius_chip())
             .tooltip(tooltip)
             .child(
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .text_size(px(13.))
+                    .text_size(px(11.5))
                     .text_color(muted)
                     .child(Icon::empty().path(icon).small().text_color(muted))
                     .child(label),
@@ -1620,11 +1632,16 @@ impl Composer {
         let mut track = cx.theme().muted_foreground;
         track.a = 0.35;
 
-        let trigger = Button::new("context-meter").ghost().compact().child(
-            div()
-                .size(px(16.))
-                .child(ring_canvas(pct.unwrap_or(0.0), ring_color, track)),
-        );
+        let trigger = Button::new("context-meter")
+            .ghost()
+            .compact()
+            .h(px(28.))
+            .rounded(crate::material::radius_chip())
+            .child(
+                div()
+                    .size(px(16.))
+                    .child(ring_canvas(pct.unwrap_or(0.0), ring_color, track)),
+            );
 
         crate::material::overlay_popover("context-popover")
             .anchor(Anchor::BottomLeft)
@@ -1645,16 +1662,21 @@ impl Composer {
         let (label, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
 
-        let trigger = Button::new("permission-chip").ghost().compact().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(Icon::empty().path(icon_path).small().text_color(muted))
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-        );
+        let trigger = Button::new("permission-chip")
+            .ghost()
+            .compact()
+            .h(px(28.))
+            .rounded(crate::material::radius_input())
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(Icon::empty().path(icon_path).small().text_color(muted))
+                    .child(label)
+                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+            );
 
         let store_entity = self.workspace_store.clone();
         let pending_restart = self
@@ -1773,13 +1795,13 @@ impl Composer {
                         .when(is_active, |row| row.aria_active_descendant())
                         .flex_none()
                         .w_full()
+                        .h(px(28.))
                         .px_2()
-                        .py_1p5()
                         .gap_2()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(crate::material::radius_chip())
                         .cursor_pointer()
-                        .when(is_active, |s| s.bg(cx.theme().accent))
+                        .when(is_active, |s| s.bg(cx.theme().list_active))
                         .hover(|s| s.bg(cx.theme().muted))
                         .child(icon.small().text_color(muted))
                         .child(
@@ -1830,6 +1852,11 @@ impl Composer {
                 .bg(cx.theme().popover)
                 .shadow_xl()
                 .child(list)
+                .with_animation(
+                    "composer-trigger-menu-pop-in",
+                    Animation::new(Duration::from_millis(150)),
+                    |element, delta| element.opacity(delta),
+                )
                 .into_any_element(),
         )
     }
@@ -1906,15 +1933,19 @@ impl Composer {
                 h_flex()
                     .flex_none()
                     .w_full()
+                    .h(px(22.))
                     .gap_1()
                     .items_center()
-                    .px_1()
+                    .px_2()
+                    .rounded(crate::material::radius_chip())
+                    .bg(cx.theme().popover)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(px(11.5))
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().foreground)
                             .child(truncate_queued(&message.text)),
                     )
@@ -1922,7 +1953,8 @@ impl Composer {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(px(12.))
+                                .text_size(px(11.))
+                                .font_family(cx.theme().mono_font_family.clone())
                                 .text_color(muted)
                                 .child(countdown),
                         )
@@ -1972,23 +2004,36 @@ impl Composer {
         if self.pending_images.is_empty() {
             return None;
         }
-        let mut row = h_flex().w_full().px_4().pt_3().gap_2().flex_wrap();
+        let mut row = h_flex().w_full().gap_1().flex_wrap();
         for (index, image) in self.pending_images.iter().enumerate() {
             let path = image.path.clone();
+            let name = image.name.clone();
             row = row.child(
-                div()
+                h_flex()
                     .id(("thumb", index))
-                    .relative()
-                    .size(px(64.))
-                    .rounded(crate::material::radius_card())
+                    .flex_none()
+                    .h(px(22.))
+                    .max_w(px(220.))
+                    .gap_1()
+                    .items_center()
+                    .pl(px(2.))
+                    .pr_1()
+                    .rounded(crate::material::radius_chip())
                     .overflow_hidden()
-                    // Card radius + a T2 fill instead of a four-sided hard border.
                     .bg(cx.theme().secondary)
                     .cursor_pointer()
                     .child(
                         img(path)
-                            .size(px(64.))
-                            .rounded(crate::material::radius_card()),
+                            .size(px(18.))
+                            .rounded(crate::material::radius_chip()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.5))
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(name),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_image_preview(index, window, cx);
@@ -1996,21 +2041,18 @@ impl Composer {
                     .child(
                         div()
                             .id(("thumb-x", index))
-                            .absolute()
-                            .top(px(2.))
-                            .right(px(2.))
-                            .size(px(16.))
+                            .flex_none()
+                            .size(px(18.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_full()
-                            .bg(gpui::black().opacity(0.6))
+                            .rounded(crate::material::radius_chip())
                             .cursor_pointer()
-                            .hover(|s| s.bg(gpui::black().opacity(0.85)))
+                            .hover(|s| s.bg(cx.theme().muted))
                             .child(
                                 Icon::new(IconName::Close)
                                     .xsmall()
-                                    .text_color(gpui::white()),
+                                    .text_color(cx.theme().muted_foreground),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -2058,8 +2100,8 @@ impl Composer {
                         crate::tr!("composer.steer_tooltip"),
                         cx,
                     )
-                    .size(px(36.))
-                    .rounded_full()
+                    .size(px(28.))
+                    .rounded(crate::material::radius_input())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2089,8 +2131,8 @@ impl Composer {
                         crate::tr!("composer.stop"),
                         cx,
                     )
-                    .size(px(36.))
-                    .rounded_full()
+                    .size(px(28.))
+                    .rounded(crate::material::radius_input())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2135,8 +2177,8 @@ impl Composer {
             crate::tr!("composer.send"),
             cx,
         )
-        .size(px(36.))
-        .rounded_full()
+        .size(px(28.))
+        .rounded(crate::material::radius_input())
         .flex()
         .items_center()
         .justify_center()
@@ -2392,40 +2434,35 @@ impl Composer {
             let question_for_click = question.clone();
             let questions_for_click = questions.clone();
             let request_for_click = request_id.clone();
-            let mark: AnyElement = if multi {
-                if is_selected {
-                    Icon::new(IconName::CircleCheck)
-                        .xsmall()
-                        .text_color(primary)
-                        .into_any_element()
+            let mark = div()
+                .size(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(if multi {
+                    px(5.)
                 } else {
-                    div()
-                        .size(px(14.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(muted)
-                        .into_any_element()
-                }
-            } else if is_selected {
-                Icon::new(IconName::Check)
-                    .xsmall()
-                    .text_color(primary)
-                    .into_any_element()
-            } else {
-                div().size(px(14.)).into_any_element()
-            };
+                    crate::material::radius_input()
+                })
+                .border_1()
+                .border_color(if is_selected { primary } else { muted })
+                .when(is_selected, |mark| {
+                    mark.bg(primary)
+                        .child(div().size(px(6.)).rounded_full().bg(gpui::white()))
+                });
             options_content = options_content.child(
                 h_flex()
                     .id(("ui-opt", opt_index))
                     .flex_none()
                     .w_full()
+                    .min_h(px(28.))
                     .px_2()
-                    .py_1p5()
+                    .py_1()
                     .gap_2()
                     .items_start()
-                    .rounded(px(6.))
+                    .rounded(crate::material::radius_chip())
                     .cursor_pointer()
-                    .when(is_selected, |s| s.bg(cx.theme().muted))
+                    .when(is_selected, |s| s.bg(cx.theme().list_active))
                     .hover(|s| s.bg(cx.theme().muted))
                     .child(div().flex_none().pt(px(2.)).child(mark))
                     .child(
@@ -2504,7 +2541,7 @@ impl Composer {
                     cx,
                 )
                 .size(px(28.))
-                .rounded_full()
+                .rounded(crate::material::radius_input())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2544,6 +2581,8 @@ impl Composer {
                 Button::new("ui-prev")
                     .ghost()
                     .small()
+                    .h(px(28.))
+                    .rounded(crate::material::radius_input())
                     .label(crate::tr!("userinput.previous"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_go(-1, &questions_previous, window, cx)
@@ -2557,6 +2596,8 @@ impl Composer {
                 Button::new("ui-next")
                     .outline()
                     .small()
+                    .h(px(28.))
+                    .rounded(crate::material::radius_input())
                     .label(crate::tr!("userinput.next_question"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_go(1, &questions_next, window, cx)
@@ -2568,6 +2609,8 @@ impl Composer {
                 Button::new("ui-done")
                     .primary()
                     .small()
+                    .h(px(28.))
+                    .rounded(crate::material::radius_input())
                     .label(crate::tr!("userinput.done"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.ui_submit(&questions_submit, request_submit.clone(), window, cx);
@@ -2580,14 +2623,39 @@ impl Composer {
         let questions_keys = questions.clone();
         let request_keys = request_id.clone();
 
+        let pager = h_flex()
+            .w_full()
+            .h(px(12.))
+            .gap_1()
+            .items_center()
+            .justify_center()
+            .children((0..total).map(|page| {
+                let questions = questions.clone();
+                div()
+                    .id(("ui-page", page))
+                    .size(px(if page == index { 9. } else { 7. }))
+                    .rounded_full()
+                    .bg(if page == index {
+                        primary
+                    } else {
+                        muted.opacity(0.35)
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let delta = page as i32 - this.ui_question_index as i32;
+                        this.ui_go(delta, &questions, window, cx);
+                    }))
+            }));
+
         v_flex()
             .w_full()
+            .max_w(px(320.))
             .gap_2()
             .p(px(14.))
             .rounded(crate::material::radius_card())
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().popover)
             .shadow_sm()
             .on_key_down(
                 cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
@@ -2609,7 +2677,7 @@ impl Composer {
                 }),
             )
             .child(header)
-            .child(div().text_size(px(15.)).child(question.question.clone()))
+            .child(div().text_size(px(13.)).child(question.question.clone()))
             .child(options)
             .child(custom_answer)
             .when(multi, |this| {
@@ -2621,6 +2689,7 @@ impl Composer {
                 )
             })
             .child(actions)
+            .when(total > 1, |this| this.child(pager))
             .into_any_element()
     }
 
@@ -3130,12 +3199,13 @@ impl Composer {
 
         v_flex()
             .w_full()
+            .max_w(px(320.))
             .gap_2()
             .p(px(14.))
             .rounded(crate::material::radius_card())
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .bg(cx.theme().popover)
             .shadow_sm()
             .child(
                 h_flex()
@@ -3197,7 +3267,7 @@ impl Composer {
                 // An ACP agent sends its own option list: render exactly those
                 // buttons (the labels are the agent's), ordered rejections-first
                 // like our fixed four, and answer with the chosen option id.
-                let mut row = h_flex().w_full().gap_2().items_center();
+                let mut row = h_flex().w_full().gap_2().items_center().flex_wrap();
                 let mut options = request.options.clone();
                 options.sort_by_key(|option| match option.kind {
                     ApprovalOptionKind::RejectAlways => 0,
@@ -3218,6 +3288,8 @@ impl Composer {
                         option.id
                     )))
                     .small()
+                    .h(px(28.))
+                    .rounded(crate::material::radius_input())
                     .label(option.label.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.respond(
@@ -3249,10 +3321,13 @@ impl Composer {
                         .w_full()
                         .gap_2()
                         .items_center()
+                        .flex_wrap()
                         .child(
                             Button::new("approval-cancel")
                                 .ghost()
                                 .small()
+                                .h(px(28.))
+                                .rounded(crate::material::radius_input())
                                 .label(crate::tr!("approval.cancel_turn"))
                                 .text_color(cx.theme().muted_foreground)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -3264,6 +3339,8 @@ impl Composer {
                             Button::new("approval-deny")
                                 .ghost()
                                 .small()
+                                .h(px(28.))
+                                .rounded(crate::material::radius_input())
                                 .label(crate::tr!("approval.decline"))
                                 .text_color(cx.theme().danger)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -3274,6 +3351,8 @@ impl Composer {
                             Button::new("approval-always")
                                 .ghost()
                                 .small()
+                                .h(px(28.))
+                                .rounded(crate::material::radius_input())
                                 .label(crate::tr!("approval.always_allow_session"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond(
@@ -3287,6 +3366,8 @@ impl Composer {
                             Button::new("approval-approve")
                                 .primary()
                                 .small()
+                                .h(px(28.))
+                                .rounded(crate::material::radius_input())
                                 .label(crate::tr!("approval.approve_once"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
@@ -3346,9 +3427,6 @@ impl Render for Composer {
             .w_full()
             .min_w_0()
             .overflow_hidden()
-            .px_2()
-            .pb_2()
-            .pt_1()
             .gap_1()
             .items_center();
 
@@ -3430,6 +3508,10 @@ impl Render for Composer {
                     Button::new(("terminal-context-chip", id))
                         .ghost()
                         .small()
+                        .h(px(22.))
+                        .rounded(crate::material::radius_chip())
+                        .text_size(px(11.5))
+                        .font_family(cx.theme().mono_font_family.clone())
                         .label(format!("{} · {}  ×", context.terminal_label, range))
                         .tooltip(context.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -3453,6 +3535,10 @@ impl Render for Composer {
                     Button::new(("review-comment-chip", index))
                         .ghost()
                         .small()
+                        .h(px(22.))
+                        .rounded(crate::material::radius_chip())
+                        .text_size(px(11.5))
+                        .font_family(cx.theme().mono_font_family.clone())
                         .label(format!("{} {}  ×", comment.file, range))
                         .tooltip(comment.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -3463,19 +3549,19 @@ impl Render for Composer {
                 }),
         );
 
-        // The hero input surface (spec §5): 16px composer corners; resting =
-        // hairline `input.border` + `shadow_md`. Focus only deepens the border
-        // to a neutral tone — the redesign's blue ring + glow read as garish
-        // against the frosted canvas and were reverted.
+        // Focus swaps the hairline to primary in one frame. Geometry stays
+        // fixed: focus never changes border width, radius, or layout.
         let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
             .w_full()
+            .gap_1p5()
+            .p(px(6.))
             .rounded(crate::material::radius_composer())
             .border_1()
             .border_color(if composer_focused {
-                cx.theme().foreground.opacity(0.35)
+                cx.theme().primary
             } else {
-                cx.theme().input
+                cx.theme().border
             })
             // White console on paper (T3-grade fill): the glass `background`
             // token would render as a murky translucent wash here.
@@ -3526,25 +3612,14 @@ impl Render for Composer {
             .when_some(plan_ready_title, |this, title| {
                 this.child(self.render_plan_ready_header(title, cx))
             })
-            .when(has_terminal_contexts, |this| {
-                this.child(div().px_3().pt_2().child(context_chips))
-            })
-            .when(has_review_comments, |this| {
-                this.child(div().px_3().pt_2().child(review_chips))
-            })
-            .child(
-                div()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .child(Input::new(&self.input).appearance(false)),
-            )
+            .when(has_terminal_contexts, |this| this.child(context_chips))
+            .when(has_review_comments, |this| this.child(review_chips))
+            .child(Input::new(&self.input).appearance(false))
             .children(self.render_image_strip(cx))
             // While a turn is running the two send gestures diverge, so say so.
             .when(turn_running, |this| {
                 this.child(
                     div()
-                        .px_4()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!(
@@ -3785,7 +3860,7 @@ fn render_model_pane(
         .w(px(360.))
         .h(px(360.))
         .items_stretch()
-        .rounded(px(12.))
+        .rounded(crate::material::radius_card())
         .overflow_hidden()
         .on_key_down(move |ev, window, cx| {
             if !ev.keystroke.modifiers.secondary() {
@@ -3813,6 +3888,11 @@ fn render_model_pane(
         })
         .child(rail)
         .child(pane)
+        .with_animation(
+            "model-picker-pop-in",
+            Animation::new(Duration::from_millis(150)),
+            |element, delta| element.opacity(delta),
+        )
         .into_any_element()
 }
 
@@ -3848,12 +3928,14 @@ fn render_model_row(
         .when(is_current, |row| row.aria_active_descendant())
         .flex_none()
         .w_full()
+        .min_h(px(28.))
         .px_2()
-        .py_1p5()
+        .py_1()
         .gap_2()
         .items_center()
-        .rounded(px(6.))
+        .rounded(crate::material::radius_chip())
         .cursor_pointer()
+        .when(is_current, |row| row.bg(cx.theme().list_active))
         .hover(|s| s.bg(cx.theme().muted))
         .on_click(move |_, window, cx| {
             let id = id.clone();
@@ -4007,11 +4089,13 @@ fn render_permission_pane(
                 .aria_selected(is_current)
                 .when(is_current, |row| row.aria_active_descendant())
                 .w_full()
+                .min_h(px(28.))
                 .px_2()
-                .py_1p5()
+                .py_1()
                 .gap_2()
                 .items_start()
-                .rounded(px(6.))
+                .rounded(crate::material::radius_chip())
+                .when(is_current, |row| row.bg(cx.theme().list_active))
                 .when(is_disabled, |row| row.opacity(0.55))
                 .when(!is_disabled, |row| {
                     row.cursor_pointer()
@@ -4071,7 +4155,12 @@ fn render_permission_pane(
                 .child(crate::tr!("composer.restart_note")),
         );
     }
-    pane.into_any_element()
+    pane.with_animation(
+        "permission-picker-pop-in",
+        Animation::new(Duration::from_millis(150)),
+        |element, delta| element.opacity(delta),
+    )
+    .into_any_element()
 }
 
 /// The traits popover: one section per option descriptor (S1 §3). Select
@@ -4362,6 +4451,7 @@ fn render_context_meter_pane(
         (Some(max), Some(pct_label)) => h_flex()
             .gap_1()
             .text_size(px(11.))
+            .font_family(cx.theme().mono_font_family.clone())
             .text_color(muted)
             .child(pct_label)
             .child("·")
@@ -4373,6 +4463,7 @@ fn render_context_meter_pane(
             .into_any_element(),
         _ => div()
             .text_size(px(11.))
+            .font_family(cx.theme().mono_font_family.clone())
             .text_color(muted)
             .child(context_meter::format_tokens(used))
             .into_any_element(),
