@@ -169,6 +169,38 @@ spinner 旋转 / 像素网格脉冲；pop-in（opacity+scale）；计时器文�
   子行，完成自动收起。
 - 折叠/展开一律 snap（动效政策不变）。
 
+## 四·八、组件拆分（Phase 5 —— 去单体化）
+
+`chat.rs`（~5600 行）拆为模块目录，组件从 ChatView 私有方法提升为独立无状态函数，
+gallery 与后续维护都直接受益。
+
+**模块地图**：
+```
+crates/ui/src/chat/
+  mod.rs            ChatView 本体：状态、虚拟列表、滚动、事件、turn 编排
+  model.rs          纯逻辑：segment_entries、WorkLogCounts、auto_expanded、
+                    manual_override_key、outcome/时长/摘要计算（含其单元测试）
+  components/
+    indicator.rs    像素矩阵工作指示器 + shimmer 标签 + 计时格式
+    bubble.rs       用户气泡（含 pending steer 虚线态、宽度测量）
+    activity.rs     活动行 + 下钻详情 + 状态图标
+    work_log.rs     工作日志胶囊（头部/量词标签/结果徽标）
+    subagent.rs     子代理胶囊 + 子行
+    changed_files.rs 文件 chips + 编辑行 + diff 计数
+    assistant.rs    assistant 块（markdown 包装 + 操作行渐显）
+    error_card.rs   错误卡
+    dividers.rs     relay 分隔线 + 模型切换分隔线
+    disclosure.rs   折叠披露行 + orchestrate 回调行
+```
+
+**组件 API 约定**：`pub(crate) fn xxx(数据参数, 状态标志(expanded 等),
+handler: impl Fn(&ClickEvent,&mut Window,&mut App)+'static, cx)` —— 组件不持有
+状态、不认识 ChatView；ChatView 调用处用 `cx.listener` 构造 handler，gallery
+传 no-op。样式常量（行高/字号/圆角）留在各组件文件内，跨组件共享的进 material.rs。
+
+**硬约束**：纯移动/提炼，零行为变化；ChatView 对外 API 不变；测试全部随代码
+迁移且不减一个；拆完 mod.rs 只剩编排（目标 <2000 行）。
+
 ## 五、验收
 
 每个 piece：`cargo check --workspace` 与 `cargo clippy --workspace -- -D warnings`
