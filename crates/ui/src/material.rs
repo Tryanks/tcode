@@ -15,6 +15,13 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, StyledExt as _, popover::Popover, v_flex};
 
+/// Height reserved beneath chat messages for hover-revealed actions.
+pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
+/// Maximum width of the shared chat/composer content column.
+pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
+/// Minimum horizontal padding around the shared chat/composer content column.
+pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
+
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
         r: r as f32 / 255.,
@@ -183,6 +190,17 @@ pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div 
         .font_medium()
         .text_color(fg)
         .child(label.into())
+}
+
+/// Uppercase section label with the design system's 0.08em tracking.
+/// GPUI has no letter-spacing primitive, so the 10.5px label is split into
+/// glyph elements with an exact 0.84px inter-glyph gap.
+pub(crate) fn tracked_uppercase(text: &str) -> Div {
+    gpui_component::h_flex().gap(px(0.84)).children(
+        text.to_uppercase()
+            .chars()
+            .map(|character| div().child(character.to_string())),
+    )
 }
 
 /// Gives a raw clickable surface the same keyboard and accessibility treatment
