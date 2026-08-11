@@ -25,7 +25,7 @@
         "primary.foreground": "#ffffff",
         "secondary.background": "#f2f2f3",
         "secondary.foreground": "#1f2124",
-        "muted.background": "#f2f2f3",
+        "muted.background": "#e7e9eb",
         "muted.foreground": "#62656b",
         "popover.background": "#ffffff",
         "popover.foreground": "#1f2124",
