@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 
 use agent::{ChangeCompleteness, FileChange, ItemContent, ItemStatus, RewindMode};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, FollowMode,
-    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    ObjectFit, ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, StyledText, Subscription, Task, Window, div, img, list,
-    prelude::FluentBuilder as _, px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
+    Div, Entity, FollowMode, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ObjectFit, ParentElement as _, Render, Role, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, StyledText, Subscription, Task,
+    Window, div, img, linear_color_stop, linear_gradient, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -21,6 +21,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,
+    spinner::Spinner,
     tooltip::Tooltip,
     v_flex,
 };
@@ -118,6 +119,9 @@ const ACTION_ROW_HEIGHT: f32 = 24.;
 const DISCLOSURE_LINE_HEIGHT: f32 = 20.;
 /// Cap on an expanded disclosure card's height; taller content scrolls within it.
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
+/// Activity output is intentionally a tail: enough context to diagnose a
+/// command without allowing one noisy process to dominate the timeline.
+const ACTIVITY_OUTPUT_TAIL_LINES: usize = 20;
 /// Child-thread title budget in a callback disclosure row before it is ellipsized.
 const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
@@ -282,26 +286,6 @@ fn segment_entries<'a>(
     let mut segments = Vec::new();
     let mut activities = Vec::new();
     let mut pending_steers = Vec::new();
-    let live_reasoning_index = turn_running
-        .then(|| {
-            entries.iter().rposition(|entry| {
-                !matches!(
-                    entry.content,
-                    EntryContent::Steer {
-                        status: SteeringStatus::Pending,
-                        ..
-                    }
-                )
-            })
-        })
-        .flatten()
-        .filter(|index| {
-            matches!(
-                entries[*index].content,
-                EntryContent::Item(ItemContent::Reasoning { .. })
-            )
-        });
-
     let flush_activities = |segments: &mut Vec<Segment<'a>>,
                             activities: &mut Vec<&'a TimelineEntry>| {
         if !activities.is_empty() {
@@ -309,7 +293,7 @@ fn segment_entries<'a>(
         }
     };
 
-    for (entry_index, entry) in entries.iter().enumerate() {
+    for entry in entries {
         let entry = entry.as_ref();
         if turn_running
             && matches!(
@@ -331,11 +315,7 @@ fn segment_entries<'a>(
             | EntryContent::Item(ItemContent::Other { .. })
             | EntryContent::ContextCompacted
             | EntryContent::Item(ItemContent::FileChange { .. }) => activities.push(entry),
-            EntryContent::Item(ItemContent::Reasoning { .. }) => {
-                if live_reasoning_index == Some(entry_index) {
-                    activities.push(entry);
-                }
-            }
+            EntryContent::Item(ItemContent::Reasoning { .. }) => activities.push(entry),
             EntryContent::Item(ItemContent::UserMessage { .. }) | EntryContent::Steer { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::User(entry));
@@ -451,6 +431,28 @@ fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
     work_log_summary_with_command_keys(counts, "chat.summary_command_one", "chat.summary_commands")
 }
 
+fn work_log_capsule_label(counts: &WorkLogCounts) -> String {
+    crate::tr!(
+        "chat.work_log_counts",
+        tools = counts.tools,
+        files = counts.files,
+        commands = counts.commands
+    )
+    .into_owned()
+}
+
+fn manual_override_key(key: &str) -> String {
+    format!("manual-{key}")
+}
+
+fn auto_expanded(expanded: &HashSet<String>, key: &str, automatic: bool) -> bool {
+    if expanded.contains(&manual_override_key(key)) {
+        expanded.contains(key)
+    } else {
+        automatic
+    }
+}
+
 fn turn_work_log_summary(counts: &WorkLogCounts) -> Option<String> {
     work_log_summary_with_command_keys(counts, "chat.total_command_one", "chat.total_commands")
         .map(|summary| crate::tr!("chat.total_summary", summary = summary).into_owned())
@@ -527,11 +529,10 @@ fn index_turns(
                 std::mem::discriminant(&entry.content).hash(&mut content);
                 entry.ts.hash(&mut content);
                 hash_entry_shape(&entry.content, &mut content);
-                if matches!(
-                    &entry.content,
-                    EntryContent::Item(ItemContent::Subagent { .. })
-                ) {
-                    let subagent_expanded = expanded.contains(&format!("subagent-{}", entry.id));
+                if let EntryContent::Item(ItemContent::Subagent { status, .. }) = &entry.content {
+                    let key = format!("subagent-{}", entry.id);
+                    let subagent_expanded =
+                        auto_expanded(expanded, &key, matches!(status, ItemStatus::InProgress));
                     subagent_expanded.hash(&mut content);
                     if subagent_expanded {
                         let child_entries = children.get(&entry.id).map_or(&[][..], Vec::as_slice);
@@ -939,6 +940,54 @@ impl ChatView {
         cx.notify();
     }
 
+    fn toggle_auto_expanded(
+        &mut self,
+        turn: usize,
+        key: &str,
+        automatic: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let was_expanded = auto_expanded(&self.expanded, key, automatic);
+        self.expanded.insert(manual_override_key(key));
+        if was_expanded {
+            self.expanded.remove(key);
+        } else {
+            self.expanded.insert(key.to_string());
+        }
+        self.sync_markdown_states(cx);
+        self.list_state.remeasure_items(turn..turn + 1);
+        cx.notify();
+    }
+
+    fn render_shimmer_label(
+        &self,
+        id: SharedString,
+        label: Cow<'static, str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let quiet = cx.theme().muted_foreground.opacity(0.08);
+        let bright = cx.theme().foreground.opacity(0.18);
+        div()
+            .px_2()
+            .py(px(1.))
+            .rounded(crate::material::radius_chip())
+            .text_size(px(13.))
+            .text_color(cx.theme().foreground)
+            .child(label)
+            .with_animation(
+                id,
+                Animation::new(Duration::from_millis(1400)).repeat(),
+                move |element, delta| {
+                    element.bg(linear_gradient(
+                        90.,
+                        linear_color_stop(quiet, (delta - 0.3).clamp(0., 1.)),
+                        linear_color_stop(bright, delta.clamp(0., 1.)),
+                    ))
+                },
+            )
+            .into_any_element()
+    }
+
     // -- turn rendering -----------------------------------------------------
 
     /// Render one turn as chronological messages, errors, and Work Log runs.
@@ -963,13 +1012,6 @@ impl ChatView {
         let segments = &segmented.flow;
         let turn_entries: Vec<&TimelineEntry> = entries.iter().map(AsRef::as_ref).collect();
         let turn_counts = work_log_counts(&turn_entries);
-        let last_assistant_id = entries.iter().rev().find_map(|entry| {
-            matches!(
-                entry.content,
-                EntryContent::Item(ItemContent::AssistantMessage { .. })
-            )
-            .then_some(entry.id.as_str())
-        });
         let last_segment_is_activity = matches!(segments.last(), Some(Segment::ActivityRun(_)));
         let append_tail_work_log = turn.running && !last_segment_is_activity;
         let last_activity_segment = (!append_tail_work_log)
@@ -1056,14 +1098,12 @@ impl ChatView {
                     else {
                         unreachable!();
                     };
-                    let streaming =
-                        turn.running && last_assistant_id.is_some_and(|id| id == entry.id.as_str());
                     column = column.child(self.render_assistant(
                         &entry.id,
                         text,
                         cwd,
                         pinned.1 == Some(entry.id.as_str()),
-                        !streaming,
+                        !turn.running,
                         cx,
                     ));
                 }
@@ -1355,7 +1395,7 @@ impl ChatView {
             width.max(
                 window
                     .text_system()
-                    .layout_line(line, px(15.), &[run], None)
+                    .layout_line(line, px(13.), &[run], None)
                     .width,
             )
         });
@@ -1457,13 +1497,13 @@ impl ChatView {
                         // 2px always reserves the pending state's border (sizes are
                         // border-box), so the width holds steady across steering
                         // states and the last glyph never wraps while pending.
-                        .w((text_width + px(32.)).ceil() + px(3.))
+                        .w((text_width + px(24.)).ceil() + px(3.))
                         .flex_none()
                         .max_w_3_4()
-                        .px_4()
-                        .py_3()
-                        .rounded_xl()
-                        .bg(cx.theme().muted)
+                        .px_3()
+                        .py_2()
+                        .rounded(px(12.))
+                        .bg(crate::material::content_surface(cx))
                         .when(pending, |bubble| {
                             bubble
                                 .border_1()
@@ -1471,7 +1511,7 @@ impl ChatView {
                                 .border_color(cx.theme().border)
                         })
                         .text_color(cx.theme().foreground)
-                        .text_size(px(15.))
+                        .text_size(px(13.))
                         .child(content)
                 })
             })
@@ -1582,12 +1622,7 @@ impl ChatView {
     /// paints its background onto the scrolling content layer, which is what
     /// made the whole rounded card slide and clip; `occlude` keeps wheel events
     /// over the card from also reaching the timeline list behind it.
-    fn render_disclosure_body(
-        &self,
-        key: &str,
-        full_text: &str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_disclosure_body(&self, key: &str, full_text: &str, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
         let lines: Vec<AnyElement> = full_text
             .split('\n')
@@ -1671,7 +1706,14 @@ impl ChatView {
             .child(self.render_copy_button(&format!("assistant:{id}"), copy_text, cx));
         message
             .group(group_key.clone())
-            .child(self.reserve_action_row(actions, group_key, pinned))
+            .child(
+                self.reserve_action_row(actions, group_key, pinned)
+                    .with_animation(
+                        SharedString::from(format!("assistant-actions-{id}")),
+                        Animation::new(Duration::from_millis(400)),
+                        |element, delta| element.opacity(delta),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1711,7 +1753,7 @@ impl ChatView {
                     .w_full()
                     .text_size(px(13.))
                     .line_height(px(20.))
-                    .text_color(cx.theme().foreground)
+                    .text_color(cx.theme().danger_foreground)
                     .whitespace_normal()
                     .child(message.to_string()),
             );
@@ -1720,7 +1762,9 @@ impl ChatView {
             .items_stretch()
             .rounded(crate::material::radius_card())
             .overflow_hidden()
-            .bg(cx.theme().muted.opacity(0.6))
+            .border_1()
+            .border_color(danger.opacity(0.22))
+            .bg(danger.opacity(0.12))
             .child(
                 div()
                     .flex_none()
@@ -1737,12 +1781,7 @@ impl ChatView {
     /// Wrap a message's action row so it occupies its height whether or not it is
     /// showing (no layout shift on hover) and is revealed by hovering the message
     /// — or unconditionally when `pinned` (the newest message of its kind).
-    fn reserve_action_row(
-        &self,
-        actions: gpui::Div,
-        group_key: SharedString,
-        pinned: bool,
-    ) -> impl IntoElement {
+    fn reserve_action_row(&self, actions: gpui::Div, group_key: SharedString, pinned: bool) -> Div {
         div()
             .h(px(ACTION_ROW_HEIGHT))
             .flex()
@@ -1783,13 +1822,7 @@ impl ChatView {
             }))
     }
 
-    /// The Work Log section: activity rows (collapsible) and an event-count
-    /// summary footer (or a live "Working for Ns" indicator).
-    ///
-    /// It used to hang off a hairline that ran right under the user bubble; the
-    /// rule is gone. Turns read as separate because of the space around them
-    /// (`TURN_GAP`) and the uppercase 11px label that opens the section — rhythm
-    /// and hierarchy, not another line.
+    /// A capsule containing one chronological run of machine activity.
     #[allow(clippy::too_many_arguments)]
     fn render_work_log(
         &self,
@@ -1806,8 +1839,8 @@ impl ChatView {
         let rows_key = format!("worklog-rows-{index}-{segment_id}");
         // Only the final segment carries the live "Working for" footer.
         let running = is_last && turn.running;
-        let expanded = work_log_auto_expands(activities, turn.running, is_last)
-            || self.expanded.contains(&section_key);
+        let automatic = work_log_auto_expands(activities, turn.running, is_last);
+        let expanded = auto_expanded(&self.expanded, &section_key, automatic);
         let muted = cx.theme().muted_foreground;
         let subagent_count = activities
             .iter()
@@ -1820,34 +1853,58 @@ impl ChatView {
             .count();
         let segment_counts = work_log_counts(activities);
 
-        let mut section = v_flex().w_full().gap_2();
+        let capsule_label = work_log_capsule_label(&segment_counts);
+        let click_key = section_key.clone();
+        let header = crate::material::accessible_clickable(
+            h_flex(),
+            SharedString::from(format!("worklog-header-{index}-{segment_id}")),
+            Role::Button,
+            capsule_label.clone(),
+            cx,
+        )
+        .aria_expanded(expanded)
+        .w_full()
+        .h(px(34.))
+        .px_3()
+        .gap_2()
+        .items_center()
+        .text_size(px(12.5))
+        .font_medium()
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(|row| row.bg(cx.theme().accent))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.toggle_auto_expanded(index, &click_key, automatic, cx);
+        }))
+        .child(
+            Icon::new(IconName::SquareTerminal)
+                .xsmall()
+                .text_color(muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_ellipsis()
+                .child(capsule_label),
+        )
+        .when(subagent_count > 0, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py(px(1.))
+                    .rounded(crate::material::radius_chip())
+                    .bg(cx.theme().muted)
+                    .text_size(px(11.))
+                    .child(crate::tr!("chat.subagent_count", count = subagent_count)),
+            )
+        })
+        .child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
+
+        let mut body = v_flex().w_full().gap_1p5().px_3().pb_3();
 
         if expanded {
-            if !running || subagent_count > 0 {
-                section = section.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .text_size(px(11.))
-                        .font_medium()
-                        .text_color(muted)
-                        .child(crate::tr!("chat.work_log").to_uppercase())
-                        .when(subagent_count > 0, |row| {
-                            row.child(
-                                div()
-                                    .px_2()
-                                    .py(px(1.))
-                                    .rounded_full()
-                                    .bg(cx.theme().muted)
-                                    .child(crate::tr!(
-                                        "chat.subagent_count",
-                                        count = subagent_count
-                                    )),
-                            )
-                        }),
-                );
-            }
-
             let display_activities = work_log_row_entries(activities, turn.running);
             let total = display_activities.len();
             let rows_expanded = self.expanded.contains(&rows_key);
@@ -1864,15 +1921,21 @@ impl ChatView {
                 if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content
                 {
                     for row in live_edit_rows(changes, cwd) {
-                        section = section.child(self.render_file_edit_row(&row, cx));
+                        body = body.child(self.render_file_edit_row(&row, cx));
                     }
                 } else {
-                    section = section.child(self.render_activity_row(entry, false, cx));
+                    let live_reasoning = running
+                        && activities.last().is_some_and(|last| last.id == entry.id)
+                        && matches!(
+                            entry.content,
+                            EntryContent::Item(ItemContent::Reasoning { .. })
+                        );
+                    body = body.child(self.render_activity_row(entry, false, live_reasoning, cx));
                 }
             }
 
             if let Some(toggle_label) = previous_logs_toggle_label(hidden, rows_expanded) {
-                section = section.child(
+                body = body.child(
                     crate::material::accessible_clickable(
                         h_flex(),
                         SharedString::from(format!("worklog-more-{index}-{segment_id}")),
@@ -1904,7 +1967,7 @@ impl ChatView {
             }
         }
 
-        // Footer: live "Working" indicator, or a toggleable nonzero event summary.
+        // Live state stays inside the capsule and shares the existing 1s ticker.
         if running {
             let secs = turn
                 .start_ts
@@ -1914,17 +1977,23 @@ impl ChatView {
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
-            section = section.child(
+            body = body.child(
                 h_flex()
                     .gap_2()
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(div().text_color(cx.theme().primary).child("•••"))
-                    .child(crate::tr!(
-                        "chat.working_for",
-                        duration = format_duration(secs)
+                    .child(self.render_shimmer_label(
+                        SharedString::from(format!("working-{index}-{segment_id}")),
+                        crate::tr!("chat.working"),
+                        cx,
                     ))
+                    .child(
+                        div()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(12.))
+                            .child(format_duration(secs)),
+                    )
                     .when_some(served_model, |row, served| {
                         row.child(
                             div()
@@ -1933,42 +2002,22 @@ impl ChatView {
                         )
                     }),
             );
-        } else if let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts) {
-            section = section.child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    SharedString::from(format!("worklog-footer-{index}-{segment_id}")),
-                    Role::Button,
-                    label.clone(),
-                    cx,
-                )
-                .aria_expanded(expanded)
-                .gap_1()
-                .items_center()
-                .text_size(px(13.))
-                .text_color(muted)
-                .cursor_pointer()
-                .hover(|s| s.text_color(cx.theme().foreground))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_expanded(index, &section_key, cx);
-                }))
-                .child(label)
-                .when(subagent_count > 0 && !expanded && !is_last, |row| {
-                    row.child(
-                        div()
-                            .px_2()
-                            .py(px(1.))
-                            .rounded_full()
-                            .bg(cx.theme().muted)
-                            .text_size(px(11.))
-                            .child(crate::tr!("chat.subagent_count", count = subagent_count)),
-                    )
-                })
-                .child(Icon::new(chevron(expanded)).xsmall()),
-            );
+        } else if expanded
+            && let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts)
+        {
+            body = body.child(div().text_size(px(11.)).text_color(muted).child(label));
         }
 
-        section.into_any_element()
+        v_flex()
+            .w_full()
+            .rounded(crate::material::radius_card())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().muted.opacity(0.42))
+            .overflow_hidden()
+            .child(header)
+            .when(expanded, |capsule| capsule.child(body))
+            .into_any_element()
     }
 
     fn render_file_edit_row(&self, row: &LiveEditRow, cx: &mut Context<Self>) -> AnyElement {
@@ -1980,6 +2029,7 @@ impl ChatView {
         &self,
         entry: &TimelineEntry,
         compact: bool,
+        live_reasoning: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if matches!(
@@ -1989,6 +2039,14 @@ impl ChatView {
             return self.render_subagent_row(entry, cx);
         }
         let muted = cx.theme().muted_foreground;
+        let key = format!("activity-{}", entry.id);
+        let expanded = self.expanded.contains(&key);
+        let expandable = matches!(
+            entry.content,
+            EntryContent::Item(ItemContent::CommandExecution { .. })
+                | EntryContent::Item(ItemContent::ToolCall { .. })
+                | EntryContent::Item(ItemContent::Reasoning { .. })
+        ) && !live_reasoning;
         let (icon, summary): (IconName, AnyElement) = match &entry.content {
             EntryContent::Item(ItemContent::CommandExecution {
                 command, status, ..
@@ -2101,22 +2159,31 @@ impl ChatView {
                 (activity_icon(ItemStatus::Completed), summary)
             }
             EntryContent::Item(ItemContent::Reasoning { text }) => {
-                let summary = h_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .gap_1()
-                    .overflow_hidden()
-                    .child(div().flex_none().child(crate::tr!("chat.thinking")))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(muted)
-                            .child(one_line(text)),
-                    )
-                    .into_any_element();
-                (IconName::Check, summary)
+                if live_reasoning {
+                    let summary = self.render_shimmer_label(
+                        SharedString::from(format!("thinking-{}", entry.id)),
+                        crate::tr!("chat.thinking_live"),
+                        cx,
+                    );
+                    (IconName::Loader, summary)
+                } else {
+                    let summary = h_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .gap_1()
+                        .overflow_hidden()
+                        .child(div().flex_none().child(crate::tr!("chat.thinking_done")))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(muted)
+                                .child(one_line(text)),
+                        )
+                        .into_any_element();
+                    (IconName::Check, summary)
+                }
             }
             EntryContent::ContextCompacted => {
                 let summary = div()
@@ -2133,14 +2200,123 @@ impl ChatView {
             _ => (IconName::Check, div().into_any_element()),
         };
 
-        h_flex()
+        let row = h_flex()
             .w_full()
+            .min_h(px(28.))
             .gap_2()
             .items_center()
             .when(!compact, |row| row.py_0p5())
             .text_size(px(13.))
             .child(Icon::new(icon).xsmall().text_color(muted))
             .child(summary)
+            .when(expandable, |row| {
+                row.child(Icon::new(chevron(expanded)).xsmall().text_color(muted))
+            });
+
+        let row: AnyElement = if expandable {
+            let turn = entry.turn;
+            let click_key = key.clone();
+            crate::material::accessible_clickable(
+                row,
+                SharedString::from(format!("activity-row-{}", entry.id)),
+                Role::Button,
+                crate::tr!("chat.activity_details"),
+                cx,
+            )
+            .aria_expanded(expanded)
+            .px_1()
+            .rounded(crate::material::radius_chip())
+            .cursor_pointer()
+            .hover(|row| row.bg(cx.theme().accent))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_expanded(turn, &click_key, cx);
+            }))
+            .into_any_element()
+        } else {
+            row.into_any_element()
+        };
+
+        let mut block = v_flex().w_full().gap_1().child(row);
+        if expanded && expandable {
+            block = block.child(self.render_activity_detail(entry, cx));
+        }
+        block.into_any_element()
+    }
+
+    fn render_activity_detail(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let detail = match &entry.content {
+            EntryContent::Item(ItemContent::CommandExecution {
+                command, output, ..
+            }) => v_flex()
+                .w_full()
+                .gap_2()
+                .child(activity_detail_section(
+                    crate::tr!("chat.command").into_owned(),
+                    command.clone(),
+                    true,
+                    mono.clone(),
+                    muted,
+                ))
+                .when(!output.is_empty(), |detail| {
+                    detail.child(activity_detail_section(
+                        crate::tr!("chat.output").into_owned(),
+                        output_tail(output, ACTIVITY_OUTPUT_TAIL_LINES),
+                        true,
+                        mono.clone(),
+                        muted,
+                    ))
+                })
+                .into_any_element(),
+            EntryContent::Item(ItemContent::ToolCall { input, output, .. }) => {
+                let mut input_brief = tool_brief(input);
+                if input_brief.is_empty() {
+                    input_brief = one_line(&input.to_string());
+                }
+                let input_brief = truncate_chars(&input_brief, 240);
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(activity_detail_section(
+                        crate::tr!("chat.input").into_owned(),
+                        input_brief,
+                        true,
+                        mono,
+                        muted,
+                    ))
+                    .when_some(output.clone(), |detail, output| {
+                        detail.child(activity_detail_section(
+                            crate::tr!("chat.output").into_owned(),
+                            truncate_chars(&one_line(&output), 240),
+                            false,
+                            String::new().into(),
+                            muted,
+                        ))
+                    })
+                    .into_any_element()
+            }
+            EntryContent::Item(ItemContent::Reasoning { text }) => div()
+                .w_full()
+                .ml(px(5.))
+                .pl(px(16.))
+                .py_1()
+                .border_l_1()
+                .border_color(cx.theme().border)
+                .text_size(px(12.5))
+                .line_height(px(20.))
+                .text_color(muted)
+                .whitespace_normal()
+                .child(text.clone())
+                .into_any_element(),
+            _ => div().into_any_element(),
+        };
+        div()
+            .w_full()
+            .rounded(crate::material::radius_input())
+            .bg(cx.theme().background.opacity(0.45))
+            .p_2()
+            .child(detail)
             .into_any_element()
     }
 
@@ -2155,7 +2331,8 @@ impl ChatView {
             unreachable!();
         };
         let key = format!("subagent-{}", entry.id);
-        let expanded = self.expanded.contains(&key);
+        let automatic = matches!(status, ItemStatus::InProgress);
+        let expanded = auto_expanded(&self.expanded, &key, automatic);
         let parent_id = entry.id.clone();
         let (children, truncated) = self
             .workspace_store
@@ -2168,7 +2345,7 @@ impl ChatView {
             })
             .unwrap_or_default();
         let muted = cx.theme().muted_foreground;
-        let finished = !matches!(status, ItemStatus::InProgress);
+        let finished = !automatic;
         let turn = entry.turn;
         let click_key = key.clone();
         let row_label = crate::tr!(
@@ -2177,6 +2354,32 @@ impl ChatView {
             description = one_line(description)
         )
         .into_owned();
+        let lifecycle: AnyElement = match status {
+            ItemStatus::InProgress => Spinner::new()
+                .xsmall()
+                .color(cx.theme().primary)
+                .into_any_element(),
+            ItemStatus::Completed => crate::material::semantic_chip(
+                crate::tr!("chat.subagent_completed"),
+                cx.theme().success.opacity(0.12),
+                cx.theme().success,
+            )
+            .into_any_element(),
+            ItemStatus::Failed | ItemStatus::Declined => h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    Icon::new(IconName::LoaderCircle)
+                        .xsmall()
+                        .text_color(cx.theme().danger),
+                )
+                .child(crate::material::semantic_chip(
+                    crate::tr!("chat.subagent_failed"),
+                    cx.theme().danger.opacity(0.12),
+                    cx.theme().danger,
+                ))
+                .into_any_element(),
+        };
         let mut row = crate::material::accessible_clickable(
             h_flex(),
             SharedString::from(format!("subagent-row-{}", entry.id)),
@@ -2186,17 +2389,22 @@ impl ChatView {
         )
         .aria_expanded(expanded)
         .w_full()
+        .h(px(44.))
         .min_w_0()
         .gap_2()
         .items_center()
-        .py_0p5()
+        .px_3()
+        .rounded_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(crate::material::content_surface(cx))
         .text_size(px(13.))
         .cursor_pointer()
-        .hover(|row| row.text_color(cx.theme().foreground))
+        .hover(|row| row.bg(cx.theme().accent))
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.toggle_expanded(turn, &click_key, cx);
+            this.toggle_auto_expanded(turn, &click_key, automatic, cx);
         }))
-        .child(Icon::new(activity_icon(*status)).xsmall().text_color(muted))
+        .child(lifecycle)
         .child(div().flex_none().font_medium().child(agent_type.clone()))
         .child(
             div()
@@ -2211,10 +2419,13 @@ impl ChatView {
         {
             row = row.child(
                 div()
+                    .max_w(px(180.))
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_color(muted)
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.5))
                     .child(one_line(summary)),
             );
         }
@@ -2283,7 +2494,7 @@ impl ChatView {
                 .text_color(muted)
                 .child(crate::tr!("chat.changed_files", count = changes.len()))
                 .into_any_element(),
-            _ => self.render_activity_row(entry, true, cx),
+            _ => self.render_activity_row(entry, true, false, cx),
         }
     }
 
@@ -2299,6 +2510,8 @@ impl ChatView {
         let muted = cx.theme().muted_foreground;
         let card_key = format!("card-{index}");
         let collapsed = self.expanded.contains(&card_key);
+        let more_key = format!("changed-files-more-{index}");
+        let show_all = self.expanded.contains(&more_key);
 
         let (total_add, total_del): (u32, u32) = changes
             .iter()
@@ -2364,90 +2577,91 @@ impl ChatView {
         let mut content = v_flex().w_full().child(header);
 
         if !collapsed {
-            let mut body = v_flex().w_full().pb_1().gap(px(1.));
-            for (dir, files) in group_by_dir(changes, cwd) {
-                let dir_add: u32 = files.iter().map(|f| f.added).sum();
-                let dir_del: u32 = files.iter().map(|f| f.deleted).sum();
-                if !dir.is_empty() {
-                    body = body.child(
-                        h_flex()
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .gap_1p5()
-                            .items_center()
-                            .text_size(px(13.))
-                            .rounded(px(6.))
-                            .hover(|s| s.bg(cx.theme().list_hover))
-                            .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted))
-                            .child(Icon::new(IconName::Folder).xsmall().text_color(muted))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .child(dir.clone()),
-                            )
-                            .child(diff_counts_colored(
-                                dir_add,
-                                dir_del,
-                                cx.theme().success,
-                                cx.theme().danger,
-                            )),
-                    );
-                }
-                for file in files {
-                    let path = file.path.clone();
-                    let row_label = format!("{}: {}", crate::tr!("chat.view_diff"), file.path);
-                    body = body.child(
-                        crate::material::accessible_clickable(
-                            h_flex(),
-                            SharedString::from(format!("changed-file-{index}-{}", file.path)),
-                            Role::Button,
-                            row_label,
-                            cx,
-                        )
-                        .w_full()
-                        .pl(px(if dir.is_empty() { 8. } else { 28. }))
-                        .pr_2()
-                        .py_1()
-                        .gap_1p5()
-                        .items_center()
-                        .text_size(px(13.))
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(cx.theme().list_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, cx| {
-                                store.open_diff_for_file(index, path.clone(), cx)
-                            });
-                        }))
-                        .child(Icon::new(IconName::File).xsmall().text_color(muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(file.name),
-                        )
-                        .child(diff_counts_colored(
-                            file.added,
-                            file.deleted,
-                            cx.theme().success,
-                            cx.theme().danger,
-                        )),
-                    );
-                }
+            let visible = if show_all {
+                changes.len()
+            } else {
+                changes.len().min(3)
+            };
+            let mut body = h_flex().w_full().px_1().pb_1().gap_1p5().flex_wrap();
+            for (file_index, change) in changes.iter().take(visible).enumerate() {
+                let display =
+                    tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
+                let name = Path::new(&display)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| display.clone());
+                let (added, deleted) = diff_stats(change.diff.as_deref());
+                let path = change.path.clone();
+                body = body.child(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        SharedString::from(format!("changed-file-chip-{index}-{file_index}")),
+                        Role::Button,
+                        format!("{}: {display}", crate::tr!("chat.view_diff")),
+                        cx,
+                    )
+                    .h(px(22.))
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .rounded(crate::material::radius_chip())
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(crate::material::content_surface(cx))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.5))
+                    .cursor_pointer()
+                    .hover(|chip| chip.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.open_diff_for_file(index, path.clone(), cx)
+                        });
+                    }))
+                    .child(name)
+                    .child(
+                        div()
+                            .text_color(cx.theme().success)
+                            .child(format!("+{added}")),
+                    )
+                    .child(
+                        div()
+                            .text_color(cx.theme().danger)
+                            .child(format!("-{deleted}")),
+                    ),
+                );
+            }
+            if changes.len() > 3 {
+                let hidden = changes.len() - 3;
+                let click_key = more_key.clone();
+                body = body.child(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        ("changed-files-more", index),
+                        Role::Button,
+                        crate::tr!("chat.more_files", count = hidden),
+                        cx,
+                    )
+                    .h(px(22.))
+                    .px_2()
+                    .items_center()
+                    .rounded(crate::material::radius_chip())
+                    .text_size(px(11.5))
+                    .text_color(muted)
+                    .cursor_pointer()
+                    .hover(|chip| chip.bg(cx.theme().accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_expanded(index, &click_key, cx);
+                    }))
+                    .child(if show_all {
+                        crate::tr!("chat.show_fewer_files")
+                    } else {
+                        crate::tr!("chat.more_files", count = hidden)
+                    }),
+                );
             }
             content = content.child(body);
         }
 
-        // A quiet manifest aligned with the prose column: no card slab, no
-        // rail — the small-caps header and hover rows carry the structure.
         content.into_any_element()
     }
 
@@ -3590,6 +3804,51 @@ fn tool_brief(input: &serde_json::Value) -> String {
     }
 }
 
+fn output_tail(output: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    lines[lines.len().saturating_sub(max_lines)..].join("\n")
+}
+
+fn activity_detail_section(
+    label: String,
+    text: String,
+    monospace: bool,
+    mono: SharedString,
+    muted: Hsla,
+) -> Div {
+    let lines = text
+        .split('\n')
+        .map(|line| {
+            div()
+                .w_full()
+                .line_height(px(18.))
+                .child(if line.is_empty() {
+                    " ".to_string()
+                } else {
+                    line.to_string()
+                })
+        })
+        .collect::<Vec<_>>();
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(10.5))
+                .font_medium()
+                .text_color(muted)
+                .child(label.to_uppercase()),
+        )
+        .child(
+            v_flex()
+                .w_full()
+                .text_size(px(11.5))
+                .text_color(muted)
+                .when(monospace, |body| body.font_family(mono))
+                .children(lines),
+        )
+}
+
 /// Wall-clock duration formatted as "XmYYs" / "YYs".
 fn format_duration(secs: u64) -> String {
     if secs >= 60 {
@@ -3786,13 +4045,6 @@ fn diff_stats(diff: Option<&str>) -> (u32, u32) {
     (added, removed)
 }
 
-struct FileRow {
-    path: String,
-    name: String,
-    added: u32,
-    deleted: u32,
-}
-
 /// One live Work Log row for an edited file: the workspace-relative display
 /// path plus `+added` / `-deleted` counts. The counts are `None` when the entry
 /// carries no diff — "+0 -0" would read as "this edit changed nothing".
@@ -3865,33 +4117,6 @@ fn work_log_row_entries<'a>(
                 )
         })
         .collect()
-}
-
-/// Group file changes by their parent directory (preserving first-seen order),
-/// so the CHANGED FILES card can render a folder → files tree. Paths are shown
-/// relative to the session `cwd` when they live under it.
-fn group_by_dir(changes: &[FileChange], cwd: &Path) -> Vec<(String, Vec<FileRow>)> {
-    let mut groups: Vec<(String, Vec<FileRow>)> = Vec::new();
-    for change in changes {
-        let display = tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
-        let (dir, name) = match display.rsplit_once('/') {
-            Some((dir, name)) => (dir.to_string(), name.to_string()),
-            None => (String::new(), display.clone()),
-        };
-        let (added, deleted) = diff_stats(change.diff.as_deref());
-        let row = FileRow {
-            path: display,
-            name,
-            added,
-            deleted,
-        };
-        if let Some(group) = groups.iter_mut().find(|(d, _)| *d == dir) {
-            group.1.push(row);
-        } else {
-            groups.push((dir, vec![row]));
-        }
-    }
-    groups
 }
 
 /// The `+N -N` pair, `flex_none` so it never gives ground to a long path.
@@ -4406,12 +4631,12 @@ This begins after the hard break."#;
             }),
         )];
         let mut children = HashMap::new();
-        let collapsed = index_turns(&turns, &entries, None, &children, &HashSet::new());
+        let automatic = index_turns(&turns, &entries, None, &children, &HashSet::new());
 
-        let expanded_keys = HashSet::from(["subagent-spawn".to_string()]);
-        let expanded = index_turns(&turns, &entries, None, &children, &expanded_keys);
+        let collapsed_keys = HashSet::from(["manual-subagent-spawn".to_string()]);
+        let collapsed = index_turns(&turns, &entries, None, &children, &collapsed_keys);
         assert_eq!(
-            list_sync(&collapsed, &expanded, false),
+            list_sync(&automatic, &collapsed, false),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -4422,9 +4647,9 @@ This begins after the hard break."#;
             "spawn".to_string(),
             vec![entry("spawn:child", assistant("Found the event envelope"))],
         );
-        let with_child = index_turns(&turns, &entries, None, &children, &expanded_keys);
+        let with_child = index_turns(&turns, &entries, None, &children, &HashSet::new());
         assert_eq!(
-            list_sync(&expanded, &with_child, false),
+            list_sync(&automatic, &with_child, false),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -4608,7 +4833,7 @@ This begins after the hard break."#;
     }
 
     #[test]
-    fn only_latest_live_reasoning_is_visible() {
+    fn all_reasoning_remains_reachable_while_the_latest_is_live() {
         let entries = [
             entry("reason-1", reasoning("first")),
             entry("reason-2", reasoning("latest")),
@@ -4617,12 +4842,14 @@ This begins after the hard break."#;
         let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
             segments.as_slice(),
-            [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "reason-2"
+            [Segment::ActivityRun(run)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["reason-1", "reason-2"]
         ));
     }
 
     #[test]
-    fn later_activity_removes_live_reasoning() {
+    fn later_activity_settles_reasoning_without_removing_it() {
         let entries = [
             entry("reason", reasoning("thinking")),
             command("later-command"),
@@ -4631,7 +4858,9 @@ This begins after the hard break."#;
         let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
             segments.as_slice(),
-            [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "later-command"
+            [Segment::ActivityRun(run)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["reason", "later-command"]
         ));
 
         let entries = [
@@ -4641,15 +4870,19 @@ This begins after the hard break."#;
         let segments = segment_entries(&entries, true).flow;
         assert!(matches!(
             segments.as_slice(),
-            [Segment::Assistant(entry)] if entry.id == "assistant"
+            [Segment::ActivityRun(run), Segment::Assistant(entry)]
+                if run.len() == 1 && run[0].id == "reason" && entry.id == "assistant"
         ));
     }
 
     #[test]
-    fn completion_removes_reasoning_from_history() {
+    fn completion_keeps_reasoning_reachable_in_history() {
         let entries = [entry("reason", reasoning("finished thinking"))];
 
-        assert!(segment_entries(&entries, false).flow.is_empty());
+        assert!(matches!(
+            segment_entries(&entries, false).flow.as_slice(),
+            [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "reason"
+        ));
     }
 
     fn file_change(id: &str, paths: &[&str]) -> Arc<TimelineEntry> {
