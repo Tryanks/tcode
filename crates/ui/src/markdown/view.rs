@@ -7,7 +7,7 @@ use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     StyledExt as _, WindowExt as _,
@@ -64,6 +64,8 @@ impl MarkdownView {
             selectable: None,
             base_dir: None,
         }
+        .text_size(px(13.5))
+        .line_height(px(21.))
     }
 
     /// Set whether text participates in window-level selection.

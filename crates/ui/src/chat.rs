@@ -47,10 +47,10 @@ use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 
-/// Content-column max width (T3 centers the timeline at ~760px). Shared with
+/// Content-column max width. Shared with
 /// the composer, which mirrors this column so the input aligns with the
 /// messages above it.
-pub(crate) const CONTENT_MAX_WIDTH: f32 = 768.;
+pub(crate) const CONTENT_MAX_WIDTH: f32 = 720.;
 /// Minimum horizontal padding around the content column so bubbles/cards never
 /// clip when the chat region is narrowed (e.g. the diff panel is open).
 pub(crate) const CONTENT_MIN_PADDING: f32 = 24.;
@@ -126,7 +126,7 @@ const ACTIVITY_OUTPUT_TAIL_LINES: usize = 20;
 const CALLBACK_TITLE_MAX_CHARS: usize = 24;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
-const TURN_GAP: f32 = 44.;
+const TURN_GAP: f32 = 24.;
 /// Pre-measure this many full-window heights on each side of the chat viewport.
 ///
 /// GPUI's list performs the expensive first layout for items in this band, so a
@@ -1006,7 +1006,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut column = v_flex().w_full().gap_4();
+        let mut column = v_flex().w_full().gap(px(10.));
 
         let segmented = segment_entries(entries, turn.running);
         let segments = &segmented.flow;
@@ -1464,6 +1464,8 @@ impl ChatView {
                 MarkdownView::new(&md.state)
                     .selectable(true)
                     .base_dir(cwd)
+                    .text_size(px(13.))
+                    .line_height(px(18.2))
                     .into_any_element()
             },
         );
@@ -1475,11 +1477,13 @@ impl ChatView {
             .when_some(steering, |column, steering| {
                 column.child(
                     div()
+                        .h(px(22.))
                         .px_2()
-                        .py(px(1.))
+                        .flex()
+                        .items_center()
                         .rounded_full()
                         .bg(cx.theme().muted)
-                        .text_size(px(11.))
+                        .text_size(px(11.5))
                         .text_color(cx.theme().muted_foreground)
                         .child(match steering {
                             SteeringStatus::Pending => crate::tr!("chat.steering"),
@@ -1497,11 +1501,11 @@ impl ChatView {
                         // 2px always reserves the pending state's border (sizes are
                         // border-box), so the width holds steady across steering
                         // states and the last glyph never wraps while pending.
-                        .w((text_width + px(24.)).ceil() + px(3.))
+                        .w((text_width + px(20.)).ceil() + px(3.))
                         .flex_none()
                         .max_w_3_4()
-                        .px_3()
-                        .py_2()
+                        .px(px(10.))
+                        .py(px(6.))
                         .rounded(px(12.))
                         // Reference bubble is `field`, not surface white; derive
                         // from foreground so both themes keep contrast with the
@@ -1515,6 +1519,7 @@ impl ChatView {
                         })
                         .text_color(cx.theme().foreground)
                         .text_size(px(13.))
+                        .line_height(px(18.2))
                         .child(content)
                 })
             })
@@ -1693,8 +1698,8 @@ impl ChatView {
         let message = v_flex().w_full().items_start().gap(px(2.)).child(
             div()
                 .w_full()
-                .text_size(px(15.))
-                .line_height(px(26.))
+                .text_size(px(13.5))
+                .line_height(px(21.))
                 .child(content),
         );
 
@@ -1743,10 +1748,10 @@ impl ChatView {
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(px(10.5))
                             .font_medium()
                             .text_color(cx.theme().danger_foreground)
-                            .child(crate::tr!("chat.error_label").to_uppercase()),
+                            .child(tracked_uppercase(crate::tr!("chat.error_label").as_ref())),
                     )
                     .child(div().flex_1())
                     .child(self.render_copy_button(&format!("error:{id}"), Arc::from(message), cx)),
@@ -1867,7 +1872,7 @@ impl ChatView {
         )
         .aria_expanded(expanded)
         .w_full()
-        .h(px(34.))
+        .h(px(30.))
         .px_3()
         .gap_2()
         .items_center()
@@ -1895,11 +1900,13 @@ impl ChatView {
             row.child(
                 div()
                     .flex_none()
+                    .h(px(22.))
                     .px_2()
-                    .py(px(1.))
+                    .items_center()
                     .rounded(crate::material::radius_chip())
                     .bg(cx.theme().muted)
-                    .text_size(px(11.))
+                    .text_size(px(11.5))
+                    .font_family(cx.theme().mono_font_family.clone())
                     .child(crate::tr!("chat.subagent_count", count = subagent_count)),
             )
         })
@@ -1950,7 +1957,7 @@ impl ChatView {
                     .gap_1()
                     .items_center()
                     .py_0p5()
-                    .text_size(px(13.))
+                    .text_size(px(12.5))
                     .text_color(muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(cx.theme().foreground))
@@ -1984,7 +1991,7 @@ impl ChatView {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .text_size(px(13.))
+                    .text_size(px(12.5))
                     .text_color(muted)
                     .child(self.render_shimmer_label(
                         SharedString::from(format!("working-{index}-{segment_id}")),
@@ -1994,7 +2001,7 @@ impl ChatView {
                     .child(
                         div()
                             .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(12.))
+                            .text_size(px(11.))
                             .child(format_duration(secs)),
                     )
                     .when_some(served_model, |row, served| {
@@ -2008,7 +2015,13 @@ impl ChatView {
         } else if expanded
             && let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts)
         {
-            body = body.child(div().text_size(px(11.)).text_color(muted).child(label));
+            body = body.child(
+                div()
+                    .text_size(px(11.))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(muted)
+                    .child(label),
+            );
         }
 
         v_flex()
@@ -2209,11 +2222,11 @@ impl ChatView {
             .gap_2()
             .items_center()
             .when(!compact, |row| row.py_0p5())
-            .text_size(px(13.))
-            .child(Icon::new(icon).xsmall().text_color(muted))
+            .text_size(px(12.5))
+            .child(Icon::new(icon).size(px(13.)).text_color(muted))
             .child(summary)
             .when(expandable, |row| {
-                row.child(Icon::new(chevron(expanded)).xsmall().text_color(muted))
+                row.child(Icon::new(chevron(expanded)).size(px(13.)).text_color(muted))
             });
 
         let row: AnyElement = if expandable {
@@ -2306,8 +2319,8 @@ impl ChatView {
                 .py_1()
                 .border_l_1()
                 .border_color(cx.theme().border)
-                .text_size(px(12.5))
-                .line_height(px(20.))
+                .text_size(px(11.5))
+                .line_height(px(18.))
                 .text_color(muted)
                 .whitespace_normal()
                 .child(text.clone())
@@ -2318,7 +2331,7 @@ impl ChatView {
             .w_full()
             .rounded(crate::material::radius_input())
             .bg(cx.theme().background.opacity(0.45))
-            .p_2()
+            .p(px(10.))
             .child(detail)
             .into_any_element()
     }
@@ -2367,6 +2380,9 @@ impl ChatView {
                 cx.theme().success.opacity(0.12),
                 cx.theme().success,
             )
+            .h(px(22.))
+            .items_center()
+            .text_size(px(11.5))
             .into_any_element(),
             ItemStatus::Failed | ItemStatus::Declined => h_flex()
                 .gap_1()
@@ -2376,11 +2392,16 @@ impl ChatView {
                         .xsmall()
                         .text_color(cx.theme().danger),
                 )
-                .child(crate::material::semantic_chip(
-                    crate::tr!("chat.subagent_failed"),
-                    cx.theme().danger.opacity(0.12),
-                    cx.theme().danger,
-                ))
+                .child(
+                    crate::material::semantic_chip(
+                        crate::tr!("chat.subagent_failed"),
+                        cx.theme().danger.opacity(0.12),
+                        cx.theme().danger,
+                    )
+                    .h(px(22.))
+                    .items_center()
+                    .text_size(px(11.5)),
+                )
                 .into_any_element(),
         };
         let mut row = crate::material::accessible_clickable(
@@ -2470,19 +2491,20 @@ impl ChatView {
                 .child(
                     div()
                         .max_w_3_4()
-                        .px_2()
-                        .py_1()
+                        .px(px(10.))
+                        .py(px(6.))
                         .rounded_lg()
                         .bg(cx.theme().muted)
                         .text_size(px(13.))
+                        .line_height(px(18.2))
                         .text_color(cx.theme().foreground)
                         .child(text.clone()),
                 )
                 .into_any_element(),
             EntryContent::Item(ItemContent::AssistantMessage { text }) => div()
                 .w_full()
-                .text_size(px(13.))
-                .line_height(px(19.))
+                .text_size(px(13.5))
+                .line_height(px(21.))
                 .text_color(cx.theme().foreground)
                 .child(text.clone())
                 .into_any_element(),
@@ -2649,6 +2671,7 @@ impl ChatView {
                     .items_center()
                     .rounded(crate::material::radius_chip())
                     .text_size(px(11.5))
+                    .font_family(cx.theme().mono_font_family.clone())
                     .text_color(muted)
                     .cursor_pointer()
                     .hover(|chip| chip.bg(cx.theme().accent))
@@ -2717,12 +2740,14 @@ impl ChatView {
                     .items_center()
                     .child(
                         div()
+                            .h(px(22.))
                             .px_2()
-                            .py(px(1.))
+                            .flex()
+                            .items_center()
                             .rounded_full()
                             .bg(cx.theme().info.opacity(0.12))
                             .text_color(cx.theme().info_foreground)
-                            .text_size(px(11.))
+                            .text_size(px(11.5))
                             .font_medium()
                             .child(crate::tr!("plan.badge")),
                     )
@@ -2858,6 +2883,7 @@ impl ChatView {
             ),
             cx.theme().muted_foreground,
             cx.theme().warning,
+            cx.theme().mono_font_family.clone(),
         )
         .into_any_element()
     }
@@ -3380,10 +3406,12 @@ impl ChatView {
             let mut launcher = v_flex().w_full().gap_1().child(
                 div()
                     .px_3()
-                    .text_size(px(11.))
+                    .text_size(px(10.5))
                     .font_medium()
                     .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("chat.start_hub_title").to_uppercase()),
+                    .child(tracked_uppercase(
+                        crate::tr!("chat.start_hub_title").as_ref(),
+                    )),
             );
             for (project, last_activity) in hub_projects {
                 let project_id = project.id.clone();
@@ -3812,6 +3840,17 @@ fn output_tail(output: &str, max_lines: usize) -> String {
     lines[lines.len().saturating_sub(max_lines)..].join("\n")
 }
 
+/// Uppercase section label with the design system's 0.08em tracking.
+/// GPUI has no letter-spacing primitive, so the 10.5px label is split into
+/// glyph elements with an exact 0.84px inter-glyph gap.
+fn tracked_uppercase(text: &str) -> Div {
+    h_flex().gap(px(0.84)).children(
+        text.to_uppercase()
+            .chars()
+            .map(|character| div().child(character.to_string())),
+    )
+}
+
 fn activity_detail_section(
     label: String,
     text: String,
@@ -3840,7 +3879,7 @@ fn activity_detail_section(
                 .text_size(px(10.5))
                 .font_medium()
                 .text_color(muted)
-                .child(label.to_uppercase()),
+                .child(tracked_uppercase(&label)),
         )
         .child(
             v_flex()
@@ -3982,13 +4021,19 @@ fn turn_time_clauses(
 /// narrow chat column (a diff panel is open, say) reflows the row at the middle
 /// dots instead of clipping the last clause at the divider. On a comfortable
 /// width the items pack onto one line and the row reads exactly as before.
-fn turn_time_footer(clauses: Vec<TurnTimeClause>, muted: Hsla, warning: Hsla) -> Div {
+fn turn_time_footer(
+    clauses: Vec<TurnTimeClause>,
+    muted: Hsla,
+    warning: Hsla,
+    mono: SharedString,
+) -> Div {
     let last = clauses.len().saturating_sub(1);
     h_flex()
         .w_full()
         .gap_1p5()
         .items_start()
-        .text_size(px(13.))
+        .text_size(px(11.))
+        .font_family(mono)
         .text_color(muted)
         .debug_selector(|| "turn-time-row".into())
         // The icon sits outside the wrapping flow, nudged onto the first line's
@@ -4123,11 +4168,18 @@ fn work_log_row_entries<'a>(
 }
 
 /// The `+N -N` pair, `flex_none` so it never gives ground to a long path.
-fn diff_counts_colored(added: u32, deleted: u32, added_color: Hsla, deleted_color: Hsla) -> Div {
+fn diff_counts_colored(
+    added: u32,
+    deleted: u32,
+    added_color: Hsla,
+    deleted_color: Hsla,
+    mono: SharedString,
+) -> Div {
     h_flex()
         .flex_none()
         .gap_2()
-        .text_size(px(13.))
+        .text_size(px(11.5))
+        .font_family(mono)
         .child(div().text_color(added_color).child(format!("+{added}")))
         .child(div().text_color(deleted_color).child(format!("-{deleted}")))
 }
@@ -4162,12 +4214,16 @@ impl FileEditRowStyle {
 fn file_edit_row(row: &LiveEditRow, style: &FileEditRowStyle) -> Div {
     h_flex()
         .w_full()
+        .min_h(px(28.))
         .gap_2()
         .items_center()
-        .py_0p5()
-        .text_size(px(13.))
+        .text_size(px(12.5))
         .debug_selector(|| "file-edit-row".into())
-        .child(Icon::new(IconName::File).xsmall().text_color(style.muted))
+        .child(
+            Icon::new(IconName::File)
+                .size(px(13.))
+                .text_color(style.muted),
+        )
         .child(
             h_flex()
                 .min_w_0()
@@ -4195,8 +4251,14 @@ fn file_edit_row(row: &LiveEditRow, style: &FileEditRowStyle) -> Div {
         )
         .when_some(row.counts, |element, (added, deleted)| {
             element.child(
-                diff_counts_colored(added, deleted, style.added, style.deleted)
-                    .debug_selector(|| "file-edit-counts".into()),
+                diff_counts_colored(
+                    added,
+                    deleted,
+                    style.added,
+                    style.deleted,
+                    style.mono.clone(),
+                )
+                .debug_selector(|| "file-edit-counts".into()),
             )
         })
 }
@@ -5647,6 +5709,7 @@ This begins after the hard break."#;
                 self.clauses.clone(),
                 cx.theme().muted_foreground,
                 cx.theme().warning,
+                cx.theme().mono_font_family.clone(),
             ))
         }
     }

@@ -37,7 +37,6 @@ const CODE_CACHE_CAPACITY: usize = 64;
 const BLOCK_OVERDRAW: Pixels = px(300.);
 const SCROLL_GESTURE_TIMEOUT: Duration = Duration::from_millis(250);
 const TABLE_BORDER_PX: f32 = 1.;
-const HEADING_BASE_FONT_SIZE: Pixels = px(15.);
 const INLINE_CODE_FONT_SIZE: Pixels = px(13.);
 const INLINE_CODE_RADIUS: Pixels = px(4.);
 type HighlightRuns = Vec<(Range<usize>, HighlightStyle)>;
@@ -389,16 +388,14 @@ fn render_block(
         BlockNode::Heading {
             level, children, ..
         } => {
-            let (scale, weight) = match level {
-                1 => (2., FontWeight::BOLD),
-                2 => (1.5, FontWeight::SEMIBOLD),
-                3 => (1.25, FontWeight::SEMIBOLD),
-                4 => (1.125, FontWeight::SEMIBOLD),
-                5 => (1., FontWeight::SEMIBOLD),
-                6 => (1., FontWeight::MEDIUM),
-                _ => (1., FontWeight::NORMAL),
+            let (size, weight) = match level {
+                1 => (px(17.), FontWeight::BOLD),
+                2 => (px(15.), FontWeight::SEMIBOLD),
+                3 => (px(13.5), FontWeight::SEMIBOLD),
+                4 | 5 => (px(13.5), FontWeight::SEMIBOLD),
+                6 => (px(13.5), FontWeight::MEDIUM),
+                _ => (px(13.5), FontWeight::NORMAL),
             };
-            let size = HEADING_BASE_FONT_SIZE * scale;
             div()
                 .id(options.path.clone())
                 .pb(rems(0.3))

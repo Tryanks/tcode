@@ -351,7 +351,6 @@ impl Render for MarkdownState {
         let measured_content_height = self.measured_content_height;
         v_flex()
             .w_full()
-            .text_size(px(15.))
             .child(render::render_root(
                 &parsed,
                 self.list_state.clone(),
