@@ -1,70 +1,50 @@
-//! The "Frosted Instrument" material system (docs/visual-redesign.md).
+//! Shared material tokens for the Beautiful UI design system.
 //!
-//! The window canvas (theme `background`) is the only intentionally translucent
-//! tier; reading surfaces sit on top of it at near-full opacity so body text
-//! never lands on the raw blur. Semantic colors stay on `cx.theme()` — this
-//! module owns the material tiers, the role-based radius scale, and the few
-//! light effects (faded hairlines, the primary-button top light) the spec
-//! defines.
+//! Colors stay on `cx.theme()`; this module centralizes shared surface roles
+//! and the role-based radius scale.
 
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
+    Pixels, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
 use gpui_component::{ActiveTheme as _, StyledExt as _, popover::Popover, v_flex};
 
-fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
-    Rgba {
-        r: r as f32 / 255.,
-        g: g as f32 / 255.,
-        b: b as f32 / 255.,
-        a: a as f32 / 255.,
-    }
-    .into()
-}
-
-/// The canvas flattened to full opacity. Painted under the glass tiers only
-/// while the window is fullscreen: a fullscreen Space has nothing but black
-/// behind the vibrancy material, and the canvas alpha compositing against it
-/// muddies every surface above. Same fallback Windows Acrylic's `FallbackColor`
-/// and macOS "Reduce Transparency" apply. Windowed, the canvas stays
-/// translucent and Root owns it (docs/visual-redesign.md §0).
+/// The canvas flattened to full opacity for fullscreen and reduced-transparency
+/// fallbacks.
 pub fn opaque_canvas(cx: &App) -> Hsla {
     cx.theme().background.opacity(1.)
 }
 
-/// T1 paper: the near-opaque reading plane the chat workspace, right panel and
-/// full-page routes paint over the vibrancy canvas. Warm paper in light mode,
-/// blue-carbon in dark.
+/// The primary card/control surface.
 pub fn content_surface(cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() {
-        rgba(0x1B, 0x1E, 0x24, 0xF0)
-    } else {
-        rgba(0xFD, 0xFD, 0xFB, 0xF2)
-    }
+    cx.theme().popover
 }
 
 // Role-based radius scale — no magic corner numbers outside this table.
 /// Popovers, menus, dialogs, toasts.
 pub fn radius_overlay() -> Pixels {
-    px(14.)
+    px(10.)
 }
 /// Cards, event cards, diff blocks.
 pub fn radius_card() -> Pixels {
-    px(12.)
+    px(10.)
 }
 /// Plain inputs and button-group containers.
 pub fn radius_input() -> Pixels {
-    px(10.)
+    px(8.)
 }
 /// Buttons.
 pub fn radius_button() -> Pixels {
     px(8.)
 }
+/// Chips and compact status badges.
+pub fn radius_chip() -> Pixels {
+    px(6.)
+}
 /// The composer field — the hero element.
 pub fn radius_composer() -> Pixels {
-    px(16.)
+    px(14.)
 }
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the
@@ -172,7 +152,7 @@ pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div 
         .flex_none()
         .px_2()
         .py(px(1.))
-        .rounded_full()
+        .rounded(radius_chip())
         .bg(bg)
         .text_size(px(11.))
         .font_medium()
