@@ -8540,6 +8540,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui-wry",
+ "gpui_platform",
  "image",
  "imara-diff",
  "lb-wry",

@@ -44,6 +44,7 @@ objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKW
 [dev-dependencies]
 criterion = "0.8"
 gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 tcode-runtime = { path = "../runtime", features = ["test-support"] }
 # dump-create is only needed by examples/sanitize_syntaxes.rs and the syntax-set
 # regression test; the shipped binary keeps the lean dependency feature set.

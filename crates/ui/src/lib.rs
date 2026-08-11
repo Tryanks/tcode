@@ -9,6 +9,8 @@ mod composer_trigger;
 mod context_meter;
 mod conversation_ui;
 pub(crate) mod diff;
+#[doc(hidden)]
+pub mod gallery_support;
 pub(crate) mod git;
 mod highlight;
 pub mod i18n;

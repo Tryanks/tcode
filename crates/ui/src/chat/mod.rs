@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-mod components;
+pub(crate) mod components;
 mod model;
 
 use agent::{ItemContent, ItemStatus, RewindMode};
