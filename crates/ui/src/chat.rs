@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use agent::{ChangeCompleteness, FileChange, ItemContent, ItemStatus, RewindMode};
+use agent::{ChangeCompleteness, FileChange, ItemContent, ItemStatus, RewindMode, TurnStatus};
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClipboardItem, Context,
     Div, Entity, FollowMode, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
@@ -383,62 +383,58 @@ fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
     counts
 }
 
-fn localized_count(count: usize, one_key: &str, many_key: &str) -> Option<String> {
-    (count > 0).then(|| {
-        if count == 1 {
-            crate::tr!(one_key).into_owned()
-        } else {
-            crate::tr!(many_key, count = count).into_owned()
-        }
-    })
-}
-
-fn work_log_summary_with_command_keys(
-    counts: &WorkLogCounts,
-    command_one_key: &str,
-    commands_key: &str,
-) -> Option<String> {
+fn work_log_capsule_label(counts: &WorkLogCounts, activity_count: usize) -> String {
     let mut clauses = Vec::new();
-    clauses.extend(localized_count(
-        counts.commands,
-        command_one_key,
-        commands_key,
-    ));
-    clauses.extend(localized_count(
-        counts.files,
-        "chat.summary_file_one",
-        "chat.summary_files",
-    ));
-    clauses.extend(localized_count(
-        counts.tools,
-        "chat.summary_tool_one",
-        "chat.summary_tools",
-    ));
-    clauses.extend(localized_count(
-        counts.subagents,
-        "chat.summary_subagent_one",
-        "chat.summary_subagents",
-    ));
-    clauses.extend(localized_count(
-        counts.compactions,
-        "chat.summary_compaction_one",
-        "chat.summary_compactions",
-    ));
-    (!clauses.is_empty()).then(|| clauses.join(" · "))
+    if counts.tools > 0 {
+        clauses.push(if counts.tools == 1 {
+            crate::tr!("chat.work_log_tool_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_tools", count = counts.tools).into_owned()
+        });
+    }
+    if counts.files > 0 {
+        clauses.push(if counts.files == 1 {
+            crate::tr!("chat.work_log_edit_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_edits", count = counts.files).into_owned()
+        });
+    }
+    if counts.commands > 0 {
+        clauses.push(if counts.commands == 1 {
+            crate::tr!("chat.work_log_command_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_commands", count = counts.commands).into_owned()
+        });
+    }
+    if clauses.is_empty() && activity_count > 0 {
+        clauses.push(if activity_count == 1 {
+            crate::tr!("chat.work_log_activity_one").into_owned()
+        } else {
+            crate::tr!("chat.work_log_activities", count = activity_count).into_owned()
+        });
+    }
+    clauses.join(" · ")
 }
 
-fn work_log_summary(counts: &WorkLogCounts) -> Option<String> {
-    work_log_summary_with_command_keys(counts, "chat.summary_command_one", "chat.summary_commands")
+fn activity_run_duration_ms(activities: &[&TimelineEntry], turn: &TurnMeta, is_last: bool) -> u64 {
+    let first = activities.iter().find_map(|entry| entry.ts);
+    let last = activities.iter().rev().find_map(|entry| entry.ts);
+    match (first, last) {
+        (Some(first), Some(last)) => last.saturating_sub(first),
+        _ if is_last => turn.timing.map_or(0, |timing| timing.total_ms),
+        _ => 0,
+    }
 }
 
-fn work_log_capsule_label(counts: &WorkLogCounts) -> String {
-    crate::tr!(
-        "chat.work_log_counts",
-        tools = counts.tools,
-        files = counts.files,
-        commands = counts.commands
-    )
-    .into_owned()
+// A failed command inside a run is normal agent probing (grep exit 1, a
+// retried build); it never fails the run. Only the turn's own terminal
+// status colors the snapshot, and only on the segment that carries it.
+fn work_log_outcome(turn: &TurnMeta, _activities: &[&TimelineEntry], is_last: bool) -> TurnStatus {
+    if is_last {
+        turn.status.unwrap_or(TurnStatus::Completed)
+    } else {
+        TurnStatus::Completed
+    }
 }
 
 fn manual_override_key(key: &str) -> String {
@@ -450,23 +446,6 @@ fn auto_expanded(expanded: &HashSet<String>, key: &str, automatic: bool) -> bool
         expanded.contains(key)
     } else {
         automatic
-    }
-}
-
-fn turn_work_log_summary(counts: &WorkLogCounts) -> Option<String> {
-    work_log_summary_with_command_keys(counts, "chat.total_command_one", "chat.total_commands")
-        .map(|summary| crate::tr!("chat.total_summary", summary = summary).into_owned())
-}
-
-fn finished_work_log_label(
-    is_last_activity: bool,
-    segment_counts: &WorkLogCounts,
-    turn_counts: &WorkLogCounts,
-) -> Option<String> {
-    if is_last_activity {
-        turn_work_log_summary(turn_counts)
-    } else {
-        work_log_summary(segment_counts)
     }
 }
 
@@ -912,12 +891,12 @@ impl ChatView {
             }
         }
 
-        // Keep a 1s ticker alive while a turn runs so the live "Working for Ns"
-        // counter advances; drop it (cancelling) when nothing is running.
+        // Keep a 100ms ticker alive while a turn runs so the live elapsed timer
+        // advances at decisecond precision; dropping it cancels the task.
         if running && self._tick.is_none() {
             self._tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_secs(1)).await;
+                    smol::Timer::after(Duration::from_millis(100)).await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -984,6 +963,57 @@ impl ChatView {
                         linear_color_stop(bright, delta.clamp(0., 1.)),
                     ))
                 },
+            )
+            .into_any_element()
+    }
+
+    fn render_working_indicator(
+        &self,
+        id: SharedString,
+        started_at: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        const DELAYS_MS: [u64; 9] = [90, 180, 270, 0, 90, 180, 90, 180, 270];
+        const CYCLE_MS: u64 = 650;
+
+        let foreground = cx.theme().foreground;
+        let mut pixels = div().grid().grid_cols(3).gap(px(1.5));
+        for (cell, delay_ms) in DELAYS_MS.into_iter().enumerate() {
+            let animation_id = SharedString::from(format!("{id}-pixel-{cell}"));
+            pixels = pixels.child(
+                div()
+                    .size(px(4.))
+                    .rounded(px(1.))
+                    .bg(foreground)
+                    .with_animation(
+                        animation_id,
+                        Animation::new(Duration::from_millis(CYCLE_MS)).repeat(),
+                        move |element, delta| {
+                            let phase = (delta + 1. - delay_ms as f32 / CYCLE_MS as f32) % 1.;
+                            let triangle = 1. - (phase * 2. - 1.).abs();
+                            let eased = triangle * triangle * (3. - 2. * triangle);
+                            element.opacity(0.15 + eased * 0.85)
+                        },
+                    ),
+            );
+        }
+
+        let elapsed_ms = started_at.map_or(0, |start| now_millis().saturating_sub(start));
+        h_flex()
+            .gap(px(10.))
+            .items_center()
+            .text_color(cx.theme().muted_foreground)
+            .child(pixels)
+            .child(self.render_shimmer_label(
+                SharedString::from(format!("{id}-label")),
+                crate::tr!("chat.working"),
+                cx,
+            ))
+            .child(
+                div()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(12.))
+                    .child(format_elapsed_deciseconds(elapsed_ms)),
             )
             .into_any_element()
     }
@@ -1148,17 +1178,12 @@ impl ChatView {
                 column.child(self.render_proposed_plan_card(index, &item_id, &markdown, cwd, cx));
         }
 
-        // 4. CHANGED FILES card (aggregated across the turn's file changes).
-        // The card only appears once the turn has finished: while a turn runs,
-        // file edits are visible as Work Log activity rows and accumulate
-        // silently. Replay marks turns idle (mark_idle), so finished turns from
-        // stored sessions still render the card.
-        if !turn.running {
-            let (changes, completeness) = self.workspace_store.read(cx).chat_turn_changes(index);
-            if !changes.is_empty() {
-                column =
-                    column.child(self.render_changed_files(index, cwd, &changes, completeness, cx));
-            }
+        // Changed-file evidence lives outside Work Log disclosure, so it stays
+        // visible when an earlier activity segment settles and folds mid-turn.
+        let (changes, completeness) = self.workspace_store.read(cx).chat_turn_changes(index);
+        if !changes.is_empty() {
+            column =
+                column.child(self.render_changed_files(index, cwd, &changes, completeness, cx));
         }
 
         // 5. Turn timestamp row (finished turns with a known end time).
@@ -1861,7 +1886,18 @@ impl ChatView {
             .count();
         let segment_counts = work_log_counts(activities);
 
-        let capsule_label = work_log_capsule_label(&segment_counts);
+        let counts = if is_last {
+            turn_counts
+        } else {
+            &segment_counts
+        };
+        let mut capsule_label = work_log_capsule_label(counts, activities.len());
+        if capsule_label.is_empty() {
+            capsule_label = crate::tr!("chat.work_log").into_owned();
+        }
+        let duration =
+            format_span((activity_run_duration_ms(activities, turn, is_last) + 500) / 1000);
+        let outcome = work_log_outcome(turn, activities, is_last);
         let click_key = section_key.clone();
         let header = crate::material::accessible_clickable(
             h_flex(),
@@ -1884,11 +1920,36 @@ impl ChatView {
         .on_click(cx.listener(move |this, _, _, cx| {
             this.toggle_auto_expanded(index, &click_key, automatic, cx);
         }))
-        .child(
-            Icon::new(IconName::SquareTerminal)
-                .xsmall()
-                .text_color(muted),
-        )
+        .when(running, |row| {
+            row.child(Spinner::new().xsmall().color(cx.theme().primary))
+        })
+        .when(!running, |row| {
+            // Settled is the default and celebrates nothing: a muted check.
+            // Only a turn-level failure or interruption earns a danger pill.
+            let (icon, label) = match outcome {
+                TurnStatus::Completed => {
+                    return row.child(Icon::new(IconName::Check).size(px(12.)).text_color(muted));
+                }
+                TurnStatus::Failed => (IconName::Redo2, crate::tr!("chat.work_log_failed")),
+                TurnStatus::Interrupted => {
+                    (IconName::CircleX, crate::tr!("chat.work_log_interrupted"))
+                }
+            };
+            row.child(
+                h_flex()
+                    .flex_none()
+                    .h(px(22.))
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .rounded(crate::material::radius_chip())
+                    .bg(cx.theme().danger.opacity(0.12))
+                    .text_color(cx.theme().danger)
+                    .text_size(px(11.5))
+                    .child(Icon::new(icon).size(px(12.)))
+                    .child(label),
+            )
+        })
         .child(
             div()
                 .flex_1()
@@ -1896,6 +1957,15 @@ impl ChatView {
                 .text_ellipsis()
                 .child(capsule_label),
         )
+        .when(!running, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.))
+                    .child(duration),
+            )
+        })
         .when(subagent_count > 0, |row| {
             row.child(
                 div()
@@ -1977,12 +2047,8 @@ impl ChatView {
             }
         }
 
-        // Live state stays inside the capsule and shares the existing 1s ticker.
+        // Live state stays inside the capsule and shares the 100ms ticker.
         if running {
-            let secs = turn
-                .start_ts
-                .map(|start| now_millis().saturating_sub(start) / 1000)
-                .unwrap_or(0);
             let requested_model = self.workspace_store.read(cx).chat_requested_model();
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
@@ -1993,17 +2059,11 @@ impl ChatView {
                     .items_center()
                     .text_size(px(12.5))
                     .text_color(muted)
-                    .child(self.render_shimmer_label(
+                    .child(self.render_working_indicator(
                         SharedString::from(format!("working-{index}-{segment_id}")),
-                        crate::tr!("chat.working"),
+                        turn.start_ts,
                         cx,
                     ))
-                    .child(
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(px(11.))
-                            .child(format_duration(secs)),
-                    )
                     .when_some(served_model, |row, served| {
                         row.child(
                             div()
@@ -2011,16 +2071,6 @@ impl ChatView {
                                 .child(format!("⚠ {served}")),
                         )
                     }),
-            );
-        } else if expanded
-            && let Some(label) = finished_work_log_label(is_last, &segment_counts, turn_counts)
-        {
-            body = body.child(
-                div()
-                    .text_size(px(11.))
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_color(muted)
-                    .child(label),
             );
         }
 
@@ -2063,15 +2113,11 @@ impl ChatView {
                 | EntryContent::Item(ItemContent::ToolCall { .. })
                 | EntryContent::Item(ItemContent::Reasoning { .. })
         ) && !live_reasoning;
-        let (icon, summary): (IconName, AnyElement) = match &entry.content {
+        let (status, icon, summary): (ItemStatus, IconName, AnyElement) = match &entry.content {
             EntryContent::Item(ItemContent::CommandExecution {
                 command, status, ..
             }) => {
-                let icon = if matches!(status, ItemStatus::InProgress) {
-                    IconName::SquareTerminal
-                } else {
-                    IconName::Check
-                };
+                let icon = activity_icon(*status);
                 let (preview, breaks) = one_line_with_break_markers(command);
                 let marker_style = HighlightStyle {
                     color: Some(muted.opacity(0.45)),
@@ -2095,7 +2141,7 @@ impl ChatView {
                             )),
                     )
                     .into_any_element();
-                (icon, summary)
+                (*status, icon, summary)
             }
             EntryContent::Item(ItemContent::ToolCall {
                 name,
@@ -2127,7 +2173,7 @@ impl ChatView {
                         )
                     })
                     .into_any_element();
-                (activity_icon(*status), summary)
+                (*status, activity_icon(*status), summary)
             }
             EntryContent::Item(ItemContent::WebSearch { query }) => {
                 let brief = one_line(query);
@@ -2148,7 +2194,11 @@ impl ChatView {
                         )
                     })
                     .into_any_element();
-                (activity_icon(ItemStatus::Completed), summary)
+                (
+                    ItemStatus::Completed,
+                    activity_icon(ItemStatus::Completed),
+                    summary,
+                )
             }
             EntryContent::Item(ItemContent::Other {
                 provider_kind,
@@ -2172,33 +2222,29 @@ impl ChatView {
                         )
                     })
                     .into_any_element();
-                (activity_icon(ItemStatus::Completed), summary)
+                (
+                    ItemStatus::Completed,
+                    activity_icon(ItemStatus::Completed),
+                    summary,
+                )
             }
-            EntryContent::Item(ItemContent::Reasoning { text }) => {
+            EntryContent::Item(ItemContent::Reasoning { .. }) => {
                 if live_reasoning {
                     let summary = self.render_shimmer_label(
                         SharedString::from(format!("thinking-{}", entry.id)),
                         crate::tr!("chat.thinking_live"),
                         cx,
                     );
-                    (IconName::Loader, summary)
+                    (ItemStatus::InProgress, IconName::Loader, summary)
                 } else {
-                    let summary = h_flex()
+                    let summary = div()
                         .min_w_0()
                         .flex_1()
-                        .gap_1()
                         .overflow_hidden()
-                        .child(div().flex_none().child(crate::tr!("chat.thinking_done")))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_color(muted)
-                                .child(one_line(text)),
-                        )
+                        .text_ellipsis()
+                        .child(crate::tr!("chat.thinking_done"))
                         .into_any_element();
-                    (IconName::Check, summary)
+                    (ItemStatus::Completed, IconName::Check, summary)
                 }
             }
             EntryContent::ContextCompacted => {
@@ -2210,10 +2256,14 @@ impl ChatView {
                     .text_color(muted)
                     .child(crate::tr!("chat.context_compacted"))
                     .into_any_element();
-                (IconName::Minimize, summary)
+                (ItemStatus::Completed, IconName::Minimize, summary)
             }
             // Non-activity content never reaches this row.
-            _ => (IconName::Check, div().into_any_element()),
+            _ => (
+                ItemStatus::Completed,
+                IconName::Check,
+                div().into_any_element(),
+            ),
         };
 
         let row = h_flex()
@@ -2223,7 +2273,20 @@ impl ChatView {
             .items_center()
             .when(!compact, |row| row.py_0p5())
             .text_size(px(12.5))
-            .child(Icon::new(icon).size(px(13.)).text_color(muted))
+            .child(match status {
+                ItemStatus::InProgress => Spinner::new()
+                    .xsmall()
+                    .color(cx.theme().primary)
+                    .into_any_element(),
+                ItemStatus::Completed => Icon::new(icon)
+                    .size(px(13.))
+                    .text_color(muted)
+                    .into_any_element(),
+                ItemStatus::Failed | ItemStatus::Declined => Icon::new(icon)
+                    .size(px(13.))
+                    .text_color(cx.theme().danger)
+                    .into_any_element(),
+            })
             .child(summary)
             .when(expandable, |row| {
                 row.child(Icon::new(chevron(expanded)).size(px(13.)).text_color(muted))
@@ -2362,6 +2425,15 @@ impl ChatView {
             .unwrap_or_default();
         let muted = cx.theme().muted_foreground;
         let finished = !automatic;
+        let duration = finished.then(|| {
+            let end = children
+                .iter()
+                .rev()
+                .find_map(|child| child.ts)
+                .or(entry.ts)
+                .unwrap_or(0);
+            format_compact_span(end.saturating_sub(entry.ts.unwrap_or(end)) / 1000)
+        });
         let turn = entry.turn;
         let click_key = key.clone();
         let row_label = crate::tr!(
@@ -2375,33 +2447,33 @@ impl ChatView {
                 .xsmall()
                 .color(cx.theme().primary)
                 .into_any_element(),
-            ItemStatus::Completed => crate::material::semantic_chip(
-                crate::tr!("chat.subagent_completed"),
-                cx.theme().success.opacity(0.12),
-                cx.theme().success,
-            )
-            .h(px(22.))
-            .items_center()
-            .text_size(px(11.5))
-            .into_any_element(),
-            ItemStatus::Failed | ItemStatus::Declined => h_flex()
+            ItemStatus::Completed => h_flex()
+                .h(px(22.))
+                .px_2()
                 .gap_1()
                 .items_center()
+                .rounded(crate::material::radius_chip())
+                .bg(cx.theme().muted)
+                .text_color(muted)
+                .text_size(px(11.5))
+                .child(Icon::new(IconName::Check).size(px(12.)))
+                .child(crate::tr!("chat.subagent_completed"))
+                .into_any_element(),
+            ItemStatus::Failed | ItemStatus::Declined => h_flex()
+                .h(px(22.))
+                .px_2()
+                .gap_1()
+                .items_center()
+                .rounded(crate::material::radius_chip())
+                .bg(cx.theme().danger.opacity(0.12))
+                .text_color(cx.theme().danger)
+                .text_size(px(11.5))
                 .child(
-                    Icon::new(IconName::LoaderCircle)
-                        .xsmall()
+                    Icon::new(IconName::Redo2)
+                        .size(px(12.))
                         .text_color(cx.theme().danger),
                 )
-                .child(
-                    crate::material::semantic_chip(
-                        crate::tr!("chat.subagent_failed"),
-                        cx.theme().danger.opacity(0.12),
-                        cx.theme().danger,
-                    )
-                    .h(px(22.))
-                    .items_center()
-                    .text_size(px(11.5)),
-                )
+                .child(crate::tr!("chat.subagent_failed"))
                 .into_any_element(),
         };
         let mut row = crate::material::accessible_clickable(
@@ -2438,7 +2510,17 @@ impl ChatView {
                 .text_ellipsis()
                 .text_color(muted)
                 .child(one_line(description)),
-        );
+        )
+        .when_some(duration, |row, duration| {
+            row.child(
+                div()
+                    .flex_none()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(duration),
+            )
+        });
         if finished && let Some(summary) = summary.as_deref().filter(|summary| !summary.is_empty())
         {
             row = row.child(
@@ -2874,6 +2956,7 @@ impl ChatView {
     fn render_timestamp(&self, ts: u64, turn: &TurnMeta, cx: &mut Context<Self>) -> AnyElement {
         let requested_model = self.workspace_store.read(cx).chat_requested_model();
         turn_time_footer(
+            SharedString::from(format!("turn-time-{ts}")),
             turn_time_clauses(
                 format_local_time(ts),
                 turn.timing,
@@ -2881,6 +2964,7 @@ impl ChatView {
                 turn.served_model.as_deref(),
                 requested_model.as_deref(),
             ),
+            turn_time_breakdown(turn.timing),
             cx.theme().muted_foreground,
             cx.theme().warning,
             cx.theme().mono_font_family.clone(),
@@ -3768,7 +3852,7 @@ fn activity_icon(status: ItemStatus) -> IconName {
     match status {
         ItemStatus::InProgress => IconName::LoaderCircle,
         ItemStatus::Completed => IconName::Check,
-        ItemStatus::Failed | ItemStatus::Declined => IconName::CircleX,
+        ItemStatus::Failed | ItemStatus::Declined => IconName::Redo2,
     }
 }
 
@@ -3905,6 +3989,32 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
+fn format_elapsed_deciseconds(elapsed_ms: u64) -> String {
+    let deciseconds = elapsed_ms / 100;
+    let seconds = deciseconds / 10;
+    let tenth = deciseconds % 10;
+    if seconds < 60 {
+        format!("{seconds}.{tenth}s")
+    } else {
+        format!("{}m {}.{tenth}s", seconds / 60, seconds % 60)
+    }
+}
+
+fn format_compact_span(secs: u64) -> String {
+    if secs >= 3600 {
+        format!(
+            "{}h{:02}m{:02}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
+    } else if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// A finished turn's duration. Long turns roll up into hours rather than
 /// growing an unreadable minute count (a full day reads `24h 00m 59s`, not
 /// `1440m 59s`), keeping the seconds because this row reports actual elapsed
@@ -3948,25 +4058,28 @@ fn format_cost_usd(cost: f64) -> String {
     }
 }
 
-/// A finished turn's bottom row, one clause per renderable unit: the completion
-/// clock, plus the turn's wall-clock breakdown when one was derivable. Legacy
-/// sessions without timestamps keep exactly the clock they showed before.
-///
-/// The row reads as the same middle-dot sentence it always did — the split only
-/// tells the layout where it may break the line.
+/// The quiet, visible portion of a finished turn's timing row. Bucket details
+/// intentionally live in [`turn_time_breakdown`] instead of competing with the
+/// completion clock, total duration, and cost.
 fn turn_time_parts(clock: String, timing: Option<TurnTiming>) -> Vec<String> {
-    let Some(timing) = timing else {
-        return vec![clock];
-    };
-    let total = timing.total_ms / 1000;
-    let tools = (timing.tool_ms / 1000).min(total);
-    let ai = total - tools;
-    vec![
-        clock,
-        crate::tr!("chat.turn_total", duration = format_span(total)).into_owned(),
-        crate::tr!("chat.turn_ai", duration = format_span(ai)).into_owned(),
-        crate::tr!("chat.turn_tools", duration = format_span(tools)).into_owned(),
-    ]
+    let mut parts = vec![clock];
+    if let Some(timing) = timing {
+        parts.push(format_compact_span(timing.total_ms / 1000));
+    }
+    parts
+}
+
+fn turn_time_breakdown(timing: Option<TurnTiming>) -> Option<String> {
+    timing.map(|timing| {
+        let total = timing.total_ms / 1000;
+        let tools = (timing.tool_ms / 1000).min(total);
+        let ai = total - tools;
+        [
+            crate::tr!("chat.turn_ai", duration = format_span(ai)).into_owned(),
+            crate::tr!("chat.turn_tools", duration = format_span(tools)).into_owned(),
+        ]
+        .join(" · ")
+    })
 }
 
 #[derive(Clone)]
@@ -3983,12 +4096,7 @@ fn turn_time_clauses(
     served_model: Option<&str>,
     requested_model: Option<&str>,
 ) -> Vec<TurnTimeClause> {
-    const TIMING_SELECTORS: [&str; 4] = [
-        "turn-time-clock",
-        "turn-time-total",
-        "turn-time-ai",
-        "turn-time-tools",
-    ];
+    const TIMING_SELECTORS: [&str; 2] = ["turn-time-clock", "turn-time-total"];
 
     let mut clauses = turn_time_parts(clock, timing)
         .into_iter()
@@ -4016,19 +4124,20 @@ fn turn_time_clauses(
     clauses
 }
 
-/// The finished turn's bottom row, laid out from [`turn_time_parts`]. Each
-/// clause is its own item in a wrapping flow rather than one long string, so a
-/// narrow chat column (a diff panel is open, say) reflows the row at the middle
-/// dots instead of clipping the last clause at the divider. On a comfortable
-/// width the items pack onto one line and the row reads exactly as before.
+/// The finished turn's quiet mono row. Only clock, total duration, cost, and a
+/// divergent-model warning stay visible; thinking/tool buckets are attached as
+/// a tooltip to this single compact disclosure target.
 fn turn_time_footer(
+    id: SharedString,
     clauses: Vec<TurnTimeClause>,
+    breakdown: Option<String>,
     muted: Hsla,
     warning: Hsla,
     mono: SharedString,
-) -> Div {
+) -> AnyElement {
     let last = clauses.len().saturating_sub(1);
     h_flex()
+        .id(id)
         .w_full()
         .gap_1p5()
         .items_start()
@@ -4036,16 +4145,9 @@ fn turn_time_footer(
         .font_family(mono)
         .text_color(muted)
         .debug_selector(|| "turn-time-row".into())
-        // The icon sits outside the wrapping flow, nudged onto the first line's
-        // optical center: wrapped clauses then hang under the clock rather than
-        // sliding under the icon.
-        .child(
-            div()
-                .flex_none()
-                .mt(px(3.))
-                .debug_selector(|| "turn-time-icon".into())
-                .child(Icon::new(IconName::Info).xsmall()),
-        )
+        .when_some(breakdown, |row, breakdown| {
+            row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
+        })
         .child(
             h_flex()
                 .flex_1()
@@ -4070,6 +4172,7 @@ fn turn_time_footer(
                         })
                 })),
         )
+        .into_any_element()
 }
 
 /// Count added / removed lines in a unified diff (ignoring the `+++`/`---`
@@ -4128,20 +4231,16 @@ fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEditRow> {
 
 /// Whether a Work Log segment opens on its own, before any user toggle.
 ///
-/// The final segment of a running turn is live, as it always was. A segment
-/// holding file edits also stays open for as long as the turn runs, even once
-/// assistant output has pushed it out of final position — otherwise the paths
-/// and line counts it exists to show would collapse out of view mid-turn.
-/// Finished turns force nothing open: the CHANGED FILES card takes over.
-fn work_log_auto_expands(activities: &[&TimelineEntry], turn_running: bool, is_last: bool) -> bool {
-    turn_running
-        && (is_last
-            || activities.iter().any(|entry| {
-                matches!(
-                    entry.content,
-                    EntryContent::Item(ItemContent::FileChange { .. })
-                )
-            }))
+/// Only the final segment of a running turn is live. As soon as later prose
+/// starts, an earlier segment settles and folds; file evidence remains visible
+/// in the separate changed-file chip row. Manual overrides still win via
+/// [`auto_expanded`].
+fn work_log_auto_expands(
+    _activities: &[&TimelineEntry],
+    turn_running: bool,
+    is_last: bool,
+) -> bool {
+    turn_running && is_last
 }
 
 /// The activity entries a Work Log segment renders as rows.
@@ -4283,12 +4382,12 @@ fn format_local_time(unix_ms: u64) -> String {
 mod tests {
     use super::{
         ChatView, FileEditRowStyle, ListSync, LiveEditRow, MdState, MdSync, Segment, WorkLogCounts,
-        diff_stats, displayed_error_text, file_edit_row, finished_work_log_label, format_duration,
-        format_span, index_turns, list_sync, live_edit_counts, live_edit_rows, md_sync,
-        plain_text_as_markdown, previous_logs_toggle_label, segment_entries, start_hub_projects,
-        timeline_overdraw, turn_time_clauses, turn_time_footer, turn_time_parts,
-        turn_work_log_summary, work_log_auto_expands, work_log_counts, work_log_row_entries,
-        work_log_summary,
+        diff_stats, displayed_error_text, file_edit_row, format_duration,
+        format_elapsed_deciseconds, format_span, index_turns, list_sync, live_edit_counts,
+        live_edit_rows, md_sync, plain_text_as_markdown, previous_logs_toggle_label,
+        segment_entries, start_hub_projects, timeline_overdraw, turn_time_breakdown,
+        turn_time_clauses, turn_time_footer, turn_time_parts, work_log_auto_expands,
+        work_log_capsule_label, work_log_counts, work_log_row_entries,
     };
     use crate::markdown::MarkdownState;
     use crate::window_state::WindowState;
@@ -5008,7 +5107,7 @@ This begins after the hard break."#;
     }
 
     #[test]
-    fn work_log_summary_localizes_mixed_nonzero_counts_exactly() {
+    fn work_log_capsule_localizes_nonzero_counts_in_priority_order() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let counts = WorkLogCounts {
             commands: 2,
@@ -5020,39 +5119,18 @@ This begins after the hard break."#;
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
-            work_log_summary(&counts).as_deref(),
-            Some(
-                "Ran 2 commands · Edited 3 files · Made 1 tool call · Started 2 subagents · Compacted context 1 time"
-            )
+            work_log_capsule_label(&counts, 9),
+            "1 tool call · 3 edits · 2 commands"
         );
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
-            work_log_summary(&counts).as_deref(),
-            Some(
-                "已执行 2 条命令 · 编辑 3 个文件 · 调用 1 次工具 · 启动 2 个子代理 · 压缩 1 次上下文"
-            )
+            work_log_capsule_label(&counts, 9),
+            "1 次工具调用 · 3 处编辑 · 2 条命令"
         );
     }
 
     #[test]
-    fn chinese_turn_summary_prefixes_the_whole_sentence_once() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let counts = WorkLogCounts {
-            commands: 5,
-            files: 3,
-            tools: 2,
-            ..WorkLogCounts::default()
-        };
-
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(
-            turn_work_log_summary(&counts).as_deref(),
-            Some("共执行 5 条命令 · 编辑 3 个文件 · 调用 2 次工具")
-        );
-    }
-
-    #[test]
-    fn work_log_summary_omits_zero_counts_and_empty_rows() {
+    fn work_log_capsule_omits_zero_components_and_uses_activity_fallback() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let tools_only = WorkLogCounts {
             tools: 2,
@@ -5060,32 +5138,14 @@ This begins after the hard break."#;
         };
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
+        assert_eq!(work_log_capsule_label(&tools_only, 2), "2 tool calls");
+        assert_eq!(work_log_capsule_label(&WorkLogCounts::default(), 0), "");
         assert_eq!(
-            work_log_summary(&tools_only).as_deref(),
-            Some("Made 2 tool calls")
-        );
-        assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
-        assert_eq!(
-            finished_work_log_label(true, &WorkLogCounts::default(), &WorkLogCounts::default()),
-            None
-        );
-        assert_eq!(
-            finished_work_log_label(
-                false,
-                &WorkLogCounts::default(),
-                &WorkLogCounts {
-                    commands: 1,
-                    ..WorkLogCounts::default()
-                }
-            ),
-            None
+            work_log_capsule_label(&WorkLogCounts::default(), 1),
+            "1 activity"
         );
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(
-            work_log_summary(&tools_only).as_deref(),
-            Some("调用 2 次工具")
-        );
-        assert_eq!(work_log_summary(&WorkLogCounts::default()), None);
+        assert_eq!(work_log_capsule_label(&tools_only, 2), "2 次工具调用");
     }
 
     #[test]
@@ -5307,18 +5367,16 @@ This begins after the hard break."#;
         }
     }
 
-    /// A file-edit segment must stay open for the whole live turn: once later
-    /// assistant output makes it non-final, auto-collapsing would hide the very
-    /// paths and counts it exists to show.
+    /// Earlier activity settles when prose starts; file chips remain outside.
     #[test]
-    fn live_file_change_segments_stay_expanded_after_they_stop_being_final() {
+    fn earlier_file_change_segments_settle_after_prose_starts() {
         let file_edits = [command("cargo check"), file_change("edit", &["src/a.rs"])];
         let ordinary = [command("cargo check"), command("cargo test")];
         let file_edits = refs(&file_edits);
         let ordinary = refs(&ordinary);
 
-        // Live, no longer the final segment: only the file-edit run is forced.
-        assert!(work_log_auto_expands(&file_edits, true, false));
+        // Live, no longer the final segment: every run settles.
+        assert!(!work_log_auto_expands(&file_edits, true, false));
         assert!(!work_log_auto_expands(&ordinary, true, false));
 
         // The final live segment keeps opening on its own, as it always did.
@@ -5343,7 +5401,7 @@ This begins after the hard break."#;
     }
 
     #[test]
-    fn finished_activity_runs_show_real_counts_and_end_with_turn_wide_summary() {
+    fn finished_activity_runs_show_nonzero_segment_counts() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let entries = [
             command("command-1"),
@@ -5366,7 +5424,7 @@ This begins after the hard break."#;
         assert_eq!(counts.commands, 2);
         assert_eq!(counts.files, 1);
 
-        let labels = |last_activity, counts: &WorkLogCounts| {
+        let labels = || {
             activity_indexes
                 .iter()
                 .map(|index| {
@@ -5374,29 +5432,14 @@ This begins after the hard break."#;
                         unreachable!();
                     };
                     let segment_counts = work_log_counts(activities);
-                    finished_work_log_label(*index == last_activity, &segment_counts, counts)
-                        .expect("each real activity run has a footer affordance")
+                    work_log_capsule_label(&segment_counts, activities.len())
                 })
                 .collect::<Vec<_>>()
         };
-        let last_activity = *activity_indexes.last().unwrap();
-
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(
-            labels(last_activity, &counts),
-            [
-                "Ran 1 command · Edited 1 file",
-                "Ran 2 commands · Edited 1 file"
-            ]
-        );
+        assert_eq!(labels(), ["1 edit · 1 command", "1 edit · 1 command"]);
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(
-            labels(last_activity, &counts),
-            [
-                "已执行 1 条命令 · 编辑 1 个文件",
-                "共执行 2 条命令 · 编辑 1 个文件"
-            ]
-        );
+        assert_eq!(labels(), ["1 处编辑 · 1 条命令", "1 处编辑 · 1 条命令"]);
     }
 
     /// A message's Copy action puts the RAW text on the clipboard — the markdown
@@ -5706,7 +5749,9 @@ This begins after the hard break."#;
             use gpui::{ParentElement as _, Styled as _};
             use gpui_component::ActiveTheme as _;
             gpui_component::v_flex().size_full().child(turn_time_footer(
+                "turn-time-probe".into(),
                 self.clauses.clone(),
+                None,
                 cx.theme().muted_foreground,
                 cx.theme().warning,
                 cx.theme().mono_font_family.clone(),
@@ -5715,9 +5760,7 @@ This begins after the hard break."#;
     }
 
     #[gpui::test]
-    fn the_time_row_wraps_its_clauses_instead_of_clipping_at_narrow_widths(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_time_row_keeps_its_compact_clauses_inside_narrow_widths(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
 
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -5730,12 +5773,7 @@ This begins after the hard break."#;
             None,
         );
         // The footer's clauses, in render order (mirrors `turn_time_footer`).
-        let selectors = [
-            "turn-time-clock",
-            "turn-time-total",
-            "turn-time-ai",
-            "turn-time-tools",
-        ];
+        let selectors = ["turn-time-clock", "turn-time-total"];
         assert_eq!(clauses.len(), selectors.len());
 
         cx.update(gpui_component::init);
@@ -5751,13 +5789,7 @@ This begins after the hard break."#;
         // A comfortable chat width: the restrained single-line baseline.
         cx.simulate_resize(size(px(900.), px(120.)));
         draw(cx);
-        let baseline = cx.debug_bounds("turn-time-row").expect("row bounds");
         let first = cx.debug_bounds(selectors[0]).expect("clock bounds");
-        let icon = cx.debug_bounds("turn-time-icon").expect("icon bounds");
-        assert!(
-            (icon.center().y - first.center().y).abs() <= px(1.5),
-            "the icon is not anchored to the first line: icon={icon:?}, clock={first:?}"
-        );
         for selector in &selectors[1..] {
             let clause = cx.debug_bounds(selector).expect("clause bounds");
             assert_eq!(
@@ -5770,7 +5802,6 @@ This begins after the hard break."#;
         // Opening the diff panel squeezes the chat column; sweep well below any
         // practical width. Every clause must stay inside the row and hang under
         // the clock instead of spilling past the divider.
-        let mut wrapped = false;
         for width in 260..=900 {
             cx.simulate_resize(size(px(width as f32), px(120.)));
             draw(cx);
@@ -5791,12 +5822,7 @@ This begins after the hard break."#;
                     "{selector} was squeezed away at {width}px: {clause:?}"
                 );
             }
-            wrapped |= row.size.height > baseline.size.height;
         }
-        assert!(
-            wrapped,
-            "the row never reflowed onto a second line, so a narrow column must be clipping it"
-        );
     }
 
     #[test]
@@ -5818,9 +5844,7 @@ This begins after the hard break."#;
                 .collect::<Vec<_>>(),
             vec![
                 ("turn-time-clock", "3:04 PM"),
-                ("turn-time-total", "Total 1m 20s"),
-                ("turn-time-ai", "AI thinking & response 45s"),
-                ("turn-time-tools", "Tool calls 35s"),
+                ("turn-time-total", "1m20s"),
                 ("turn-time-cost", "$0.12"),
                 ("turn-time-model", "⚠ claude-opus-5"),
             ]
@@ -5847,28 +5871,18 @@ This begins after the hard break."#;
     }
 
     #[test]
-    fn the_time_row_breaks_into_one_wrappable_unit_per_clause() {
+    fn the_time_row_keeps_one_compact_unit_per_visible_clause() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         // The footer wraps at clause boundaries, so each clause has to be its
         // own unit — never one string the narrow column would have to clip.
         assert_eq!(
             turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(80_000, 35_000))),
-            vec![
-                "3:04 PM",
-                "Total 1m 20s",
-                "AI thinking & response 45s",
-                "Tool calls 35s",
-            ]
+            vec!["3:04 PM", "1m20s"]
         );
         assert_eq!(
             turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(10_500, 3_600))),
-            vec![
-                "3:04 PM",
-                "Total 10s",
-                "AI thinking & response 7s",
-                "Tool calls 3s",
-            ]
+            vec!["3:04 PM", "10s"]
         );
         // No clause carries a separator of its own: the row's dots belong to the
         // layout, so a wrapped line can never open with an orphaned one.
@@ -5886,7 +5900,7 @@ This begins after the hard break."#;
     }
 
     #[test]
-    fn finished_time_row_spells_out_the_turn_breakdown_in_both_locales() {
+    fn finished_time_row_is_compact_and_breakdown_is_localized_in_tooltip() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         // 1m 20s total, 35s of it inside tool calls.
         let timing = TurnTiming::new(80_000, 35_000);
@@ -5894,24 +5908,36 @@ This begins after the hard break."#;
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             turn_time_row("3:04 PM".into(), Some(timing)),
-            "3:04 PM · Total 1m 20s · AI thinking & response 45s · Tool calls 35s"
+            "3:04 PM · 1m20s"
+        );
+        assert_eq!(
+            turn_time_breakdown(Some(timing)).as_deref(),
+            Some("AI thinking & response 45s · Tool calls 35s")
         );
 
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             turn_time_row("3:04 PM".into(), Some(timing)),
-            "3:04 PM · 总计 1 分 20 秒 · AI 思考与回答 45 秒 · 工具调用 35 秒"
+            "3:04 PM · 1m20s"
+        );
+        assert_eq!(
+            turn_time_breakdown(Some(timing)).as_deref(),
+            Some("AI 思考与回答 45 秒 · 工具调用 35 秒")
         );
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]
-    fn an_ai_only_turn_still_shows_all_three_durations() {
+    fn an_ai_only_turn_keeps_total_visible_and_buckets_in_tooltip() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             turn_time_row("9:00 AM".into(), Some(TurnTiming::new(8_000, 0))),
-            "9:00 AM · Total 8s · AI thinking & response 8s · Tool calls 0s"
+            "9:00 AM · 8s"
+        );
+        assert_eq!(
+            turn_time_breakdown(Some(TurnTiming::new(8_000, 0))).as_deref(),
+            Some("AI thinking & response 8s · Tool calls 0s")
         );
     }
 
@@ -5932,13 +5958,13 @@ This begins after the hard break."#;
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
             turn_time_row("1:00 AM".into(), Some(timing)),
-            "1:00 AM · Total 24h 00m 59s · AI thinking & response 30m 59s · Tool calls 23h 30m 00s"
+            "1:00 AM · 24h00m59s"
         );
 
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
             turn_time_row("1:00 AM".into(), Some(timing)),
-            "1:00 AM · 总计 24 小时 00 分 59 秒 · AI 思考与回答 30 分 59 秒 · 工具调用 23 小时 30 分 00 秒"
+            "1:00 AM · 24h00m59s"
         );
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
@@ -5955,5 +5981,8 @@ This begins after the hard break."#;
         assert_eq!(format_span(90_061), "25h 01m 01s");
         assert_eq!(format_span(59), "59s");
         assert_eq!(format_span(90), "1m 30s");
+        assert_eq!(format_elapsed_deciseconds(0), "0.0s");
+        assert_eq!(format_elapsed_deciseconds(12_399), "12.3s");
+        assert_eq!(format_elapsed_deciseconds(65_299), "1m 5.2s");
     }
 }
