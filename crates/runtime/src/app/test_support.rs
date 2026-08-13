@@ -4,8 +4,6 @@ use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 
-use tcode_protocol::HostMessage;
-
 use crate::host::HostMsg;
 
 pub(super) struct TestStore(SessionStore);
@@ -39,9 +37,9 @@ impl Drop for TestStore {
 pub(super) struct TestAppContext {
     mailbox_tx: smol::channel::Sender<HostMsg>,
     mailbox_rx: smol::channel::Receiver<HostMsg>,
-    outgoing_tx: smol::channel::Sender<HostMessage>,
-    pub(super) outgoing_rx: smol::channel::Receiver<HostMessage>,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+    outgoing_tx: smol::channel::Sender<String>,
+    pub(super) outgoing_rx: smol::channel::Receiver<String>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
     changed_tx: smol::channel::Sender<()>,
     changed_rx: smol::channel::Receiver<()>,
     state: Option<Weak<RefCell<AppState>>>,

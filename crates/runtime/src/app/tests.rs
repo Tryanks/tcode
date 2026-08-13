@@ -2783,7 +2783,8 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
         assert!(!state.native_rewind_pending());
     });
     let mut serialized_prefill = None;
-    while let Ok(output) = cx.outgoing_rx.try_recv() {
+    while let Ok(line) = cx.outgoing_rx.try_recv() {
+        let output = tcode_protocol::decode_host_line(&line).expect("decode host test output");
         if let HostMessage::Event(EventEnvelope {
             event: ServerEvent::NativeRewindPrefill { session_id, text },
             ..
