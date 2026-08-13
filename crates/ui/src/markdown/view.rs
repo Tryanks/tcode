@@ -3,16 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::widgets::input::{Copy, SelectAll};
+use crate::widgets::menu::ContextMenuExt as _;
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _, menu::ContextMenuExt as _, notification::Notification,
-};
+use gpui_base::StyledExt as _;
 use serde::Deserialize;
 
 use super::{link_target::LinkTarget, state::MarkdownState, window_selection};

@@ -8,6 +8,7 @@ use std::{
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::ContextMenuExt as _;
 use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
@@ -18,12 +19,7 @@ use gpui::{
     UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
     prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_component::{
-    ElementExt as _, h_flex,
-    menu::ContextMenuExt as _,
-    resizable::{h_resizable, resizable_panel, v_resizable},
-    v_flex,
-};
+use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use term::{
     Cell, Color, CursorShape, HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermState,
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},

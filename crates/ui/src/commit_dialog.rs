@@ -18,7 +18,7 @@ use gpui::{
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Task,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
 use tcode_protocol::Command;

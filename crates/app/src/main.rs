@@ -18,7 +18,7 @@ use tcode_ui::{
 };
 use tcode_ui::{assets, settings};
 
-use gpui_component::{Root, WindowExt as _, dialog::DialogFooter};
+use tcode_ui::overlay::{DialogActions, OverlayExt as _, OverlayHost};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
@@ -116,7 +116,7 @@ fn handle_quit(
                     // both Enter and Escape safe while retaining the alert's
                     // normal visual style and explicit danger action.
                     .footer(
-                        DialogFooter::new()
+                        DialogActions::new()
                             .child(
                                 Button::new("quit-working-sessions")
                                     .label(tcode_ui::tr!("quit.confirm"))
@@ -339,7 +339,7 @@ fn main() {
                             }
                             let shell = cx
                                 .new(|cx| AppShell::new(workspace_store, window_state, window, cx));
-                            cx.new(|cx| Root::new(shell, window, cx))
+                            cx.new(|cx| OverlayHost::new(shell, window, cx))
                         }
                     })
                     .expect("failed to open tcode window");

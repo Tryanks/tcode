@@ -162,33 +162,6 @@ impl gpui_base::Selectable for Button {
     }
 }
 
-impl gpui_component::menu::DropdownMenu for Button {}
-
-impl From<ButtonVariant> for gpui_component::button::ButtonVariant {
-    fn from(value: ButtonVariant) -> Self {
-        match value {
-            ButtonVariant::Default => Self::Default,
-            ButtonVariant::Primary => Self::Primary,
-            ButtonVariant::Secondary => Self::Secondary,
-            ButtonVariant::Danger => Self::Danger,
-            ButtonVariant::Success => Self::Success,
-            ButtonVariant::Ghost => Self::Ghost,
-            ButtonVariant::Text => Self::Text,
-        }
-    }
-}
-
-pub(crate) fn notification_action_button(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui_component::button::Button {
-    gpui_component::button::Button::new(id)
-        .outline()
-        .label(label)
-        .on_click(handler)
-}
-
 impl Sizable for Button {
     fn with_size(mut self, size: impl Into<Size>) -> Self {
         self.size = size.into();

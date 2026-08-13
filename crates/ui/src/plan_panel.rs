@@ -17,7 +17,7 @@ use gpui::{
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::plan_title;
 use tcode_protocol::Command;

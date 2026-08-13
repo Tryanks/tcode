@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -30,10 +31,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, canvas, div, img,
     point, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    ElementExt as _, StyledExt as _, WindowExt as _, dialog::DialogButtonProps, h_flex,
-    notification::Notification, popover::PopoverState, v_flex,
-};
+use gpui_base::PopoverState;
+use gpui_base::{ElementExt as _, StyledExt as _, h_flex, v_flex};
 
 use crate::attachments::attach_error_message;
 use crate::composer_trigger::{
@@ -827,7 +826,7 @@ impl Composer {
                         to = to
                     ))
                     .button_props(
-                        DialogButtonProps::default()
+                        DialogButtons::default()
                             .ok_text(crate::tr!("composer.relay_confirm"))
                             .cancel_text(crate::tr!("composer.relay_cancel"))
                             .show_cancel(true),

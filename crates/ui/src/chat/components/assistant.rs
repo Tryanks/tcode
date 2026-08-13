@@ -9,7 +9,7 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use crate::markdown::{MarkdownState, MarkdownView};
 

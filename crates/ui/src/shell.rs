@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
@@ -10,11 +11,7 @@ use gpui::{
     Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    Root, WindowExt as _,
-    notification::Notification,
-    resizable::{ResizableState, h_resizable, resizable_panel},
-};
+use gpui_base::{ResizableState, h_resizable, resizable_panel};
 use tcode_core::ui::RightTab;
 use tcode_protocol::Command;
 use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
@@ -366,9 +363,6 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
         let route = self.window_state.read(cx).route;
         let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
@@ -423,10 +417,7 @@ impl Render for AppShell {
                         .min_h_0()
                         .overflow_hidden()
                         .child(self.settings_page.clone()),
-                )
-                .children(sheet_layer)
-                .children(dialog_layer)
-                .children(notification_layer);
+                );
         }
 
         // Which entity fills the right panel: the Preview tab shows the embedded
@@ -657,9 +648,6 @@ impl Render for AppShell {
                     .child(workspace),
             )
             .when(palette_open, |this| this.child(self.palette.clone()))
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 

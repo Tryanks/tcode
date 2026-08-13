@@ -8,6 +8,7 @@
 
 use std::rc::Rc;
 
+use crate::overlay::{DialogButtons, OverlayExt as _};
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::switch::Switch;
@@ -20,8 +21,7 @@ use gpui::{
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::dialog::DialogButtonProps;
-use gpui_component::{StyledExt as _, WindowExt as _, v_flex};
+use gpui_base::{StyledExt as _, v_flex};
 
 use computer_use_mcp::permissions::{
     self, PermissionKind, PermissionStatus, open_settings_pane, relaunch_app, request,
@@ -367,7 +367,7 @@ impl SettingsPage {
             crate::material::accessible_clickable(div(), id, Role::Tab, label.clone(), cx)
                 .aria_selected(active)
                 .child(
-                    gpui_component::h_flex()
+                    gpui_base::h_flex()
                         // Match the main sidebar thread rows: 30px tall, 13px
                         // label, a tight 6px rounded rect tinted when active and
                         // a neutral hover only when not.
@@ -408,7 +408,7 @@ impl SettingsPage {
             .child(
                 window_drag_area(
                     "settings-nav-drag",
-                    gpui_component::h_flex()
+                    gpui_base::h_flex()
                         .h(px(52.))
                         .flex_none()
                         .items_center()
@@ -483,7 +483,7 @@ impl SettingsPage {
             .child(
                 div().flex_none().child(
                     crate::material::accessible_clickable(
-                        gpui_component::h_flex(),
+                        gpui_base::h_flex(),
                         "settings-back",
                         Role::Button,
                         crate::tr!("settings.back"),
@@ -535,7 +535,7 @@ impl SettingsPage {
         // the way the chat header aligns with its timeline column.
         window_drag_area(
             "settings-header-drag",
-            gpui_component::h_flex()
+            gpui_base::h_flex()
                 .flex_none()
                 .h(px(52.))
                 .w_full()
@@ -547,7 +547,7 @@ impl SettingsPage {
             cx,
         )
         .child(
-            gpui_component::h_flex()
+            gpui_base::h_flex()
                 .w(px(CONTENT_MAX_WIDTH))
                 .max_w_full()
                 .when(hosts_caption, |column| {
@@ -598,7 +598,7 @@ impl SettingsPage {
                 .title(crate::tr!("settings.restore_title"))
                 .description(crate::tr!("settings.restore_description"))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("settings.restore"))
                         .cancel_text(crate::tr!("settings.cancel"))
@@ -651,7 +651,7 @@ impl SettingsPage {
             .min_h_0()
             .overflow_y_scroll()
             .child(
-                gpui_component::h_flex()
+                gpui_base::h_flex()
                     .w_full()
                     .justify_center()
                     .px_6()
@@ -767,19 +767,15 @@ impl SettingsPage {
         let checking = self.store.read(cx).providers_checking();
         let muted = cx.theme().muted_foreground;
 
-        let mut header = gpui_component::h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .pl_3()
-                    .text_size(px(11.))
-                    .font_medium()
-                    .text_color(muted)
-                    .child(crate::tr!("settings.providers_section")),
-            );
+        let mut header = gpui_base::h_flex().w_full().items_center().gap_2().child(
+            div()
+                .flex_1()
+                .pl_3()
+                .text_size(px(11.))
+                .font_medium()
+                .text_color(muted)
+                .child(crate::tr!("settings.providers_section")),
+        );
         if let Some(checked_at) = checked_at {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
             header = header.child(
@@ -937,7 +933,7 @@ impl SettingsPage {
                     self.row_frame(cx)
                         .child(self.row_labels(meta.title.clone(), desc, cx))
                         .child(
-                            gpui_component::h_flex()
+                            gpui_base::h_flex()
                                 .flex_none()
                                 .gap_2()
                                 .child(
@@ -997,7 +993,7 @@ impl SettingsPage {
                 .title(crate::tr!("sidebar.delete_title", title = title.clone()))
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("settings.delete_permanently"))
                         .cancel_text(crate::tr!("settings.cancel"))
@@ -1202,7 +1198,7 @@ impl SettingsPage {
                 "perm-recheck-screen-recording",
             ),
         };
-        let mut controls = gpui_component::h_flex()
+        let mut controls = gpui_base::h_flex()
             .flex_none()
             .gap_2()
             .items_center()
@@ -1252,7 +1248,7 @@ impl SettingsPage {
     }
 
     fn restart_banner(&self, cx: &mut Context<Self>) -> AnyElement {
-        gpui_component::h_flex()
+        gpui_base::h_flex()
             .w_full()
             .items_center()
             .gap_3()
@@ -1375,7 +1371,7 @@ impl SettingsPage {
     /// A single group row: transparent, ~44px min height, label left / control
     /// right. The group container owns the fill and border.
     fn row_frame(&self, _cx: &Context<Self>) -> gpui::Div {
-        gpui_component::h_flex()
+        gpui_base::h_flex()
             .w_full()
             .min_h(px(44.))
             .px_3()
@@ -1446,7 +1442,7 @@ impl SettingsPage {
         // picker uses. An outlined trigger reads as a card nested inside the
         // already-bordered group.
         Button::new(id).ghost().compact().child(
-            gpui_component::h_flex()
+            gpui_base::h_flex()
                 .w(px(160.))
                 .items_center()
                 .justify_between()
@@ -1495,7 +1491,7 @@ impl SettingsPage {
                         let on_select = on_select.clone();
                         let label = option.label.clone();
                         let item = crate::material::accessible_clickable(
-                            gpui_component::h_flex(),
+                            gpui_base::h_flex(),
                             option.id,
                             Role::MenuItem,
                             label.clone(),
@@ -1638,7 +1634,7 @@ impl Render for SettingsPage {
         // glass canvas the chat sidebar does (its `sidebar` token shows the
         // T0 blur through its own translucency), so navigating chat↔settings
         // never flips the window material. Only the content column is paper.
-        gpui_component::h_flex()
+        gpui_base::h_flex()
             .size_full()
             .text_color(cx.theme().foreground)
             .child(self.render_nav(window, cx))

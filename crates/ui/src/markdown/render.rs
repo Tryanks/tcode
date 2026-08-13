@@ -19,7 +19,8 @@ use gpui::{
     StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px, relative,
     rems, size,
 };
-use gpui_component::{h_flex, highlighter::HighlightTheme, v_flex};
+use gpui_base::{h_flex, v_flex};
+use gpui_component::highlighter::HighlightTheme;
 
 use crate::{diff::model::sub_runs, highlight};
 

@@ -32,11 +32,11 @@ Facts established during research (2026-08-13):
       sites survive), serde-load `themes/tcode.json`, own dark/light mode,
       replace `gpui_component::init` theme parts.
       Accept: build green; theme switching works in running app.
-- [ ] Phase 2 — owned primitives styled over base: Icon (keep assets crate),
+- [x] Phase 2 — owned primitives styled over base: Icon (keep assets crate),
       Button facade (only variants tcode uses), Input chrome, Tooltip chrome,
       Spinner, Kbd. Migrate call sites.
       Accept: build green; gallery example renders all primitives.
-- [ ] Phase 3 — notifications over base ToastManager + own overlay layer;
+- [x] Phase 3 — notifications over base ToastManager + own overlay layer;
       dialogs/sheets over base Dialog/Sheet; retire WindowExt/Root usage.
       Accept: build green; toast + dialog flows work in app.
 - [ ] Phase 4 — sweep remaining `gpui_component::` refs, remove

@@ -12,7 +12,7 @@ use gpui::{
     ObjectFit, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use tcode_core::session::SteeringStatus;
 

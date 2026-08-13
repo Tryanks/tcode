@@ -1,5 +1,6 @@
 //! First-class ACP provider cards and the modal agent marketplace.
 
+use crate::overlay::OverlayExt as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
@@ -13,9 +14,8 @@ use gpui::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_component::scroll::ScrollableElement as _;
 
 use tcode_core::acp::InstalledAcpAgent;
 use tcode_protocol::AcpMarketplaceItem;

@@ -8,7 +8,7 @@ use gpui::{
     AnyElement, App, ClickEvent, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     Window, div, px,
 };
-use gpui_component::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 /// A provider/app error as a first-class timeline block: a danger-tinted card
 /// carrying the full message, wrapped across as many lines as it needs.

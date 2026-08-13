@@ -12,7 +12,7 @@ use gpui::{
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::OrchestrateCallback;
 
@@ -325,7 +325,7 @@ mod tests {
             ParentElement as _, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
             StatefulInteractiveElement as _, Styled as _, Window, div, list, point, px, size,
         };
-        use gpui_component::v_flex;
+        use gpui_base::v_flex;
 
         cx.update(gpui_component::init);
         let cx = cx.add_empty_window();

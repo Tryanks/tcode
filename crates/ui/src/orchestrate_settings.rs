@@ -14,7 +14,7 @@ use gpui::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_protocol::Command;
@@ -575,7 +575,7 @@ impl OrchestrateSettingsPanel {
                 let option = |mode: ChildApprovalMode,
                               id: &'static str,
                               label: gpui::SharedString,
-                              cx: &mut Context<gpui_component::popover::PopoverState>|
+                              cx: &mut Context<gpui_base::PopoverState>|
                  -> AnyElement {
                     let panel = panel.clone();
                     let popover = cx.entity();

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::{
@@ -20,9 +21,8 @@ use gpui::{
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, StyledText,
     Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _, h_flex, highlighter::HighlightTheme, popover::Popover, v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_component::highlighter::HighlightTheme;
 
 use super::model::{
     DiffColors, ExpandDir, FileDiffInput, PairedRow, RenderedFile, RenderedRow, VisibleItem,
@@ -824,12 +824,11 @@ impl DiffPanel {
             .content(move |_, _, cx| {
                 let panel_for = panel.clone();
                 let session_for = session_selector.clone();
-                let scope_row = |id: &'static str,
-                                     label: gpui::SharedString,
-                                     scope: DiffScope,
-                                     cx: &mut gpui::Context<
-                        gpui_component::popover::PopoverState,
-                    >| {
+                let scope_row =
+                    |id: &'static str,
+                     label: gpui::SharedString,
+                     scope: DiffScope,
+                     cx: &mut gpui::Context<gpui_base::PopoverState>| {
                         let panel = panel_for.clone();
                         let session = session_for.clone();
                         material::accessible_clickable(
@@ -839,38 +838,38 @@ impl DiffPanel {
                             label.clone(),
                             cx,
                         )
-                            .aria_selected(selected_scope == Some(scope))
-                            .flex_none()
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .items_center()
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .cursor_pointer()
-                            .hover(|row| row.bg(cx.theme().list_hover))
-                            .when(selected_scope == Some(scope), |row| {
-                                row.bg(cx.theme().list_active)
-                            })
-                            .child(div().flex_1().child(label))
-                            .when(selected_scope == Some(scope), |row| {
-                                row.child(Icon::new(IconName::Check).xsmall())
-                            })
-                            .on_click({
-                                let popover = cx.entity();
-                                move |_, window, cx| {
-                                    panel.update(cx, |this, cx| {
-                                        this.scopes.insert(session.clone(), scope);
-                                        this.cache = None;
-                                        this.selection = None;
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.discard_diff_focus(cx);
-                                        });
-                                        cx.notify();
+                        .aria_selected(selected_scope == Some(scope))
+                        .flex_none()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .items_center()
+                        .rounded(px(6.))
+                        .text_size(px(13.))
+                        .cursor_pointer()
+                        .hover(|row| row.bg(cx.theme().list_hover))
+                        .when(selected_scope == Some(scope), |row| {
+                            row.bg(cx.theme().list_active)
+                        })
+                        .child(div().flex_1().child(label))
+                        .when(selected_scope == Some(scope), |row| {
+                            row.child(Icon::new(IconName::Check).xsmall())
+                        })
+                        .on_click({
+                            let popover = cx.entity();
+                            move |_, window, cx| {
+                                panel.update(cx, |this, cx| {
+                                    this.scopes.insert(session.clone(), scope);
+                                    this.cache = None;
+                                    this.selection = None;
+                                    this.workspace_store.update(cx, |store, cx| {
+                                        store.discard_diff_focus(cx);
                                     });
-                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                }
-                            })
+                                    cx.notify();
+                                });
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            }
+                        })
                     };
                 let mut list = v_flex()
                     .w_full()

@@ -12,7 +12,7 @@ use gpui::{
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use super::super::model::{LiveEditRow, diff_stats};
 
@@ -305,7 +305,7 @@ mod tests {
             // content-height there; reproduce that rather than letting the
             // window stretch the row and mask a wrap.
             use gpui::{ParentElement as _, Styled as _};
-            gpui_component::v_flex()
+            gpui_base::v_flex()
                 .size_full()
                 .child(file_edit_row(&self.row, &FileEditRowStyle::from_theme(cx)))
         }

@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     Styled as _, div, px,
 };
-use gpui_component::h_flex;
+use gpui_base::h_flex;
 
 pub(crate) fn relay_divider(
     id: &str,

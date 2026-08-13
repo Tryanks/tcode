@@ -178,17 +178,3 @@ fn apply_size(icon: Svg, size: Size) -> Svg {
         Size::Large => icon.size_6(),
     }
 }
-
-// Existing gpui-component widgets accept their own Icon through `Into<Icon>`.
-// Implementing the upstream naming trait lets tcode IconName cross that boundary.
-impl gpui_component::IconNamed for IconName {
-    fn path(self) -> SharedString {
-        IconNamed::path(self)
-    }
-}
-
-impl gpui_component::IconNamed for Icon {
-    fn path(self) -> SharedString {
-        self.path
-    }
-}

@@ -8,7 +8,7 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
-use gpui_component::h_flex;
+use gpui_base::h_flex;
 
 use super::super::model::{
     TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,
@@ -176,7 +176,7 @@ mod tests {
             // stretch it and mask a wrap.
             use crate::theme::ActiveTheme as _;
             use gpui::{ParentElement as _, Styled as _};
-            gpui_component::v_flex().size_full().child(turn_time_footer(
+            gpui_base::v_flex().size_full().child(turn_time_footer(
                 "turn-time-probe".into(),
                 self.clauses.clone(),
                 None,

@@ -279,6 +279,7 @@ pub fn init(cx: &mut App) {
 /// the platform window is opaque.
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
     gpui_component::init(cx);
+    crate::widgets::menu::init(cx);
     let themes = parse_theme_file(theme_json).expect("embedded themes/tcode.json must be valid");
 
     ThemeRegistry::global_mut(cx)

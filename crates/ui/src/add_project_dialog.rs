@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
@@ -10,10 +11,8 @@ use gpui::{
     ParentElement as _, PathPromptOptions, Render, Role, StatefulInteractiveElement as _,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _, dialog::DialogFooter, h_flex, scroll::ScrollableElement as _,
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_component::scroll::ScrollableElement as _;
 
 use crate::store::WorkspaceStore;
 use crate::time::{humanize_ago, now_secs};
@@ -456,7 +455,7 @@ fn render_add_footer(
     _cx: &mut App,
 ) -> AnyElement {
     let open = dialog.clone();
-    DialogFooter::new()
+    DialogActions::new()
         .child(
             Button::new("add-project-cancel")
                 .rounded(crate::material::radius_button())

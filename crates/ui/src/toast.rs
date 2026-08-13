@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
+use crate::overlay::{Notification, NotificationType};
 use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _, notification_action_button};
+use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -10,11 +11,7 @@ use gpui::{
     App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
-use gpui_component::{
-    h_flex,
-    notification::{Notification, NotificationType},
-    v_flex,
-};
+use gpui_base::{h_flex, v_flex};
 
 pub type ToastId = u64;
 
@@ -115,11 +112,10 @@ pub fn notification(
         let label = action.label;
         notification = notification.action(move |_, _, _| {
             let handler = handler.clone();
-            notification_action_button(
-                ("toast-action", id as usize),
-                label.clone(),
-                move |_, window, cx| handler(window, cx),
-            )
+            Button::new(("toast-action", id as usize))
+                .outline()
+                .label(label.clone())
+                .on_click(move |_, window, cx| handler(window, cx))
         });
     }
 

@@ -84,7 +84,7 @@ mod native {
         AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
     };
-    use gpui_component::{h_flex, v_flex};
+    use gpui_base::{h_flex, v_flex};
     use gpui_wry::WebView;
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
     use raw_window_handle::HasWindowHandle as _;
@@ -1097,7 +1097,7 @@ mod native {
 mod placeholder {
     use crate::theme::ActiveTheme as _;
     use gpui::{Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window};
-    use gpui_component::v_flex;
+    use gpui_base::v_flex;
     use preview_mcp::PreviewOp;
 
     use super::ReplyTx;

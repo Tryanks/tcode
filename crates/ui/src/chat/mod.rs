@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub(crate) mod components;
 mod model;
 
+use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::tooltip::Tooltip;
@@ -21,7 +22,7 @@ use gpui::{
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
     div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, WindowExt as _, h_flex, notification::Notification, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{
@@ -1710,7 +1711,7 @@ impl Render for ChatView {
             let drawer_resize = self.terminal_drawer.clone();
             let width = f32::from(window.bounds().size.width);
             drawer.update(cx, |drawer, cx| drawer.resize(width, terminal_height, cx));
-            gpui_component::resizable::v_resizable("chat-terminal-panels")
+            gpui_base::v_resizable("chat-terminal-panels")
                 .on_resize(move |state, _, cx| {
                     let height = state.read(cx).sizes().get(1).copied();
                     if let Some(height) = height {
@@ -1718,9 +1719,9 @@ impl Render for ChatView {
                             .update(cx, |drawer, cx| drawer.resize(width, f32::from(height), cx));
                     }
                 })
-                .child(gpui_component::resizable::resizable_panel().child(main))
+                .child(gpui_base::resizable_panel().child(main))
                 .child(
-                    gpui_component::resizable::resizable_panel()
+                    gpui_base::resizable_panel()
                         .flex_none()
                         .size(px(terminal_height))
                         .size_range(px(120.)..px(600.))

@@ -9,12 +9,13 @@
 //! defines.
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::Popover;
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_component::{StyledExt as _, popover::Popover, v_flex};
+use gpui_base::{StyledExt as _, v_flex};
 
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
@@ -152,7 +153,7 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
 /// reimplementing it. Neutral helper: sidebar.rs keeps its own inline copy, this
 /// only lets the settings nav wear the same treatment.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
-    gpui_component::h_flex()
+    gpui_base::h_flex()
         .items_center()
         .gap_2()
         .child(
@@ -197,7 +198,7 @@ pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div 
 /// GPUI has no letter-spacing primitive, so the 10.5px label is split into
 /// glyph elements with an exact 0.84px inter-glyph gap.
 pub(crate) fn tracked_uppercase(text: &str) -> Div {
-    gpui_component::h_flex().gap(px(0.84)).children(
+    gpui_base::h_flex().gap(px(0.84)).children(
         text.to_uppercase()
             .chars()
             .map(|character| div().child(character.to_string())),

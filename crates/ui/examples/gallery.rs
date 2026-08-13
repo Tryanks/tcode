@@ -8,8 +8,9 @@ use gpui::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
     WindowBounds, WindowOptions, div, px, size,
 };
-use gpui_component::{Root, StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_core::session::{EntryContent, OrchestrateCallback, TimelineEntry};
+use tcode_ui::overlay::OverlayHost;
 use tcode_ui::theme::{self, ActiveTheme as _};
 use tcode_ui::{assets, gallery_support, markdown::MarkdownState};
 
@@ -528,7 +529,7 @@ fn main() {
             };
             cx.open_window(options, |window, cx| {
                 let gallery = cx.new(Gallery::new);
-                cx.new(|cx| Root::new(gallery, window, cx))
+                cx.new(|cx| OverlayHost::new(gallery, window, cx))
             })
             .expect("failed to open component gallery window");
         });

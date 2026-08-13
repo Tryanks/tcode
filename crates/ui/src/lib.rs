@@ -18,6 +18,7 @@ pub mod icon;
 pub mod markdown;
 pub(crate) mod material;
 mod orchestrate_settings;
+pub mod overlay;
 mod palette;
 mod pasteboard;
 mod plan_panel;

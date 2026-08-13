@@ -7,7 +7,7 @@ use gpui::{
     App, Bounds, Context, EntityId, FocusHandle, IntoElement, ListAlignment, ListState,
     ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Window, px,
 };
-use gpui_component::{ElementExt as _, v_flex};
+use gpui_base::{ElementExt as _, v_flex};
 
 use super::{link_target::LinkTarget, nodes::BlockNode, render, window_selection};
 
