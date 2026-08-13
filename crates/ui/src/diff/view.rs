@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use agent::{FileChange, FileChangeKind};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
@@ -15,7 +19,7 @@ use gpui::{
     Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    Selectable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     highlighter::HighlightTheme,

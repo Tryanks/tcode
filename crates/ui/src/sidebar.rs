@@ -1,13 +1,17 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,

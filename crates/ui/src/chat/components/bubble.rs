@@ -2,13 +2,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     Anchor, AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement as _,
     ObjectFit, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, Sizable as _,
+    Disableable as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };

@@ -8,6 +8,10 @@ pub(crate) mod components;
 mod model;
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use agent::{ItemContent, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
@@ -16,7 +20,7 @@ use gpui::{
     div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _,
+    Selectable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,

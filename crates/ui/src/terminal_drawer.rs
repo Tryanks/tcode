@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::theme::ActiveTheme as _;
+use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
@@ -17,7 +18,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_component::{
-    Disableable as _, ElementExt as _, IconName, Sizable as _,
+    Disableable as _, ElementExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::ContextMenuExt as _,

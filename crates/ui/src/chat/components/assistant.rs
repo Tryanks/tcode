@@ -2,13 +2,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Div, Entity,
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };

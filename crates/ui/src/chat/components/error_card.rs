@@ -1,10 +1,14 @@
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     AnyElement, App, ClickEvent, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     Window, div, px,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _, StyledExt as _,
+    StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };

@@ -1,6 +1,10 @@
 use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use agent::{ChangeCompleteness, FileChange};
 use gpui::{
     AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
@@ -8,7 +12,7 @@ use gpui::{
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _, StyledExt as _,
+    StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };

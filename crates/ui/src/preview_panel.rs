@@ -77,12 +77,12 @@ mod native {
     use std::time::Duration;
 
     use crate::theme::ActiveTheme as _;
+    use crate::{icon::IconName, sizing::Sizable as _};
     use gpui::{
         AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
     };
     use gpui_component::{
-        IconName, Sizable as _,
         button::{Button, ButtonVariants as _},
         h_flex,
         input::{Input, InputEvent, InputState},

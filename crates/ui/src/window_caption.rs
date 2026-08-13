@@ -19,11 +19,14 @@
 //! drag area.
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     App, InteractiveElement, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, Window, WindowControlArea, div, px,
 };
-use gpui_component::{Icon, IconName, Sizable as _};
 use tcode_runtime::app::RightTab;
 
 use crate::window_state::Route;

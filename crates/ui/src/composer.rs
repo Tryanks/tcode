@@ -10,6 +10,10 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::theme::ActiveTheme as _;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use agent::{
     ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalOptionKind, ApprovalRequest,
     FileChangeKind, InteractionMode, ModelSpec, OptionDescriptor, ProviderCommand,
@@ -24,8 +28,7 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    Disableable as _, ElementExt as _, Icon, IconName, Sizable as _, StyledExt as _,
-    WindowExt as _,
+    Disableable as _, ElementExt as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
