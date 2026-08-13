@@ -87,6 +87,8 @@ impl TestAppContext {
             .expect("test state must outlive its context");
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut idle_passes = 0_u32;
+        let mut saw_work = false;
+        let mut store_flushed = false;
 
         while Instant::now() < deadline {
             let mut had_work = false;
@@ -110,15 +112,54 @@ impl TestAppContext {
 
             if had_work {
                 idle_passes = 0;
+                saw_work = true;
+                store_flushed = false;
             } else {
                 idle_passes += 1;
-                if idle_passes >= 50 {
+                // Loaded CI runners (notably Windows) can take well past 50ms
+                // to schedule a background completion; calls that processed
+                // work get a wider idle window before declaring parked.
+                let threshold = if saw_work && !store_flushed { 250 } else { 50 };
+                if idle_passes >= threshold {
+                    if !store_flushed {
+                        // Barrier the store-writer task so persisted state is
+                        // visible before callers assert on it. Its failure
+                        // path can enqueue more work, so keep draining.
+                        store_flushed = true;
+                        if self.flush_store_writer(&state, deadline) {
+                            idle_passes = 0;
+                            continue;
+                        }
+                    }
                     return;
                 }
             }
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("test host failed to park within five seconds");
+    }
+
+    /// Push a `StoreWrite::Flush` barrier through the store-writer task and
+    /// wait for its echo. Returns false when no writer is running.
+    fn flush_store_writer(&self, state: &Rc<RefCell<AppState>>, deadline: Instant) -> bool {
+        let (tx, rx) = smol::channel::bounded(1);
+        {
+            let state = state.borrow();
+            // The writer task spawns lazily on the first enqueued write; a
+            // still-present receiver means it never started — nothing to flush.
+            if state.store_write_receiver.is_some()
+                || state.store_writes.try_send(StoreWrite::Flush(tx)).is_err()
+            {
+                return false;
+            }
+        }
+        while Instant::now() < deadline {
+            if rx.try_recv().is_ok() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("store writer failed to flush within the parked deadline");
     }
 }
 
