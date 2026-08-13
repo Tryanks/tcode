@@ -9,6 +9,9 @@
 use std::collections::HashSet;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::switch::Switch;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -18,15 +21,8 @@ use gpui::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariant, ButtonVariants as _},
-    dialog::DialogButtonProps,
-    h_flex,
-    input::{Input, InputEvent, InputState},
-    switch::Switch,
-    v_flex,
-};
+use gpui_component::dialog::DialogButtonProps;
+use gpui_component::{StyledExt as _, WindowExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_protocol::Command;
@@ -514,7 +510,7 @@ impl ProviderDialog {
                         move |window, cx| {
                             let label = crate::tr!("providers.accent_select", color = hex.clone())
                                 .into_owned();
-                            gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                            crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
                         }
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -830,7 +826,7 @@ impl ProviderDialog {
                                 .flex_none()
                                 .child(Icon::new(IconName::Info).xsmall().text_color(muted))
                                 .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(capabilities.clone())
+                                    crate::widgets::tooltip::Tooltip::new(capabilities.clone())
                                         .build(window, cx)
                                 }),
                         )
@@ -948,7 +944,7 @@ pub fn render_footer(
                             .description(crate::tr!("providers.delete_confirm_body"))
                             .button_props(
                                 DialogButtonProps::default()
-                                    .ok_variant(ButtonVariant::Danger)
+                                    .ok_variant(ButtonVariant::Danger.into())
                                     .ok_text(crate::tr!("providers.delete_profile"))
                                     .cancel_text(crate::tr!("settings.cancel"))
                                     .show_cancel(true),

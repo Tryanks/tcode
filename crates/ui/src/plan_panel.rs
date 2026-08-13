@@ -5,6 +5,8 @@
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -15,13 +17,7 @@ use gpui::{
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    spinner::Spinner,
-    v_flex,
-};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::plan_title;
 use tcode_protocol::Command;

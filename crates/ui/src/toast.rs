@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _, notification_action_button};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -10,7 +11,6 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_component::{
-    button::{Button, ButtonVariants as _},
     h_flex,
     notification::{Notification, NotificationType},
     v_flex,
@@ -115,10 +115,11 @@ pub fn notification(
         let label = action.label;
         notification = notification.action(move |_, _, _| {
             let handler = handler.clone();
-            Button::new(("toast-action", id as usize))
-                .outline()
-                .label(label.clone())
-                .on_click(move |_, window, cx| handler(window, cx))
+            notification_action_button(
+                ("toast-action", id as usize),
+                label.clone(),
+                move |_, window, cx| handler(window, cx),
+            )
         });
     }
 

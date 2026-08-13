@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::widgets::input::{Copy, SelectAll};
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
@@ -10,10 +11,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    StyledExt as _, WindowExt as _,
-    input::{Copy, SelectAll},
-    menu::ContextMenuExt as _,
-    notification::Notification,
+    StyledExt as _, WindowExt as _, menu::ContextMenuExt as _, notification::Notification,
 };
 use serde::Deserialize;
 

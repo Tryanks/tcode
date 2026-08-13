@@ -39,6 +39,7 @@ mod terminal_drawer;
 pub mod theme;
 pub(crate) mod time;
 pub(crate) mod toast;
+pub mod widgets;
 mod window_caption;
 mod window_state;
 mod workspace_walk;

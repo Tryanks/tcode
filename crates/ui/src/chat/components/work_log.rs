@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -12,7 +13,7 @@ use gpui::{
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, spinner::Spinner, v_flex};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 
 use super::super::model::WorkLogCounts;
 use super::indicator;

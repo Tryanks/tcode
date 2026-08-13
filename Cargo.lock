@@ -8538,6 +8538,7 @@ dependencies = [
  "computer-use-mcp",
  "criterion",
  "gpui",
+ "gpui-base",
  "gpui-component",
  "gpui-component-assets",
  "gpui-component-macros",

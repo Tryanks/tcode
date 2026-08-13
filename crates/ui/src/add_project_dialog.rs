@@ -2,19 +2,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::{Input, InputState};
+use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, PathPromptOptions, Render, Role, StatefulInteractiveElement as _,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    dialog::DialogFooter,
-    h_flex,
-    input::{Input, InputState},
-    progress::Progress,
-    scroll::ScrollableElement as _,
+    StyledExt as _, WindowExt as _, dialog::DialogFooter, h_flex, scroll::ScrollableElement as _,
     v_flex,
 };
 

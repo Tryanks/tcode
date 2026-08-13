@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -11,11 +12,7 @@ use gpui::{
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
-};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 
 use super::super::model::{LiveEditRow, diff_stats};
 

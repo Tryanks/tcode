@@ -6,6 +6,8 @@
 //! settings [`ProviderDialog`], a transactional modal form.
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::switch::Switch;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -15,13 +17,7 @@ use gpui::{
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    switch::Switch,
-    v_flex,
-};
+use gpui_component::{StyledExt as _, WindowExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_protocol::Command;
@@ -175,7 +171,7 @@ impl ProviderCard {
                 let name = name.clone();
                 move |window, cx| {
                     let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
-                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                    crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
                 }
             })
             .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));
@@ -287,7 +283,7 @@ impl ProviderCard {
                                     crate::tr!("providers.reveal_email")
                                 }
                                 .into_owned();
-                                gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                                crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.email_revealed = !this.email_revealed;

@@ -6,6 +6,7 @@
 //! pickers.
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -15,13 +16,7 @@ use gpui::{
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    scroll::ScrollableElement as _,
-    v_flex,
-};
+use gpui_component::{StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex};
 
 use agent::{OptionDescriptor, ProviderKind};
 use tcode_core::settings::Settings;

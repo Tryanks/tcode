@@ -8,6 +8,9 @@
 
 use std::rc::Rc;
 
+use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::switch::Switch;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -17,14 +20,8 @@ use gpui::{
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariant, ButtonVariants as _},
-    dialog::DialogButtonProps,
-    input::{Input, InputEvent, InputState},
-    switch::Switch,
-    v_flex,
-};
+use gpui_component::dialog::DialogButtonProps;
+use gpui_component::{StyledExt as _, WindowExt as _, v_flex};
 
 use computer_use_mcp::permissions::{
     self, PermissionKind, PermissionStatus, open_settings_pane, relaunch_app, request,
@@ -602,7 +599,7 @@ impl SettingsPage {
                 .description(crate::tr!("settings.restore_description"))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
+                        .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("settings.restore"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -1001,7 +998,7 @@ impl SettingsPage {
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
+                        .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("settings.delete_permanently"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),

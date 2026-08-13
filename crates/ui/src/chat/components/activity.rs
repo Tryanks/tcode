@@ -1,4 +1,5 @@
 use crate::theme::ActiveTheme as _;
+use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -8,7 +9,7 @@ use gpui::{
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledText, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{StyledExt as _, h_flex, spinner::Spinner, v_flex};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 
 use agent::{ItemContent, ItemStatus};
 use tcode_core::session::{EntryContent, TimelineEntry};

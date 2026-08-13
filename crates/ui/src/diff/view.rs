@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::{Input, InputState};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -19,13 +21,7 @@ use gpui::{
     Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Selectable as _, StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    highlighter::HighlightTheme,
-    input::{Input, InputState},
-    popover::Popover,
-    v_flex,
+    StyledExt as _, h_flex, highlighter::HighlightTheme, popover::Popover, v_flex,
 };
 
 use super::model::{

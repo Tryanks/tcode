@@ -18,11 +18,8 @@ use tcode_ui::{
 };
 use tcode_ui::{assets, settings};
 
-use gpui_component::{
-    Root, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    dialog::DialogFooter,
-};
+use gpui_component::{Root, WindowExt as _, dialog::DialogFooter};
+use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 

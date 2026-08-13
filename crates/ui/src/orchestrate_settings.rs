@@ -2,6 +2,9 @@
 //! allow list. Every main model is eligible; only child dispatch is gated.
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use crate::widgets::switch::Switch;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -11,14 +14,7 @@ use gpui::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    switch::Switch,
-    v_flex,
-};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_protocol::Command;

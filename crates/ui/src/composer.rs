@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -28,15 +31,8 @@ use gpui::{
     point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    Disableable as _, ElementExt as _, StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    dialog::DialogButtonProps,
-    h_flex,
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
-    notification::Notification,
-    popover::PopoverState,
-    spinner::Spinner,
-    v_flex,
+    ElementExt as _, StyledExt as _, WindowExt as _, dialog::DialogButtonProps, h_flex,
+    notification::Notification, popover::PopoverState, v_flex,
 };
 
 use crate::attachments::attach_error_message;
@@ -2122,7 +2118,7 @@ impl Composer {
                     .cursor_pointer()
                     .when(has_text, |s| s.hover(|s| s.opacity(0.9)))
                     .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(queue_hint.clone()).build(window, cx)
+                        crate::widgets::tooltip::Tooltip::new(queue_hint.clone()).build(window, cx)
                     })
                     .child(Icon::new(IconName::ArrowUp).small().text_color(fg))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -3713,7 +3709,7 @@ fn render_model_pane(
             .when(active, |s| s.bg(cx.theme().muted))
             .hover(|s| s.bg(cx.theme().muted))
             .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                crate::widgets::tooltip::Tooltip::new(label.clone()).build(window, cx)
             })
             .child(
                 icon.small()

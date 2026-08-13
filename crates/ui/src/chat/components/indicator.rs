@@ -2,12 +2,13 @@ use std::borrow::Cow;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::tooltip::Tooltip;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Hsla, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{h_flex, tooltip::Tooltip};
+use gpui_component::h_flex;
 
 use super::super::model::{
     TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,

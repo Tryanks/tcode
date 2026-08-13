@@ -6,6 +6,9 @@
 use std::collections::HashSet;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::checkbox::Checkbox;
+use crate::widgets::input::{Textarea, TextareaState};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -15,14 +18,7 @@ use gpui::{
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Task,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    Disableable as _, StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
-    h_flex,
-    input::{Textarea, TextareaState},
-    v_flex,
-};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
 use tcode_protocol::Command;

@@ -8,6 +8,8 @@ pub(crate) mod components;
 mod model;
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -19,14 +21,7 @@ use gpui::{
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
     div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    Selectable as _, StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    notification::Notification,
-    tooltip::Tooltip,
-    v_flex,
-};
+use gpui_component::{StyledExt as _, WindowExt as _, h_flex, notification::Notification, v_flex};
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{

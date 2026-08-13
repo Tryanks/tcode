@@ -77,17 +77,14 @@ mod native {
     use std::time::Duration;
 
     use crate::theme::ActiveTheme as _;
+    use crate::widgets::button::{Button, ButtonVariants as _};
+    use crate::widgets::input::{Input, InputEvent, InputState};
     use crate::{icon::IconName, sizing::Sizable as _};
     use gpui::{
         AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
     };
-    use gpui_component::{
-        button::{Button, ButtonVariants as _},
-        h_flex,
-        input::{Input, InputEvent, InputState},
-        v_flex,
-    };
+    use gpui_component::{h_flex, v_flex};
     use gpui_wry::WebView;
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
     use raw_window_handle::HasWindowHandle as _;

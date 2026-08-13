@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
@@ -18,7 +19,7 @@ use gpui::{
     StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px, relative,
     rems, size,
 };
-use gpui_component::{h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex};
+use gpui_component::{h_flex, highlighter::HighlightTheme, v_flex};
 
 use crate::{diff::model::sub_runs, highlight};
 

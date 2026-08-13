@@ -1,6 +1,9 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -12,14 +15,11 @@ use gpui::{
 };
 use gpui_component::{
     StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _},
     notification::Notification,
     scroll::ScrollableElement as _,
-    tooltip::Tooltip,
     v_flex,
 };
 use serde::Deserialize;
@@ -742,7 +742,7 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.archive_all_description", count = count))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
+                        .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("sidebar.archive_all_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -786,7 +786,7 @@ impl SessionsSidebar {
                 ))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
+                        .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("sidebar.remove_project_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -845,7 +845,7 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.archive_description", title = title))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
+                        .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("sidebar.archive_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -887,7 +887,7 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_variant(ButtonVariant::Danger)
+                        .ok_variant(ButtonVariant::Danger.into())
                         .ok_text(crate::tr!("sidebar.delete_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -2010,7 +2010,7 @@ fn proceed_delete(
             ))
             .button_props(
                 DialogButtonProps::default()
-                    .ok_variant(ButtonVariant::Danger)
+                    .ok_variant(ButtonVariant::Danger.into())
                     .ok_text(crate::tr!("sidebar.worktree_cleanup_remove"))
                     .cancel_text(crate::tr!("sidebar.worktree_cleanup_keep"))
                     .show_cancel(true),
