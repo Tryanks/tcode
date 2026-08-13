@@ -19,9 +19,11 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
-use tcode_core::{project::SessionMeta, settings::SidebarLayout};
+use tcode_core::{
+    project::{ProjectGroup, SessionMeta},
+    settings::SidebarLayout,
+};
 use tcode_protocol::Command;
-use tcode_runtime::app::ProjectGroup;
 
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, WorkspaceStore};

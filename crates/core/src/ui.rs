@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_TERMINALS_PER_SESSION: usize = 6;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalSplitDirection {

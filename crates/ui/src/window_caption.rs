@@ -27,7 +27,7 @@ use gpui::{
     App, InteractiveElement, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, Window, WindowControlArea, div, px,
 };
-use tcode_runtime::app::RightTab;
+use tcode_core::ui::RightTab;
 
 use crate::window_state::Route;
 

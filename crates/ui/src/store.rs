@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use gpui::{App, Context, EventEmitter, Task};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
-    project::{Project, SessionMeta, WorktreeInfo, group_sessions, order_sessions_with_children},
+    project::{
+        Project, ProjectGroup, SessionMeta, WorktreeInfo, group_sessions,
+        order_sessions_with_children,
+    },
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
     session::{ReviewComment, StoredEvent, Timeline},
@@ -19,12 +22,9 @@ use tcode_protocol::{
     ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, QueuedMessageStatus, RecentDir,
     ServerEvent, SessionStatus, Subscription, Topic,
 };
-use tcode_runtime::{
-    app::ProjectGroup,
-    event::RuntimeEvent,
-    pipe::HostHandle,
-    terminal::{LocalTerminalRegistry, TerminalContext, TerminalWorkspace},
-};
+use tcode_runtime::event::RuntimeEvent;
+use tcode_runtime::pipe::HostHandle;
+use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalContext, TerminalWorkspace};
 use tcode_services::import::ExternalImportUpdate;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
@@ -1890,12 +1890,8 @@ mod tests {
         session::{ReviewComment, ReviewSide},
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
-    use tcode_runtime::{
-        app::AppState,
-        event::HostEvent,
-        host::HostCx,
-        pipe::{HostHandle, HostServices, spawn_host},
-    };
+    use tcode_runtime::event::HostEvent;
+    use tcode_runtime::pipe::{HostHandle, HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 
     use super::WorkspaceStore;
@@ -1904,14 +1900,10 @@ mod tests {
         spawn_host(store, HostServices::default()).expect("spawn test host")
     }
 
-    fn update_host<R>(
-        host: &HostHandle,
-        update: impl FnOnce(&mut AppState, &mut HostCx) -> R + Send + 'static,
-    ) -> R
-    where
-        R: Send + 'static,
-    {
-        smol::block_on(host.update_state_for_test(update)).expect("update test host")
+    macro_rules! update_host {
+        ($host:expr, $update:expr) => {
+            smol::block_on($host.update_state_for_test($update)).expect("update test host")
+        };
     }
 
     fn command(host: &HostHandle, command: Command) {
@@ -2028,7 +2020,7 @@ mod tests {
         ];
         for (offset, event) in live_events.into_iter().enumerate() {
             let event_session_id = session_id.clone();
-            update_host(&host, move |state, cx| {
+            update_host!(&host, move |state, cx| {
                 state
                     .active
                     .as_mut()
@@ -2047,7 +2039,7 @@ mod tests {
                 }));
             });
         }
-        let live = update_host(&host, |state, _| {
+        let live = update_host!(&host, |state, _| {
             let timeline = &state.active.as_ref().expect("active session").timeline;
             (
                 timeline
@@ -2141,16 +2133,13 @@ mod tests {
             })
         });
 
-        let live_index = update_host(&host, |state, _| {
-            let AppState {
-                sessions, projects, ..
-            } = state;
+        let live_index = update_host!(&host, |state, _| {
             (
-                serde_json::to_value(sessions).unwrap(),
-                serde_json::to_value(projects).unwrap(),
+                serde_json::to_value(&state.sessions).unwrap(),
+                serde_json::to_value(&state.projects).unwrap(),
             )
         });
-        let live_settings = update_host(&host, |state, _| {
+        let live_settings = update_host!(&host, |state, _| {
             serde_json::to_value(&state.settings).unwrap()
         });
         let replica_index = workspace.read_with(cx, |store, _| {
@@ -2208,7 +2197,7 @@ mod tests {
                     .is_some_and(|status| status.session_id == session_id)
             })
         });
-        update_host(&host, |state, cx| {
+        update_host!(&host, |state, cx| {
             state.queue_message_for_replica_test("queued for replication".into(), cx);
         });
         command(
@@ -2244,7 +2233,7 @@ mod tests {
             })
         });
 
-        let live = update_host(&host, move |state, _| {
+        let live = update_host!(&host, move |state, _| {
             state
                 .session_status_snapshot(&session_id)
                 .expect("live session status")
@@ -2438,7 +2427,7 @@ mod tests {
             (1, first.id.clone(), "first parked prefill".to_string()),
             (2, second.id.clone(), "second parked prefill".to_string()),
         ] {
-            update_host(&host, move |_state, cx| {
+            update_host!(&host, move |_state, cx| {
                 cx.emit(HostEvent::Domain(EventEnvelope {
                     topic: Topic::SessionStatus {
                         session_id: session_id.clone(),
@@ -2491,7 +2480,7 @@ mod tests {
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
-        update_host(&host, |state, cx| {
+        update_host!(&host, |state, cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
                     "agents": [{
@@ -2536,7 +2525,7 @@ mod tests {
             })
         });
 
-        let (live_providers, live_git) = update_host(&host, |state, _| {
+        let (live_providers, live_git) = update_host!(&host, |state, _| {
             (
                 state.providers_status_snapshot(),
                 state.git_status_snapshot(),

@@ -45,10 +45,9 @@ use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
 use crate::workspace_walk::filter_entries;
-use tcode_core::attachments::validate_attachment;
+use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::ui::{ConversationDestination, WorkspaceMode};
 use tcode_protocol::{Command, PathEntry};
-use tcode_runtime::app::mime_from_path;
 
 /// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
 const METER_BLUE: u32 = 0x3B82F6;

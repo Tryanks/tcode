@@ -14,8 +14,14 @@ use agent::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
+use crate::event::{
+    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice,
+    RuntimeOperationId, RuntimeToast,
+};
 use crate::host::{HostCx, HostTask};
+use crate::terminal::{LocalTerminalRegistry, TerminalContext, TerminalSplit, TerminalWorkspace};
 use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
+use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
 use tcode_core::project::{
     AutoArchiveConfig, AutoArchiveExemptions, Project, SessionMeta, WorktreeInfo,
@@ -34,7 +40,9 @@ use tcode_core::settings::{
     ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
     ProviderSettings, ResolvedProfile, Settings,
 };
-pub use tcode_core::ui::{ConversationDestination, RightTab, WorkspaceMode};
+use tcode_core::ui::{
+    ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
+};
 use tcode_protocol::{
     AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, PathEntry,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
@@ -66,17 +74,6 @@ use tcode_services::version_check::{
 };
 use tcode_services::workspace::list_workspace;
 
-#[rustfmt::skip]
-pub use tcode_core::project::{group_sessions, ProjectGroup};
-pub use crate::event::{
-    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice,
-    RuntimeOperationId, RuntimeToast,
-};
-pub use crate::terminal::{
-    LocalTerminalRegistry, MAX_TERMINALS_PER_SESSION, TerminalContext, TerminalEntry,
-    TerminalSplit, TerminalSplitDirection, TerminalWorkspace,
-};
-
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
 const AI_TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
@@ -93,26 +90,6 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::Pi,
     ProviderKind::OpenCode,
 ];
-
-/// Best-effort MIME type from a file extension.
-pub fn mime_from_path(path: &Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
 
 fn normalize_terminal_context_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim_matches('\n').to_string()
@@ -8043,6 +8020,7 @@ mod tests {
     use std::rc::{Rc, Weak};
     use std::sync::{Arc, Mutex};
 
+    use tcode_core::project::group_sessions;
     use tcode_protocol::HostMessage;
 
     use crate::host::HostMsg;

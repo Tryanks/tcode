@@ -25,9 +25,8 @@ use term::{
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
 };
 
-use tcode_core::ui::TerminalSplitDirection;
+use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 use tcode_protocol::Command;
-use tcode_runtime::app::MAX_TERMINALS_PER_SESSION;
 
 use crate::{material, store::WorkspaceStore};
 
