@@ -1559,10 +1559,15 @@ impl ChatView {
     }
 
     fn render_scroll_pill(&self, cx: &mut Context<Self>) -> AnyElement {
+        // Absolute positioning ignores mx_auto without pinned horizontal
+        // insets; span the region and center with flex instead.
         div()
             .absolute()
             .bottom(px(12.))
-            .mx_auto()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
             .child(
                 Button::new("scroll-to-end")
                     .outline()
