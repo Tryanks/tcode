@@ -14,8 +14,7 @@ use gpui::{
     Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme,
-    ThemeMode as ComponentThemeMode, WindowExt as _,
+    Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState},
@@ -37,6 +36,7 @@ use crate::settings::{
 };
 use crate::shell::Quit;
 use crate::store::WorkspaceStore;
+use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_caption;
 use crate::window_drag_area;
@@ -77,9 +77,9 @@ struct SelectRowOption<T> {
 /// "Toggle theme" action).
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
     match mode {
-        ThemeMode::Light => Theme::change(ComponentThemeMode::Light, Some(window), cx),
-        ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, Some(window), cx),
-        ThemeMode::System => Theme::sync_system_appearance(Some(window), cx),
+        ThemeMode::Light => theme::change_mode(UiThemeMode::Light, Some(window), cx),
+        ThemeMode::Dark => theme::change_mode(UiThemeMode::Dark, Some(window), cx),
+        ThemeMode::System => theme::sync_system_appearance(Some(window), cx),
     }
 }
 

@@ -1,11 +1,11 @@
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, spinner::Spinner,
-    v_flex,
+    Icon, IconName, Sizable as _, StyledExt as _, h_flex, spinner::Spinner, v_flex,
 };
 
 use agent::{ItemContent, ItemStatus};

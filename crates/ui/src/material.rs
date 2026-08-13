@@ -8,12 +8,13 @@
 //! light effects (faded hairlines, the primary-button top light) the spec
 //! defines.
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_component::{ActiveTheme as _, StyledExt as _, popover::Popover, v_flex};
+use gpui_component::{StyledExt as _, popover::Popover, v_flex};
 
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;

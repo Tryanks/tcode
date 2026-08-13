@@ -1,11 +1,12 @@
 use std::rc::Rc;
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::{Notification, NotificationType},

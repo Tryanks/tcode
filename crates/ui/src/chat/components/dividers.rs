@@ -1,9 +1,10 @@
+use crate::theme::ActiveTheme as _;
 use agent::ProviderKind;
 use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     Styled as _, div, px,
 };
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui_component::h_flex;
 
 pub(crate) fn relay_divider(
     id: &str,

@@ -11,11 +11,15 @@ use gpui::{
 use tcode_protocol::{Command, CommandResponse};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
-use tcode_ui::{AppShell, Quit, TogglePalette, WindowState, store::WorkspaceStore};
+use tcode_ui::{
+    AppShell, Quit, TogglePalette, WindowState,
+    store::WorkspaceStore,
+    theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode},
+};
 use tcode_ui::{assets, settings};
 
 use gpui_component::{
-    ActiveTheme as _, Root, Theme, ThemeMode as ComponentThemeMode, ThemeRegistry, WindowExt as _,
+    Root, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::DialogFooter,
 };
@@ -197,7 +201,6 @@ fn main() {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(move |cx| {
-            gpui_component::init(cx);
             tcode_ui::markdown::init(cx);
 
             // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
@@ -230,13 +233,7 @@ fn main() {
             } else {
                 Cow::Owned(flatten_canvas_for_opaque_window(TCODE_THEME))
             };
-            ThemeRegistry::global_mut(cx)
-                .load_themes_from_str(&theme_json)
-                .expect("embedded themes/tcode.json must be valid");
-            let light = ThemeRegistry::global(cx).themes()["tcode Light"].clone();
-            let dark = ThemeRegistry::global(cx).themes()["tcode Dark"].clone();
-            Theme::global_mut(cx).apply_config(&light);
-            Theme::global_mut(cx).apply_config(&dark);
+            theme::init_with_json(&theme_json, cx);
 
             let workspace_store =
                 cx.new(|cx| tcode_ui::store::WorkspaceStore::new(host.clone(), cx));
@@ -267,9 +264,9 @@ fn main() {
                 Quit,
             )])]);
             match initial_settings.theme_mode {
-                settings::ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
-                settings::ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
-                settings::ThemeMode::System => Theme::sync_system_appearance(None, cx),
+                settings::ThemeMode::Light => theme::change_mode(UiThemeMode::Light, None, cx),
+                settings::ThemeMode::Dark => theme::change_mode(UiThemeMode::Dark, None, cx),
+                settings::ThemeMode::System => theme::sync_system_appearance(None, cx),
             }
             log::info!(
                 "applied embedded themes/tcode.json mode={} theme={}",
@@ -334,13 +331,13 @@ fn main() {
                         move |window, cx| {
                             match theme_store.read(cx).settings().theme_mode {
                                 settings::ThemeMode::Light => {
-                                    Theme::change(ComponentThemeMode::Light, Some(window), cx)
+                                    theme::change_mode(UiThemeMode::Light, Some(window), cx)
                                 }
                                 settings::ThemeMode::Dark => {
-                                    Theme::change(ComponentThemeMode::Dark, Some(window), cx)
+                                    theme::change_mode(UiThemeMode::Dark, Some(window), cx)
                                 }
                                 settings::ThemeMode::System => {
-                                    Theme::sync_system_appearance(Some(window), cx)
+                                    theme::sync_system_appearance(Some(window), cx)
                                 }
                             }
                             let shell = cx

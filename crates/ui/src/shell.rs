@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
@@ -10,7 +11,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Root, WindowExt as _,
+    Root, WindowExt as _,
     notification::Notification,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };

@@ -2,8 +2,9 @@
 
 use std::path::PathBuf;
 
+use crate::theme::ActiveTheme as _;
 use gpui::{App, ParentElement as _, Styled as _, Window, div, img, px};
-use gpui_component::{ActiveTheme as _, WindowExt as _};
+use gpui_component::WindowExt as _;
 use tcode_core::attachments::AttachError;
 
 /// Open an image as a window-level lightbox. The dialog lives on the Root

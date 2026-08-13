@@ -1,13 +1,14 @@
 //! Settings → Orchestrate: lead-model identities and the child-model routing
 //! allow list. Every main model is eligible; only child dispatch is gated.
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},

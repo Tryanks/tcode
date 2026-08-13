@@ -1,13 +1,14 @@
 use std::borrow::Cow;
 use std::path::Path;
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, ClickEvent, Div, Entity, InteractiveElement as _, IntoElement as _,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };

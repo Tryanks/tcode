@@ -34,6 +34,7 @@ mod shortcut;
 mod sidebar;
 pub mod store;
 mod terminal_drawer;
+pub mod theme;
 pub(crate) mod time;
 pub(crate) mod toast;
 mod window_caption;

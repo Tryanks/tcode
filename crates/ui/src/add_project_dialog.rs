@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, PathPromptOptions, Render, Role, StatefulInteractiveElement as _,
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, StyledExt as _, WindowExt as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::DialogFooter,
     h_flex,

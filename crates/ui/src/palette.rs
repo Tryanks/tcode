@@ -10,6 +10,7 @@
 //!
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
 
+use crate::theme::ActiveTheme as _;
 use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
@@ -17,7 +18,7 @@ use gpui::{
     Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
+    Icon, IconName, Sizable as _, StyledExt as _, h_flex,
     input::{Input, InputEvent, InputState},
     v_flex,
 };

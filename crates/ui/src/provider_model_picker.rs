@@ -5,13 +5,14 @@
 //! live here so Orchestrate and other settings do not grow subtly different
 //! pickers.
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,

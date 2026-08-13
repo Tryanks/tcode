@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
@@ -17,9 +18,7 @@ use gpui::{
     StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px, relative,
     rems, size,
 };
-use gpui_component::{
-    ActiveTheme as _, h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex,
-};
+use gpui_component::{h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex};
 
 use crate::{diff::model::sub_runs, highlight};
 
@@ -555,7 +554,7 @@ fn marks_for_node(marks: &[(Range<usize>, TextMark)], offset: usize, cx: &mut Ap
             });
         }
         if mark.code {
-            highlight.background_color = Some(*cx.theme().tokens.muted);
+            highlight.background_color = Some(cx.theme().tokens.colors.muted);
             fonts.push((range.clone(), cx.theme().mono_font_family.clone()));
         }
         if let Some(link) = mark.link.clone() {
@@ -644,7 +643,7 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
                 code_style: Some(InlineCodeStyle {
                     font_family: cx.theme().mono_font_family.clone(),
                     font_size: INLINE_CODE_FONT_SIZE,
-                    background: *cx.theme().tokens.muted,
+                    background: cx.theme().tokens.colors.muted,
                     radius: INLINE_CODE_RADIUS,
                 }),
             });
@@ -722,7 +721,7 @@ fn render_list_item(
                                     .border_1()
                                     .border_color(cx.theme().primary)
                                     .when(checked, |this| {
-                                        this.bg(cx.theme().tokens.primary)
+                                        this.bg(cx.theme().tokens.colors.primary)
                                             .text_color(cx.theme().primary_foreground)
                                             .text_xs()
                                             .child("✓")
@@ -845,7 +844,7 @@ fn render_code_block(
             div()
                 .p_3()
                 .rounded(cx.theme().radius)
-                .bg(cx.theme().tokens.muted)
+                .bg(cx.theme().tokens.colors.muted)
                 .child(v_flex().w_full().children(rendered_lines)),
         )
         .into_any_element()
@@ -949,7 +948,7 @@ fn render_scroll_table(
                 .flex()
                 .flex_row()
                 .when(row_ix == 0, |this| {
-                    this.bg(cx.theme().tokens.muted)
+                    this.bg(cx.theme().tokens.colors.muted)
                         .font_weight(FontWeight::SEMIBOLD)
                 })
                 .when(row_ix + 1 < row_count, |this| {

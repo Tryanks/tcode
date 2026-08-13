@@ -1,12 +1,13 @@
 //! First-class ACP provider cards and the modal agent marketplace.
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},

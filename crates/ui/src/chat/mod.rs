@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 pub(crate) mod components;
 mod model;
 
+use crate::theme::ActiveTheme as _;
 use agent::{ItemContent, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
@@ -15,8 +16,7 @@ use gpui::{
     div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
-    WindowExt as _,
+    Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     notification::Notification,

@@ -5,13 +5,14 @@
 //! and the enable switch. The row body and the gear both open the per-profile
 //! settings [`ProviderDialog`], a transactional modal form.
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     switch::Switch,

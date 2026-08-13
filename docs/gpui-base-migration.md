@@ -27,7 +27,7 @@ Facts established during research (2026-08-13):
       update, fix compile (ScrollbarShow→ScrollbarMode etc.). Both layers
       coexist; no behavior change intended.
       Accept: `cargo build --workspace --examples` green; app launches.
-- [ ] Phase 1 — tcode-owned theme: `Theme` type + `ActiveTheme` trait in
+- [x] Phase 1 — tcode-owned theme: `Theme` type + `ActiveTheme` trait in
       crates/ui (mirror the field names currently used so `cx.theme()` call
       sites survive), serde-load `themes/tcode.json`, own dark/light mode,
       replace `gpui_component::init` theme parts.

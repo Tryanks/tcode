@@ -8,13 +8,11 @@ use gpui::{
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Task, Window,
     WindowBounds, WindowOptions, div, px, size,
 };
-use gpui_component::{
-    ActiveTheme as _, Root, StyledExt as _, Theme, ThemeRegistry, h_flex, v_flex,
-};
+use gpui_component::{Root, StyledExt as _, h_flex, v_flex};
 use tcode_core::session::{EntryContent, OrchestrateCallback, TimelineEntry};
+use tcode_ui::theme::{self, ActiveTheme as _};
 use tcode_ui::{assets, gallery_support, markdown::MarkdownState};
 
-const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 const ASSISTANT_MARKDOWN: &str = r#"Here is a compact result with **real markdown rendering** and a link to [the guide](https://example.com).
 
 ```rust
@@ -504,7 +502,6 @@ fn main() {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(|cx| {
-            gpui_component::init(cx);
             tcode_ui::markdown::init(cx);
             tcode_ui::settings::apply_locale(Some(tcode_ui::LANGUAGE_ENGLISH));
 
@@ -522,13 +519,7 @@ fn main() {
                 .add_fonts(fonts)
                 .expect("failed to register gallery fonts");
 
-            ThemeRegistry::global_mut(cx)
-                .load_themes_from_str(TCODE_THEME)
-                .expect("themes/tcode.json must be valid");
-            let light = ThemeRegistry::global(cx).themes()["tcode Light"].clone();
-            let dark = ThemeRegistry::global(cx).themes()["tcode Dark"].clone();
-            Theme::global_mut(cx).apply_config(&light);
-            Theme::global_mut(cx).apply_config(&dark);
+            theme::init(cx);
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(980.), px(820.)), cx)),

@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use crate::theme::ActiveTheme as _;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Hsla, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{ActiveTheme as _, h_flex, tooltip::Tooltip};
+use gpui_component::{h_flex, tooltip::Tooltip};
 
 use super::super::model::{
     TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,
@@ -172,8 +173,8 @@ mod tests {
             // The turn column stacks the footer under the answer, so the row is
             // content-height there; reproduce that rather than letting the window
             // stretch it and mask a wrap.
+            use crate::theme::ActiveTheme as _;
             use gpui::{ParentElement as _, Styled as _};
-            use gpui_component::ActiveTheme as _;
             gpui_component::v_flex().size_full().child(turn_time_footer(
                 "turn-time-probe".into(),
                 self.clauses.clone(),
