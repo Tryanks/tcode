@@ -167,6 +167,7 @@ enum TerminalSpawnAction {
 
 mod acp;
 mod active_session;
+mod approvals;
 mod events;
 mod git;
 mod lifecycle;
@@ -287,10 +288,9 @@ pub struct AppState {
     computer_use_registration: Option<agent::McpRegistration>,
     callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
-    /// Live provider approvals for sessions without an authoritative active
-    /// timeline. Maintained incrementally from `on_event`; never replayed from
-    /// disk, because a persisted approval cannot survive its provider process.
-    sessions_awaiting_approval: HashMap<String, Vec<agent::ApprovalRequest>>,
+    /// Live provider approvals for every resident session. This is the sole
+    /// host-side authority; persisted timeline approvals remain client state.
+    approvals: HashMap<String, Vec<agent::ApprovalRequest>>,
     /// Background-computed git state of the active session's cwd, driving the
     /// adaptive header quick-action button (`None` until the first refresh /
     /// with no active session). See [`AppState::refresh_git_status`].
@@ -423,7 +423,7 @@ impl AppState {
             computer_use_registration: None,
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
-            sessions_awaiting_approval: HashMap::new(),
+            approvals: HashMap::new(),
             git_status: None,
             git_busy: false,
             next_operation_id: 1,

@@ -48,7 +48,7 @@ impl AppState {
 
         if let AgentEvent::SessionClosed { reason } = &event {
             self.pending_native_rewinds.remove(session_id);
-            self.sessions_awaiting_approval.remove(session_id);
+            self.clear_approvals(session_id);
             self.close_orchestrator_children(session_id, cx);
             let is_active = self.active_session_id() == Some(session_id);
             if !is_active {
@@ -311,7 +311,7 @@ impl AppState {
             _ => {}
         }
 
-        self.track_pending_approval_event(session_id, &event);
+        self.record_approval_event(session_id, &event);
         self.record_event(session_id, &event, cx);
 
         match &event {
@@ -319,7 +319,7 @@ impl AppState {
                 self.deliver_child_callback(session_id, *status, cx);
             }
             AgentEvent::ApprovalRequested(request) => {
-                self.deliver_child_approval_callback(session_id, request, cx);
+                self.deliver_child_approval_callback(session_id, &request.id, cx);
             }
             _ => {}
         }
@@ -382,32 +382,6 @@ impl AppState {
         }
 
         cx.notify();
-    }
-
-    pub(super) fn track_pending_approval_event(&mut self, session_id: &str, event: &AgentEvent) {
-        match event {
-            AgentEvent::ApprovalRequested(request) => {
-                let requests = self
-                    .sessions_awaiting_approval
-                    .entry(session_id.to_string())
-                    .or_default();
-                if !requests.iter().any(|pending| pending.id == request.id) {
-                    requests.push(request.clone());
-                }
-            }
-            AgentEvent::ApprovalResolved { request_id, .. } => {
-                if let Some(requests) = self.sessions_awaiting_approval.get_mut(session_id) {
-                    requests.retain(|request| request.id != *request_id);
-                    if requests.is_empty() {
-                        self.sessions_awaiting_approval.remove(session_id);
-                    }
-                }
-            }
-            AgentEvent::TurnCompleted { .. } => {
-                self.sessions_awaiting_approval.remove(session_id);
-            }
-            _ => {}
-        }
     }
 
     /// Append to JSONL + fold into the matching active or background timeline.

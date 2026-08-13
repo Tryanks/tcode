@@ -1935,9 +1935,9 @@ fn orchestrate_approve_routes_decisions_and_validates_scope() {
         child.meta.parent_session_id = Some("parent".into());
         state.sessions.push(child.meta.clone());
         state.background.insert(child.meta.id.clone(), child);
-        state.sessions_awaiting_approval.insert(
-            "child".into(),
-            vec![agent::ApprovalRequest {
+        state.record_approval_event(
+            "child",
+            &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
                 id: "approval-op".into(),
                 turn_id: None,
                 kind: agent::ApprovalKind::ExecCommand {
@@ -1946,7 +1946,7 @@ fn orchestrate_approve_routes_decisions_and_validates_scope() {
                     reason: None,
                 },
                 options: Vec::new(),
-            }],
+            }),
         );
 
         let (reply, response) = smol::channel::bounded(1);
@@ -1986,6 +1986,22 @@ fn orchestrate_approve_routes_decisions_and_validates_scope() {
         );
         let unknown_request = response.try_recv().unwrap().unwrap_err();
         assert_eq!(unknown_request, "no pending approval with that request_id");
+
+        // The successful response above clears the request immediately. Seed a
+        // fresh provider request before independently exercising validation.
+        state.record_approval_event(
+            "child",
+            &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: "approval-op".into(),
+                turn_id: None,
+                kind: agent::ApprovalKind::ExecCommand {
+                    command: "cargo test".into(),
+                    cwd: None,
+                    reason: None,
+                },
+                options: Vec::new(),
+            }),
+        );
 
         let (reply, response) = smol::channel::bounded(1);
         state.handle_orchestrate_op(

@@ -643,15 +643,8 @@ impl AppState {
         decision: ApprovalDecision,
         cx: &mut HostCx,
     ) {
-        if let Some(ActiveSession {
-            runtime: Runtime::Live(commands),
-            ..
-        }) = &self.active
-        {
-            let _ = commands.try_send(SessionCommand::RespondApproval {
-                request_id,
-                decision,
-            });
+        if let Some(session_id) = self.active_session_id().map(str::to_string) {
+            let _ = self.respond_session_approval(&session_id, request_id, decision);
         }
         cx.notify();
     }

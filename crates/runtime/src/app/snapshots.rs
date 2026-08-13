@@ -178,17 +178,7 @@ impl AppState {
                 )
             })
         });
-        let pending_approval = if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.meta.id == session_id)
-        {
-            !session.timeline.pending_approvals.is_empty()
-        } else {
-            self.sessions_awaiting_approval
-                .get(session_id)
-                .is_some_and(|requests| !requests.is_empty())
-        };
+        let pending_approval = self.has_approval(session_id);
         let terminal_preferences = self.terminal_preferences_for(session);
         Some(SessionStatus {
             session_id: session_id.to_string(),

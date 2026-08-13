@@ -420,7 +420,7 @@ impl AppState {
             } => {
                 let result = (|| {
                     self.require_child(&parent_id, &thread_id)?;
-                    self.sessions_awaiting_approval.remove(&thread_id);
+                    self.clear_approvals(&thread_id);
                     if self.active_session_id() == Some(&thread_id) {
                         if let Some(child) = self.active.as_mut() {
                             child.queue.clear();
@@ -471,15 +471,16 @@ impl AppState {
             } => {
                 let result = (|| {
                     self.require_child(&parent_id, &thread_id)?;
-                    let pending = self.pending_approvals_for(&thread_id);
+                    let pending = self.approval_requests(&thread_id);
                     let request = match request_id {
                         Some(request_id) => pending
-                            .into_iter()
+                            .iter()
                             .find(|request| request.id == request_id)
+                            .cloned()
                             .ok_or_else(|| {
                                 "no pending approval with that request_id".to_string()
                             })?,
-                        None => match pending.as_slice() {
+                        None => match pending {
                             [request] => request.clone(),
                             [] => return Err("no pending approval".into()),
                             _ => {
@@ -511,39 +512,6 @@ impl AppState {
                 meta.id == thread_id && meta.parent_session_id.as_deref() == Some(parent_id)
             })
             .ok_or_else(|| "unknown thread or not a child of this parent".into())
-    }
-
-    pub(super) fn pending_approvals_for(&self, session_id: &str) -> Vec<agent::ApprovalRequest> {
-        if let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) {
-            let pending = active.timeline.pending_approvals.clone();
-            if !pending.is_empty() {
-                return pending;
-            }
-        }
-        self.sessions_awaiting_approval
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    pub(super) fn respond_session_approval(
-        &mut self,
-        session_id: &str,
-        request_id: String,
-        decision: ApprovalDecision,
-    ) -> Result<(), String> {
-        let session = self
-            .resident(session_id)
-            .ok_or_else(|| "session is not loaded".to_string())?;
-        let Runtime::Live(commands) = &session.runtime else {
-            return Err("session is not live".into());
-        };
-        commands
-            .try_send(SessionCommand::RespondApproval {
-                request_id,
-                decision,
-            })
-            .map_err(|err| format!("failed to respond to approval: {err}"))
     }
 
     pub(super) fn ensure_child_loaded(
@@ -749,9 +717,9 @@ impl AppState {
         timeline: &Timeline,
     ) -> serde_json::Value {
         let (state, final_message, usage) = self.child_result(meta, timeline);
-        let pending_approval = self.pending_approval_for(&meta.id);
-        let waiting_approval = pending_approval.as_ref().map(approval_request_summary);
-        let approval_request_id = pending_approval.as_ref().map(|request| request.id.as_str());
+        let approval = self.first_approval(&meta.id);
+        let waiting_approval = approval.map(approval_request_summary);
+        let approval_request_id = approval.map(|request| request.id.as_str());
         let mut status = serde_json::json!({
             "thread_id": meta.id,
             "title": meta.title,
@@ -837,13 +805,21 @@ impl AppState {
     pub(super) fn deliver_child_approval_callback(
         &mut self,
         child_id: &str,
-        request: &agent::ApprovalRequest,
+        request_id: &str,
         cx: &mut HostCx,
     ) {
         let Some(child) = self
             .sessions
             .iter()
             .find(|meta| meta.id == child_id && meta.parent_session_id.is_some())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(request) = self
+            .approval_requests(child_id)
+            .iter()
+            .find(|request| request.id == request_id)
             .cloned()
         else {
             return;
@@ -870,13 +846,13 @@ impl AppState {
             ChildApprovalMode::Orchestrator => format!(
                 "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {} (request_id: {}). You are the approver: decide with the approve tool (decision: approve | approve_for_session | deny); deny anything outside the brief's scope.",
                 child.title,
-                approval_request_summary(request),
+                approval_request_summary(&request),
                 request.id
             ),
             ChildApprovalMode::Manual => format!(
                 "[orchestrate] thread {child_id} (\"{}\") is waiting for approval: {}.",
                 child.title,
-                approval_request_summary(request)
+                approval_request_summary(&request)
             ),
             ChildApprovalMode::AlwaysAllow => unreachable!(),
         };

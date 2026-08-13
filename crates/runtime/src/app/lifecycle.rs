@@ -347,7 +347,7 @@ impl AppState {
 
     pub(crate) fn shutdown_active(&mut self, _cx: &mut HostCx) {
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
-            self.sessions_awaiting_approval.remove(&session_id);
+            self.clear_approvals(&session_id);
             self.pending_native_rewinds.remove(&session_id);
         }
         if let Some(active) = self.active.take()
@@ -472,7 +472,7 @@ impl AppState {
 
     /// Shut down and forget a parked session (archive/delete paths).
     pub(super) fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
-        self.sessions_awaiting_approval.remove(session_id);
+        self.clear_approvals(session_id);
         self.pending_native_rewinds.remove(session_id);
         if let Some(parked) = self.background.remove(session_id)
             && let Runtime::Live(commands) = parked.runtime

@@ -488,7 +488,7 @@ impl AppState {
     /// delete meta + JSONL, and (when `remove_worktree`) remove the git worktree
     /// it was the last user of.
     pub fn delete_session(&mut self, session_id: &str, remove_worktree: bool, cx: &mut HostCx) {
-        self.sessions_awaiting_approval.remove(session_id);
+        self.clear_approvals(session_id);
         let meta = self.sessions.iter().find(|m| m.id == session_id).cloned();
         if self.active_session_id() == Some(session_id) {
             // shutdown_active drops the ActiveSession (and its terminal PTY).
@@ -580,18 +580,6 @@ impl AppState {
     pub(crate) fn turn_running_for(&self, session_id: &str) -> bool {
         self.resident(session_id)
             .is_some_and(ActiveSession::has_work)
-    }
-
-    /// The first approval currently blocking a session, including parked and
-    /// reopened sessions whose in-memory timeline may be stale.
-    pub(crate) fn pending_approval_for(&self, session_id: &str) -> Option<agent::ApprovalRequest> {
-        if let Some(active) = self.active.as_ref().filter(|a| a.meta.id == session_id) {
-            return active.timeline.pending_approvals.first().cloned();
-        }
-        self.sessions_awaiting_approval
-            .get(session_id)
-            .and_then(|requests| requests.first())
-            .cloned()
     }
 
     /// Number of active or parked sessions that still own live work: a turn in
