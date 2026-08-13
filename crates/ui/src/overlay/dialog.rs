@@ -23,8 +23,10 @@ type ContentBuilder = Rc<dyn Fn(DialogContent, &mut Window, &mut App) -> DialogC
 pub(crate) struct ActiveDialog {
     pub focus_handle: FocusHandle,
     pub previous_focus_handle: Option<WeakFocusHandle>,
-    pub builder: Rc<dyn Fn(Dialog, &mut Window, &mut App) -> Dialog>,
+    pub builder: DialogBuilder,
 }
+
+pub type DialogBuilder = Rc<dyn Fn(Dialog, &mut Window, &mut App) -> Dialog>;
 
 #[derive(Clone)]
 pub struct DialogButtons {
@@ -172,6 +174,9 @@ enum DialogBase {
 }
 
 impl DialogBase {
+    // Internal fan-out straight into the base builder calls; a params struct
+    // would be used exactly once.
+    #[allow(clippy::too_many_arguments)]
     fn render(
         self,
         layer: usize,

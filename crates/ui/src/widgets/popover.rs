@@ -17,17 +17,19 @@ pub struct Popover {
     default_open: bool,
     open: Option<bool>,
     tracked_focus: Option<FocusHandle>,
-    trigger: Option<Box<dyn FnOnce(bool, &Window, &App) -> AnyElement>>,
-    content: Option<
-        Box<dyn FnOnce(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement>,
-    >,
+    trigger: Option<TriggerBuilder>,
+    content: Option<ContentBuilder>,
     children: Vec<AnyElement>,
     style: StyleRefinement,
     mouse_button: MouseButton,
     overlay_closable: bool,
     appearance: bool,
-    on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_open_change: Option<super::ToggleHandler>,
 }
+
+type TriggerBuilder = Box<dyn FnOnce(bool, &Window, &App) -> AnyElement>;
+type ContentBuilder =
+    Box<dyn FnOnce(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement>;
 
 impl Popover {
     pub fn new(id: impl Into<ElementId>) -> Self {

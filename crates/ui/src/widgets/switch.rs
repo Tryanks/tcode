@@ -19,7 +19,7 @@ pub struct Switch {
     checked: bool,
     disabled: bool,
     label: Option<SharedString>,
-    on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_click: Option<super::ToggleHandler>,
     size: Size,
     color: Option<Hsla>,
     tooltip: Option<SharedString>,

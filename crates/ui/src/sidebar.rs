@@ -739,7 +739,7 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.archive_all_description", count = count))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger.into())
+                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.archive_all_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -783,7 +783,7 @@ impl SessionsSidebar {
                 ))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger.into())
+                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.remove_project_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -842,7 +842,7 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.archive_description", title = title))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger.into())
+                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.archive_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -884,7 +884,7 @@ impl SessionsSidebar {
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger.into())
+                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.delete_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -2007,7 +2007,7 @@ fn proceed_delete(
             ))
             .button_props(
                 DialogButtons::default()
-                    .ok_variant(ButtonVariant::Danger.into())
+                    .ok_variant(ButtonVariant::Danger)
                     .ok_text(crate::tr!("sidebar.worktree_cleanup_remove"))
                     .cancel_text(crate::tr!("sidebar.worktree_cleanup_keep"))
                     .show_cancel(true),

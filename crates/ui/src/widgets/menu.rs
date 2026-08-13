@@ -29,7 +29,7 @@ enum MenuItem {
     Separator,
     Item {
         label: Option<SharedString>,
-        render: Option<Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>>,
+        render: Option<ItemRenderer>,
         action: Box<dyn Action>,
         disabled: bool,
         checked: bool,
@@ -256,6 +256,7 @@ impl Render for PopupMenu {
 }
 
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+type ItemRenderer = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
 #[derive(Default)]
 struct MenuState {

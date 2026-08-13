@@ -7,8 +7,10 @@ use gpui_base::StyledExt as _;
 
 enum TooltipContent {
     Text(SharedString),
-    Element(Box<dyn Fn(&mut Window, &mut App) -> AnyElement>),
+    Element(ElementBuilder),
 }
+
+type ElementBuilder = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
 pub struct Tooltip {
     style: StyleRefinement,

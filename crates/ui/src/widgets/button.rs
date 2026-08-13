@@ -73,9 +73,11 @@ pub struct Button {
     loading: bool,
     size: Size,
     tooltip: Option<SharedString>,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
-    on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
+    on_hover: Option<super::ToggleHandler>,
 }
+
+type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 impl Button {
     pub fn new(id: impl Into<ElementId>) -> Self {

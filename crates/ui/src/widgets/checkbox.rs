@@ -21,7 +21,7 @@ pub struct Checkbox {
     checked: bool,
     disabled: bool,
     size: Size,
-    on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_click: Option<super::ToggleHandler>,
 }
 
 impl Checkbox {

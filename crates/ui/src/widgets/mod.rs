@@ -1,3 +1,6 @@
+/// Shared callback shape for toggle-style widget events (`&bool` new state).
+pub(crate) type ToggleHandler = std::rc::Rc<dyn Fn(&bool, &mut gpui::Window, &mut gpui::App)>;
+
 pub mod button;
 pub mod checkbox;
 pub mod input;

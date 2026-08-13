@@ -599,7 +599,7 @@ impl SettingsPage {
                 .description(crate::tr!("settings.restore_description"))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger.into())
+                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("settings.restore"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),
@@ -994,7 +994,7 @@ impl SettingsPage {
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
                     DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger.into())
+                        .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("settings.delete_permanently"))
                         .cancel_text(crate::tr!("settings.cancel"))
                         .show_cancel(true),

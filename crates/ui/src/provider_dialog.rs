@@ -944,7 +944,7 @@ pub fn render_footer(
                             .description(crate::tr!("providers.delete_confirm_body"))
                             .button_props(
                                 DialogButtons::default()
-                                    .ok_variant(ButtonVariant::Danger.into())
+                                    .ok_variant(ButtonVariant::Danger)
                                     .ok_text(crate::tr!("providers.delete_profile"))
                                     .cancel_text(crate::tr!("settings.cancel"))
                                     .show_cancel(true),
