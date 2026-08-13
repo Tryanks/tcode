@@ -5,6 +5,7 @@ pub mod kbd;
 pub mod menu;
 mod popover;
 pub mod progress;
+pub(crate) mod ring;
 pub mod spinner;
 pub mod switch;
 pub mod tooltip;
