@@ -14,7 +14,6 @@ preview-mcp = { path = "../preview-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
 gpui-component-macros = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }

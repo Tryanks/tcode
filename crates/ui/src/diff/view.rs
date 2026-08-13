@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::highlight::HighlightTheme;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -22,7 +23,6 @@ use gpui::{
     Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use gpui_component::highlighter::HighlightTheme;
 
 use super::model::{
     DiffColors, ExpandDir, FileDiffInput, PairedRow, RenderedFile, RenderedRow, VisibleItem,
@@ -2058,7 +2058,7 @@ mod tests {
 
     #[gpui::test]
     fn virtual_list_constructs_only_the_large_diff_viewport(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let cx = cx.add_empty_window();
         let constructions = Arc::new(AtomicUsize::new(0));
         let state = ListState::new(5_001, ListAlignment::Top, px(180.));

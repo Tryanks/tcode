@@ -1902,7 +1902,7 @@ This paragraph has a soft
 line break, followed by a hard break.\
 This begins after the hard break."#;
 
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let data_root = std::env::temp_dir().join(format!(
             "tcode-markdown-outer-list-test-{}",

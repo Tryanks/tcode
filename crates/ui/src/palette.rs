@@ -633,7 +633,7 @@ mod tests {
     fn arrow_keys_move_and_clamp_the_highlight_while_the_query_keeps_focus(
         cx: &mut TestAppContext,
     ) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-palette-keyboard-test-{}",
             tcode_services::store::now_millis()

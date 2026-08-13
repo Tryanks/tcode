@@ -204,7 +204,7 @@ mod tests {
         let selectors = ["turn-time-clock", "turn-time-total"];
         assert_eq!(clauses.len(), selectors.len());
 
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let (_, cx) = cx.add_window_view(|_, _| TurnTimeFooterProbe { clauses });
         let cx: &mut VisualTestContext = cx;
         let draw = |cx: &mut VisualTestContext| {

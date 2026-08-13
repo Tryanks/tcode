@@ -327,7 +327,7 @@ mod tests {
         };
         use gpui_base::v_flex;
 
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let cx = cx.add_empty_window();
 
         let list_state = ListState::new(2, ListAlignment::Top, px(50.));

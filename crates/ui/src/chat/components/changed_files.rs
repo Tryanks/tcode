@@ -315,7 +315,7 @@ mod tests {
     fn long_edit_path_and_counts_stay_inside_the_row_at_narrow_widths(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
 
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let (_, cx) = cx.add_window_view(|_, _| FileEditRowProbe {
             row: LiveEditRow {
                 path: "crates/ui/src/deeply/nested/module/tree/with/an/absurdly/long/name/live_file_edit_row.rs".into(),

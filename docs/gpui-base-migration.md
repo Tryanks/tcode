@@ -39,8 +39,8 @@ Facts established during research (2026-08-13):
 - [x] Phase 3 — notifications over base ToastManager + own overlay layer;
       dialogs/sheets over base Dialog/Sheet; retire WindowExt/Root usage.
       Accept: build green; toast + dialog flows work in app.
-- [ ] Phase 4 — sweep remaining `gpui_component::` refs, remove
-      `gpui-component`/`gpui-component-macros` deps (keep assets + gpui-wry),
+- [x] Phase 4 — sweep remaining `gpui_component::` refs, remove
+      `gpui-component` (keep assets, macros, and gpui-wry),
       full workspace build + clippy + tests.
       Accept: `grep -r gpui_component crates --include=*.rs` → only
       gpui_component_assets; workspace build/clippy/tests green.

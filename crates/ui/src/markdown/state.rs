@@ -383,7 +383,7 @@ mod tests {
 
     #[gpui::test]
     fn source_and_parsed_text_stay_coherent(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("old", cx)));
 
@@ -408,7 +408,7 @@ mod tests {
     /// (streaming chat pushes deltas while the user may be selecting).
     #[gpui::test]
     fn reparse_preserves_selection_during_active_drag(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("start", cx)));
         state.update(cx, |state, cx| {
@@ -428,7 +428,7 @@ mod tests {
 
     #[gpui::test]
     fn select_all_reads_blocks_that_were_never_painted(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let source = (0..2_000)
             .map(|ix| format!("block {ix}"))
@@ -452,7 +452,7 @@ mod tests {
 
     #[gpui::test]
     fn select_all_includes_code_and_table_text(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let state = cx.update(|cx| {
             cx.new(|cx| {

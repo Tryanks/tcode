@@ -5,6 +5,7 @@
 //! live here so Orchestrate and other settings do not grow subtly different
 //! pickers.
 
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::{
@@ -17,7 +18,6 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use gpui_component::scroll::ScrollableElement as _;
 
 use agent::{OptionDescriptor, ProviderKind};
 use tcode_core::settings::Settings;

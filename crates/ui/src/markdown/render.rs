@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::highlight::HighlightTheme;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
@@ -20,7 +21,6 @@ use gpui::{
     rems, size,
 };
 use gpui_base::{h_flex, v_flex};
-use gpui_component::highlighter::HighlightTheme;
 
 use crate::{diff::model::sub_runs, highlight};
 

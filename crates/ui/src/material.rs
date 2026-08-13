@@ -300,7 +300,7 @@ mod tests {
     #[gpui::test]
     fn raw_controls_follow_root_tab_order_and_activate_from_the_keyboard(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            crate::theme::init(cx);
             cx.bind_keys([
                 KeyBinding::new("tab", FocusNext, Some("AccessibleControlsProbe")),
                 KeyBinding::new("shift-tab", FocusPrevious, Some("AccessibleControlsProbe")),

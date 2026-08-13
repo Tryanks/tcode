@@ -152,7 +152,7 @@ mod tests {
 
     #[gpui::test]
     fn copy_puts_raw_text_on_the_clipboard(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let raw = "Done — **bold**, `code` and:\n\n- one\n- two\n";
 
         let payload = gpui::ClipboardItem::new_string(raw.to_string());
@@ -175,7 +175,7 @@ mod tests {
 
     #[gpui::test]
     fn plain_text_markdown_escapes_inline_and_block_syntax(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let cases = [
             "*not italic* _nor this_ **nor bold**",
@@ -203,7 +203,7 @@ mod tests {
 
     #[gpui::test]
     fn plain_text_markdown_preserves_lines_and_indentation(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let cases = [
             ("line one\nline two", "line one\nline two\n"),
@@ -224,7 +224,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_state_set_text_renders_the_new_text(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Old **value**", cx)));
 
@@ -235,7 +235,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_state_push_str_appends_after_prior_updates(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Seed", cx)));
 
@@ -250,7 +250,7 @@ mod tests {
 
     #[gpui::test]
     fn md_state_synced_mirror_tracks_push_and_reset_paths(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let mut md = cx.update(|cx| MdState::new("Seed", cx));
 
@@ -270,7 +270,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_state_selected_text_works_after_select_all(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Some **bold** text", cx)));
 

@@ -1,6 +1,7 @@
 use std::{borrow::Cow, collections::HashSet};
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
@@ -16,7 +17,6 @@ use gpui::{
     Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use gpui_component::scroll::ScrollableElement as _;
 use serde::Deserialize;
 
 use tcode_core::{project::SessionMeta, settings::SidebarLayout};

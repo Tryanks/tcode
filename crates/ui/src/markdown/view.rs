@@ -392,7 +392,7 @@ mod tests {
 
     #[gpui::test]
     fn renders_gfm_document_without_panicking(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             TestRoot::new(
@@ -408,7 +408,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_reports_intrinsic_height_inside_outer_list(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(cx));
         let cx: &mut VisualTestContext = cx;
@@ -426,7 +426,7 @@ mod tests {
 
     #[gpui::test]
     fn streamed_append_preserves_earlier_block_measurements(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("stable block\n\nstreaming block", cx));
@@ -450,7 +450,7 @@ mod tests {
 
     #[gpui::test]
     fn wide_table_shrinks_to_viewport_and_wraps(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             TestRoot::new(
@@ -481,7 +481,7 @@ mod tests {
 
     #[gpui::test]
     fn small_table_stretches_to_viewport_width(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("| a | b |\n| --- | --- |\n| 1 | 2 |", cx));
@@ -503,7 +503,7 @@ mod tests {
 
     #[gpui::test]
     fn right_aligned_column_justifies_cell_content(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             TestRoot::new("| num | label |\n| ---: | --- |\n| 1 | value |", cx)
@@ -534,7 +534,7 @@ mod tests {
 
     #[gpui::test]
     fn wide_table_track_contains_the_last_cell(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let header = (0..20).map(|ix| format!("column-{ix}")).collect::<Vec<_>>();
         let separator = vec!["---"; header.len()];
@@ -571,7 +571,7 @@ mod tests {
 
     #[gpui::test]
     fn streaming_table_growth_updates_track_height(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("| column |\n| --- |\n| streaming", cx));
@@ -612,7 +612,7 @@ mod tests {
 
     #[gpui::test]
     fn clipped_markdown_cannot_start_selection(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("visible\n\nhidden selection text", cx));
@@ -642,7 +642,7 @@ mod tests {
 
     #[gpui::test]
     fn cross_view_drag_copies_in_document_order(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| CrossViewRoot::new(cx));
         let cx: &mut VisualTestContext = cx;

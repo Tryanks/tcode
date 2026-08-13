@@ -1,11 +1,13 @@
 use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 
 use gpui::{App, Global, Hsla, Pixels, Rgba, SharedString, Window, WindowAppearance, px};
-use gpui_component::{
-    ColorTokens, RadiusTokens, SemanticThemeTokens, Theme as ComponentTheme,
-    ThemeMode as ComponentThemeMode, ThemeRegistry, highlighter::HighlightTheme,
+use gpui_base::{
+    ColorTokens, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles, ScrollbarTheme,
+    SemanticThemeTokens, TypographyTokens,
 };
 use serde::Deserialize;
+
+pub use crate::highlight::HighlightTheme;
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
@@ -65,6 +67,9 @@ pub struct Theme {
     pub primary_foreground: Hsla,
     pub radius: Pixels,
     pub ring: Hsla,
+    pub scrollbar: Hsla,
+    pub scrollbar_thumb: Hsla,
+    pub scrollbar_thumb_hover: Hsla,
     pub secondary: Hsla,
     pub secondary_active: Hsla,
     pub selection: Hsla,
@@ -214,7 +219,7 @@ impl TryFrom<ThemeConfig> for Theme {
                 xl: px(config.radius + 8.),
                 ..Default::default()
             },
-            typography: gpui_component::TypographyTokens {
+            typography: TypographyTokens {
                 sans: config.font_family.clone().into(),
                 mono: config.mono_font_family.clone().into(),
                 ..Default::default()
@@ -251,6 +256,9 @@ impl TryFrom<ThemeConfig> for Theme {
             primary_foreground,
             radius,
             ring,
+            scrollbar: color("scrollbar.background")?,
+            scrollbar_thumb: color("scrollbar.thumb.background")?,
+            scrollbar_thumb_hover: color("scrollbar.thumb.hover.background")?,
             secondary,
             secondary_active: secondary,
             selection: primary.alpha(0.3),
@@ -268,7 +276,7 @@ impl TryFrom<ThemeConfig> for Theme {
     }
 }
 
-/// Initialize both tcode's theme and the temporary styled-widget bridge.
+/// Initialize gpui-base behavior and tcode's application-owned theme.
 pub fn init(cx: &mut App) {
     init_with_json(TCODE_THEME, cx);
 }
@@ -278,21 +286,12 @@ pub fn init(cx: &mut App) {
 /// The desktop app uses this to flatten its translucent canvas colors when
 /// the platform window is opaque.
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
-    gpui_component::init(cx);
+    gpui_base::init(cx);
     crate::widgets::menu::init(cx);
     let themes = parse_theme_file(theme_json).expect("embedded themes/tcode.json must be valid");
 
-    ThemeRegistry::global_mut(cx)
-        .load_themes_from_str(theme_json)
-        .expect("embedded themes/tcode.json must be valid");
-    let component_light = ThemeRegistry::global(cx).themes()["tcode Light"].clone();
-    let component_dark = ThemeRegistry::global(cx).themes()["tcode Dark"].clone();
-    ComponentTheme::global_mut(cx).apply_config(&component_light);
-    ComponentTheme::global_mut(cx).apply_config(&component_dark);
-
     cx.set_global(themes.clone());
-    cx.set_global(themes.light);
-    ComponentTheme::change(ComponentThemeMode::Light, None, cx);
+    change_mode(ThemeMode::Light, None, cx);
 }
 
 pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
@@ -300,15 +299,32 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Light => cx.global::<Themes>().light.clone(),
         ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
     };
-    cx.set_global(theme);
-    ComponentTheme::change(
-        match mode {
-            ThemeMode::Light => ComponentThemeMode::Light,
-            ThemeMode::Dark => ComponentThemeMode::Dark,
+    let base_theme = gpui_base::Theme {
+        tokens: theme.tokens.clone(),
+        scrollbar: ScrollbarTheme {
+            mode: if cx.should_auto_hide_scrollbars() {
+                ScrollbarMode::Scrolling
+            } else {
+                ScrollbarMode::Hover
+            },
+            styles: ScrollbarStyles::default()
+                .track(|style| style.bg(theme.scrollbar))
+                .track_hover(|style| style.bg(theme.scrollbar))
+                .track_active(|style| style.bg(theme.scrollbar).border_color(theme.border))
+                .thumb(|style| style.bg(theme.scrollbar_thumb).radius(theme.radius))
+                .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(theme.radius))
+                .thumb_active(|style| style.bg(theme.scrollbar_thumb_hover).radius(theme.radius)),
         },
-        window,
-        cx,
-    );
+        resizable: ResizableTheme {
+            handle: theme.border,
+            active_handle: theme.ring,
+        },
+    };
+    cx.set_global(base_theme);
+    cx.set_global(theme);
+    if let Some(window) = window {
+        window.refresh();
+    }
 }
 
 pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {

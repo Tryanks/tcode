@@ -23,7 +23,7 @@ computer-use-mcp = { path = "../computer-use-mcp" }
 mcp-host = { path = "../mcp-host" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
+gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
 env_logger = "0.11"
 log = "0.4"
 

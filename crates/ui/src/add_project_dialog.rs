@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::overlay::{DialogActions, OverlayExt as _};
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
@@ -12,7 +13,6 @@ use gpui::{
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use gpui_component::scroll::ScrollableElement as _;
 
 use crate::store::WorkspaceStore;
 use crate::time::{humanize_ago, now_secs};
@@ -580,7 +580,7 @@ mod tests {
 
     #[gpui::test]
     fn recent_list_scrolls_when_its_content_exceeds_the_viewport(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let (_, cx) = cx.add_window_view(|_, _| RecentListScrollProbe);
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(320.), px(240.)));
