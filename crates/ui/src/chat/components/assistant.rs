@@ -82,8 +82,8 @@ pub(crate) fn assistant(
     let message = v_flex().w_full().items_start().gap(px(2.)).child(
         div()
             .w_full()
-            .text_size(px(13.5))
-            .line_height(px(21.))
+            .text_size(px(15.))
+            .line_height(px(26.))
             .child(content),
     );
 

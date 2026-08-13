@@ -165,7 +165,8 @@ pub(crate) fn user_bubble(
         width.max(
             window
                 .text_system()
-                .layout_line(line, px(13.), &[run], None)
+                // Must match the bubble's rendered text size below.
+                .layout_line(line, px(15.), &[run], None)
                 .width,
         )
     });
@@ -218,8 +219,6 @@ pub(crate) fn user_bubble(
             MarkdownView::new(&markdown)
                 .selectable(true)
                 .base_dir(cwd)
-                .text_size(px(13.))
-                .line_height(px(18.2))
                 .into_any_element()
         },
     );
@@ -264,8 +263,7 @@ pub(crate) fn user_bubble(
                             .border_color(cx.theme().border)
                     })
                     .text_color(cx.theme().foreground)
-                    .text_size(px(13.))
-                    .line_height(px(18.2))
+                    .text_size(px(15.))
                     .child(content)
             })
         })
