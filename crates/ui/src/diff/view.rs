@@ -637,8 +637,11 @@ impl DiffPanel {
     // -- top strip (tab look + right icon cluster) --------------------------
 
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let (panel_open, expanded, active, plan_tab_active) =
-            self.workspace_store.read(cx).diff_panel_chrome_state();
+        let chrome = self.workspace_store.read(cx).diff_panel_chrome_state();
+        let panel_open = chrome.panel_open;
+        let expanded = chrome.expanded;
+        let active = chrome.active_tab;
+        let plan_tab_active = chrome.plan_tab_active;
         // Windows: the open Diff/Plan panel is the rightmost column, so this
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
@@ -1936,7 +1939,11 @@ impl DiffPanel {
 impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
-        let tab = self.workspace_store.read(cx).diff_panel_chrome_state().2;
+        let tab = self
+            .workspace_store
+            .read(cx)
+            .diff_panel_chrome_state()
+            .active_tab;
         let mut root = v_flex()
             .size_full()
             .min_w_0()

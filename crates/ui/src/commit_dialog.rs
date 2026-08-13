@@ -48,7 +48,10 @@ impl CommitDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (files, branch, on_default_branch) = store.read(cx).commit_dialog_state();
+        let state = store.read(cx).commit_dialog_state();
+        let files = state.files;
+        let branch = state.branch;
+        let on_default_branch = state.on_default_branch;
         let message = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)

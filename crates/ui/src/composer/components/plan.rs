@@ -5,7 +5,11 @@ impl Composer {
     /// The plan stays implementable from either mode, but only Plan mode turns
     /// typed feedback into refinement.
     pub(in super::super) fn refines_the_plan(&self, cx: &App) -> bool {
-        self.workspace_store.read(cx).composer_interaction_mode() == InteractionMode::Plan
+        self.workspace_store
+            .read(cx)
+            .composer_state()
+            .interaction_mode
+            == InteractionMode::Plan
     }
 
     /// The Implement split-button: primary "Implement" + a chevron menu with
@@ -46,7 +50,7 @@ impl Composer {
                             .child(crate::tr!("plan.implement_new_thread"))
                             .on_click(move |_, window, cx| {
                                 store.update(cx, |store, _cx| {
-                                    let Some(markdown) = store.composer_plan_ready_markdown()
+                                    let Some(markdown) = store.composer_state().plan_ready_markdown
                                     else {
                                         return;
                                     };

@@ -16,6 +16,7 @@ struct ModelRow {
     /// This row starts a session with an installed ACP agent rather than
     /// selecting a model (ACP agents own their model list).
     acp: bool,
+    favorite: bool,
 }
 
 /// The provider glyph tinted with the accent configured on its Settings →
@@ -66,7 +67,8 @@ impl Composer {
     /// The model-picker button + popover (anchored above, ~360px).
     pub(in super::super) fn render_model_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
-        let Some(active_model) = store.composer_active_model() else {
+        let composer_state = store.composer_state();
+        let Some(active_model) = composer_state.active_model.clone() else {
             return div().into_any_element();
         };
         let provider = active_model.provider;
@@ -80,7 +82,7 @@ impl Composer {
         // active, resolve against *its* card so its custom models are named.
         let resolved = match &active_profile {
             Some(id) => store.picker_models_for_profile(id),
-            None => store.composer_picker_models(provider),
+            None => composer_state.picker_models(provider),
         };
         let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
 
@@ -89,7 +91,7 @@ impl Composer {
         let query = self.model_search.read(cx).value().to_lowercase();
         let has_favorites = PICKER_PROVIDER_KINDS
             .into_iter()
-            .flat_map(|p| store.composer_picker_models(p))
+            .flat_map(|p| composer_state.picker_models(p))
             .any(|m| m.favorite);
         let rail = self.rail_for(
             provider,
@@ -101,8 +103,8 @@ impl Composer {
             PickerRail::Favorites => PICKER_PROVIDER_KINDS
                 .into_iter()
                 .flat_map(|p| {
-                    store
-                        .composer_picker_models(p)
+                    composer_state
+                        .picker_models(p)
                         .into_iter()
                         .filter(|m| m.favorite)
                         .map(move |m| ModelRow {
@@ -111,6 +113,7 @@ impl Composer {
                             provider: p,
                             profile_id: None,
                             acp: false,
+                            favorite: m.favorite,
                         })
                 })
                 .collect(),
@@ -130,6 +133,7 @@ impl Composer {
                         provider: kind,
                         profile_id: (!is_builtin).then(|| profile_id.clone()),
                         acp: false,
+                        favorite: m.favorite,
                     })
                     .collect()
             }
@@ -144,6 +148,7 @@ impl Composer {
                     provider: ProviderKind::Acp,
                     profile_id: None,
                     acp: true,
+                    favorite: false,
                 })
                 .collect(),
         };
@@ -153,7 +158,7 @@ impl Composer {
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
-        let loading = store.composer_models_loading(provider)
+        let loading = composer_state.models_loading(provider)
             && matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id))
             && rows.is_empty()
             && query.is_empty();
@@ -161,7 +166,7 @@ impl Composer {
         let composer = cx.entity();
         let store_entity = self.workspace_store.clone();
         let model_search = self.model_search.clone();
-        let pending_restart = store.composer_model_pending_restart();
+        let pending_restart = composer_state.model_pending_restart;
         // On an ACP rail the "selected" row is the agent itself.
         let selected = match provider {
             ProviderKind::Acp => acp_agent_id.clone(),
@@ -227,14 +232,15 @@ impl Composer {
     /// the current model has no descriptors.
     pub(in super::super) fn render_traits_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
+        let composer = store.composer_state();
         // Native providers describe their options through the model catalog; ACP
         // agents push theirs over the wire (`AgentEvent::ProviderOptions`). Both
         // arrive as `OptionDescriptor`s and render through this one picker.
-        let descriptors = store.composer_active_option_descriptors();
+        let descriptors = composer.active_option_descriptors.clone();
         if descriptors.is_empty() {
             return div().into_any_element();
         }
-        let spec = match store.composer_active_model_spec() {
+        let spec = match composer.active_model_spec.clone() {
             Some(spec) => spec,
             None => ModelSpec {
                 id: String::new(),
@@ -243,8 +249,8 @@ impl Composer {
                 options: descriptors,
             },
         };
-        let selections = store.composer_active_option_selections();
-        let ultrathink_armed = store.composer_ultrathink_armed();
+        let selections = composer.active_option_selections;
+        let ultrathink_armed = composer.ultrathink_armed;
         let Some(label) = traits_chip_label(&spec, &selections, ultrathink_armed) else {
             return div().into_any_element();
         };
@@ -257,7 +263,7 @@ impl Composer {
             .value()
             .to_lowercase()
             .contains("ultrathink");
-        let pending_restart = store.composer_options_pending_restart();
+        let pending_restart = composer.options_pending_restart;
 
         let trigger = Button::new("traits-chip")
             .ghost()
@@ -295,7 +301,11 @@ impl Composer {
 
     /// The Build/Plan interaction-mode chip (S1 §4).
     pub(in super::super) fn render_mode_chip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = self.workspace_store.read(cx).composer_interaction_mode();
+        let mode = self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .interaction_mode;
         let muted = cx.theme().muted_foreground;
         let (icon, label, tooltip) = match mode {
             InteractionMode::Build => (
@@ -335,7 +345,9 @@ impl Composer {
     /// The circular context-window meter (ring showing used%, red > 90%) + a
     /// hover/click popover (T3's `ContextWindowMeter`).
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (usage, provider) = self.workspace_store.read(cx).composer_context();
+        let composer = self.workspace_store.read(cx).composer_state();
+        let usage = composer.token_usage;
+        let provider = composer.provider;
         let pct = usage.and_then(|u| context_meter::used_percentage(&u));
         let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
         let ring_color: Hsla = if overloaded {
@@ -368,11 +380,9 @@ impl Composer {
     /// label) opening a popover of the three modes (icon + bold name + muted
     /// description, ✓ on the current one).
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.workspace_store.read(cx).composer_approval_mode();
-        let native_approval_modes_enabled = self
-            .workspace_store
-            .read(cx)
-            .composer_native_approval_modes_enabled();
+        let composer = self.workspace_store.read(cx).composer_state();
+        let current = composer.approval_mode;
+        let native_approval_modes_enabled = composer.native_approval_modes_enabled;
         let (label, icon_path) = approval_mode_meta(current);
         let muted = cx.theme().muted_foreground;
 
@@ -393,10 +403,7 @@ impl Composer {
             );
 
         let store_entity = self.workspace_store.clone();
-        let pending_restart = self
-            .workspace_store
-            .read(cx)
-            .composer_approval_pending_restart();
+        let pending_restart = composer.approval_pending_restart;
         crate::material::overlay_popover("permission-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
@@ -416,10 +423,11 @@ impl Composer {
     /// The "⋯" overflow button + popover holding the context / permission /
     /// mode controls when the control row is too narrow to show them inline.
     pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let usage = self.workspace_store.read(cx).composer_context().0;
+        let composer = self.workspace_store.read(cx).composer_state();
+        let usage = composer.token_usage;
         let muted = cx.theme().muted_foreground;
-        let mode = self.workspace_store.read(cx).composer_approval_mode();
-        let interaction = self.workspace_store.read(cx).composer_interaction_mode();
+        let mode = composer.approval_mode;
+        let interaction = composer.interaction_mode;
         let store_entity = self.workspace_store.clone();
 
         let trigger = Button::new("overflow-controls")
@@ -672,7 +680,7 @@ fn render_model_row(
     let muted = cx.theme().muted_foreground;
     let is_current = selected.as_deref() == Some(row.id.as_str());
     let is_acp = row.acp;
-    let is_fav = !is_acp && store_entity.read(cx).composer_is_favorite_model(&row.id);
+    let is_fav = !is_acp && row.favorite;
     let name = row.name.clone();
     let id = row.id.clone();
     let provider = row.provider;

@@ -19,15 +19,19 @@ use tcode_core::{
 use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
 use tcode_protocol::{
     Command, EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
-    ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, QueuedMessageStatus, RecentDir,
-    ServerEvent, SessionStatus, Subscription, Topic,
+    ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent,
+    SessionStatus, Subscription, Topic,
 };
 use tcode_runtime::event::RuntimeEvent;
 use tcode_runtime::pipe::HostHandle;
-use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalContext, TerminalWorkspace};
+use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalWorkspace};
 use tcode_services::import::ExternalImportUpdate;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
+
+mod snapshots;
+
+pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, ShellPanelState};
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -56,26 +60,16 @@ pub enum ForkAvailability {
     Running,
 }
 
-pub(crate) struct ComposerCheckoutState {
-    pub branch: String,
-    pub branches: Vec<String>,
-    pub turn_running: bool,
-    pub is_draft: bool,
-    pub worktree_base: Option<String>,
-    pub worktree: Option<WorktreeInfo>,
-}
-
-pub(crate) struct ComposerActiveModel {
-    pub provider: agent::ProviderKind,
-    pub model: Option<String>,
-    pub acp_agent_id: Option<String>,
-    pub profile_id: Option<String>,
-}
-
 pub(crate) struct DiffActiveState {
     pub session: String,
     pub cwd: PathBuf,
     pub branches: Vec<String>,
+}
+
+pub(crate) struct CommitDialogState {
+    pub files: Vec<GitFileEntry>,
+    pub branch: Option<String>,
+    pub on_default_branch: bool,
 }
 
 fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
@@ -988,10 +982,8 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn shell_panel_state(&self) -> (bool, tcode_core::ui::RightTab, bool) {
-        self.active_conversation_ui()
-            .map(|ui| (ui.right_panel_open, ui.right_tab, ui.right_panel_expanded))
-            .unwrap_or((false, RightTab::default(), false))
+    pub(crate) fn shell_panel_state(&self) -> ShellPanelState {
+        snapshots::shell_panel_state(self.active_conversation_ui())
     }
 
     pub fn preview_active_identity(&self) -> Option<(String, String)> {
@@ -1211,22 +1203,25 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn commit_dialog_state(&self) -> (Vec<GitFileEntry>, Option<String>, bool) {
-        (
-            self.git_status_replica
+    pub(crate) fn commit_dialog_state(&self) -> CommitDialogState {
+        CommitDialogState {
+            files: self
+                .git_status_replica
                 .status
                 .as_ref()
                 .map(|status| status.changed_files.clone())
                 .unwrap_or_default(),
-            self.git_status_replica
+            branch: self
+                .git_status_replica
                 .status
                 .as_ref()
                 .and_then(|status| status.branch.clone()),
-            self.git_status_replica
+            on_default_branch: self
+                .git_status_replica
                 .status
                 .as_ref()
                 .is_some_and(|status| status.is_default_branch),
-        )
+        }
     }
 
     pub(crate) fn diff_active_state(&self) -> Option<DiffActiveState> {
@@ -1322,16 +1317,12 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn diff_panel_chrome_state(&self) -> (bool, bool, tcode_core::ui::RightTab, bool) {
-        let plan_tab_active_label = self
-            .with_active_timeline(|timeline| timeline.proposed_plan.is_some())
-            .unwrap_or(false)
-            || self.composer_interaction_mode() == agent::InteractionMode::Plan;
-        let (open, expanded, tab) = self
-            .active_conversation_ui()
-            .map(|ui| (ui.right_panel_open, ui.right_panel_expanded, ui.right_tab))
-            .unwrap_or((false, false, RightTab::default()));
-        (open, expanded, tab, plan_tab_active_label)
+    pub(crate) fn diff_panel_chrome_state(&self) -> DiffPanelChrome {
+        snapshots::diff_panel_chrome(
+            self.active_conversation_ui(),
+            self.session_status_replica.as_ref(),
+            self.session_replica.as_ref().map(|(_, timeline)| timeline),
+        )
     }
 
     pub fn review_comments(&self) -> Vec<ReviewComment> {
@@ -1423,8 +1414,13 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn composer_has_active_session(&self) -> bool {
-        self.session_status_replica.is_some()
+    pub(crate) fn composer_state(&self) -> ComposerState {
+        snapshots::composer_state(
+            self.session_status_replica.as_ref(),
+            self.session_replica.as_ref().map(|(_, timeline)| timeline),
+            &self.settings_replica,
+            &self.providers_replica,
+        )
     }
 
     /// Consumes a prefill already delivered by the typed
@@ -1436,25 +1432,6 @@ impl WorkspaceStore {
             status.native_rewind_prefill_available = false;
         }
         Some(prefill)
-    }
-
-    pub fn composer_terminal_contexts(&self) -> Vec<TerminalContext> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| {
-                status
-                    .terminal_contexts
-                    .iter()
-                    .map(|context| TerminalContext {
-                        id: context.id,
-                        terminal_label: context.terminal_label.clone(),
-                        line_start: context.line_start,
-                        line_end: context.line_end,
-                        text: context.text.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Borrows the live terminal workspace for terminal emulation and PTY I/O.
@@ -1473,18 +1450,6 @@ impl WorkspaceStore {
         Some(read(&workspace))
     }
 
-    pub fn composer_relay_confirmation(&self) -> Option<(String, String)> {
-        self.session_status_replica
-            .as_ref()
-            .and_then(|status| status.relay_confirmation.clone())
-    }
-
-    pub fn composer_active_cwd(&self) -> Option<PathBuf> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.cwd.clone())
-    }
-
     pub fn list_active_workspace(&self, cx: &mut App) -> Task<Vec<PathEntry>> {
         let host = self.host.clone();
         cx.spawn(
@@ -1500,19 +1465,6 @@ impl WorkspaceStore {
                 }
             },
         )
-    }
-
-    pub fn composer_provider_commands(&self) -> Vec<agent::ProviderCommand> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.provider_commands.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn composer_attachments_dir(&self) -> Option<PathBuf> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.attachments_dir.clone())
     }
 
     pub fn save_attachment_to_dir(
@@ -1545,221 +1497,6 @@ impl WorkspaceStore {
                 Err(error) => Err(protocol_io_error(error.message)),
             },
         )
-    }
-
-    pub fn composer_pending_user_input(&self) -> Option<(String, Vec<agent::UserInputQuestion>)> {
-        self.with_active_timeline(|timeline| timeline.pending_user_input.clone())
-            .flatten()
-    }
-
-    pub(crate) fn composer_active_model(&self) -> Option<ComposerActiveModel> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| ComposerActiveModel {
-                provider: status.provider,
-                model: status.requested_model.clone(),
-                acp_agent_id: status.acp_agent_id.clone(),
-                profile_id: status.requested_profile_id.clone(),
-            })
-    }
-
-    pub fn composer_picker_models(&self, provider: agent::ProviderKind) -> Vec<ResolvedModel> {
-        picker_models(
-            &self.provider_model_catalog(provider),
-            &self.settings_replica.provider(provider),
-            &self.settings_replica.favorite_models,
-        )
-    }
-
-    pub fn composer_models_loading(&self, provider: agent::ProviderKind) -> bool {
-        self.providers_replica
-            .models_loading
-            .get(&provider)
-            .copied()
-            .unwrap_or(false)
-            && self
-                .providers_replica
-                .model_catalogs
-                .get(&provider)
-                .is_none_or(Vec::is_empty)
-    }
-
-    pub fn composer_model_pending_restart(&self) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.model_pending_restart)
-    }
-
-    pub fn composer_active_model_spec(&self) -> Option<agent::ModelSpec> {
-        let status = self.session_status_replica.as_ref()?;
-        let model = status.requested_model.as_deref()?;
-        self.providers_replica
-            .model_catalogs
-            .get(&status.provider)?
-            .iter()
-            .find(|spec| spec.id == model)
-            .cloned()
-    }
-
-    pub fn composer_active_option_descriptors(&self) -> Vec<agent::OptionDescriptor> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.provider_option_descriptors.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn composer_active_option_selections(&self) -> Vec<agent::OptionSelection> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.provider_option_selections.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn composer_ultrathink_armed(&self) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.ultrathink_armed)
-    }
-
-    pub fn composer_options_pending_restart(&self) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.options_pending_restart)
-    }
-
-    pub fn composer_interaction_mode(&self) -> agent::InteractionMode {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.interaction_mode)
-            .unwrap_or_default()
-    }
-
-    pub fn composer_context(&self) -> (Option<agent::TokenUsage>, Option<agent::ProviderKind>) {
-        let provider = self
-            .session_status_replica
-            .as_ref()
-            .map(|status| status.provider);
-        (
-            self.with_active_timeline(|timeline| timeline.usage)
-                .flatten(),
-            provider,
-        )
-    }
-
-    pub fn composer_approval_mode(&self) -> agent::ApprovalMode {
-        let mode = self
-            .session_status_replica
-            .as_ref()
-            .map(|status| status.approval_mode)
-            .unwrap_or_default();
-        if !self.composer_native_approval_modes_enabled()
-            && matches!(
-                mode,
-                agent::ApprovalMode::Supervised | agent::ApprovalMode::AutoAcceptEdits
-            )
-        {
-            agent::ApprovalMode::FullAccess
-        } else {
-            mode
-        }
-    }
-
-    pub fn composer_native_approval_modes_enabled(&self) -> bool {
-        let Some(status) = self.session_status_replica.as_ref() else {
-            return true;
-        };
-        if status.provider != agent::ProviderKind::Pi {
-            return true;
-        }
-        status
-            .requested_profile_id
-            .as_deref()
-            .and_then(|id| self.settings_replica.resolved_profile(id))
-            .map(|profile| profile.settings.pi_native_approvals)
-            .unwrap_or_else(|| {
-                self.settings_replica
-                    .provider(agent::ProviderKind::Pi)
-                    .pi_native_approvals
-            })
-    }
-
-    pub fn composer_approval_pending_restart(&self) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.approval_pending_restart)
-    }
-
-    pub fn composer_queue(&self) -> Option<(Vec<QueuedMessageStatus>, bool, &'static str)> {
-        self.session_status_replica.as_ref().map(|status| {
-            (
-                status.queued_messages.clone(),
-                status.supports_steering,
-                status.provider.display_name(),
-            )
-        })
-    }
-
-    pub fn composer_supports_steering(&self) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.supports_steering)
-    }
-
-    pub fn composer_preparing_worktree(&self) -> bool {
-        self.session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.preparing_worktree)
-    }
-
-    pub fn composer_plan_ready_markdown(&self) -> Option<String> {
-        self.with_active_timeline(|timeline| {
-            timeline.plan_ready().map(|plan| plan.markdown.clone())
-        })
-        .flatten()
-    }
-
-    pub(crate) fn composer_checkout_state(&self) -> Option<ComposerCheckoutState> {
-        let status = self.session_status_replica.as_ref()?;
-        let branch = status.git_branch.clone().or_else(|| {
-            status
-                .worktree
-                .as_ref()
-                .map(|worktree| worktree.branch.clone())
-        })?;
-        let worktree_base = match &status.draft_workspace {
-            tcode_core::ui::WorkspaceMode::NewWorktree { base } => Some(base.clone()),
-            _ => None,
-        };
-        Some(ComposerCheckoutState {
-            branch,
-            branches: status.branches.clone(),
-            turn_running: status.turn_running,
-            is_draft: status.draft,
-            worktree_base,
-            worktree: status.worktree.clone(),
-        })
-    }
-
-    pub fn composer_render_state(&self) -> (bool, Option<agent::ApprovalRequest>, usize) {
-        let turn_running = self
-            .session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.turn_running);
-        self.with_active_timeline(|timeline| {
-            (
-                turn_running,
-                timeline.pending_approvals.first().cloned(),
-                timeline.pending_approvals.len(),
-            )
-        })
-        .unwrap_or((turn_running, None, 0))
-    }
-
-    pub fn composer_is_favorite_model(&self, model: &str) -> bool {
-        self.settings_replica
-            .favorite_models
-            .iter()
-            .any(|favorite| favorite == model)
     }
 
     pub fn chat_active_session(&self) -> Option<(String, PathBuf, bool)> {
@@ -1808,19 +1545,8 @@ impl WorkspaceStore {
         ))
     }
 
-    pub fn chat_panel_state(&self) -> (bool, tcode_core::ui::RightTab, bool, bool, bool, f32) {
-        self.active_conversation_ui()
-            .map(|ui| {
-                (
-                    ui.right_panel_open,
-                    ui.right_tab,
-                    ui.right_panel_open && ui.right_tab == RightTab::Plan,
-                    ui.right_panel_open && ui.right_tab == RightTab::Preview,
-                    ui.terminal_open,
-                    ui.terminal_height,
-                )
-            })
-            .unwrap_or((false, RightTab::default(), false, false, false, 240.))
+    pub(crate) fn chat_panel_state(&self) -> ChatPanelState {
+        snapshots::chat_panel_state(self.active_conversation_ui())
     }
 
     pub fn chat_git_controls(&self) -> Option<(QuickAction, Vec<MenuItem>)> {

@@ -6,7 +6,10 @@ impl Composer {
         &self,
         cx: &App,
     ) -> Option<(String, Vec<UserInputQuestion>)> {
-        self.workspace_store.read(cx).composer_pending_user_input()
+        self.workspace_store
+            .read(cx)
+            .composer_state()
+            .pending_user_input
     }
 
     /// Keep the per-request question state in sync: reset the index/selections
@@ -16,7 +19,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self.workspace_store.read(cx).composer_pending_user_input();
+        let current = self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .pending_user_input;
         let current_id = current.as_ref().map(|(id, _)| id.clone());
         if current_id != self.ui_request_id {
             self.ui_request_id = current_id;

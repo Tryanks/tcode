@@ -23,11 +23,13 @@ impl Composer {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let Some((queued, can_steer, agent)) = self.workspace_store.read(cx).composer_queue()
-        else {
+        let Some(queue) = self.workspace_store.read(cx).composer_state().queue else {
             self.scheduled_countdown_tick = None;
             return None;
         };
+        let queued = queue.messages;
+        let can_steer = queue.can_steer;
+        let agent = queue.agent;
         let has_scheduled = queued
             .iter()
             .any(|message| message.fire_at_unix_secs.is_some());

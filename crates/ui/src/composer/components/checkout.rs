@@ -5,7 +5,7 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let checkout = self.workspace_store.read(cx).composer_checkout_state()?;
+        let checkout = self.workspace_store.read(cx).composer_state().checkout?;
         let branch = checkout.branch;
         let branches = checkout.branches;
         let turn_running = checkout.turn_running;

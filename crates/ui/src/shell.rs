@@ -377,7 +377,10 @@ impl Render for AppShell {
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let (diff_open, right_tab, diff_expanded) = self.store.read(cx).shell_panel_state();
+        let panel = self.store.read(cx).shell_panel_state();
+        let diff_open = panel.right_panel_open;
+        let right_tab = panel.right_tab;
+        let diff_expanded = panel.right_panel_expanded;
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
         let diff_expanded = diff_expanded && right_tab != RightTab::Preview;

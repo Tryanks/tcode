@@ -1049,8 +1049,12 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        let (right_panel_open, right_tab, plan_showing, preview_showing, terminal_open, _) =
-            self.workspace_store.read(cx).chat_panel_state();
+        let panel = self.workspace_store.read(cx).chat_panel_state();
+        let right_panel_open = panel.right_panel_open;
+        let right_tab = panel.right_tab;
+        let plan_showing = panel.plan_showing;
+        let preview_showing = panel.preview_showing;
+        let terminal_open = panel.terminal_open;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
@@ -1589,8 +1593,9 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
-        let (_, _, _, _, terminal_open, terminal_height) =
-            self.workspace_store.read(cx).chat_panel_state();
+        let panel = self.workspace_store.read(cx).chat_panel_state();
+        let terminal_open = panel.terminal_open;
+        let terminal_height = panel.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
         // content column. The column fills the available width up to

@@ -35,7 +35,7 @@ impl Composer {
     /// Load the workspace file/folder listing for the active session cwd in the
     /// background (gitignore-respected), the first time a mention menu opens.
     pub(in super::super) fn ensure_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(cwd) = self.workspace_store.read(cx).composer_active_cwd() else {
+        let Some(cwd) = self.workspace_store.read(cx).composer_state().active_cwd else {
             return;
         };
         if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
@@ -88,7 +88,11 @@ impl Composer {
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // fuzzily filtered by the `$` query with no item cap.
-                let commands = self.workspace_store.read(cx).composer_provider_commands();
+                let commands = self
+                    .workspace_store
+                    .read(cx)
+                    .composer_state()
+                    .provider_commands;
                 let rows =
                     filter_provider_commands(&commands, ProviderCommandKind::Skill, &trigger.query)
                         .into_iter()
@@ -156,7 +160,11 @@ impl Composer {
                     .collect();
                 // Provider-native slash commands (Claude `slash_commands`), shown
                 // after the built-in group, fuzzily filtered without truncation.
-                let commands = self.workspace_store.read(cx).composer_provider_commands();
+                let commands = self
+                    .workspace_store
+                    .read(cx)
+                    .composer_state()
+                    .provider_commands;
                 rows.extend(
                     filter_provider_commands(
                         &commands,

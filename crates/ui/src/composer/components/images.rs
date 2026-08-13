@@ -92,7 +92,11 @@ impl Composer {
             return false;
         }
         let session_id = self.workspace_store.read(cx).active_session_id();
-        let attachments_dir = self.workspace_store.read(cx).composer_attachments_dir();
+        let attachments_dir = self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .attachments_dir;
         let current_count = self.pending_images.len() + self.pending_image_loads;
         self.pending_image_loads += 1;
         let generation = self.image_load_generation;

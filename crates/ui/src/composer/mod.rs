@@ -320,7 +320,8 @@ impl Composer {
             || !self
                 .workspace_store
                 .read(cx)
-                .composer_terminal_contexts()
+                .composer_state()
+                .terminal_contexts
                 .is_empty()
             || !self.workspace_store.read(cx).review_comments().is_empty()
     }
@@ -344,11 +345,12 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        let terminal_contexts = self.workspace_store.read(cx).composer_terminal_contexts();
+        let composer_state = self.workspace_store.read(cx).composer_state();
+        let terminal_contexts = composer_state.terminal_contexts;
         if !self.has_sendable_content(cx) {
             return;
         }
-        if !self.workspace_store.read(cx).composer_has_active_session() {
+        if !composer_state.has_active_session {
             window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
             return;
         }
@@ -414,7 +416,12 @@ impl Composer {
             .iter()
             .map(|image| image.path.clone())
             .collect::<Vec<_>>();
-        if let Some((from, to)) = self.workspace_store.read(cx).composer_relay_confirmation() {
+        if let Some((from, to)) = self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .relay_confirmation
+        {
             let composer = cx.entity();
             let input = input.clone();
             window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -525,7 +532,11 @@ impl Composer {
         if turn_running {
             // Providers with native mid-turn steering keep a send button active
             // beside Stop while a turn runs.
-            let steers = self.workspace_store.read(cx).composer_supports_steering();
+            let steers = self
+                .workspace_store
+                .read(cx)
+                .composer_state()
+                .supports_steering;
             let has_text = !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
                 .gap_2()
@@ -598,7 +609,12 @@ impl Composer {
 
         // Group C: while the first send is creating a worktree, show a disabled
         // "Preparing worktree…" pill instead of the send button.
-        if self.workspace_store.read(cx).composer_preparing_worktree() {
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .preparing_worktree
+        {
             return h_flex()
                 .gap_2()
                 .items_center()
@@ -650,7 +666,8 @@ impl Composer {
         if self
             .workspace_store
             .read(cx)
-            .composer_plan_ready_markdown()
+            .composer_state()
+            .plan_ready_markdown
             .is_some()
         {
             if self.has_sendable_content(cx) && self.refines_the_plan(cx) {
@@ -683,8 +700,10 @@ impl Render for Composer {
         self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
         self.sync_native_rewind_prefill(window, cx);
-        let (turn_running, approval, approval_count) =
-            self.workspace_store.read(cx).composer_render_state();
+        let composer_state = self.workspace_store.read(cx).composer_state();
+        let turn_running = composer_state.turn_running;
+        let approval = composer_state.pending_approval;
+        let approval_count = composer_state.pending_approval_count;
 
         let border = cx.theme().border;
         let divider = move || div().w_px().h(px(16.)).bg(border);
@@ -756,7 +775,8 @@ impl Render for Composer {
         let plan_ready_title = self
             .workspace_store
             .read(cx)
-            .composer_plan_ready_markdown()
+            .composer_state()
+            .plan_ready_markdown
             .map(|md| {
                 tcode_core::session::plan_title(&md)
                     .unwrap_or_else(|| crate::tr!("plan.proposed_plan").into_owned())
@@ -781,7 +801,11 @@ impl Render for Composer {
 
         // Dropping image files onto the card attaches them (T3 drag-drop).
         let composer = cx.entity();
-        let terminal_contexts = self.workspace_store.read(cx).composer_terminal_contexts();
+        let terminal_contexts = self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .terminal_contexts;
         let has_terminal_contexts = !terminal_contexts.is_empty();
         let context_chips =
             h_flex()
