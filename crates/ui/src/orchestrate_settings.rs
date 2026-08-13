@@ -10,7 +10,7 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     switch::Switch,
     v_flex,
 };
@@ -29,7 +29,7 @@ use crate::store::WorkspaceStore;
 struct IdentityRowState {
     provider: ProviderKind,
     model: String,
-    identity: Entity<InputState>,
+    identity: Entity<TextareaState>,
 }
 
 struct ChildRowState {
@@ -37,12 +37,12 @@ struct ChildRowState {
     model: String,
     profile_id: Option<String>,
     effort: Entity<InputState>,
-    description: Entity<InputState>,
+    description: Entity<TextareaState>,
 }
 
 pub struct OrchestrateSettingsPanel {
     store: Entity<WorkspaceStore>,
-    generic_identity: Entity<InputState>,
+    generic_identity: Entity<TextareaState>,
     identity_rows: Vec<IdentityRowState>,
     child_rows: Vec<ChildRowState>,
     identity_model_picker: Entity<ProviderModelPicker>,
@@ -60,8 +60,7 @@ impl OrchestrateSettingsPanel {
             .generic_identity
             .clone();
         let generic_identity = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(4, 14)
                 .placeholder(crate::tr!("orchestrate.generic_identity.placeholder"))
                 .default_value(generic_value)
@@ -144,8 +143,7 @@ impl OrchestrateSettingsPanel {
 
         for entry in orchestrate.model_identities {
             let identity = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .auto_grow(3, 10)
                     .placeholder(crate::tr!("orchestrate.model_identity.placeholder"))
                     .default_value(entry.identity)
@@ -172,8 +170,7 @@ impl OrchestrateSettingsPanel {
                     .default_value(entry.effort.clone().unwrap_or_default())
             });
             let description = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .auto_grow(3, 9)
                     .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                     .default_value(entry.description)
@@ -795,7 +792,7 @@ impl OrchestrateSettingsPanel {
                                     .child(crate::tr!("orchestrate.generic_identity.description")),
                             )
                             .child(
-                                Input::new(&self.generic_identity)
+                                Textarea::new(&self.generic_identity)
                                     .rounded(crate::material::radius_input()),
                             ),
                     ),
@@ -885,7 +882,7 @@ impl OrchestrateSettingsPanel {
                                     })),
                             ),
                     )
-                    .child(Input::new(&row.identity).rounded(crate::material::radius_input()))
+                    .child(Textarea::new(&row.identity).rounded(crate::material::radius_input()))
                     .into_any_element(),
             );
         }
@@ -1041,8 +1038,8 @@ impl OrchestrateSettingsPanel {
                             ),
                     )
                     .child(
-                        Input::new(&row.description)
-                            .small()
+                        Textarea::new(&row.description)
+                            .text_sm()
                             .rounded(crate::material::radius_input()),
                     )
                     .into_any_element(),

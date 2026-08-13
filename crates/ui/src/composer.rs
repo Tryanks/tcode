@@ -28,7 +28,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     dialog::DialogButtonProps,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     notification::Notification,
     popover::PopoverState,
     spinner::Spinner,
@@ -323,7 +323,7 @@ pub(crate) fn composer_destination(
 }
 
 /// In-memory text drafts plus the destination currently represented by the
-/// shared [`InputState`]. Keeping switching in this small state machine makes
+/// shared [`TextareaState`]. Keeping switching in this small state machine makes
 /// it explicit that the outgoing value is saved before the incoming one is
 /// restored.
 #[derive(Default)]
@@ -490,11 +490,11 @@ fn transcode_image_to_png(bytes: &[u8]) -> image::ImageResult<Vec<u8>> {
 
 pub struct Composer {
     workspace_store: Entity<WorkspaceStore>,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     /// Dedicated free-form answer field shown inside an agent question card.
     /// Keeping it separate from the turn composer makes the pending question
     /// and the destination of typed text unambiguous.
-    user_input_custom: Entity<InputState>,
+    user_input_custom: Entity<TextareaState>,
     /// Unsent text is isolated by persisted thread or project New thread page.
     text_cache: ComposerTextCache,
     model_search: Entity<InputState>,
@@ -563,8 +563,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
                 .placeholder(crate::tr!("composer.placeholder"))
@@ -573,7 +572,8 @@ impl Composer {
             InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
         });
         let user_input_custom = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
+                .rows(1)
                 .submit_on_enter(true)
                 .placeholder(crate::tr!("userinput.custom_placeholder"))
         });
@@ -679,7 +679,9 @@ impl Composer {
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(incoming_text, window, cx);
-            state.set_selected_range(cursor..cursor, cx);
+            state
+                .base_state()
+                .update(cx, |state, cx| state.set_selected_range(cursor..cursor, cx));
         });
         self.recompute_trigger(cx);
     }
@@ -697,7 +699,9 @@ impl Composer {
         let cursor = prefill.len();
         self.input.update(cx, |state, cx| {
             state.set_value(prefill, window, cx);
-            state.set_selected_range(cursor..cursor, cx);
+            state
+                .base_state()
+                .update(cx, |state, cx| state.set_selected_range(cursor..cursor, cx));
             state.focus(window, cx);
         });
         self.recompute_trigger(cx);
@@ -723,7 +727,7 @@ impl Composer {
     /// queueing (with a notice) on providers that cannot steer.
     fn submit(
         &mut self,
-        input: &Entity<InputState>,
+        input: &Entity<TextareaState>,
         steer: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -861,7 +865,7 @@ impl Composer {
     #[allow(clippy::too_many_arguments)]
     fn finish_submit(
         &mut self,
-        input: &Entity<InputState>,
+        input: &Entity<TextareaState>,
         sent_text: String,
         attachment_paths: Vec<PathBuf>,
         orchestrate: bool,
@@ -916,7 +920,10 @@ impl Composer {
     fn recompute_trigger(&mut self, cx: &mut Context<Self>) {
         let (text, cursor) = {
             let state = self.input.read(cx);
-            (state.value().to_string(), state.cursor())
+            (
+                state.value().to_string(),
+                state.base_state().read(cx).cursor(),
+            )
         };
         let trigger = detect_composer_trigger(&text, cursor);
         let key = trigger
@@ -1087,7 +1094,9 @@ impl Composer {
         };
         let replacement = replacement.to_string();
         self.input.update(cx, |state, cx| {
-            state.set_selected_range(trigger.range.clone(), cx);
+            state.base_state().update(cx, |state, cx| {
+                state.set_selected_range(trigger.range.clone(), cx)
+            });
             state.replace(replacement.clone(), window, cx);
         });
     }
@@ -2527,7 +2536,7 @@ impl Composer {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.user_input_custom).appearance(false)),
+                    .child(Textarea::new(&self.user_input_custom).appearance(false)),
             )
             .child(
                 crate::material::accessible_clickable(
@@ -2713,7 +2722,7 @@ impl Composer {
 
     fn submit_custom_user_input(
         &mut self,
-        input: &Entity<InputState>,
+        input: &Entity<TextareaState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3480,7 +3489,9 @@ impl Render for Composer {
         if self.applied_placeholder != desired_placeholder {
             self.applied_placeholder = desired_placeholder.clone();
             self.input.update(cx, |state, cx| {
-                state.set_placeholder(desired_placeholder, window, cx)
+                state.base_state().update(cx, |state, cx| {
+                    state.set_placeholder(desired_placeholder, window, cx)
+                })
             });
         }
 
@@ -3611,7 +3622,7 @@ impl Render for Composer {
             })
             .when(has_terminal_contexts, |this| this.child(context_chips))
             .when(has_review_comments, |this| this.child(review_chips))
-            .child(Input::new(&self.input).appearance(false))
+            .child(Textarea::new(&self.input).appearance(false))
             .children(self.render_image_strip(cx))
             .child(control_row);
 

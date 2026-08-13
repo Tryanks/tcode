@@ -13,8 +13,8 @@ term = { path = "../term" }
 preview-mcp = { path = "../preview-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
 gpui = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 chrono = "0.4"
@@ -29,7 +29,7 @@ syntect = { version = "5.3.0", default-features = false, features = ["parsing", 
 imara-diff = "0.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "c1acb9f3854238da9543af817453726a0efbadb0" }
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }
 

@@ -15,7 +15,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
-    input::{Input, InputState},
+    input::{Textarea, TextareaState},
     v_flex,
 };
 
@@ -26,7 +26,7 @@ use crate::store::WorkspaceStore;
 
 pub struct CommitDialog {
     store: Entity<WorkspaceStore>,
-    message: Entity<InputState>,
+    message: Entity<TextareaState>,
     files: Vec<GitFileEntry>,
     /// User-*excluded* (unchecked) paths — kept out of the commit via pathspec.
     excluded: HashSet<String>,
@@ -49,8 +49,7 @@ impl CommitDialog {
     ) -> Self {
         let (files, branch, on_default_branch) = store.read(cx).commit_dialog_state();
         let message = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(3, 10)
                 .placeholder(crate::tr!("git.commit.message_placeholder"))
         });
@@ -359,7 +358,7 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Input::new(&self.message).rounded(crate::material::radius_input())),
+                .child(Textarea::new(&self.message).rounded(crate::material::radius_input())),
         );
 
         crate::material::overlay_contour(

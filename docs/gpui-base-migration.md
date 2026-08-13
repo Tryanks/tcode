@@ -23,7 +23,7 @@ Facts established during research (2026-08-13):
 
 ## Phases (each ends: builds green, committed)
 
-- [ ] Phase 0 — bump pin to post-split rev `c1acb9f`, align gpui via cargo
+- [x] Phase 0 — bump pin to post-split rev `c1acb9f`, align gpui via cargo
       update, fix compile (ScrollbarShow→ScrollbarMode etc.). Both layers
       coexist; no behavior change intended.
       Accept: `cargo build --workspace --examples` green; app launches.

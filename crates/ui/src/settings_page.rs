@@ -1428,9 +1428,8 @@ impl SettingsPage {
             this.update_settings(|settings| mutate(settings, !checked), cx);
         }))
         .child(self.row_labels(title, desc, cx))
-        // gpui-component 0315556's Switch is still mouse-only. It is
-        // intentionally visual here; the semantic row above owns click,
-        // focus, keyboard activation, and the toggled state.
+        // The Switch is intentionally visual here; the semantic row above
+        // owns click, focus, keyboard activation, and the toggled state.
         .child(Switch::new(id).checked(checked))
         .into_any_element()
     }
