@@ -272,11 +272,6 @@ impl Composer {
             );
         }
 
-        // Number keys 1-9 select the matching option.
-        let question_keys = question.clone();
-        let questions_keys = questions.clone();
-        let request_keys = request_id.clone();
-
         let pager = h_flex()
             .w_full()
             .h(px(12.))
@@ -303,7 +298,6 @@ impl Composer {
 
         v_flex()
             .w_full()
-            .max_w(px(320.))
             .gap_2()
             .p(px(14.))
             .rounded(crate::material::radius_card())
@@ -311,25 +305,6 @@ impl Composer {
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
             .shadow_sm()
-            .on_key_down(
-                cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
-                    if let Ok(n) = ev.keystroke.key.parse::<usize>()
-                        && n >= 1
-                        && n <= question_keys.options.len()
-                    {
-                        let label = question_keys.options[n - 1].label.clone();
-                        this.ui_toggle_option(&question_keys, label, cx);
-                        if !question_keys.multi_select {
-                            this.ui_advance_or_submit(
-                                &questions_keys,
-                                request_keys.clone(),
-                                window,
-                                cx,
-                            );
-                        }
-                    }
-                }),
-            )
             .child(header)
             .child(div().text_size(px(13.)).child(question.question.clone()))
             .child(options)
@@ -345,6 +320,42 @@ impl Composer {
             .child(actions)
             .when(total > 1, |this| this.child(pager))
             .into_any_element()
+    }
+
+    /// Number keys 1-9 pressed in the (empty) main composer input select the
+    /// matching option of the pending question. Returns true when consumed.
+    /// Deliberately NOT wired to the panel itself: the only focusable child
+    /// there is the custom-answer textarea, where digits must stay literal.
+    pub(in super::super) fn handle_user_input_digit(
+        &mut self,
+        ev: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if ev.keystroke.modifiers.modified() || !self.input.read(cx).value().is_empty() {
+            return false;
+        }
+        let Some((request_id, questions)) = self.pending_user_input(cx) else {
+            return false;
+        };
+        let index = self
+            .ui_question_index
+            .min(questions.len().saturating_sub(1));
+        let Some(question) = questions.get(index).cloned() else {
+            return false;
+        };
+        let Ok(n) = ev.keystroke.key.parse::<usize>() else {
+            return false;
+        };
+        if n < 1 || n > question.options.len() {
+            return false;
+        }
+        let label = question.options[n - 1].label.clone();
+        self.ui_toggle_option(&question, label, cx);
+        if !question.multi_select {
+            self.ui_advance_or_submit(&questions, request_id, window, cx);
+        }
+        true
     }
 
     /// Toggle an option label for a question: single-select replaces, multi

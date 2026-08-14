@@ -889,6 +889,10 @@ impl Render for Composer {
                     this.paste_clipboard_image(window, cx);
                     return;
                 }
+                if this.handle_user_input_digit(ev, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 if !this.menu_visible() {
                     return;
                 }

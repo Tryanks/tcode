@@ -66,7 +66,6 @@ impl Composer {
 
         v_flex()
             .w_full()
-            .max_w(px(320.))
             .gap_2()
             .p(px(14.))
             .rounded(crate::material::radius_card())
