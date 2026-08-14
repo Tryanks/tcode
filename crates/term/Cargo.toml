@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 async-channel = "2"
-rio-vt = "0.5.24"
+rio-graphics = "0.5.24"
+rio-vt = { version = "0.5.24", features = ["graphics"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

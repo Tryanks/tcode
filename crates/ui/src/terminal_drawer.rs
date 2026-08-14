@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -14,7 +15,7 @@ use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, RenderImage, Role,
     ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
     prelude::FluentBuilder as _, px, rgb, size,
@@ -22,6 +23,12 @@ use gpui::{
 use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use term::{
     HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermSnapshot,
+    graphics::{
+        AtlasPlacement, ColorType, GraphicData, GraphicOverlay, IncompletePlacement,
+        KittyPlacement, OverlayViewport, PLACEHOLDER, PlaceholderRun, UpdateQueues,
+        VirtualPlacement, atlas_image_key, atlas_overlay_geometry, clip_overlay_to_rect,
+        compute_run_geometry, kitty_image_key, kitty_overlay_geometry,
+    },
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
     rio_vt::{
         ansi::CursorShape,
@@ -187,11 +194,32 @@ struct TerminalGridCache {
     rows: Vec<Option<CachedRowLayout>>,
 }
 
+#[derive(Clone)]
+struct TerminalImage {
+    image: Arc<RenderImage>,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy)]
+struct VirtualPlaceholderPaint {
+    run: PlaceholderRun,
+    screen_line: usize,
+    start_screen_col: usize,
+}
+
+struct OrderedGraphicOverlay {
+    overlay: GraphicOverlay,
+    protocol_order: u8,
+    placement_order: u32,
+}
+
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
     row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
+    image_registry: RefCell<HashMap<u64, HashMap<u64, TerminalImage>>>,
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
@@ -221,6 +249,7 @@ impl TerminalDrawer {
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
             row_layout_cache: RefCell::new(HashMap::new()),
+            image_registry: RefCell::new(HashMap::new()),
             cell_width: 7.83,
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
@@ -368,6 +397,9 @@ impl TerminalDrawer {
 
         self.event_subscriptions
             .retain(|id, _| streams.iter().any(|(stream_id, _)| stream_id == id));
+        self.image_registry
+            .borrow_mut()
+            .retain(|id, _| streams.iter().any(|(stream_id, _)| stream_id == id));
 
         for (terminal_id, receiver) in streams {
             let already_subscribed = self
@@ -376,6 +408,11 @@ impl TerminalDrawer {
                 .is_some_and(|subscription| subscription.receiver.same_channel(&receiver));
             if already_subscribed {
                 continue;
+            }
+            if self.event_subscriptions.contains_key(&terminal_id) {
+                // A restart keeps the tab id but creates a new terminal. Its
+                // image namespace starts empty just like a newly opened tab.
+                self.image_registry.borrow_mut().remove(&terminal_id);
             }
 
             let task_receiver = receiver.clone();
@@ -482,6 +519,30 @@ impl TerminalDrawer {
                     _task: task,
                 },
             );
+        }
+    }
+
+    fn apply_graphics_updates(&self, terminal_id: u64, updates: Option<UpdateQueues>) {
+        let Some(updates) = updates else {
+            return;
+        };
+        let mut registries = self.image_registry.borrow_mut();
+        let images = registries.entry(terminal_id).or_default();
+
+        for graphic in updates.pending {
+            let key = atlas_image_key(graphic.id.get());
+            if let Some(image) = terminal_image(graphic) {
+                images.insert(key, image);
+            }
+        }
+        for (image_id, graphic) in updates.pending_images {
+            let key = kitty_image_key(image_id);
+            if let Some(image) = terminal_image(graphic) {
+                images.insert(key, image);
+            }
+        }
+        for key in updates.remove_queue {
+            images.remove(&key);
         }
     }
 
@@ -641,6 +702,19 @@ impl TerminalDrawer {
         let cell_height = self.cell_height;
         let cols = state.cols;
         let rows = state.screen_lines;
+        let atlas_placements = state.atlas_placements.clone();
+        let kitty_placements = state.kitty_placements.clone();
+        let kitty_virtual_placements = state.kitty_virtual_placements.clone();
+        let virtual_placeholder_paints = virtual_placeholder_paints(state);
+        let history_size = (state.lines_evicted.min(i64::MAX as u64) as i64)
+            .saturating_add(state.history_size.min(i64::MAX as usize) as i64);
+        let display_offset = state.display_offset.min(i64::MAX as usize) as i64;
+        let graphic_images = self
+            .image_registry
+            .borrow()
+            .get(&terminal_id)
+            .cloned()
+            .unwrap_or_default();
         let focus_handle = self.focus_handle.clone();
         let drawer = cx.entity();
         let grid_bounds = self.grid_bounds.clone();
@@ -691,6 +765,42 @@ impl TerminalDrawer {
                         );
                         window.paint_quad(fill(background_bounds, background.color));
                     }
+
+                    let physical_cell_width = cell_width * scale_factor;
+                    let physical_cell_height = cell_height * scale_factor;
+                    let physical_origin_x = f32::from(origin.x) * scale_factor;
+                    let physical_origin_y = f32::from(origin.y) * scale_factor;
+                    let viewport = OverlayViewport {
+                        cell_width: physical_cell_width,
+                        cell_height: physical_cell_height,
+                        origin_x: physical_origin_x,
+                        origin_y: physical_origin_y,
+                        history_size,
+                        display_offset,
+                        screen_lines: rows.min(i64::MAX as usize) as i64,
+                    };
+                    let clip = (
+                        physical_origin_x,
+                        physical_origin_y,
+                        physical_origin_x + cols as f32 * physical_cell_width,
+                        physical_origin_y + rows as f32 * physical_cell_height,
+                    );
+                    let graphic_overlays = layout_graphic_overlays(
+                        &atlas_placements,
+                        &kitty_placements,
+                        &kitty_virtual_placements,
+                        &virtual_placeholder_paints,
+                        &graphic_images,
+                        &viewport,
+                        clip,
+                    );
+                    paint_graphic_overlays(
+                        window,
+                        &graphic_overlays,
+                        &graphic_images,
+                        scale_factor,
+                        false,
+                    );
 
                     let cursor_bounds = paint_data.cursor.map(|cursor| {
                         Bounds::new(
@@ -805,6 +915,14 @@ impl TerminalDrawer {
                             cx,
                         );
                     }
+
+                    paint_graphic_overlays(
+                        window,
+                        &graphic_overlays,
+                        &graphic_images,
+                        scale_factor,
+                        true,
+                    );
 
                     if register_input {
                         window.handle_input(
@@ -1122,7 +1240,7 @@ impl TerminalDrawer {
     }
 
     fn render_terminal(&self, terminal_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        let Some((snapshot, label, register_input)) = self
+        let Some((mut snapshot, label, register_input)) = self
             .workspace_store
             .read(cx)
             .with_terminal_workspace(|workspace| {
@@ -1138,6 +1256,8 @@ impl TerminalDrawer {
         else {
             return div().into_any_element();
         };
+
+        self.apply_graphics_updates(terminal_id, snapshot.graphics_updates.take());
 
         let mut grid = v_flex().child(self.render_grid(terminal_id, &snapshot, register_input, cx));
         if snapshot.exited {
@@ -1174,16 +1294,24 @@ impl TerminalDrawer {
             .items_center()
             .justify_center()
             .when(link_hovered, |this| this.cursor_pointer())
-            .on_prepaint(move |bounds, _window, cx| {
+            .on_prepaint(move |bounds, window, cx| {
                 let content_width = f32::from(bounds.size.width) - 2. * PANE_PADDING;
                 let content_height = f32::from(bounds.size.height) - 2. * PANE_PADDING;
                 let cols = (content_width / cell_width).floor().max(2.) as usize;
                 let rows = (content_height / cell_height).floor().max(2.) as usize;
+                let scale_factor = window.scale_factor();
+                let cell_width_px = (cell_width * scale_factor).round().max(1.) as u32;
+                let cell_height_px = (cell_height * scale_factor).round().max(1.) as u32;
                 workspace_store
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.terminal(terminal_id) {
-                            entry.terminal.resize(cols, rows);
+                            entry.terminal.resize_with_cell_size(
+                                cols,
+                                rows,
+                                cell_width_px,
+                                cell_height_px,
+                            );
                         }
                     });
             })
@@ -1842,6 +1970,13 @@ fn layout_row(
             continue;
         }
 
+        // Kitty Unicode placeholders are image-placement metadata, not text.
+        // Their cell styling still participates in backgrounds and selection.
+        if square.c() == PLACEHOLDER {
+            previous_cell_had_extras = false;
+            continue;
+        }
+
         // Alacritty stores emoji variation/modifier codepoints as extras;
         // its following placeholder space is not an independently painted
         // character. This mirrors Zed's terminal layout workaround.
@@ -2207,6 +2342,317 @@ fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32
     Some(lines.clamp(1, 3) * pixels.signum() as i32)
 }
 
+fn terminal_image(graphic: GraphicData) -> Option<TerminalImage> {
+    if graphic.width == 0 || graphic.height == 0 {
+        return None;
+    }
+    let pixel_count = graphic.width.checked_mul(graphic.height)?;
+    let bgra = match graphic.color_type {
+        ColorType::Rgba => {
+            if graphic.pixels.len() != pixel_count.checked_mul(4)? {
+                return None;
+            }
+            let mut pixels = graphic.pixels;
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            pixels
+        }
+        ColorType::Rgb => {
+            if graphic.pixels.len() != pixel_count.checked_mul(3)? {
+                return None;
+            }
+            let mut pixels = Vec::with_capacity(pixel_count.checked_mul(4)?);
+            for pixel in graphic.pixels.chunks_exact(3) {
+                pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], u8::MAX]);
+            }
+            pixels
+        }
+    };
+    let width = u32::try_from(graphic.width).ok()?;
+    let height = u32::try_from(graphic.height).ok()?;
+    // RenderImage's byte contract is BGRA even though image::RgbaImage is the
+    // storage carrier, so protocol RGB(A) is swizzled exactly once on arrival.
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(TerminalImage {
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
+        width: graphic.width,
+        height: graphic.height,
+    })
+}
+
+fn virtual_placeholder_paints(state: &TermSnapshot) -> Vec<VirtualPlaceholderPaint> {
+    let mut paints = Vec::new();
+    for (screen_line, row) in state.visible_rows.iter().enumerate() {
+        if !row.kitty_virtual_placeholder {
+            continue;
+        }
+
+        let mut current: Option<(IncompletePlacement, usize)> = None;
+        for (col, square) in row.inner.iter().take(state.cols).enumerate() {
+            if square.c() != PLACEHOLDER {
+                flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+                continue;
+            }
+
+            let Some(style) = state.style(screen_line, col) else {
+                flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+                continue;
+            };
+            let combining = square
+                .extras_id()
+                .and_then(|id| state.zero_width.get(&id))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut cell =
+                IncompletePlacement::from_cell(style.fg, style.underline_color, combining);
+
+            if let Some((placement, _)) = current.as_mut()
+                && placement.can_append(&cell)
+            {
+                placement.append();
+                continue;
+            }
+
+            flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+            // Missing coordinates on the first cell default to zero before
+            // continuation matching, as required by kitty's placeholder rules.
+            cell.row.get_or_insert(0);
+            cell.col.get_or_insert(0);
+            current = Some((cell, col));
+        }
+        flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+    }
+    paints
+}
+
+fn flush_virtual_placeholder_paint(
+    paints: &mut Vec<VirtualPlaceholderPaint>,
+    current: &mut Option<(IncompletePlacement, usize)>,
+    screen_line: usize,
+) {
+    if let Some((placement, start_screen_col)) = current.take() {
+        paints.push(VirtualPlaceholderPaint {
+            run: placement.complete(),
+            screen_line,
+            start_screen_col,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_graphic_overlays(
+    atlas_placements: &[AtlasPlacement],
+    kitty_placements: &[KittyPlacement],
+    virtual_placements: &HashMap<(u32, u32), VirtualPlacement>,
+    placeholder_paints: &[VirtualPlaceholderPaint],
+    images: &HashMap<u64, TerminalImage>,
+    viewport: &OverlayViewport,
+    clip: (f32, f32, f32, f32),
+) -> Vec<OrderedGraphicOverlay> {
+    let mut overlays = Vec::new();
+
+    for placement in atlas_placements {
+        if !images.contains_key(&placement.image_key) {
+            continue;
+        }
+        let Some(geometry) = atlas_overlay_geometry(placement, viewport) else {
+            continue;
+        };
+        push_graphic_overlay(
+            &mut overlays,
+            GraphicOverlay {
+                image_id: placement.image_key,
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                z_index: -1,
+                source_rect: geometry.source_rect,
+            },
+            0,
+            0,
+            clip,
+        );
+    }
+
+    for placement in kitty_placements {
+        let image_key = kitty_image_key(placement.image_id);
+        let Some(image) = images.get(&image_key) else {
+            continue;
+        };
+        let Some(geometry) = kitty_overlay_geometry(placement, image.width, image.height, viewport)
+        else {
+            continue;
+        };
+        push_graphic_overlay(
+            &mut overlays,
+            GraphicOverlay {
+                image_id: image_key,
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                z_index: placement.z_index,
+                source_rect: geometry.source_rect,
+            },
+            1,
+            placement.placement_id,
+            clip,
+        );
+    }
+
+    // Virtual placements have no z-index field in rio's metadata; rio's own
+    // renderer assigns -1, which puts them below glyphs like atlas graphics.
+    for placeholder in placeholder_paints {
+        let placement = virtual_placements
+            .get(&(placeholder.run.image_id, placeholder.run.placement_id))
+            .or_else(|| virtual_placements.get(&(placeholder.run.image_id, 0)));
+        let Some(placement) = placement else {
+            continue;
+        };
+        let image_key = kitty_image_key(placeholder.run.image_id);
+        let Some(image) = images.get(&image_key) else {
+            continue;
+        };
+        let (Ok(image_width), Ok(image_height)) =
+            (u32::try_from(image.width), u32::try_from(image.height))
+        else {
+            continue;
+        };
+        let Some(geometry) = compute_run_geometry(
+            &placeholder.run,
+            placement.columns,
+            placement.rows,
+            image_width,
+            image_height,
+            (placement.x, placement.y, placement.width, placement.height),
+            viewport.cell_width,
+            viewport.cell_height,
+            viewport.origin_x,
+            viewport.origin_y,
+            placeholder.screen_line,
+            placeholder.start_screen_col,
+        ) else {
+            continue;
+        };
+        push_graphic_overlay(
+            &mut overlays,
+            GraphicOverlay {
+                image_id: image_key,
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                z_index: -1,
+                source_rect: geometry.source_rect,
+            },
+            2,
+            placement.placement_id,
+            clip,
+        );
+    }
+
+    overlays.sort_by_key(|ordered| {
+        (
+            ordered.overlay.z_index,
+            ordered.protocol_order,
+            ordered.overlay.image_id,
+            ordered.placement_order,
+        )
+    });
+    overlays
+}
+
+fn push_graphic_overlay(
+    overlays: &mut Vec<OrderedGraphicOverlay>,
+    mut overlay: GraphicOverlay,
+    protocol_order: u8,
+    placement_order: u32,
+    clip: (f32, f32, f32, f32),
+) {
+    if clip_overlay_to_rect(&mut overlay, clip.0, clip.1, clip.2, clip.3) {
+        overlays.push(OrderedGraphicOverlay {
+            overlay,
+            protocol_order,
+            placement_order,
+        });
+    }
+}
+
+fn paint_graphic_overlays(
+    window: &mut Window,
+    overlays: &[OrderedGraphicOverlay],
+    images: &HashMap<u64, TerminalImage>,
+    scale_factor: f32,
+    above_text: bool,
+) {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return;
+    }
+    for ordered in overlays {
+        let overlay = &ordered.overlay;
+        if (overlay.z_index >= 0) != above_text {
+            continue;
+        }
+        let Some(image) = images.get(&overlay.image_id) else {
+            continue;
+        };
+        paint_graphic_overlay(window, overlay, image, scale_factor);
+    }
+}
+
+fn paint_graphic_overlay(
+    window: &mut Window,
+    overlay: &GraphicOverlay,
+    image: &TerminalImage,
+    scale_factor: f32,
+) {
+    let [u0, v0, u1, v1] = overlay.source_rect;
+    let source_width = u1 - u0;
+    let source_height = v1 - v0;
+    if !overlay.x.is_finite()
+        || !overlay.y.is_finite()
+        || !overlay.width.is_finite()
+        || !overlay.height.is_finite()
+        || !u0.is_finite()
+        || !v0.is_finite()
+        || !source_width.is_finite()
+        || !source_height.is_finite()
+        || overlay.width <= 0.0
+        || overlay.height <= 0.0
+        || source_width <= 0.0
+        || source_height <= 0.0
+    {
+        return;
+    }
+
+    let target_x = overlay.x / scale_factor;
+    let target_y = overlay.y / scale_factor;
+    let target_width = overlay.width / scale_factor;
+    let target_height = overlay.height / scale_factor;
+    let full_width = target_width / source_width;
+    let full_height = target_height / source_height;
+    let image_x = target_x - u0 * full_width;
+    let image_y = target_y - v0 * full_height;
+    let target_bounds = Bounds::new(
+        point(px(target_x), px(target_y)),
+        size(px(target_width), px(target_height)),
+    );
+    let image_bounds = Bounds::new(
+        point(px(image_x), px(image_y)),
+        size(px(full_width), px(full_height)),
+    );
+    let _ = window.paint_image(
+        target_bounds,
+        image_bounds,
+        Default::default(),
+        image.image.clone(),
+        0,
+        false,
+    );
+}
+
 fn terminal_font() -> gpui::Font {
     let mut terminal_font = font(TERMINAL_FONT_FAMILY);
     terminal_font.features = FontFeatures::disable_ligatures();
@@ -2288,6 +2734,11 @@ mod tests {
             exit_code: None,
             display_offset: 0,
             history_size: 0,
+            lines_evicted: 0,
+            graphics_updates: None,
+            atlas_placements: Vec::new(),
+            kitty_placements: Vec::new(),
+            kitty_virtual_placements: HashMap::new(),
             mode: Mode::empty(),
             keyboard_mode: KeyboardModes::NO_MODE,
             selection: None,

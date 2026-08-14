@@ -31,11 +31,28 @@ mod pty_info;
 
 pub use hyperlinks::HyperlinkMatch;
 
+/// Renderer-facing graphics values and pure placement geometry from rio.
+pub mod graphics {
+    pub use rio_graphics::{
+        ColorType, GraphicData, GraphicId, GraphicOverlay, atlas_image_key, kitty_image_key,
+    };
+    pub use rio_vt::ansi::graphics::{
+        AtlasPlacement, KittyOverlayGeometry, KittyPlacement, OverlayViewport, UpdateQueues,
+        VirtualPlacement, atlas_overlay_geometry, clip_overlay_to_rect, kitty_overlay_geometry,
+        resolve_source_rect,
+    };
+    pub use rio_vt::ansi::kitty_virtual::{
+        IncompletePlacement, PLACEHOLDER, PlaceholderRun, RunGeometry, compute_run_geometry,
+    };
+}
+
 use grid_emulator::{GridEmulator, GridEvent};
 use pty::{PtyEvent, PtyHandle};
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
+const DEFAULT_CELL_WIDTH_PX: u32 = 8;
+const DEFAULT_CELL_HEIGHT_PX: u32 = 17;
 
 /// A rendering-relevant event emitted by the compatibility terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +89,19 @@ pub struct TermSnapshot {
     pub exit_code: Option<i32>,
     pub display_offset: usize,
     pub history_size: usize,
+    /// Lines evicted from rio's scrollback ring before the retained history.
+    pub lines_evicted: u64,
+    /// Image pixels added or removed since the preceding snapshot.
+    ///
+    /// Pixel buffers appear here once and are consumed by the renderer's image
+    /// registry; placement snapshots below intentionally contain metadata only.
+    pub graphics_updates: Option<graphics::UpdateQueues>,
+    /// Active-screen sixel and iTerm2 placement metadata; geometry filters it to the viewport.
+    pub atlas_placements: Vec<graphics::AtlasPlacement>,
+    /// Active-screen direct kitty placement metadata, sorted by z-index.
+    pub kitty_placements: Vec<graphics::KittyPlacement>,
+    /// Kitty Unicode-placeholder placement metadata keyed by image/placement id.
+    pub kitty_virtual_placements: HashMap<(u32, u32), graphics::VirtualPlacement>,
     pub mode: Mode,
     pub keyboard_mode: KeyboardModes,
     pub selection: Option<SelectionRange>,
@@ -314,7 +344,27 @@ impl Terminal {
 
     pub fn resize(&self, cols: usize, rows: usize) {
         if self.emulator.resize_if_changed(cols, rows) {
-            let _ = self.pty.resize(cols, rows);
+            let _ = self.pty.resize(self.emulator.window_size());
+        }
+    }
+
+    /// Update the physical pixel dimensions of one terminal cell.
+    ///
+    /// This updates rio's graphics sizing and the host PTY pixel winsize even
+    /// when the grid's row and column counts stay unchanged.
+    pub fn set_cell_size(&self, width_px: u32, height_px: u32) {
+        if self.emulator.set_cell_size(width_px, height_px) {
+            let _ = self.pty.resize(self.emulator.window_size());
+        }
+    }
+
+    /// Resize the grid and update its physical cell metrics as one operation.
+    pub fn resize_with_cell_size(&self, cols: usize, rows: usize, width_px: u32, height_px: u32) {
+        if self
+            .emulator
+            .resize_with_cell_size_if_changed(cols, rows, width_px, height_px)
+        {
+            let _ = self.pty.resize(self.emulator.window_size());
         }
     }
 
@@ -843,15 +893,19 @@ mod tests {
     fn forwards_primary_device_attribute_response_to_pty() {
         require_live_pty!();
         let terminal = command(
-            "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=5 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
+            "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=16 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
         );
         let state = wait_until(&terminal, |state| {
             let text = state.text();
             let fields = text.split_whitespace().collect::<Vec<_>>();
             state.exited
-                && fields
-                    .windows(5)
-                    .any(|window| window == ["1b", "5b", "3f", "36", "63"])
+                && fields.windows(16).any(|window| {
+                    window
+                        == [
+                            "1b", "5b", "3f", "36", "32", "3b", "34", "3b", "36", "3b", "32", "32",
+                            "3b", "35", "32", "63",
+                        ]
+                })
         });
         assert_eq!(state.exit_code, Some(0));
     }

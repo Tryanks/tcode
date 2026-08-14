@@ -10,8 +10,9 @@ use std::{
     time::Instant,
 };
 
+use rio_graphics::{atlas_image_key, kitty_image_key};
 use rio_vt::{
-    ansi::{CursorShape as RioCursorShape, KeyboardModes},
+    ansi::{CursorShape as RioCursorShape, KeyboardModes, graphics::UpdateQueues},
     clipboard::ClipboardType,
     config::colors::{ColorRgb, NamedColor},
     crosswords::{
@@ -24,9 +25,12 @@ use rio_vt::{
     selection::{Selection, SelectionType},
 };
 
+use crate::{
+    DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, SelectedText, SelectionKind, SelectionSide,
+    TermSnapshot, hyperlinks,
+};
 #[cfg(test)]
 use crate::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::{SelectedText, SelectionKind, SelectionSide, TermSnapshot, hyperlinks};
 
 impl From<SelectionSide> for RioSide {
     fn from(side: SelectionSide) -> Self {
@@ -68,6 +72,7 @@ struct GridCore {
     fallback_title: Mutex<String>,
     lifecycle: Mutex<GridLifecycle>,
     size: Arc<AtomicGridSize>,
+    graphics_updates: Arc<Mutex<Option<UpdateQueues>>>,
 }
 
 struct GridState {
@@ -84,27 +89,46 @@ struct GridLifecycle {
 struct AtomicGridSize {
     cols: AtomicUsize,
     rows: AtomicUsize,
+    cell_width_px: AtomicUsize,
+    cell_height_px: AtomicUsize,
 }
 
 impl AtomicGridSize {
-    fn new(cols: usize, rows: usize) -> Self {
+    fn new(size: GridSize) -> Self {
         Self {
-            cols: AtomicUsize::new(cols),
-            rows: AtomicUsize::new(rows),
+            cols: AtomicUsize::new(size.cols),
+            rows: AtomicUsize::new(size.rows),
+            cell_width_px: AtomicUsize::new(size.cell_width_px as usize),
+            cell_height_px: AtomicUsize::new(size.cell_height_px as usize),
         }
     }
 
-    fn store(&self, cols: usize, rows: usize) {
-        self.cols.store(cols, Ordering::Relaxed);
-        self.rows.store(rows, Ordering::Relaxed);
-    }
-
-    fn window_size(&self) -> WindowSize {
+    fn load(&self) -> GridSize {
         GridSize {
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
+            cell_width_px: self
+                .cell_width_px
+                .load(Ordering::Relaxed)
+                .min(u32::MAX as usize) as u32,
+            cell_height_px: self
+                .cell_height_px
+                .load(Ordering::Relaxed)
+                .min(u32::MAX as usize) as u32,
         }
-        .window_size()
+    }
+
+    fn store(&self, size: GridSize) {
+        self.cols.store(size.cols, Ordering::Relaxed);
+        self.rows.store(size.rows, Ordering::Relaxed);
+        self.cell_width_px
+            .store(size.cell_width_px as usize, Ordering::Relaxed);
+        self.cell_height_px
+            .store(size.cell_height_px as usize, Ordering::Relaxed);
+    }
+
+    fn window_size(&self) -> WindowSize {
+        self.load().window_size()
     }
 }
 
@@ -113,6 +137,7 @@ struct GridListener {
     notifications: async_channel::Sender<GridEvent>,
     osc_title: Arc<Mutex<Option<String>>>,
     size: Arc<AtomicGridSize>,
+    graphics_updates: Arc<Mutex<Option<UpdateQueues>>>,
 }
 
 impl EventListener for GridListener {
@@ -144,11 +169,6 @@ impl EventListener for GridListener {
                 let _ = self.notifications.try_send(GridEvent::Wakeup);
             }
             RioEvent::PtyWrite(_, text) => {
-                let text = if text == "\x1b[?62;4;6;22;52c" {
-                    "\x1b[?6c".to_string()
-                } else {
-                    text
-                };
                 let _ = self
                     .notifications
                     .try_send(GridEvent::Input(text.into_bytes()));
@@ -160,6 +180,14 @@ impl EventListener for GridListener {
             RioEvent::TextAreaSizeRequest(_, format) => {
                 let bytes = format(self.size.window_size()).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
+            }
+            RioEvent::UpdateGraphics { queues, .. } => {
+                merge_graphics_updates(&mut self.graphics_updates.lock().unwrap(), queues);
+                let _ = self.notifications.try_send(GridEvent::Wakeup);
+            }
+            RioEvent::GlyphProtocolInstalled { .. } | RioEvent::GlyphProtocolQuery { .. } => {
+                // tcode does not install rio's feature-gated font machinery;
+                // image protocols are rendered independently by the drawer.
             }
             RioEvent::ClipboardStore(kind, text) => {
                 let _ = self
@@ -177,10 +205,12 @@ impl EventListener for GridListener {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct GridSize {
     cols: usize,
     rows: usize,
+    cell_width_px: u32,
+    cell_height_px: u32,
 }
 
 impl Dimensions for GridSize {
@@ -198,12 +228,37 @@ impl Dimensions for GridSize {
 }
 
 impl GridSize {
+    fn crosswords_size(self) -> CrosswordsSize {
+        let width = (self.cols as u64)
+            .saturating_mul(u64::from(self.cell_width_px))
+            .min(u64::from(u32::MAX)) as u32;
+        let height = (self.rows as u64)
+            .saturating_mul(u64::from(self.cell_height_px))
+            .min(u64::from(u32::MAX)) as u32;
+        CrosswordsSize::new_with_dimensions(
+            self.cols,
+            self.rows,
+            width,
+            height,
+            self.cell_width_px,
+            self.cell_height_px,
+        )
+    }
+
     fn window_size(self) -> WindowSize {
+        let width = self
+            .cols
+            .saturating_mul(self.cell_width_px as usize)
+            .min(u16::MAX as usize) as u16;
+        let height = self
+            .rows
+            .saturating_mul(self.cell_height_px as usize)
+            .min(u16::MAX as usize) as u16;
         WindowSize {
-            rows: self.rows as u16,
-            cols: self.cols as u16,
-            width: 8,
-            height: 17,
+            rows: self.rows.min(u16::MAX as usize) as u16,
+            cols: self.cols.min(u16::MAX as usize) as u16,
+            width,
+            height,
         }
     }
 }
@@ -225,17 +280,21 @@ impl GridEmulator {
         let size = GridSize {
             cols: cols.max(2),
             rows: rows.max(2),
+            cell_width_px: DEFAULT_CELL_WIDTH_PX,
+            cell_height_px: DEFAULT_CELL_HEIGHT_PX,
         };
         let (notifications, events) = async_channel::unbounded();
         let osc_title = Arc::new(Mutex::new(None));
-        let atomic_size = Arc::new(AtomicGridSize::new(size.cols, size.rows));
+        let atomic_size = Arc::new(AtomicGridSize::new(size));
+        let graphics_updates = Arc::new(Mutex::new(None));
         let listener = GridListener {
             notifications: notifications.clone(),
             osc_title: osc_title.clone(),
             size: atomic_size.clone(),
+            graphics_updates: graphics_updates.clone(),
         };
         let term = Crosswords::new(
-            CrosswordsSize::new(size.cols, size.rows),
+            size.crosswords_size(),
             RioCursorShape::Block,
             listener,
             WindowId::from(0),
@@ -252,6 +311,7 @@ impl GridEmulator {
             fallback_title: Mutex::new(fallback_title),
             lifecycle: Mutex::new(GridLifecycle::default()),
             size: atomic_size,
+            graphics_updates,
         });
         Self { core, events }
     }
@@ -334,18 +394,48 @@ impl GridEmulator {
     }
 
     pub(crate) fn resize_if_changed(&self, cols: usize, rows: usize) -> bool {
-        let cols = cols.max(2);
-        let rows = rows.max(2);
+        let current = self.core.size.load();
+        self.resize_with_cell_size_if_changed(
+            cols,
+            rows,
+            current.cell_width_px,
+            current.cell_height_px,
+        )
+    }
+
+    pub(crate) fn set_cell_size(&self, width_px: u32, height_px: u32) -> bool {
+        let current = self.core.size.load();
+        self.resize_with_cell_size_if_changed(current.cols, current.rows, width_px, height_px)
+    }
+
+    pub(crate) fn resize_with_cell_size_if_changed(
+        &self,
+        cols: usize,
+        rows: usize,
+        width_px: u32,
+        height_px: u32,
+    ) -> bool {
+        let size = GridSize {
+            cols: cols.max(2),
+            rows: rows.max(2),
+            cell_width_px: width_px.max(1),
+            cell_height_px: height_px.max(1),
+        };
         let mut state = self.core.state.lock();
-        if state.term.columns() == cols && state.term.screen_lines() == rows {
+        let current = self.core.size.load();
+        if current == size {
             return false;
         }
-        state.term.resize(CrosswordsSize::new(cols, rows));
+        state.term.resize(size.crosswords_size());
         state.term.mark_fully_damaged();
-        self.core.size.store(cols, rows);
+        self.core.size.store(size);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
         true
+    }
+
+    pub(crate) fn window_size(&self) -> WindowSize {
+        self.core.size.window_size()
     }
 
     pub fn scroll(&self, lines: i32) {
@@ -525,10 +615,49 @@ impl GridEmulator {
             .selection
             .as_ref()
             .and_then(|selection| selection.to_range(&state.term));
-        let damage = state
+        let mut damage = state
             .term
             .peek_damage_event()
             .unwrap_or(TerminalDamage::Noop);
+        let mut graphics_updates = self.core.graphics_updates.lock().unwrap().take();
+        if let Some(queues) = state.term.graphics_take_queues() {
+            merge_graphics_updates(&mut graphics_updates, queues);
+        }
+        let atlas_placements = state.term.graphics.atlas_placements.clone();
+        let mut kitty_placements = state
+            .term
+            .graphics
+            .kitty_placements
+            .values()
+            .filter(|placement| {
+                state
+                    .term
+                    .graphics
+                    .kitty_images
+                    .contains_key(&placement.image_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        kitty_placements.sort_by_key(|placement| {
+            (
+                placement.z_index,
+                placement.image_id,
+                placement.placement_id,
+            )
+        });
+        let kitty_virtual_placements = state
+            .term
+            .graphics
+            .kitty_virtual_placements
+            .iter()
+            .map(|(key, placement)| (*key, placement.clone()))
+            .collect();
+        let graphics_changed =
+            state.term.graphics.kitty_graphics_dirty || graphics_updates.is_some();
+        state.term.graphics.kitty_graphics_dirty = false;
+        if graphics_changed && damage == TerminalDamage::Noop {
+            damage = TerminalDamage::Full;
+        }
         let mut row_damage = vec![false; screen_lines];
         match state.term.damage() {
             rio_vt::crosswords::TermDamage::Full => row_damage.fill(true),
@@ -569,6 +698,7 @@ impl GridEmulator {
         let mode = state.term.mode();
         let keyboard_mode = state.term.keyboard_mode();
         let history_size = state.term.history_size();
+        let lines_evicted = state.term.lines_evicted();
         let cursor_blinking = state.term.blinking_cursor;
         drop(state);
         let lifecycle = self.core.lifecycle.lock().unwrap();
@@ -586,6 +716,11 @@ impl GridEmulator {
             exit_code: lifecycle.exit_code,
             display_offset,
             history_size,
+            lines_evicted,
+            graphics_updates,
+            atlas_placements,
+            kitty_placements,
+            kitty_virtual_placements,
             mode,
             keyboard_mode,
             selection,
@@ -625,6 +760,46 @@ impl GridEmulator {
         let mut lifecycle = self.core.lifecycle.lock().unwrap();
         lifecycle.exited = true;
         lifecycle.exit_code = exit_code;
+    }
+}
+
+fn merge_graphics_updates(target: &mut Option<UpdateQueues>, mut updates: UpdateQueues) {
+    let target = target.get_or_insert_with(|| UpdateQueues {
+        pending: Vec::new(),
+        pending_images: Vec::new(),
+        remove_queue: Vec::new(),
+    });
+
+    // A snapshot is the renderer's transaction boundary. Coalesce repeated
+    // events by final image key while retaining rio's per-event ordering
+    // (adds first, then removals), so remove→retransmit leaves the new image
+    // present and transmit→remove leaves it absent.
+    for graphic in updates.pending.drain(..) {
+        let key = atlas_image_key(graphic.id.get());
+        target
+            .pending
+            .retain(|previous| atlas_image_key(previous.id.get()) != key);
+        target.remove_queue.retain(|removed| *removed != key);
+        target.pending.push(graphic);
+    }
+    for (image_id, graphic) in updates.pending_images.drain(..) {
+        let key = kitty_image_key(image_id);
+        target
+            .pending_images
+            .retain(|(previous_id, _)| kitty_image_key(*previous_id) != key);
+        target.remove_queue.retain(|removed| *removed != key);
+        target.pending_images.push((image_id, graphic));
+    }
+    for key in updates.remove_queue.drain(..) {
+        target
+            .pending
+            .retain(|graphic| atlas_image_key(graphic.id.get()) != key);
+        target
+            .pending_images
+            .retain(|(image_id, _)| kitty_image_key(*image_id) != key);
+        if !target.remove_queue.contains(&key) {
+            target.remove_queue.push(key);
+        }
     }
 }
 
@@ -799,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn title_bell_and_protocol_reply_are_data_events() {
+    fn title_bell_and_native_primary_da_reply_are_data_events() {
         let emulator = GridEmulator::new();
         let events = emulator.events();
         emulator.feed(b"\x07\x1b]2;client title\x07\x1b[c");
@@ -807,7 +982,96 @@ mod tests {
         let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
         assert!(emitted.contains(&GridEvent::Bell));
         assert!(emitted.contains(&GridEvent::TitleChanged(Some("client title".to_string()))));
-        assert!(emitted.contains(&GridEvent::Input(b"\x1b[?6c".to_vec())));
+        assert!(emitted.contains(&GridEvent::Input(b"\x1b[?62;4;6;22;52c".to_vec())));
+    }
+
+    #[test]
+    fn cell_metrics_drive_text_area_pixel_size_replies() {
+        let emulator = GridEmulator::new();
+        let events = emulator.events();
+        emulator.set_cell_size(10, 20);
+        emulator.resize_if_changed(42, 9);
+
+        emulator.feed(b"\x1b[14t");
+
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| { event == GridEvent::Input(b"\x1b[4;180;420t".to_vec()) })
+        );
+    }
+
+    #[test]
+    fn sixel_image_crosses_snapshot_once_with_placement_and_damage() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+
+        emulator.feed(b"\x1bPq~\x1b\\");
+
+        let snapshot = emulator.snapshot();
+        let updates = snapshot.graphics_updates.expect("sixel add queue");
+        assert_eq!(updates.pending.len(), 1);
+        assert!(updates.pending_images.is_empty());
+        assert!(updates.remove_queue.is_empty());
+        assert_eq!(
+            (updates.pending[0].width, updates.pending[0].height),
+            (1, 6)
+        );
+        assert_eq!(snapshot.atlas_placements.len(), 1);
+        assert_ne!(snapshot.damage, TerminalDamage::Noop);
+        assert!(snapshot.row_damage.iter().any(|damaged| *damaged));
+
+        let idle = emulator.snapshot();
+        assert!(idle.graphics_updates.is_none());
+        assert_eq!(idle.damage, TerminalDamage::Noop);
+    }
+
+    #[test]
+    fn kitty_transmit_display_and_delete_all_cross_the_snapshot() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+        emulator.feed(b"\x1b_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\");
+
+        let displayed = emulator.snapshot();
+        let updates = displayed.graphics_updates.expect("kitty add queue");
+        assert!(updates.pending.is_empty());
+        assert_eq!(updates.pending_images.len(), 1);
+        assert_eq!(updates.pending_images[0].0, 7);
+        assert_eq!(
+            (
+                updates.pending_images[0].1.width,
+                updates.pending_images[0].1.height,
+            ),
+            (2, 2)
+        );
+        assert_eq!(displayed.kitty_placements.len(), 1);
+        assert_eq!(displayed.kitty_placements[0].image_id, 7);
+
+        emulator.feed(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        let deleted = emulator.snapshot();
+        assert!(deleted.kitty_placements.is_empty());
+        assert!(deleted.kitty_virtual_placements.is_empty());
+    }
+
+    #[test]
+    fn graphics_updates_preserve_the_latest_operation_before_a_snapshot() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+        let transmit = b"\x1b_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\";
+
+        emulator.feed(transmit);
+        emulator.feed(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        emulator.feed(transmit);
+
+        let snapshot = emulator.snapshot();
+        let updates = snapshot.graphics_updates.expect("coalesced kitty queue");
+        assert_eq!(updates.pending_images.len(), 1);
+        assert_eq!(updates.pending_images[0].0, 7);
+        assert!(
+            !updates
+                .remove_queue
+                .contains(&rio_graphics::kitty_image_key(7))
+        );
+        assert_eq!(snapshot.kitty_placements.len(), 1);
     }
 
     #[test]

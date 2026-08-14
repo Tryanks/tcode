@@ -17,14 +17,24 @@ use std::{
 use rio_vt::corcovado::unix::UnixReady;
 use rio_vt::{
     corcovado::{Events, Poll, PollOpt, Ready, Token, channel},
+    event::WindowSize,
     teletypewriter::{
         self as tty, ChildEvent, EventedPty as _, ProcessReadWrite as _, WinsizeBuilder,
     },
 };
 
-use crate::{DEFAULT_COLS, DEFAULT_ROWS, pty_info};
+use crate::{DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, DEFAULT_COLS, DEFAULT_ROWS, pty_info};
 
 const READ_BUFFER_SIZE: usize = 0x10_0000;
+
+fn initial_window_size() -> WindowSize {
+    WindowSize {
+        rows: DEFAULT_ROWS as u16,
+        cols: DEFAULT_COLS as u16,
+        width: (DEFAULT_COLS * DEFAULT_CELL_WIDTH_PX as usize) as u16,
+        height: (DEFAULT_ROWS * DEFAULT_CELL_HEIGHT_PX as usize) as u16,
+    }
+}
 
 thread_local! {
     static SPAWN_CWD_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
@@ -99,10 +109,7 @@ impl PtyHandle {
         shell_name: String,
     ) -> io::Result<Self> {
         let cwd = cwd.as_ref().to_path_buf();
-        let size = PtySize {
-            cols: DEFAULT_COLS,
-            rows: DEFAULT_ROWS,
-        };
+        let size = initial_window_size();
         let environment = Some(vec![
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
@@ -116,10 +123,10 @@ impl PtyHandle {
                 args,
                 &working_directory,
                 environment,
-                size.cols as u16,
-                size.rows as u16,
-                8,
-                17,
+                size.cols,
+                size.rows,
+                size.width,
+                size.height,
             )
         })?;
         #[cfg(windows)]
@@ -129,8 +136,8 @@ impl PtyHandle {
                 args,
                 &working_directory,
                 environment,
-                size.cols as u16,
-                size.rows as u16,
+                size.cols,
+                size.rows,
             )
         })?;
         #[cfg(unix)]
@@ -261,12 +268,9 @@ impl PtyHandle {
         self.sender.send(PtyCommand::Input(bytes.into()))
     }
 
-    /// Resize the host PTY. Dimensions are clamped to at least 2×2.
-    pub fn resize(&self, cols: usize, rows: usize) -> io::Result<()> {
-        self.sender.send(PtyCommand::Resize(PtySize {
-            cols: cols.max(2),
-            rows: rows.max(2),
-        }))
+    /// Resize the host PTY with row/column and total pixel dimensions.
+    pub fn resize(&self, size: WindowSize) -> io::Result<()> {
+        self.sender.send(PtyCommand::Resize(size))
     }
 
     /// Terminate the child process.
@@ -298,26 +302,9 @@ impl PtyWriter {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PtySize {
-    cols: usize,
-    rows: usize,
-}
-
-impl PtySize {
-    fn window_size(self) -> WinsizeBuilder {
-        WinsizeBuilder {
-            rows: self.rows as u16,
-            cols: self.cols as u16,
-            width: 8,
-            height: 17,
-        }
-    }
-}
-
 enum PtyCommand {
     Input(Vec<u8>),
-    Resize(PtySize),
+    Resize(WindowSize),
     Kill,
     Shutdown,
 }
@@ -456,7 +443,7 @@ impl RawPtyEventLoop {
                     }
                 }
                 Ok(PtyCommand::Resize(size)) => {
-                    let _ = self.pty.set_winsize(size.window_size());
+                    let _ = self.pty.set_winsize(WinsizeBuilder::from(size));
                 }
                 Ok(PtyCommand::Kill) => {
                     let _ = terminate_pty(&self.pty);
