@@ -9,15 +9,19 @@ use std::{
     time::Instant,
 };
 
-use alacritty_terminal::{
-    Term,
-    event::{Event, EventListener, WindowSize},
-    grid::{Dimensions, Scroll},
-    index::{Column, Line, Point, Side as AlacrittySide},
+use rio_vt::{
+    ansi::CursorShape as RioCursorShape,
+    config::colors::{AnsiColor, ColorRgb, NamedColor},
+    crosswords::{
+        Crosswords, CrosswordsSize, Mode,
+        grid::{Dimensions, Indexed, Scroll},
+        pos::{Column, Line, Pos, Side as RioSide},
+        square::{ContentTag, Wide},
+        style::{Style, StyleFlags},
+    },
+    event::{EventListener, RioEvent, WindowId, WindowSize, sync::FairMutex},
+    performer::handler::Processor,
     selection::{Selection, SelectionType},
-    sync::FairMutex,
-    term::{Config, TermMode, cell::Flags},
-    vte::ansi::{ClearMode, Color as AlacrittyColor, Handler as _, NamedColor, Processor, Rgb},
 };
 
 use crate::{
@@ -27,7 +31,7 @@ use crate::{
 #[cfg(test)]
 use crate::{DEFAULT_COLS, DEFAULT_ROWS};
 
-impl From<SelectionSide> for AlacrittySide {
+impl From<SelectionSide> for RioSide {
     fn from(side: SelectionSide) -> Self {
         match side {
             SelectionSide::Left => Self::Left,
@@ -51,7 +55,7 @@ pub(crate) enum GridEvent {
 
 /// Client-side terminal state machine.
 ///
-/// This type accepts raw output bytes and owns all Alacritty grid state. It has
+/// This type accepts raw output bytes and owns all terminal grid state. It has
 /// no PTY, child-process, or platform process types in its public API.
 #[derive(Clone)]
 pub(crate) struct GridEmulator {
@@ -69,7 +73,7 @@ struct GridCore {
 }
 
 struct GridState {
-    term: Term<GridListener>,
+    term: Crosswords<GridListener>,
     parser: Processor,
 }
 
@@ -114,47 +118,52 @@ struct GridListener {
 }
 
 impl EventListener for GridListener {
-    fn send_event(&self, event: Event) {
+    fn send_event(&self, event: RioEvent, _window_id: WindowId) {
         match event {
-            Event::Title(title) => {
+            RioEvent::Title(title) => {
                 *self.osc_title.lock().unwrap() = Some(title.clone());
                 let _ = self
                     .notifications
                     .try_send(GridEvent::TitleChanged(Some(title)));
             }
-            Event::ResetTitle => {
+            RioEvent::ResetTitle => {
                 *self.osc_title.lock().unwrap() = None;
                 let _ = self.notifications.try_send(GridEvent::TitleChanged(None));
             }
-            Event::CursorBlinkingChange => {
+            RioEvent::CursorBlinkingChange | RioEvent::CursorBlinkingChangeOnRoute(_) => {
                 let _ = self
                     .notifications
                     .try_send(GridEvent::CursorBlinkingChanged);
             }
-            Event::Bell => {
+            RioEvent::Bell => {
                 let _ = self.notifications.try_send(GridEvent::Bell);
             }
-            Event::Wakeup => {
+            RioEvent::Render
+            | RioEvent::RenderRoute(_)
+            | RioEvent::TerminalDamaged(_)
+            | RioEvent::PrepareRender(_)
+            | RioEvent::PrepareRenderOnRoute(_, _) => {
                 let _ = self.notifications.try_send(GridEvent::Wakeup);
             }
-            Event::PtyWrite(text) => {
+            RioEvent::PtyWrite(_, text) => {
+                let text = if text == "\x1b[?62;4;6;22;52c" {
+                    "\x1b[?6c".to_string()
+                } else {
+                    text
+                };
                 let _ = self
                     .notifications
                     .try_send(GridEvent::Input(text.into_bytes()));
             }
-            Event::ColorRequest(index, format) => {
+            RioEvent::ColorRequest(_, index, format) => {
                 let bytes = format(query_color(index)).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
             }
-            Event::TextAreaSizeRequest(format) => {
+            RioEvent::TextAreaSizeRequest(_, format) => {
                 let bytes = format(self.size.window_size()).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
             }
-            Event::MouseCursorDirty
-            | Event::ClipboardStore(..)
-            | Event::ClipboardLoad(..)
-            | Event::Exit
-            | Event::ChildExit(_) => {}
+            _ => {}
         }
     }
 }
@@ -182,10 +191,10 @@ impl Dimensions for GridSize {
 impl GridSize {
     fn window_size(self) -> WindowSize {
         WindowSize {
-            num_lines: self.rows as u16,
-            num_cols: self.cols as u16,
-            cell_width: 8,
-            cell_height: 17,
+            rows: self.rows as u16,
+            cols: self.cols as u16,
+            width: 8,
+            height: 17,
         }
     }
 }
@@ -216,15 +225,18 @@ impl GridEmulator {
             osc_title: osc_title.clone(),
             size: atomic_size.clone(),
         };
-        let config = Config {
-            scrolling_history: 1000,
-            ..Config::default()
-        };
-        let term = Term::new(config, &size, listener);
+        let term = Crosswords::new(
+            CrosswordsSize::new(size.cols, size.rows),
+            RioCursorShape::Block,
+            listener,
+            WindowId::from(0),
+            0,
+            1000,
+        );
         let core = Arc::new(GridCore {
             state: FairMutex::new(GridState {
                 term,
-                parser: Processor::new(),
+                parser: Processor::default(),
             }),
             notifications,
             osc_title,
@@ -283,10 +295,10 @@ impl GridEmulator {
 
     pub(crate) fn prepare_input_if_changed(&self) -> bool {
         let mut state = self.core.state.lock();
-        let display_offset = state.term.grid().display_offset();
+        let display_offset = state.term.display_offset();
         let had_selection = state.term.selection.take().is_some();
         state.term.scroll_display(Scroll::Bottom);
-        let changed = had_selection || state.term.grid().display_offset() != display_offset;
+        let changed = had_selection || state.term.display_offset() != display_offset;
         drop(state);
         if changed {
             let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -301,7 +313,7 @@ impl GridEmulator {
         if state.term.columns() == cols && state.term.screen_lines() == rows {
             return false;
         }
-        state.term.resize(GridSize { cols, rows });
+        state.term.resize(CrosswordsSize::new(cols, rows));
         self.core.size.store(cols, rows);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -310,9 +322,9 @@ impl GridEmulator {
 
     pub fn scroll(&self, lines: i32) {
         let mut state = self.core.state.lock();
-        let display_offset = state.term.grid().display_offset();
+        let display_offset = state.term.display_offset();
         state.term.scroll_display(Scroll::Delta(lines));
-        let changed = state.term.grid().display_offset() != display_offset;
+        let changed = state.term.display_offset() != display_offset;
         drop(state);
         if changed {
             let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -327,16 +339,16 @@ impl GridEmulator {
     /// Start or update a selection of the requested kind.
     fn select_kind(&self, start: (usize, usize), end: (usize, usize), kind: SelectionKind) {
         let mut state = self.core.state.lock();
-        let offset = state.term.grid().display_offset() as i32;
+        let offset = state.term.display_offset() as i32;
         let point = |(row, col): (usize, usize)| {
-            Point::new(
+            Pos::new(
                 Line(row as i32 - offset),
                 Column(col.min(state.term.columns() - 1)),
             )
         };
         let selection_type = selection_type(kind);
-        let mut selection = Selection::new(selection_type, point(start), AlacrittySide::Left);
-        selection.update(point(end), AlacrittySide::Right);
+        let mut selection = Selection::new(selection_type, point(start), RioSide::Left);
+        selection.update(point(end), RioSide::Right);
         state.term.selection = Some(selection);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -345,8 +357,8 @@ impl GridEmulator {
     /// Start an interactive selection at an empty anchor in visible grid coordinates.
     pub fn start_selection(&self, kind: SelectionKind, point: (usize, usize), side: SelectionSide) {
         let mut state = self.core.state.lock();
-        let offset = state.term.grid().display_offset() as i32;
-        let point = Point::new(
+        let offset = state.term.display_offset() as i32;
+        let point = Pos::new(
             Line(point.0 as i32 - offset),
             Column(point.1.min(state.term.columns() - 1)),
         );
@@ -358,8 +370,8 @@ impl GridEmulator {
     /// Update the existing interactive selection using visible grid coordinates.
     pub fn update_selection(&self, point: (usize, usize), side: SelectionSide) {
         let mut state = self.core.state.lock();
-        let offset = state.term.grid().display_offset() as i32;
-        let point = Point::new(
+        let offset = state.term.display_offset() as i32;
+        let point = Pos::new(
             Line(point.0 as i32 - offset),
             Column(point.1.min(state.term.columns() - 1)),
         );
@@ -383,12 +395,12 @@ impl GridEmulator {
         let mut state = self.core.state.lock();
         let mut selection = Selection::new(
             SelectionType::Simple,
-            Point::new(Line(-(state.term.history_size() as i32)), Column(0)),
-            AlacrittySide::Left,
+            Pos::new(Line(-(state.term.history_size() as i32)), Column(0)),
+            RioSide::Left,
         );
         selection.update(
-            Point::new(state.term.bottommost_line(), state.term.last_column()),
-            AlacrittySide::Right,
+            Pos::new(state.term.bottommost_line(), state.term.last_column()),
+            RioSide::Right,
         );
         state.term.selection = Some(selection);
         drop(state);
@@ -397,24 +409,25 @@ impl GridEmulator {
 
     pub fn clear(&self) {
         let mut state = self.core.state.lock();
-        state.term.clear_screen(ClearMode::Saved);
+        state.term.clear_saved_history();
 
-        let cursor = state.term.grid().cursor.point;
-        state.term.grid_mut().reset_region(..cursor.line);
+        let cursor = state.term.grid.cursor.pos;
+        state.term.grid.reset_region(..cursor.row);
 
-        let line = state.term.grid()[cursor.line][..Column(state.term.columns())]
+        let line = state.term.grid[cursor.row][..Column(state.term.columns())]
             .iter()
-            .cloned()
+            .copied()
             .enumerate()
             .collect::<Vec<_>>();
         for (index, cell) in line {
-            state.term.grid_mut()[Line(0)][Column(index)] = cell;
+            state.term.grid[Line(0)][Column(index)] = cell;
         }
 
-        state.term.grid_mut().cursor.point = Point::new(Line(0), cursor.column);
+        state.term.grid.cursor.pos = Pos::new(Line(0), cursor.col);
         if state.term.screen_lines() > 1 {
-            state.term.grid_mut().reset_region(Line(1)..);
+            state.term.grid.reset_region(Line(1)..);
         }
+        state.term.selection = None;
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
     }
@@ -433,53 +446,86 @@ impl GridEmulator {
             return None;
         }
         Some(SelectedText {
-            line_start: line_number(range.start.line),
-            line_end: line_number(range.end.line),
+            line_start: line_number(range.start.row),
+            line_end: line_number(range.end.row),
             text,
         })
     }
 
     pub fn snapshot(&self) -> TermState {
         let state = self.core.state.lock();
-        let content = state.term.renderable_content();
-        let cursor_style = state.term.cursor_style();
         let cols = state.term.columns();
         let rows = state.term.screen_lines();
-        let display_cursor_line = content.cursor.point.line.0 + content.display_offset as i32;
+        let display_offset = state.term.display_offset();
+        let cursor_state = state.term.cursor();
+        let display_cursor_line = cursor_state.pos.row.0 + display_offset as i32;
         let cursor = if display_cursor_line >= 0 && display_cursor_line < rows as i32 {
-            Some((display_cursor_line as usize, content.cursor.point.column.0))
+            Some((display_cursor_line as usize, cursor_state.pos.col.0))
         } else {
             None
         };
-        let selection = content.selection;
-        let cells = content
-            .display_iter
-            .map(|indexed| {
+        let selection = state
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&state.term));
+        let visible_rows = state.term.visible_rows();
+        let mut cells = Vec::with_capacity(cols * rows);
+        for (row, row_cells) in visible_rows.iter().enumerate() {
+            for col in 0..cols {
+                let pos = Pos::new(Line(row as i32 - display_offset as i32), Column(col));
+                let square = row_cells[Column(col)];
                 let selected = selection.is_some_and(|range| {
-                    range.contains_cell(&indexed, content.cursor.point, content.cursor.shape)
+                    range.contains_square(
+                        &Indexed {
+                            pos,
+                            square: &square,
+                        },
+                        cursor_state.pos,
+                        cursor_state.content,
+                    )
                 });
-                let cell = indexed.cell;
-                let mut text = String::from(cell.c);
-                text.extend(cell.zerowidth().into_iter().flatten());
-                Cell {
-                    ch: cell.c,
+                let (ch, text, style) = match square.content_tag() {
+                    ContentTag::Codepoint => {
+                        let ch = display_char(square.c());
+                        let text = state.term.grid.cell_text(pos).map(display_char).collect();
+                        (ch, text, state.term.grid.style_of(&square))
+                    }
+                    ContentTag::BgPalette => {
+                        let style = Style {
+                            bg: AnsiColor::Indexed(square.bg_palette_index()),
+                            ..Style::default()
+                        };
+                        (' ', " ".to_string(), style)
+                    }
+                    ContentTag::BgRgb => {
+                        let (r, g, b) = square.bg_rgb();
+                        let style = Style {
+                            bg: AnsiColor::Spec(ColorRgb { r, g, b }),
+                            ..Style::default()
+                        };
+                        (' ', " ".to_string(), style)
+                    }
+                };
+                cells.push(Cell {
+                    ch,
                     text,
-                    fg: convert_color(cell.fg),
-                    bg: convert_color(cell.bg),
-                    bold: cell.flags.contains(Flags::BOLD),
-                    italic: cell.flags.contains(Flags::ITALIC),
-                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                    inverse: cell.flags.contains(Flags::INVERSE),
+                    fg: convert_color(style.fg),
+                    bg: convert_color(style.bg),
+                    bold: style.flags.contains(StyleFlags::BOLD),
+                    italic: style.flags.contains(StyleFlags::ITALIC),
+                    underline: style.flags.intersects(StyleFlags::ALL_UNDERLINES),
+                    inverse: style.flags.contains(StyleFlags::INVERSE),
                     selected,
-                    wide: cell.flags.contains(Flags::WIDE_CHAR),
-                    wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-                }
-            })
-            .collect();
-        let mode = *state.term.mode();
+                    wide: square.wide() == Wide::Wide,
+                    wide_spacer: square.wide() == Wide::Spacer,
+                });
+            }
+        }
+        let mode = state.term.mode();
         let history_size = state.term.history_size();
-        let cursor_shape = content.cursor.shape;
-        let display_offset = content.display_offset;
+        let cursor_shape = cursor_state.content;
+        let cursor_blinking = state.term.blinking_cursor;
         drop(state);
         let lifecycle = self.core.lifecycle.lock().unwrap();
         TermState {
@@ -488,23 +534,23 @@ impl GridEmulator {
             cells,
             cursor,
             cursor_shape: map_cursor_shape(cursor_shape),
-            cursor_blinking: cursor_style.blinking,
+            cursor_blinking,
             title: self.title(),
             exited: lifecycle.exited,
             exit_code: lifecycle.exit_code,
             display_offset,
             history_size,
             mode: ModeSnapshot {
-                mouse_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
-                mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
-                mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
-                sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
-                utf8_mouse: mode.contains(TermMode::UTF8_MOUSE),
-                alt_screen: mode.contains(TermMode::ALT_SCREEN),
-                alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
-                bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
-                app_cursor: mode.contains(TermMode::APP_CURSOR),
-                focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
+                mouse_click: mode.contains(Mode::MOUSE_REPORT_CLICK),
+                mouse_motion: mode.contains(Mode::MOUSE_MOTION),
+                mouse_drag: mode.contains(Mode::MOUSE_DRAG),
+                sgr_mouse: mode.contains(Mode::SGR_MOUSE),
+                utf8_mouse: mode.contains(Mode::UTF8_MOUSE),
+                alt_screen: mode.contains(Mode::ALT_SCREEN),
+                alternate_scroll: mode.contains(Mode::ALTERNATE_SCROLL),
+                bracketed_paste: mode.contains(Mode::BRACKETED_PASTE),
+                app_cursor: mode.contains(Mode::APP_CURSOR),
+                focus_in_out: mode.contains(Mode::FOCUS_IN_OUT),
             },
         }
     }
@@ -582,18 +628,16 @@ fn selection_type(kind: SelectionKind) -> SelectionType {
     }
 }
 
-fn map_cursor_shape(shape: alacritty_terminal::vte::ansi::CursorShape) -> CursorShape {
-    use alacritty_terminal::vte::ansi::CursorShape as AlacrittyCursorShape;
+fn map_cursor_shape(shape: RioCursorShape) -> CursorShape {
     match shape {
-        AlacrittyCursorShape::Block => CursorShape::Block,
-        AlacrittyCursorShape::Underline => CursorShape::Underline,
-        AlacrittyCursorShape::Beam => CursorShape::Bar,
-        AlacrittyCursorShape::HollowBlock => CursorShape::HollowBlock,
-        AlacrittyCursorShape::Hidden => CursorShape::Hidden,
+        RioCursorShape::Block => CursorShape::Block,
+        RioCursorShape::Underline => CursorShape::Underline,
+        RioCursorShape::Beam => CursorShape::Bar,
+        RioCursorShape::Hidden => CursorShape::Hidden,
     }
 }
 
-fn query_color(index: usize) -> Rgb {
+fn query_color(index: usize) -> ColorRgb {
     const ANSI: [u32; 16] = [
         0x1f2329, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xabb2bf, 0x5c6370,
         0xff616e, 0x7bc275, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
@@ -613,19 +657,23 @@ fn query_color(index: usize) -> Rgb {
         index if index == NamedColor::Cursor as usize => 0x1f2329,
         _ => 0x1f2329,
     };
-    Rgb {
+    ColorRgb {
         r: (value >> 16) as u8,
         g: (value >> 8) as u8,
         b: value as u8,
     }
 }
 
-fn convert_color(color: AlacrittyColor) -> Color {
+fn display_char(ch: char) -> char {
+    if ch == '\0' { ' ' } else { ch }
+}
+
+fn convert_color(color: AnsiColor) -> Color {
     match color {
-        AlacrittyColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
-        AlacrittyColor::Indexed(index) => Color::Indexed(index),
-        AlacrittyColor::Named(named) => match named {
-            NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
+        AnsiColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
+        AnsiColor::Indexed(index) => Color::Indexed(index),
+        AnsiColor::Named(named) => match named {
+            NamedColor::Foreground | NamedColor::LightForeground | NamedColor::DimForeground => {
                 Color::DefaultForeground
             }
             NamedColor::Background => Color::DefaultBackground,
@@ -689,15 +737,11 @@ mod tests {
     }
 
     #[test]
-    fn maps_all_alacritty_cursor_shapes() {
-        use alacritty_terminal::vte::ansi::CursorShape as Shape;
+    fn maps_all_rio_cursor_shapes() {
+        use rio_vt::ansi::CursorShape as Shape;
         assert_eq!(map_cursor_shape(Shape::Block), CursorShape::Block);
         assert_eq!(map_cursor_shape(Shape::Underline), CursorShape::Underline);
         assert_eq!(map_cursor_shape(Shape::Beam), CursorShape::Bar);
-        assert_eq!(
-            map_cursor_shape(Shape::HollowBlock),
-            CursorShape::HollowBlock
-        );
         assert_eq!(map_cursor_shape(Shape::Hidden), CursorShape::Hidden);
     }
 }
