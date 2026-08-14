@@ -218,6 +218,10 @@ pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
+    /// Last-known panel sizes of the active split (from its resize handle),
+    /// used to apportion the drawer body between the two panes when resizing
+    /// their PTYs. Empty means "no drag yet": assume an even split.
+    split_sizes: Rc<RefCell<Vec<f32>>>,
     row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
     image_registry: RefCell<HashMap<u64, HashMap<u64, TerminalImage>>>,
     cell_width: f32,
@@ -248,6 +252,7 @@ impl TerminalDrawer {
             workspace_store,
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
+            split_sizes: Rc::new(RefCell::new(Vec::new())),
             row_layout_cache: RefCell::new(HashMap::new()),
             image_registry: RefCell::new(HashMap::new()),
             cell_width: 7.83,
@@ -1277,13 +1282,16 @@ impl TerminalDrawer {
         // grid's geometry. Reserving space for it while a selection exists
         // resized the PTY mid-drag — rows jumped and blank lines appeared.
         let has_selection = snapshot.selection.is_some();
-        let workspace_store = self.workspace_store.clone();
-        let cell_width = self.cell_width;
-        let cell_height = self.cell_height;
         let link_hovered = self
             .hovered_link
             .as_ref()
             .is_some_and(|(id, _)| *id == terminal_id);
+        // PTY dimensions are deliberately NOT measured from this pane: its
+        // percentage height does not resolve against the flex-sized drawer
+        // body, so the pane hugs the grid's content height and any row count
+        // derived from it is self-referential (frozen at its current value).
+        // `render` measures the drawer body — which does track the real
+        // height — and resizes every pane's PTY from there.
         div()
             .id(("terminal-grid", terminal_id))
             .relative()
@@ -1294,27 +1302,6 @@ impl TerminalDrawer {
             .items_center()
             .justify_center()
             .when(link_hovered, |this| this.cursor_pointer())
-            .on_prepaint(move |bounds, window, cx| {
-                let content_width = f32::from(bounds.size.width) - 2. * PANE_PADDING;
-                let content_height = f32::from(bounds.size.height) - 2. * PANE_PADDING;
-                let cols = (content_width / cell_width).floor().max(2.) as usize;
-                let rows = (content_height / cell_height).floor().max(2.) as usize;
-                let scale_factor = window.scale_factor();
-                let cell_width_px = (cell_width * scale_factor).round().max(1.) as u32;
-                let cell_height_px = (cell_height * scale_factor).round().max(1.) as u32;
-                workspace_store
-                    .read(cx)
-                    .with_terminal_workspace(|workspace| {
-                        if let Some(entry) = workspace.terminal(terminal_id) {
-                            entry.terminal.resize_with_cell_size(
-                                cols,
-                                rows,
-                                cell_width_px,
-                                cell_height_px,
-                            );
-                        }
-                    });
-            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event, window, cx| {
@@ -1727,33 +1714,51 @@ impl Render for TerminalDrawer {
                     })),
             );
 
+        if active_split.is_none() {
+            self.split_sizes.borrow_mut().clear();
+        }
         let body: AnyElement = match (active_id, active_split) {
-            (_, Some(split)) => match split.direction {
-                TerminalSplitDirection::Horizontal => {
-                    let first = resizable_panel()
-                        .pr(px(2.))
-                        .child(self.render_terminal(split.first, cx));
-                    let second = resizable_panel()
-                        .pl(px(2.))
-                        .child(self.render_terminal(split.second, cx));
-                    h_resizable(("terminal-split-h", split.first))
-                        .child(first)
-                        .child(second)
-                        .into_any_element()
+            (_, Some(split)) => {
+                let split_sizes = self.split_sizes.clone();
+                let on_resize = move |state: &gpui::Entity<gpui_base::ResizableState>,
+                                      _: &mut Window,
+                                      cx: &mut App| {
+                    *split_sizes.borrow_mut() = state
+                        .read(cx)
+                        .sizes()
+                        .iter()
+                        .map(|size| f32::from(*size))
+                        .collect();
+                };
+                match split.direction {
+                    TerminalSplitDirection::Horizontal => {
+                        let first = resizable_panel()
+                            .pr(px(2.))
+                            .child(self.render_terminal(split.first, cx));
+                        let second = resizable_panel()
+                            .pl(px(2.))
+                            .child(self.render_terminal(split.second, cx));
+                        h_resizable(("terminal-split-h", split.first))
+                            .on_resize(on_resize)
+                            .child(first)
+                            .child(second)
+                            .into_any_element()
+                    }
+                    TerminalSplitDirection::Vertical => {
+                        let first = resizable_panel()
+                            .pb(px(2.))
+                            .child(self.render_terminal(split.first, cx));
+                        let second = resizable_panel()
+                            .pt(px(2.))
+                            .child(self.render_terminal(split.second, cx));
+                        v_resizable(("terminal-split-v", split.first))
+                            .on_resize(on_resize)
+                            .child(first)
+                            .child(second)
+                            .into_any_element()
+                    }
                 }
-                TerminalSplitDirection::Vertical => {
-                    let first = resizable_panel()
-                        .pb(px(2.))
-                        .child(self.render_terminal(split.first, cx));
-                    let second = resizable_panel()
-                        .pt(px(2.))
-                        .child(self.render_terminal(split.second, cx));
-                    v_resizable(("terminal-split-v", split.first))
-                        .child(first)
-                        .child(second)
-                        .into_any_element()
-                }
-            },
+            }
             (Some(id), None) => self.render_terminal(id, cx),
             _ => div()
                 .p_3()
@@ -1788,6 +1793,76 @@ impl Render for TerminalDrawer {
                 .bg(cx.theme().popover)
                 .flex_1()
                 .min_h_0()
+                // Resize every pane's PTY from this element's bounds. This is
+                // the innermost element whose laid-out height reliably tracks
+                // the drawer; the panes themselves hug their grid content
+                // (percentage heights fail to resolve below this point), which
+                // previously froze the row count at its initial value.
+                .on_prepaint({
+                    let workspace_store = self.workspace_store.clone();
+                    let (cell_width, cell_height) = (self.cell_width, self.cell_height);
+                    let split_sizes = self.split_sizes.clone();
+                    move |bounds, window, cx| {
+                        let width = f32::from(bounds.size.width);
+                        let height = f32::from(bounds.size.height);
+                        let scale_factor = window.scale_factor();
+                        let resize = |cx: &App, terminal_id: u64, pane_width: f32, pane_height: f32| {
+                            let cols = ((pane_width - 2. * PANE_PADDING) / cell_width)
+                                .floor()
+                                .max(2.) as usize;
+                            let rows = ((pane_height - 2. * PANE_PADDING) / cell_height)
+                                .floor()
+                                .max(2.) as usize;
+                            let cell_width_px = (cell_width * scale_factor).round().max(1.) as u32;
+                            let cell_height_px =
+                                (cell_height * scale_factor).round().max(1.) as u32;
+                            workspace_store
+                                .read(cx)
+                                .with_terminal_workspace(|workspace| {
+                                    if let Some(entry) = workspace.terminal(terminal_id) {
+                                        entry.terminal.resize_with_cell_size(
+                                            cols,
+                                            rows,
+                                            cell_width_px,
+                                            cell_height_px,
+                                        );
+                                    }
+                                });
+                        };
+                        match active_split {
+                            None => {
+                                if let Some(id) = active_id {
+                                    resize(cx, id, width, height);
+                                }
+                            }
+                            Some(split) => {
+                                // Panel sizes from the resize handle; before any
+                                // drag the group splits the axis evenly (1px
+                                // handle). Each pane also carries a 2px gutter
+                                // (`pr`/`pl`/`pb`/`pt`) toward the handle.
+                                let sizes = split_sizes.borrow();
+                                let axis = match split.direction {
+                                    TerminalSplitDirection::Horizontal => width,
+                                    TerminalSplitDirection::Vertical => height,
+                                };
+                                let (first, second) = match sizes.as_slice() {
+                                    [first, second] => (*first, *second),
+                                    _ => ((axis - 1.) / 2., (axis - 1.) / 2.),
+                                };
+                                match split.direction {
+                                    TerminalSplitDirection::Horizontal => {
+                                        resize(cx, split.first, first - 2., height);
+                                        resize(cx, split.second, second - 2., height);
+                                    }
+                                    TerminalSplitDirection::Vertical => {
+                                        resize(cx, split.first, width, first - 2.);
+                                        resize(cx, split.second, width, second - 2.);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
                 .child(body),
             )
     }
