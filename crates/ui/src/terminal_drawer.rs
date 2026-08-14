@@ -25,6 +25,7 @@ use term::{
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
     rio_vt::{
         ansi::CursorShape,
+        clipboard::ClipboardType,
         config::colors::{AnsiColor, NamedColor},
         crosswords::{Mode, square::Wide, style::StyleFlags},
     },
@@ -384,9 +385,26 @@ impl TerminalDrawer {
                     // window then collapses Wakeup floods from large PTY writes.
                     if this
                         .update_in(cx, |this, window, cx| {
-                            if matches!(first_event, TermEvent::Bell) {
-                                this.bell_tabs.insert(terminal_id);
-                                window.play_system_bell();
+                            match &first_event {
+                                TermEvent::Bell => {
+                                    this.bell_tabs.insert(terminal_id);
+                                    window.play_system_bell();
+                                }
+                                TermEvent::ClipboardStore {
+                                    kind: ClipboardType::Clipboard,
+                                    text,
+                                } => {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                }
+                                TermEvent::ClipboardStore {
+                                    kind: ClipboardType::Selection,
+                                    ..
+                                } => {
+                                    // GPUI exposes the system clipboard but no primary-selection
+                                    // clipboard. macOS has no primary selection, and on other
+                                    // platforms substituting the system clipboard would be wrong.
+                                }
+                                _ => {}
                             }
                             window.invalidate_character_coordinates();
                             cx.notify();
@@ -415,13 +433,30 @@ impl TerminalDrawer {
                             return;
                         };
                         saw_batched_event = true;
-                        if matches!(event, TermEvent::Bell) {
-                            let _ = this.update_in(cx, |this, window, _| {
-                                this.bell_tabs.insert(terminal_id);
-                                window.play_system_bell();
-                            });
+                        match &event {
+                            TermEvent::Bell => {
+                                let _ = this.update_in(cx, |this, window, _| {
+                                    this.bell_tabs.insert(terminal_id);
+                                    window.play_system_bell();
+                                });
+                            }
+                            TermEvent::ClipboardStore {
+                                kind: ClipboardType::Clipboard,
+                                text,
+                            } => {
+                                let text = text.clone();
+                                let _ = this.update_in(cx, |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                });
+                            }
+                            TermEvent::ClipboardStore {
+                                kind: ClipboardType::Selection,
+                                ..
+                            }
+                            | TermEvent::Wakeup
+                            | TermEvent::Exited => {}
                         }
-                        if !matches!(event, TermEvent::Wakeup) {
+                        if !matches!(&event, TermEvent::Wakeup) {
                             non_wakeup_events += 1;
                             if non_wakeup_events >= 100 {
                                 break;
@@ -489,16 +524,14 @@ impl TerminalDrawer {
             cx.stop_propagation();
             return;
         }
-        if event.prefer_character_input {
-            return;
-        }
-
         let mut handled = false;
         self.with_terminal(cx, |terminal| {
             if let Some(bytes) = mappings::key_bytes(
                 &keystroke.key,
                 term_modifiers(keystroke.modifiers),
                 terminal.mode(),
+                terminal.keyboard_mode(),
+                terminal.modify_other_keys(),
                 true,
             ) {
                 terminal.write_input(bytes);
@@ -2486,7 +2519,14 @@ mod tests {
         let mode = Mode::empty();
         let encode = |key: &str| {
             let key = gpui::Keystroke::parse(key).unwrap();
-            mappings::key_bytes(&key.key, term_modifiers(key.modifiers), mode, true)
+            mappings::key_bytes(
+                &key.key,
+                term_modifiers(key.modifiers),
+                mode,
+                term::rio_vt::ansi::KeyboardModes::NO_MODE,
+                None,
+                true,
+            )
         };
         assert_eq!(encode("a"), None);
         assert_eq!(encode("ctrl-space"), Some(vec![0]));

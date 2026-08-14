@@ -1,6 +1,6 @@
 //! Classic xterm input encoders, kept independent of the UI framework.
 
-use rio_vt::crosswords::Mode;
+use rio_vt::{ansi::KeyboardModes, crosswords::Mode};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -141,6 +141,250 @@ fn normal_mouse_report(point: GridPoint, button: u8, utf8: bool) -> Option<Vec<u
 }
 
 pub fn key_bytes(
+    key: &str,
+    modifiers: Modifiers,
+    mode: Mode,
+    keyboard_mode: KeyboardModes,
+    modify_other_keys: Option<u8>,
+    option_as_meta: bool,
+) -> Option<Vec<u8>> {
+    if let Some(bytes) = kitty_key_bytes(key, modifiers, keyboard_mode) {
+        return Some(bytes);
+    }
+    if keyboard_mode == KeyboardModes::NO_MODE
+        && let Some(bytes) = modify_other_keys_bytes(key, modifiers, modify_other_keys)
+    {
+        return Some(bytes);
+    }
+    legacy_key_bytes(key, modifiers, mode, option_as_meta)
+}
+
+fn kitty_key_bytes(key: &str, modifiers: Modifiers, mode: KeyboardModes) -> Option<Vec<u8>> {
+    let kitty_sequence = mode.intersects(
+        KeyboardModes::DISAMBIGUATE_ESC_CODES
+            | KeyboardModes::REPORT_EVENT_TYPES
+            | KeyboardModes::REPORT_ALL_KEYS_AS_ESC,
+    );
+    if !kitty_sequence {
+        return None;
+    }
+
+    let associated_text = mode
+        .contains(KeyboardModes::REPORT_ASSOCIATED_TEXT)
+        .then(|| associated_text(key, modifiers))
+        .flatten();
+    let modifier = 1
+        + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.control)
+        + 8 * u8::from(modifiers.platform);
+    let has_modifiers = modifier != 1;
+
+    let (payload, terminator) = kitty_functional_key(key)
+        .or_else(|| kitty_legacy_functional_key(key, has_modifiers || associated_text.is_some()))
+        .or_else(|| kitty_control_key(key))
+        .or_else(|| kitty_all_key(key, mode))
+        .or_else(|| kitty_text_key(key, modifiers, mode))?;
+
+    let mut sequence = format!("\x1b[{payload}");
+    if has_modifiers || associated_text.is_some() {
+        sequence.push_str(&format!(";{modifier}"));
+    }
+    // tcode currently receives presses only. Kitty's `:1` press suffix is
+    // optional, so REPORT_EVENT_TYPES does not change a press encoding.
+    if let Some(text) = associated_text {
+        sequence.push(';');
+        let mut codepoints = text.chars().map(u32::from);
+        sequence.push_str(&codepoints.next()?.to_string());
+        for codepoint in codepoints {
+            sequence.push(':');
+            sequence.push_str(&codepoint.to_string());
+        }
+    }
+    sequence.push(terminator);
+    Some(sequence.into_bytes())
+}
+
+fn kitty_functional_key(key: &str) -> Option<(String, char)> {
+    if let Some(number) = key
+        .strip_prefix('f')
+        .and_then(|number| number.parse::<u32>().ok())
+        && (13..=35).contains(&number)
+    {
+        return Some(((57_363 + number).to_string(), 'u'));
+    }
+    let code = match key {
+        // Kitty deliberately differs from traditional terminfo for F3.
+        "f3" => return Some(("13".to_string(), '~')),
+        "scrolllock" => 57_359,
+        "printscreen" => 57_361,
+        "pause" => 57_362,
+        "contextmenu" => 57_363,
+        "mediaplay" => 57_428,
+        "mediapause" => 57_429,
+        "mediaplaypause" => 57_430,
+        "mediastop" => 57_432,
+        "mediafastforward" => 57_433,
+        "mediarewind" => 57_434,
+        "medianext" => 57_435,
+        "mediaprevious" => 57_436,
+        "mediarecord" => 57_437,
+        "volumedown" => 57_438,
+        "volumeup" => 57_439,
+        "volumemute" => 57_440,
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+fn kitty_legacy_functional_key(key: &str, explicit_one: bool) -> Option<(String, char)> {
+    let one = if explicit_one { "1" } else { "" };
+    let (payload, terminator) = match key {
+        "pageup" => ("5", '~'),
+        "pagedown" => ("6", '~'),
+        "insert" => ("2", '~'),
+        "delete" => ("3", '~'),
+        "home" => (one, 'H'),
+        "end" => (one, 'F'),
+        "left" => (one, 'D'),
+        "right" => (one, 'C'),
+        "up" => (one, 'A'),
+        "down" => (one, 'B'),
+        "f1" => (one, 'P'),
+        "f2" => (one, 'Q'),
+        "f4" => (one, 'S'),
+        "f5" => ("15", '~'),
+        "f6" => ("17", '~'),
+        "f7" => ("18", '~'),
+        "f8" => ("19", '~'),
+        "f9" => ("20", '~'),
+        "f10" => ("21", '~'),
+        "f11" => ("23", '~'),
+        "f12" => ("24", '~'),
+        _ => return None,
+    };
+    Some((payload.to_string(), terminator))
+}
+
+fn kitty_control_key(key: &str) -> Option<(String, char)> {
+    let code = match key {
+        "tab" => 9,
+        "enter" => 13,
+        "escape" => 27,
+        "space" => 32,
+        "backspace" | "back" => 127,
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+fn kitty_all_key(key: &str, mode: KeyboardModes) -> Option<(String, char)> {
+    if !mode.contains(KeyboardModes::REPORT_ALL_KEYS_AS_ESC) {
+        return None;
+    }
+    // GPUI does not expose left/right key location here, so generic modifier
+    // names use kitty's left-side codes.
+    let code = match key {
+        "capslock" => 57_358,
+        "numlock" => 57_360,
+        "shift" => 57_441,
+        "control" | "ctrl" => 57_442,
+        "alt" => 57_443,
+        "super" | "command" => 57_444,
+        "hyper" => 57_445,
+        "meta" => 57_446,
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+fn kitty_text_key(key: &str, modifiers: Modifiers, mode: KeyboardModes) -> Option<(String, char)> {
+    let ch = single_printable_char(key)?;
+    let (base, shifted) = shifted_key(ch, modifiers.shift);
+    let payload = if mode.contains(KeyboardModes::REPORT_ALTERNATE_KEYS) && base != shifted {
+        format!("{}:{}", u32::from(base), u32::from(shifted))
+    } else {
+        u32::from(base).to_string()
+    };
+    Some((payload, 'u'))
+}
+
+fn associated_text(key: &str, modifiers: Modifiers) -> Option<String> {
+    if key == "space" {
+        return Some(" ".to_string());
+    }
+    let ch = single_printable_char(key)?;
+    Some(shifted_key(ch, modifiers.shift).1.to_string())
+}
+
+fn single_printable_char(key: &str) -> Option<char> {
+    let mut chars = key.chars();
+    let ch = chars.next()?;
+    (chars.next().is_none() && !ch.is_control()).then_some(ch)
+}
+
+fn shifted_key(ch: char, shift: bool) -> (char, char) {
+    if !shift {
+        return (ch, ch);
+    }
+    if ch.is_ascii_alphabetic() {
+        return (ch.to_ascii_lowercase(), ch.to_ascii_uppercase());
+    }
+    const PAIRS: &[(char, char)] = &[
+        ('`', '~'),
+        ('1', '!'),
+        ('2', '@'),
+        ('3', '#'),
+        ('4', '$'),
+        ('5', '%'),
+        ('6', '^'),
+        ('7', '&'),
+        ('8', '*'),
+        ('9', '('),
+        ('0', ')'),
+        ('-', '_'),
+        ('=', '+'),
+        ('[', '{'),
+        (']', '}'),
+        ('\\', '|'),
+        (';', ':'),
+        ('\'', '"'),
+        (',', '<'),
+        ('.', '>'),
+        ('/', '?'),
+    ];
+    PAIRS
+        .iter()
+        .find_map(|&(base, shifted)| (ch == base || ch == shifted).then_some((base, shifted)))
+        .unwrap_or((ch, ch))
+}
+
+fn modify_other_keys_bytes(key: &str, modifiers: Modifiers, level: Option<u8>) -> Option<Vec<u8>> {
+    // Level 1's compatibility exception table is intentionally left to the
+    // legacy encoder. Level 2 has unambiguous semantics and covers the input
+    // values GPUI exposes without physical-key/location information.
+    if level != Some(2)
+        || !(modifiers.shift || modifiers.alt || modifiers.control || modifiers.platform)
+    {
+        return None;
+    }
+    let codepoint = match key {
+        "enter" => 13,
+        "tab" => 9,
+        "backspace" | "back" => 127,
+        "escape" => 27,
+        "space" => 32,
+        _ => u32::from(shifted_key(single_printable_char(key)?, modifiers.shift).0),
+    };
+    let modifier = 1
+        + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.control)
+        + 8 * u8::from(modifiers.platform);
+    Some(format!("\x1b[27;{modifier};{codepoint}~").into_bytes())
+}
+
+fn legacy_key_bytes(
     key: &str,
     modifiers: Modifiers,
     mode: Mode,
@@ -385,6 +629,8 @@ mod tests {
                     ..Default::default()
                 },
                 none,
+                KeyboardModes::NO_MODE,
+                None,
                 true
             ),
             Some(vec![3])
@@ -397,16 +643,32 @@ mod tests {
                     ..Default::default()
                 },
                 none,
+                KeyboardModes::NO_MODE,
+                None,
                 true
             ),
             Some(vec![127])
         );
         assert_eq!(
-            key_bytes("up", Modifiers::default(), none, true),
+            key_bytes(
+                "up",
+                Modifiers::default(),
+                none,
+                KeyboardModes::NO_MODE,
+                None,
+                true,
+            ),
             Some(b"\x1b[A".to_vec())
         );
         assert_eq!(
-            key_bytes("up", Modifiers::default(), Mode::APP_CURSOR, true),
+            key_bytes(
+                "up",
+                Modifiers::default(),
+                Mode::APP_CURSOR,
+                KeyboardModes::NO_MODE,
+                None,
+                true,
+            ),
             Some(b"\x1bOA".to_vec())
         );
     }
@@ -414,11 +676,25 @@ mod tests {
     fn key_function_keys_and_modifiers() {
         let none = Mode::empty();
         assert_eq!(
-            key_bytes("f1", Modifiers::default(), none, true),
+            key_bytes(
+                "f1",
+                Modifiers::default(),
+                none,
+                KeyboardModes::NO_MODE,
+                None,
+                true,
+            ),
             Some(b"\x1bOP".to_vec())
         );
         assert_eq!(
-            key_bytes("f20", Modifiers::default(), none, true),
+            key_bytes(
+                "f20",
+                Modifiers::default(),
+                none,
+                KeyboardModes::NO_MODE,
+                None,
+                true,
+            ),
             Some(b"\x1b[34~".to_vec())
         );
         assert_eq!(
@@ -430,6 +706,8 @@ mod tests {
                     ..Default::default()
                 },
                 none,
+                KeyboardModes::NO_MODE,
+                None,
                 true
             ),
             Some(b"\x1b[1;6A".to_vec())
@@ -442,9 +720,130 @@ mod tests {
                     ..Default::default()
                 },
                 none,
+                KeyboardModes::NO_MODE,
+                None,
                 true
             ),
             Some(b"\x1b[15;3~".to_vec())
         );
+    }
+
+    #[test]
+    fn kitty_csi_u_press_encoding() {
+        let disambiguate = KeyboardModes::DISAMBIGUATE_ESC_CODES;
+        assert_eq!(
+            key_bytes(
+                "a",
+                Modifiers::default(),
+                Mode::empty(),
+                KeyboardModes::NO_MODE,
+                None,
+                true,
+            ),
+            None,
+            "legacy printable input remains delegated to GPUI's text handler"
+        );
+        assert_eq!(
+            key_bytes(
+                "escape",
+                Modifiers::default(),
+                Mode::empty(),
+                disambiguate,
+                None,
+                true,
+            ),
+            Some(b"\x1b[27u".to_vec())
+        );
+        assert_eq!(
+            key_bytes(
+                "a",
+                Modifiers {
+                    shift: true,
+                    control: true,
+                    ..Default::default()
+                },
+                Mode::empty(),
+                disambiguate,
+                None,
+                true,
+            ),
+            Some(b"\x1b[97;6u".to_vec())
+        );
+        assert_eq!(
+            key_bytes(
+                "up",
+                Modifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+                Mode::empty(),
+                disambiguate,
+                None,
+                true,
+            ),
+            Some(b"\x1b[1;3A".to_vec())
+        );
+        for (key, expected) in [("enter", b"\x1b[13u".as_slice()), ("tab", b"\x1b[9u")] {
+            assert_eq!(
+                key_bytes(
+                    key,
+                    Modifiers::default(),
+                    Mode::empty(),
+                    disambiguate,
+                    None,
+                    true,
+                ),
+                Some(expected.to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_alternate_keys_associated_text_and_function_keys() {
+        let mode = KeyboardModes::DISAMBIGUATE_ESC_CODES
+            | KeyboardModes::REPORT_ALTERNATE_KEYS
+            | KeyboardModes::REPORT_ASSOCIATED_TEXT;
+        assert_eq!(
+            key_bytes(
+                "a",
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                Mode::empty(),
+                mode,
+                None,
+                true,
+            ),
+            Some(b"\x1b[97:65;2;65u".to_vec())
+        );
+        assert_eq!(
+            key_bytes("f13", Modifiers::default(), Mode::empty(), mode, None, true,),
+            Some(b"\x1b[57376u".to_vec())
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_level_two_encodes_supported_modified_keys() {
+        let control = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        for (key, expected) in [
+            ("a", b"\x1b[27;5;97~".as_slice()),
+            ("enter", b"\x1b[27;5;13~"),
+        ] {
+            assert_eq!(
+                key_bytes(
+                    key,
+                    control,
+                    Mode::empty(),
+                    KeyboardModes::NO_MODE,
+                    Some(2),
+                    true,
+                ),
+                Some(expected.to_vec())
+            );
+        }
     }
 }

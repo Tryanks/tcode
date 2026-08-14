@@ -10,6 +10,7 @@ use std::{
 pub use rio_vt;
 use rio_vt::{
     ansi::KeyboardModes,
+    clipboard::ClipboardType,
     config::colors::{AnsiColor, ColorRgb},
     crosswords::{
         Mode,
@@ -37,7 +38,7 @@ const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
 
 /// A rendering-relevant event emitted by the compatibility terminal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// The terminal grid or cursor changed.
     Wakeup,
@@ -45,6 +46,8 @@ pub enum TermEvent {
     Bell,
     /// The host-side child process exited.
     Exited,
+    /// An OSC 52 request to store decoded UTF-8 text in a clipboard.
+    ClipboardStore { kind: ClipboardType, text: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -251,6 +254,9 @@ impl Terminal {
                             writer.write_raw(bytes);
                             None
                         }
+                        GridEvent::ClipboardStore { kind, text } => {
+                            Some(TermEvent::ClipboardStore { kind, text })
+                        }
                     };
                     if let Some(notification) = notification {
                         let _ = grid_notifications.try_send(notification);
@@ -351,6 +357,16 @@ impl Terminal {
     /// Read terminal modes without consuming renderer damage.
     pub fn mode(&self) -> Mode {
         self.emulator.mode()
+    }
+
+    /// Read kitty keyboard protocol flags without consuming renderer damage.
+    pub fn keyboard_mode(&self) -> KeyboardModes {
+        self.emulator.keyboard_mode()
+    }
+
+    /// Read the active xterm modifyOtherKeys level without consuming damage.
+    pub fn modify_other_keys(&self) -> Option<u8> {
+        self.emulator.modify_other_keys()
     }
 
     /// Read scrollback size without consuming renderer damage.
@@ -733,6 +749,50 @@ mod tests {
         });
         assert!(mappings::routes_mouse(state.mode, false));
         assert!(!mappings::routes_mouse(state.mode, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_exposes_active_kitty_keyboard_mode_without_a_snapshot() {
+        require_live_pty!();
+        let terminal = command("printf '\\033[>1u'; sleep 1");
+        let start = Instant::now();
+        while terminal.keyboard_mode() != KeyboardModes::DISAMBIGUATE_ESC_CODES {
+            assert!(
+                start.elapsed() < Duration::from_secs(120),
+                "terminal did not apply kitty keyboard mode"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_store_reaches_the_public_terminal_event_stream_decoded() {
+        require_live_pty!();
+        let terminal = command("printf '\\033]52;c;dGNvZGU=\\007'; sleep 1");
+        let events = terminal.events();
+        let start = Instant::now();
+        loop {
+            match events.try_recv() {
+                Ok(TermEvent::ClipboardStore { kind, text }) => {
+                    assert_eq!(kind, ClipboardType::Clipboard);
+                    assert_eq!(text, "tcode");
+                    break;
+                }
+                Ok(_) => {}
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(120),
+                        "terminal did not emit the OSC 52 store"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("terminal event stream closed before the OSC 52 store")
+                }
+            }
+        }
     }
 
     #[cfg(unix)]

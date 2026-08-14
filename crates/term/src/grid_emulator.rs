@@ -11,7 +11,8 @@ use std::{
 };
 
 use rio_vt::{
-    ansi::CursorShape as RioCursorShape,
+    ansi::{CursorShape as RioCursorShape, KeyboardModes},
+    clipboard::ClipboardType,
     config::colors::{ColorRgb, NamedColor},
     crosswords::{
         Crosswords, CrosswordsSize,
@@ -47,6 +48,7 @@ pub(crate) enum GridEvent {
     CursorBlinkingChanged,
     Bell,
     Input(Vec<u8>),
+    ClipboardStore { kind: ClipboardType, text: String },
 }
 
 /// Client-side terminal state machine.
@@ -158,6 +160,17 @@ impl EventListener for GridListener {
             RioEvent::TextAreaSizeRequest(_, format) => {
                 let bytes = format(self.size.window_size()).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
+            }
+            RioEvent::ClipboardStore(kind, text) => {
+                let _ = self
+                    .notifications
+                    .try_send(GridEvent::ClipboardStore { kind, text });
+            }
+            RioEvent::ClipboardLoad(_, _, formatter) => {
+                // OSC 52 reads are denied by returning an empty clipboard.
+                let _ = self
+                    .notifications
+                    .try_send(GridEvent::Input(formatter("").into_bytes()));
             }
             _ => {}
         }
@@ -483,6 +496,14 @@ impl GridEmulator {
         self.core.state.lock().term.mode()
     }
 
+    pub fn keyboard_mode(&self) -> KeyboardModes {
+        self.core.state.lock().term.keyboard_mode()
+    }
+
+    pub fn modify_other_keys(&self) -> Option<u8> {
+        self.core.state.lock().term.modify_other_keys()
+    }
+
     pub fn history_size(&self) -> usize {
         self.core.state.lock().term.history_size()
     }
@@ -787,6 +808,36 @@ mod tests {
         assert!(emitted.contains(&GridEvent::Bell));
         assert!(emitted.contains(&GridEvent::TitleChanged(Some("client title".to_string()))));
         assert!(emitted.contains(&GridEvent::Input(b"\x1b[?6c".to_vec())));
+    }
+
+    #[test]
+    fn kitty_keyboard_mode_is_available_without_consuming_damage() {
+        let emulator = GridEmulator::new();
+        emulator.feed(b"\x1b[>1u");
+        assert_eq!(
+            emulator.keyboard_mode(),
+            KeyboardModes::DISAMBIGUATE_ESC_CODES
+        );
+    }
+
+    #[test]
+    fn osc52_store_is_decoded_and_load_is_denied_with_an_empty_reply() {
+        let emulator = GridEmulator::new();
+        let events = emulator.events();
+        emulator.feed(b"\x1b]52;c;dGNvZGU=\x07");
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event
+                == GridEvent::ClipboardStore {
+                    kind: ClipboardType::Clipboard,
+                    text: "tcode".to_string(),
+                }
+        }));
+
+        emulator.feed(b"\x1b]52;c;?\x07");
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| { event == GridEvent::Input(b"\x1b]52;c;\x07".to_vec()) })
+        );
     }
 
     #[test]
