@@ -21,8 +21,13 @@ use gpui::{
 };
 use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use term::{
-    Cell, Color, CursorShape, HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermState,
+    HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermSnapshot,
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
+    rio_vt::{
+        ansi::CursorShape,
+        config::colors::{AnsiColor, NamedColor},
+        crosswords::{Mode, square::Wide, style::StyleFlags},
+    },
 };
 
 use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
@@ -84,11 +89,12 @@ struct MarkedText {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GridTextStyle {
-    fg: Color,
-    bg: Color,
+    fg: AnsiColor,
+    bg: AnsiColor,
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_wavy: bool,
     selected: bool,
     cursor: bool,
 }
@@ -103,7 +109,7 @@ struct BatchedTextRun {
     style: GridTextStyle,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalPalette {
     foreground: Hsla,
     background: Hsla,
@@ -137,10 +143,54 @@ struct GridPaintData {
     cursor: Option<CursorPaint>,
 }
 
+#[derive(Clone, Default)]
+struct RowPaintData {
+    text_runs: Vec<BatchedTextRun>,
+    backgrounds: Vec<BackgroundRect>,
+    selections: Vec<BackgroundRect>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CursorRowKey {
+    position: (usize, usize),
+    shape: CursorShape,
+    blinking: bool,
+    marked_text: Option<String>,
+    focused: bool,
+    blink_phase: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RowLayoutKey {
+    selection: Option<term::rio_vt::selection::SelectionRange>,
+    hovered_link: Option<((usize, usize), (usize, usize))>,
+    cursor: Option<CursorRowKey>,
+}
+
+#[derive(Clone)]
+struct CachedRowLayout {
+    key: RowLayoutKey,
+    paint: RowPaintData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GridCacheKey {
+    cols: usize,
+    screen_lines: usize,
+    display_offset: usize,
+    palette: TerminalPalette,
+}
+
+struct TerminalGridCache {
+    key: GridCacheKey,
+    rows: Vec<Option<CachedRowLayout>>,
+}
+
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
+    row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
@@ -169,6 +219,7 @@ impl TerminalDrawer {
             workspace_store,
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
+            row_layout_cache: RefCell::new(HashMap::new()),
             cell_width: 7.83,
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
@@ -228,8 +279,8 @@ impl TerminalDrawer {
 
     fn paste_to_terminal(&self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
         self.with_terminal_id(terminal_id, cx, |terminal| {
-            let mode = terminal.snapshot().mode;
-            let text = prepare_terminal_paste(text, mode.bracketed_paste);
+            let mode = terminal.mode();
+            let text = prepare_terminal_paste(text, mode.contains(Mode::BRACKETED_PASTE));
             terminal.write_input(text.into_bytes());
         });
     }
@@ -447,7 +498,7 @@ impl TerminalDrawer {
             if let Some(bytes) = mappings::key_bytes(
                 &keystroke.key,
                 term_modifiers(keystroke.modifiers),
-                terminal.snapshot().mode,
+                terminal.mode(),
                 true,
             ) {
                 terminal.write_input(bytes);
@@ -490,22 +541,22 @@ impl TerminalDrawer {
                 .read(cx)
                 .with_terminal_workspace(|workspace| {
                     if let Some(entry) = workspace.terminal(terminal_id) {
-                        let snapshot = entry.terminal.snapshot();
+                        let mode = entry.terminal.mode();
                         let point = self
                             .grid_point_and_side(terminal_id, event.position)
                             .map(|((row, column), _)| GridPoint { row, column })
                             .unwrap_or(GridPoint { row: 0, column: 0 });
-                        if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                        if mappings::routes_mouse(mode, event.modifiers.shift) {
                             if let Some(bytes) = mappings::scroll_report(
                                 point,
                                 lines,
                                 term_modifiers(event.modifiers),
-                                snapshot.mode,
+                                mode,
                             ) {
                                 entry.terminal.write_raw(bytes);
                             }
-                        } else if snapshot.mode.alt_screen
-                            && snapshot.mode.alternate_scroll
+                        } else if mode.contains(Mode::ALT_SCREEN)
+                            && mode.contains(Mode::ALTERNATE_SCROLL)
                             && !event.modifiers.shift
                         {
                             entry.terminal.write_raw(mappings::alt_scroll(lines));
@@ -522,7 +573,7 @@ impl TerminalDrawer {
     fn render_grid(
         &self,
         terminal_id: u64,
-        state: &TermState,
+        state: &TermSnapshot,
         register_input: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -541,18 +592,22 @@ impl TerminalDrawer {
             .as_ref()
             .filter(|(id, _)| *id == terminal_id)
             .map(|(_, link)| link);
-        let paint_data = layout_grid(
+        let blink_phase =
+            self.cursor_phase || self.last_input.elapsed() < Duration::from_millis(500);
+        let paint_data = layout_grid_cached(
+            &mut self.row_layout_cache.borrow_mut(),
+            terminal_id,
             state,
             palette,
-            marked_text.is_some(),
+            marked_text.as_deref(),
             hovered_link,
             self.terminal_focused,
-            self.cursor_phase || self.last_input.elapsed() < Duration::from_millis(500),
+            blink_phase,
         );
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
         let cols = state.cols;
-        let rows = state.rows;
+        let rows = state.screen_lines;
         let focus_handle = self.focus_handle.clone();
         let drawer = cx.entity();
         let grid_bounds = self.grid_bounds.clone();
@@ -618,14 +673,14 @@ impl TerminalDrawer {
                         && let Some(cursor_bounds) = cursor_bounds
                     {
                         match (cursor.focused, cursor.shape) {
-                            (false, _) | (_, CursorShape::HollowBlock) => {
+                            (false, _) => {
                                 let t = px(1.);
                                 window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(cursor_bounds.size.width, t)), cursor.color));
                                 window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - t), size(cursor_bounds.size.width, t)), cursor.color));
                                 window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(t, cursor_bounds.size.height)), cursor.color));
                                 window.paint_quad(fill(Bounds::new(point(cursor_bounds.right() - t, cursor_bounds.top()), size(t, cursor_bounds.size.height)), cursor.color));
                             }
-                            (_, CursorShape::Bar) => window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(px(2.), cursor_bounds.size.height)), cursor.color)),
+                            (_, CursorShape::Beam) => window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(px(2.), cursor_bounds.size.height)), cursor.color)),
                             (_, CursorShape::Underline) => window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - px(2.)), size(cursor_bounds.size.width, px(2.))), cursor.color)),
                             (_, CursorShape::Block) => window.paint_quad(fill(cursor_bounds, cursor.color)),
                             (_, CursorShape::Hidden) => {}
@@ -658,7 +713,7 @@ impl TerminalDrawer {
                             underline: run.style.underline.then_some(UnderlineStyle {
                                 thickness: px(1.),
                                 color: Some(foreground),
-                                wavy: false,
+                                wavy: run.style.underline_wavy,
                             }),
                         };
                         let shaped = window.text_system().shape_line(
@@ -779,8 +834,8 @@ impl TerminalDrawer {
             .read(cx)
             .with_terminal_workspace(|workspace| {
                 if let Some(entry) = workspace.terminal(terminal_id) {
-                    let snapshot = entry.terminal.snapshot();
-                    if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                    let mode = entry.terminal.mode();
+                    if mappings::routes_mouse(mode, event.modifiers.shift) {
                         if let Some(button) = term_mouse_button(event.button)
                             && let Some(bytes) = mappings::mouse_button_report(
                                 GridPoint {
@@ -790,7 +845,7 @@ impl TerminalDrawer {
                                 button,
                                 term_modifiers(event.modifiers),
                                 true,
-                                snapshot.mode,
+                                mode,
                             )
                         {
                             entry.terminal.write_raw(bytes);
@@ -811,7 +866,8 @@ impl TerminalDrawer {
                     #[cfg(target_os = "linux")]
                     if event.button == MouseButton::Middle {
                         if let Some(text) = primary_text {
-                            let text = prepare_terminal_paste(&text, snapshot.mode.bracketed_paste);
+                            let text =
+                                prepare_terminal_paste(&text, mode.contains(Mode::BRACKETED_PASTE));
                             entry.terminal.write_input(text.into_bytes());
                         }
                         stop_propagation = true;
@@ -871,8 +927,8 @@ impl TerminalDrawer {
                 let Some(entry) = workspace.terminal(terminal_id) else {
                     return;
                 };
-                let snapshot = entry.terminal.snapshot();
-                if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                let mode = entry.terminal.mode();
+                if mappings::routes_mouse(mode, event.modifiers.shift) {
                     if self.last_mouse_point.get(&terminal_id) != Some(&point) {
                         self.last_mouse_point.insert(terminal_id, point);
                         if let Some(bytes) = mappings::mouse_move_report(
@@ -882,7 +938,7 @@ impl TerminalDrawer {
                             },
                             event.pressed_button.and_then(term_mouse_button),
                             term_modifiers(event.modifiers),
-                            snapshot.mode,
+                            mode,
                         ) {
                             entry.terminal.write_raw(bytes);
                         }
@@ -930,8 +986,8 @@ impl TerminalDrawer {
                         }
                         self.selecting = Some(terminal_id);
                         entry.terminal.update_selection(point, side);
-                        if !snapshot.mode.alt_screen
-                            && snapshot.history_size > 0
+                        if !mode.contains(Mode::ALT_SCREEN)
+                            && entry.terminal.history_size() > 0
                             && let Some(lines) = drag_scroll_lines(
                                 event.position.y,
                                 self.grid_bounds.borrow().get(&terminal_id).copied(),
@@ -960,8 +1016,8 @@ impl TerminalDrawer {
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         let entry = workspace.terminal(terminal_id)?;
-                        let snapshot = entry.terminal.snapshot();
-                        if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                        let mode = entry.terminal.mode();
+                        if mappings::routes_mouse(mode, event.modifiers.shift) {
                             if let Some(button) = term_mouse_button(event.button)
                                 && let Some(bytes) = mappings::mouse_button_report(
                                     GridPoint {
@@ -971,7 +1027,7 @@ impl TerminalDrawer {
                                     button,
                                     term_modifiers(event.modifiers),
                                     false,
-                                    snapshot.mode,
+                                    mode,
                                 )
                             {
                                 entry.terminal.write_raw(bytes);
@@ -1067,7 +1123,7 @@ impl TerminalDrawer {
         // The add-to-context button is a pure overlay: it must never affect the
         // grid's geometry. Reserving space for it while a selection exists
         // resized the PTY mid-drag — rows jumped and blank lines appeared.
-        let has_selection = snapshot.cells.iter().any(|cell| cell.selected);
+        let has_selection = snapshot.selection.is_some();
         let workspace_store = self.workspace_store.clone();
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
@@ -1243,7 +1299,7 @@ impl Render for TerminalDrawer {
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.active()
-                            && entry.terminal.snapshot().mode.focus_in_out
+                            && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
                         {
                             entry.terminal.write_raw(b"\x1b[I".to_vec());
                         }
@@ -1255,7 +1311,7 @@ impl Render for TerminalDrawer {
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.active()
-                            && entry.terminal.snapshot().mode.focus_in_out
+                            && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
                         {
                             entry.terminal.write_raw(b"\x1b[O".to_vec());
                         }
@@ -1295,7 +1351,7 @@ impl Render for TerminalDrawer {
                             (
                                 entry.id,
                                 entry.terminal.label(),
-                                entry.terminal.snapshot().exited,
+                                entry.terminal.exited(),
                                 self.bell_tabs.contains(&entry.id),
                             )
                         })
@@ -1576,108 +1632,237 @@ impl Render for TerminalDrawer {
     }
 }
 
+#[cfg(test)]
 fn layout_grid(
-    state: &TermState,
+    state: &TermSnapshot,
     palette: TerminalPalette,
     composing: bool,
     hovered_link: Option<&HyperlinkMatch>,
     focused: bool,
     blink_phase: bool,
 ) -> GridPaintData {
+    layout_grid_cached(
+        &mut HashMap::new(),
+        0,
+        state,
+        palette,
+        composing.then_some(""),
+        hovered_link,
+        focused,
+        blink_phase,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_grid_cached(
+    caches: &mut HashMap<u64, TerminalGridCache>,
+    terminal_id: u64,
+    state: &TermSnapshot,
+    palette: TerminalPalette,
+    marked_text: Option<&str>,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+) -> GridPaintData {
+    let composing = marked_text.is_some();
     let cursor = layout_cursor(state, palette);
     let cursor_cell = cursor.map(|cursor| (cursor.row, cursor.start_col));
-    let mut text_runs: Vec<BatchedTextRun> = Vec::new();
-    let mut backgrounds: Vec<BackgroundRect> = Vec::new();
-    let mut selections: Vec<BackgroundRect> = Vec::new();
+    let grid_key = GridCacheKey {
+        cols: state.cols,
+        screen_lines: state.screen_lines,
+        display_offset: state.display_offset,
+        palette,
+    };
+    let cache = caches
+        .entry(terminal_id)
+        .or_insert_with(|| TerminalGridCache {
+            key: grid_key,
+            rows: vec![None; state.screen_lines],
+        });
+    if cache.key != grid_key || matches!(state.damage, term::rio_vt::event::TerminalDamage::Full) {
+        cache.key = grid_key;
+        cache.rows = vec![None; state.screen_lines];
+    }
 
-    for row in 0..state.rows {
-        let mut previous_cell_had_extras = false;
-        for col in 0..state.cols {
-            let Some(cell) = state.cell(row, col) else {
-                break;
-            };
-            let (fg, bg) = cell_colors(cell);
+    let mut paint = RowPaintData::default();
 
-            let background = if matches!(bg, Color::DefaultBackground) {
-                None
-            } else {
-                Some(terminal_color(bg, palette))
-            };
-            if let Some(color) = background {
-                push_background(&mut backgrounds, row, col, color);
-            }
-            if cell.selected {
-                push_background(&mut selections, row, col, palette.selection);
-            }
-
-            // A wide spacer still participates in backgrounds and hit-testing,
-            // but never contributes a glyph to the shaped text.
-            if cell.wide_spacer {
-                continue;
-            }
-
-            // Alacritty stores emoji variation/modifier codepoints as extras;
-            // its following placeholder space is not an independently painted
-            // character. This mirrors Zed's terminal layout workaround.
-            if cell.ch == ' ' && previous_cell_had_extras {
-                previous_cell_had_extras = false;
-                continue;
-            }
-            previous_cell_had_extras = cell.text.chars().nth(1).is_some();
-
-            let text = display_cell_text(cell);
-            if matches!(cell.ch, '\0' | ' ') && !cell.underline {
-                continue;
-            }
-
-            let cursor_visible = !composing
-                && !cell.selected
-                && state.display_offset == 0
-                && cursor_cell == Some((row, col))
-                && focused
-                && state.cursor_shape == CursorShape::Block
-                && (!state.cursor_blinking || blink_phase);
-            let hyperlink_hovered =
-                hovered_link.is_some_and(|link| (row, col) >= link.start && (row, col) <= link.end);
-            let style = GridTextStyle {
-                fg,
-                bg,
-                bold: cell.bold,
-                italic: cell.italic,
-                underline: cell.underline || hyperlink_hovered,
-                selected: cell.selected,
-                cursor: cursor_visible,
-            };
-
-            if let Some(current) = text_runs.last_mut()
-                && current.row == row
-                && current.start_col + current.cell_count == col
-                && current.style == style
-            {
-                current.text.push_str(&text);
-                current.cell_count += 1;
-            } else {
-                text_runs.push(BatchedTextRun {
-                    row,
-                    start_col: col,
-                    text,
-                    cell_count: 1,
-                    style,
-                });
-            }
-        }
+    for row in 0..state.screen_lines {
+        let row_key = row_layout_key(
+            state,
+            row,
+            cursor_cell,
+            marked_text,
+            hovered_link,
+            focused,
+            blink_phase,
+        );
+        let clean = !state.row_damage.get(row).copied().unwrap_or(true);
+        let cached = cache.rows[row]
+            .as_ref()
+            .filter(|cached| clean && cached.key == row_key)
+            .map(|cached| cached.paint.clone());
+        let row_paint = cached.unwrap_or_else(|| {
+            let paint = layout_row(
+                state,
+                row,
+                palette,
+                composing,
+                hovered_link,
+                focused,
+                blink_phase,
+                cursor_cell,
+            );
+            cache.rows[row] = Some(CachedRowLayout {
+                key: row_key,
+                paint: paint.clone(),
+            });
+            paint
+        });
+        paint.text_runs.extend(row_paint.text_runs);
+        paint.backgrounds.extend(row_paint.backgrounds);
+        paint.selections.extend(row_paint.selections);
     }
 
     GridPaintData {
-        text_runs,
-        backgrounds,
-        selections,
+        text_runs: paint.text_runs,
+        backgrounds: paint.backgrounds,
+        selections: paint.selections,
         cursor: cursor.map(|mut cursor| {
             cursor.focused = focused;
             cursor.visible &= !composing && (!state.cursor_blinking || blink_phase);
             cursor
         }),
     }
+}
+
+fn row_layout_key(
+    state: &TermSnapshot,
+    row: usize,
+    cursor_cell: Option<(usize, usize)>,
+    marked_text: Option<&str>,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+) -> RowLayoutKey {
+    let grid_line = row as i32 - state.display_offset as i32;
+    let selection = state
+        .selection
+        .filter(|range| grid_line >= range.start.row.0 && grid_line <= range.end.row.0);
+    let hovered_link = hovered_link
+        .filter(|link| row >= link.start.0 && row <= link.end.0)
+        .map(|link| (link.start, link.end));
+    let cursor = cursor_cell
+        .filter(|(cursor_row, _)| *cursor_row == row && state.display_offset == 0)
+        .map(|position| CursorRowKey {
+            position,
+            shape: state.cursor_state.content,
+            blinking: state.cursor_blinking,
+            marked_text: marked_text.map(str::to_owned),
+            focused,
+            blink_phase,
+        });
+    RowLayoutKey {
+        selection,
+        hovered_link,
+        cursor,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_row(
+    state: &TermSnapshot,
+    row: usize,
+    palette: TerminalPalette,
+    composing: bool,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+    cursor_cell: Option<(usize, usize)>,
+) -> RowPaintData {
+    let mut paint = RowPaintData::default();
+    let mut previous_cell_had_extras = false;
+    for col in 0..state.cols {
+        let Some(square) = state.cell(row, col).copied() else {
+            break;
+        };
+        let Some(style) = state.style(row, col) else {
+            break;
+        };
+        let selected = state.is_selected(row, col);
+        let (fg, bg) = cell_colors(style.fg, style.bg, style.flags);
+
+        let background = if matches!(bg, AnsiColor::Named(NamedColor::Background)) {
+            None
+        } else {
+            Some(terminal_color(bg, palette))
+        };
+        if let Some(color) = background {
+            push_background(&mut paint.backgrounds, row, col, color);
+        }
+        if selected {
+            push_background(&mut paint.selections, row, col, palette.selection);
+        }
+
+        // A wide spacer still participates in backgrounds and hit-testing,
+        // but never contributes a glyph to the shaped text.
+        if square.wide() == Wide::Spacer {
+            continue;
+        }
+
+        // Alacritty stores emoji variation/modifier codepoints as extras;
+        // its following placeholder space is not an independently painted
+        // character. This mirrors Zed's terminal layout workaround.
+        let cell_text = state.cell_text(row, col).unwrap_or_else(|| " ".to_string());
+        if square.c() == ' ' && previous_cell_had_extras {
+            previous_cell_had_extras = false;
+            continue;
+        }
+        previous_cell_had_extras = cell_text.chars().nth(1).is_some();
+
+        let text = display_cell_text(&cell_text);
+        let underline = style.flags.intersects(StyleFlags::ALL_UNDERLINES);
+        if matches!(square.c(), '\0' | ' ') && !underline {
+            continue;
+        }
+
+        let cursor_visible = !composing
+            && !selected
+            && state.display_offset == 0
+            && cursor_cell == Some((row, col))
+            && focused
+            && state.cursor_state.content == CursorShape::Block
+            && (!state.cursor_blinking || blink_phase);
+        let hyperlink_hovered =
+            hovered_link.is_some_and(|link| (row, col) >= link.start && (row, col) <= link.end);
+        let style = GridTextStyle {
+            fg,
+            bg,
+            bold: style.flags.contains(StyleFlags::BOLD),
+            italic: style.flags.contains(StyleFlags::ITALIC),
+            underline: underline || hyperlink_hovered,
+            underline_wavy: style.flags.contains(StyleFlags::UNDERCURL),
+            selected,
+            cursor: cursor_visible,
+        };
+
+        if let Some(current) = paint.text_runs.last_mut()
+            && current.row == row
+            && current.start_col + current.cell_count == col
+            && current.style == style
+        {
+            current.text.push_str(&text);
+            current.cell_count += 1;
+        } else {
+            paint.text_runs.push(BatchedTextRun {
+                row,
+                start_col: col,
+                text,
+                cell_count: 1,
+                style,
+            });
+        }
+    }
+    paint
 }
 
 fn push_background(backgrounds: &mut Vec<BackgroundRect>, row: usize, col: usize, color: Hsla) {
@@ -1697,8 +1882,8 @@ fn push_background(backgrounds: &mut Vec<BackgroundRect>, row: usize, col: usize
     }
 }
 
-fn display_cell_text(cell: &Cell) -> String {
-    let mut characters = cell.text.chars();
+fn display_cell_text(cell_text: &str) -> String {
+    let mut characters = cell_text.chars();
     let Some(first) = characters.next() else {
         return " ".to_string();
     };
@@ -1708,36 +1893,40 @@ fn display_cell_text(cell: &Cell) -> String {
     text
 }
 
-fn cell_colors(cell: &Cell) -> (Color, Color) {
-    let (mut fg, mut bg) = (cell.fg, cell.bg);
-    if cell.inverse {
+fn cell_colors(
+    foreground: AnsiColor,
+    background: AnsiColor,
+    flags: StyleFlags,
+) -> (AnsiColor, AnsiColor) {
+    let (mut fg, mut bg) = (foreground, background);
+    if flags.contains(StyleFlags::INVERSE) {
         std::mem::swap(&mut fg, &mut bg);
     }
     (fg, bg)
 }
 
-fn layout_cursor(state: &TermState, palette: TerminalPalette) -> Option<CursorPaint> {
+fn layout_cursor(state: &TermSnapshot, palette: TerminalPalette) -> Option<CursorPaint> {
     if state.display_offset != 0 {
         return None;
     }
     let (row, col) = state.cursor?;
-    let cell = state.cell(row, col)?;
-    let (start_col, cell_count, color_cell) = if cell.wide_spacer && col > 0 {
-        let base = state.cell(row, col - 1)?;
-        (col - 1, 2, base)
-    } else if cell.wide {
-        (col, 2, cell)
+    let square = *state.cell(row, col)?;
+    let (start_col, cell_count, color_col) = if square.wide() == Wide::Spacer && col > 0 {
+        (col - 1, 2, col - 1)
+    } else if square.wide() == Wide::Wide {
+        (col, 2, col)
     } else {
-        (col, 1, cell)
+        (col, 1, col)
     };
-    let (fg, _) = cell_colors(color_cell);
+    let style = state.style(row, color_col)?;
+    let (fg, _) = cell_colors(style.fg, style.bg, style.flags);
     Some(CursorPaint {
         row,
         start_col,
         cell_count,
         color: terminal_color(fg, palette).opacity(0.72),
-        visible: !color_cell.selected,
-        shape: state.cursor_shape,
+        visible: !state.is_selected(row, color_col),
+        shape: state.cursor_state.content,
         focused: true,
     })
 }
@@ -1991,14 +2180,26 @@ fn terminal_font() -> gpui::Font {
     terminal_font
 }
 
-fn terminal_color(color: Color, palette: TerminalPalette) -> Hsla {
+fn terminal_color(color: AnsiColor, palette: TerminalPalette) -> Hsla {
     match color {
-        Color::DefaultForeground => palette.foreground,
-        Color::DefaultBackground => palette.background,
-        Color::Rgb(r, g, b) => {
-            rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into()
+        AnsiColor::Named(
+            NamedColor::Foreground | NamedColor::LightForeground | NamedColor::DimForeground,
+        ) => palette.foreground,
+        AnsiColor::Named(NamedColor::Background) => palette.background,
+        AnsiColor::Named(NamedColor::Cursor) => palette.foreground,
+        AnsiColor::Named(NamedColor::DimBlack) => terminal_color(AnsiColor::Indexed(0), palette),
+        AnsiColor::Named(NamedColor::DimRed) => terminal_color(AnsiColor::Indexed(1), palette),
+        AnsiColor::Named(NamedColor::DimGreen) => terminal_color(AnsiColor::Indexed(2), palette),
+        AnsiColor::Named(NamedColor::DimYellow) => terminal_color(AnsiColor::Indexed(3), palette),
+        AnsiColor::Named(NamedColor::DimBlue) => terminal_color(AnsiColor::Indexed(4), palette),
+        AnsiColor::Named(NamedColor::DimMagenta) => terminal_color(AnsiColor::Indexed(5), palette),
+        AnsiColor::Named(NamedColor::DimCyan) => terminal_color(AnsiColor::Indexed(6), palette),
+        AnsiColor::Named(NamedColor::DimWhite) => terminal_color(AnsiColor::Indexed(7), palette),
+        AnsiColor::Named(named) => terminal_color(AnsiColor::Indexed(named as u8), palette),
+        AnsiColor::Spec(color) => {
+            rgb((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)).into()
         }
-        Color::Indexed(index) => {
+        AnsiColor::Indexed(index) => {
             const ANSI: [u32; 16] = [
                 0x1f2329, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xabb2bf,
                 0x5c6370, 0xff616e, 0x7bc275, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
@@ -2023,20 +2224,42 @@ fn terminal_color(color: Color, palette: TerminalPalette) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use term::rio_vt::{
+        ansi::KeyboardModes,
+        crosswords::{grid::row::Row, pos::CursorState, square::Square, style::Style},
+        event::TerminalDamage,
+    };
 
-    fn cell(ch: char, text: &str, wide: bool, wide_spacer: bool) -> Cell {
-        Cell {
-            ch,
-            text: text.to_string(),
-            fg: Color::DefaultForeground,
-            bg: Color::DefaultBackground,
-            bold: false,
-            italic: false,
-            underline: false,
-            inverse: false,
-            selected: false,
-            wide,
-            wide_spacer,
+    fn cell(ch: char, wide: Wide) -> Square {
+        let mut square = Square::from_char(ch);
+        square.set_wide(wide);
+        square
+    }
+
+    fn snapshot(cells: Vec<Square>) -> TermSnapshot {
+        let cols = cells.len();
+        let mut row = Row::new(cols);
+        row.inner = cells;
+        TermSnapshot {
+            cols,
+            screen_lines: 1,
+            visible_rows: vec![row],
+            row_damage: vec![true],
+            damage: TerminalDamage::Full,
+            cursor_state: CursorState::default(),
+            cursor: None,
+            cursor_blinking: false,
+            title: String::new(),
+            exited: false,
+            exit_code: None,
+            display_offset: 0,
+            history_size: 0,
+            mode: Mode::empty(),
+            keyboard_mode: KeyboardModes::NO_MODE,
+            selection: None,
+            styles: vec![Style::default()],
+            zero_width: HashMap::new(),
         }
     }
 
@@ -2074,20 +2297,7 @@ mod tests {
 
     #[test]
     fn unselected_default_grid_has_no_selection_or_ansi_background_paint() {
-        let state = TermState {
-            cols: 1,
-            rows: 1,
-            cells: vec![cell('x', "x", false, false)],
-            cursor: None,
-            cursor_shape: CursorShape::Block,
-            cursor_blinking: false,
-            title: String::new(),
-            exited: false,
-            exit_code: None,
-            display_offset: 0,
-            history_size: 0,
-            mode: term::ModeSnapshot::default(),
-        };
+        let state = snapshot(vec![cell('x', Wide::Narrow)]);
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
             background: rgb(0x000000).into(),
@@ -2196,28 +2406,15 @@ mod tests {
     #[test]
     fn batches_mixed_cjk_at_physical_column_boundaries() {
         let cells = vec![
-            cell('a', "a", false, false),
-            cell('中', "中", true, false),
-            cell(' ', " ", false, true),
-            cell('b', "b", false, false),
-            cell('文', "文", true, false),
-            cell(' ', " ", false, true),
-            cell('c', "c", false, false),
+            cell('a', Wide::Narrow),
+            cell('中', Wide::Wide),
+            cell(' ', Wide::Spacer),
+            cell('b', Wide::Narrow),
+            cell('文', Wide::Wide),
+            cell(' ', Wide::Spacer),
+            cell('c', Wide::Narrow),
         ];
-        let state = TermState {
-            cols: cells.len(),
-            rows: 1,
-            cells,
-            cursor: None,
-            cursor_shape: CursorShape::Block,
-            cursor_blinking: false,
-            title: String::new(),
-            exited: false,
-            exit_code: None,
-            display_offset: 0,
-            history_size: 0,
-            mode: term::ModeSnapshot::default(),
-        };
+        let state = snapshot(cells);
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
             background: rgb(0x000000).into(),
@@ -2239,8 +2436,54 @@ mod tests {
     }
 
     #[test]
+    fn row_cache_reuses_clean_rows_and_rebuilds_damaged_rows() {
+        let palette = TerminalPalette {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            selection: rgb(0x336699).into(),
+        };
+        let mut state = snapshot(vec![cell('a', Wide::Narrow)]);
+        let mut caches = HashMap::new();
+        let first = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(first.text_runs[0].text, "a");
+
+        state.visible_rows[0].inner[0] = cell('b', Wide::Narrow);
+        state.damage = TerminalDamage::CursorOnly;
+        state.row_damage[0] = false;
+        let cached = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(cached.text_runs[0].text, "a");
+
+        state.damage = TerminalDamage::Partial;
+        state.row_damage[0] = true;
+        let rebuilt = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(rebuilt.text_runs[0].text, "b");
+    }
+
+    #[test]
+    fn undercurl_maps_to_wavy_underline() {
+        let mut square = cell('x', Wide::Narrow);
+        square.set_style_id(1);
+        let mut state = snapshot(vec![square]);
+        state.styles.push(Style {
+            flags: StyleFlags::UNDERCURL,
+            ..Style::default()
+        });
+        let palette = TerminalPalette {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            selection: rgb(0x336699).into(),
+        };
+
+        let run = layout_grid(&state, palette, false, None, true, true)
+            .text_runs
+            .remove(0);
+        assert!(run.style.underline);
+        assert!(run.style.underline_wavy);
+    }
+
+    #[test]
     fn printable_keys_defer_to_input_handler_but_control_keys_stay_raw() {
-        let mode = term::ModeSnapshot::default();
+        let mode = Mode::empty();
         let encode = |key: &str| {
             let key = gpui::Keystroke::parse(key).unwrap();
             mappings::key_bytes(&key.key, term_modifiers(key.modifiers), mode, true)

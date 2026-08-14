@@ -1,5 +1,7 @@
 //! Classic xterm input encoders, kept independent of the UI framework.
 
+use rio_vt::crosswords::Mode;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
     pub shift: bool,
@@ -21,6 +23,10 @@ pub struct GridPoint {
     pub column: usize,
 }
 
+pub fn routes_mouse(mode: Mode, shift: bool) -> bool {
+    mode.intersects(Mode::MOUSE_MODE) && !shift
+}
+
 fn modifier_bits(modifiers: Modifiers) -> u8 {
     u8::from(modifiers.shift) * 4 + u8::from(modifiers.alt) * 8 + u8::from(modifiers.control) * 16
 }
@@ -38,9 +44,9 @@ pub fn mouse_button_report(
     button: MouseButton,
     modifiers: Modifiers,
     pressed: bool,
-    mode: crate::ModeSnapshot,
+    mode: Mode,
 ) -> Option<Vec<u8>> {
-    mode.mouse_mode()
+    mode.intersects(Mode::MOUSE_MODE)
         .then(|| mouse_report(point, button_code(button), modifiers, pressed, mode))?
 }
 
@@ -48,9 +54,9 @@ pub fn mouse_move_report(
     point: GridPoint,
     button: Option<MouseButton>,
     modifiers: Modifiers,
-    mode: crate::ModeSnapshot,
+    mode: Mode,
 ) -> Option<Vec<u8>> {
-    if !(mode.mouse_motion || mode.mouse_drag && button.is_some()) {
+    if !(mode.contains(Mode::MOUSE_MOTION) || mode.contains(Mode::MOUSE_DRAG) && button.is_some()) {
         return None;
     }
     let code = button.map_or(35, |button| button_code(button) + 32);
@@ -61,9 +67,9 @@ pub fn scroll_report(
     point: GridPoint,
     lines: i32,
     modifiers: Modifiers,
-    mode: crate::ModeSnapshot,
+    mode: Mode,
 ) -> Option<Vec<u8>> {
-    if !mode.mouse_mode() || lines == 0 {
+    if !mode.intersects(Mode::MOUSE_MODE) || lines == 0 {
         return None;
     }
     let code = if lines > 0 { 64 } else { 65 };
@@ -85,10 +91,10 @@ fn mouse_report(
     button: u8,
     modifiers: Modifiers,
     pressed: bool,
-    mode: crate::ModeSnapshot,
+    mode: Mode,
 ) -> Option<Vec<u8>> {
     let button = button + modifier_bits(modifiers);
-    if mode.sgr_mouse {
+    if mode.contains(Mode::SGR_MOUSE) {
         let suffix = if pressed { 'M' } else { 'm' };
         Some(
             format!(
@@ -106,7 +112,7 @@ fn mouse_report(
             } else {
                 3 + modifier_bits(modifiers)
             },
-            mode.utf8_mouse,
+            mode.contains(Mode::UTF8_MOUSE),
         )
     }
 }
@@ -137,7 +143,7 @@ fn normal_mouse_report(point: GridPoint, button: u8, utf8: bool) -> Option<Vec<u
 pub fn key_bytes(
     key: &str,
     modifiers: Modifiers,
-    mode: crate::ModeSnapshot,
+    mode: Mode,
     option_as_meta: bool,
 ) -> Option<Vec<u8>> {
     let none = !modifiers.shift && !modifiers.alt && !modifiers.control && !modifiers.platform;
@@ -158,12 +164,36 @@ pub fn key_bytes(
         "backspace" if only(false, false, true) => Some("\x08"),
         "backspace" if only(false, true, false) => Some("\x1b\x7f"),
         "space" | "@" if only(false, false, true) => Some("\0"),
-        "home" if none => Some(if mode.app_cursor { "\x1bOH" } else { "\x1b[H" }),
-        "end" if none => Some(if mode.app_cursor { "\x1bOF" } else { "\x1b[F" }),
-        "up" if none => Some(if mode.app_cursor { "\x1bOA" } else { "\x1b[A" }),
-        "down" if none => Some(if mode.app_cursor { "\x1bOB" } else { "\x1b[B" }),
-        "right" if none => Some(if mode.app_cursor { "\x1bOC" } else { "\x1b[C" }),
-        "left" if none => Some(if mode.app_cursor { "\x1bOD" } else { "\x1b[D" }),
+        "home" if none => Some(if mode.contains(Mode::APP_CURSOR) {
+            "\x1bOH"
+        } else {
+            "\x1b[H"
+        }),
+        "end" if none => Some(if mode.contains(Mode::APP_CURSOR) {
+            "\x1bOF"
+        } else {
+            "\x1b[F"
+        }),
+        "up" if none => Some(if mode.contains(Mode::APP_CURSOR) {
+            "\x1bOA"
+        } else {
+            "\x1b[A"
+        }),
+        "down" if none => Some(if mode.contains(Mode::APP_CURSOR) {
+            "\x1bOB"
+        } else {
+            "\x1b[B"
+        }),
+        "right" if none => Some(if mode.contains(Mode::APP_CURSOR) {
+            "\x1bOC"
+        } else {
+            "\x1b[C"
+        }),
+        "left" if none => Some(if mode.contains(Mode::APP_CURSOR) {
+            "\x1bOD"
+        } else {
+            "\x1b[D"
+        }),
         "back" if none => Some("\x7f"),
         "insert" if none => Some("\x1b[2~"),
         "delete" if none => Some("\x1b[3~"),
@@ -265,12 +295,8 @@ pub fn key_bytes(
 mod tests {
     use super::*;
 
-    fn sgr() -> crate::ModeSnapshot {
-        crate::ModeSnapshot {
-            mouse_click: true,
-            sgr_mouse: true,
-            ..Default::default()
-        }
+    fn sgr() -> Mode {
+        Mode::MOUSE_REPORT_CLICK | Mode::SGR_MOUSE
     }
     #[test]
     fn sgr_press_release_move_and_modifiers() {
@@ -283,11 +309,7 @@ mod tests {
             mouse_button_report(point, MouseButton::Left, Modifiers::default(), false, sgr()),
             Some(b"\x1b[<0;5;3m".to_vec())
         );
-        let mode = crate::ModeSnapshot {
-            mouse_motion: true,
-            sgr_mouse: true,
-            ..Default::default()
-        };
+        let mode = Mode::MOUSE_MOTION | Mode::SGR_MOUSE;
         assert_eq!(
             mouse_move_report(
                 point,
@@ -305,10 +327,7 @@ mod tests {
     }
     #[test]
     fn normal_utf8_scroll_and_alt_scroll() {
-        let mode = crate::ModeSnapshot {
-            mouse_click: true,
-            ..Default::default()
-        };
+        let mode = Mode::MOUSE_REPORT_CLICK;
         assert_eq!(
             mouse_button_report(
                 GridPoint { row: 0, column: 0 },
@@ -329,11 +348,7 @@ mod tests {
             ),
             Some(vec![27, 91, 77, 35, 33, 33])
         );
-        let utf8 = crate::ModeSnapshot {
-            mouse_click: true,
-            utf8_mouse: true,
-            ..Default::default()
-        };
+        let utf8 = Mode::MOUSE_REPORT_CLICK | Mode::UTF8_MOUSE;
         assert_eq!(
             mouse_button_report(
                 GridPoint {
@@ -361,7 +376,7 @@ mod tests {
     }
     #[test]
     fn key_ctrl_caret_and_application_cursor() {
-        let none = crate::ModeSnapshot::default();
+        let none = Mode::empty();
         assert_eq!(
             key_bytes(
                 "c",
@@ -391,21 +406,13 @@ mod tests {
             Some(b"\x1b[A".to_vec())
         );
         assert_eq!(
-            key_bytes(
-                "up",
-                Modifiers::default(),
-                crate::ModeSnapshot {
-                    app_cursor: true,
-                    ..none
-                },
-                true
-            ),
+            key_bytes("up", Modifiers::default(), Mode::APP_CURSOR, true),
             Some(b"\x1bOA".to_vec())
         );
     }
     #[test]
     fn key_function_keys_and_modifiers() {
-        let none = crate::ModeSnapshot::default();
+        let none = Mode::empty();
         assert_eq!(
             key_bytes("f1", Modifiers::default(), none, true),
             Some(b"\x1bOP".to_vec())
