@@ -24,7 +24,7 @@ use crate::settings::{
     ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings,
     provider_label,
 };
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 struct IdentityRowState {
     provider: ProviderKind,
@@ -84,7 +84,7 @@ impl OrchestrateSettingsPanel {
             )
         });
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            observe_store_topics(&store, &[TopicKind::Settings], cx),
             cx.subscribe_in(
                 &identity_model_picker,
                 window,

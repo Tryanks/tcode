@@ -66,6 +66,36 @@ pub(crate) fn user_content(content: &EntryContent) -> Option<UserContent<'_>> {
     }
 }
 
+/// IDs whose message action rows stay visible without hover.
+pub(crate) fn latest_message_ids(
+    entries: &[Arc<TimelineEntry>],
+) -> (Option<String>, Option<String>) {
+    let mut last_user_id = None;
+    let mut last_assistant_id = None;
+    for entry in entries.iter().rev() {
+        if last_user_id.is_none()
+            && matches!(
+                entry.content,
+                EntryContent::Item(ItemContent::UserMessage { .. }) | EntryContent::Steer { .. }
+            )
+        {
+            last_user_id = Some(entry.id.clone());
+        }
+        if last_assistant_id.is_none()
+            && matches!(
+                entry.content,
+                EntryContent::Item(ItemContent::AssistantMessage { .. })
+            )
+        {
+            last_assistant_id = Some(entry.id.clone());
+        }
+        if last_user_id.is_some() && last_assistant_id.is_some() {
+            break;
+        }
+    }
+    (last_user_id, last_assistant_id)
+}
+
 /// Coalesce only adjacent activity entries, leaving messages and errors at
 /// their exact positions in the timeline.
 pub(crate) fn segment_entries<'a>(
@@ -1083,6 +1113,31 @@ mod tests {
 
     fn reasoning(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::Reasoning { text: text.into() })
+    }
+
+    #[test]
+    fn latest_message_ids_find_the_newest_user_and_assistant_entries() {
+        let entries = vec![
+            entry("user-old", user_item("old")),
+            entry("assistant-old", assistant("old")),
+            command("command"),
+            entry(
+                "steer-new",
+                EntryContent::Steer {
+                    text: "new".into(),
+                    status: SteeringStatus::Pending,
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            ),
+            entry("assistant-new", assistant("new")),
+            entry("reasoning", reasoning("later but not a message")),
+        ];
+
+        assert_eq!(
+            latest_message_ids(&entries),
+            (Some("steer-new".into()), Some("assistant-new".into()))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{App, Context, EventEmitter, Task};
+use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
@@ -33,6 +33,55 @@ mod intents;
 mod snapshots;
 
 pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, ShellPanelState};
+
+/// Payload-free topic discriminant used by views to subscribe only to the
+/// store projections they render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopicKind {
+    SessionEvents,
+    SessionStatus,
+    Index,
+    Settings,
+    Providers,
+    GitStatus,
+    RuntimeEvents,
+    ActiveSession,
+    Terminal,
+}
+
+impl From<&Topic> for TopicKind {
+    fn from(topic: &Topic) -> Self {
+        match topic {
+            Topic::SessionEvents { .. } => Self::SessionEvents,
+            Topic::SessionStatus { .. } => Self::SessionStatus,
+            Topic::Index => Self::Index,
+            Topic::Settings => Self::Settings,
+            Topic::Providers => Self::Providers,
+            Topic::GitStatus => Self::GitStatus,
+            Topic::RuntimeEvents => Self::RuntimeEvents,
+            Topic::ActiveSession => Self::ActiveSession,
+            Topic::Terminal { .. } => Self::Terminal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoreChange {
+    pub(crate) topic: TopicKind,
+}
+
+/// Observe selected store domains while keeping topic filtering out of views.
+pub(crate) fn observe_store_topics<V: 'static>(
+    store: &Entity<WorkspaceStore>,
+    topics: &'static [TopicKind],
+    cx: &mut Context<V>,
+) -> GpuiSubscription {
+    cx.subscribe(store, move |_, _, change: &StoreChange, cx| {
+        if topics.contains(&change.topic) {
+            cx.notify();
+        }
+    })
+}
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -179,6 +228,9 @@ impl WorkspaceStore {
                                 cx.emit(event.clone());
                             } else {
                                 store.apply_domain_event(&envelope);
+                                cx.emit(StoreChange {
+                                    topic: TopicKind::from(&envelope.topic),
+                                });
                             }
                             cx.notify();
                         })
@@ -472,6 +524,9 @@ impl WorkspaceStore {
                 cx.emit(event.clone());
             } else {
                 self.apply_domain_event(&envelope);
+                cx.emit(StoreChange {
+                    topic: TopicKind::from(&envelope.topic),
+                });
             }
             cx.notify();
         }
@@ -1533,6 +1588,7 @@ impl WorkspaceStore {
 }
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
+impl EventEmitter<StoreChange> for WorkspaceStore {}
 
 #[cfg(test)]
 mod tests {

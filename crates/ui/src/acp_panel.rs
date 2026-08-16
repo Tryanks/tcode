@@ -21,7 +21,7 @@ use tcode_core::acp::InstalledAcpAgent;
 use tcode_protocol::AcpMarketplaceItem;
 
 use crate::material;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
@@ -52,7 +52,7 @@ impl AcpAgentCard {
             input.set_value(format_env(&agent.env), window, cx);
             input
         });
-        let subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
+        let subscriptions = vec![observe_store_topics(&store, &[TopicKind::Settings], cx)];
         Self {
             store,
             agent_id: agent.id.clone(),
@@ -298,7 +298,7 @@ impl AcpPanel {
         };
         let search = input(&crate::tr!("providers.acp.search"), window, cx);
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            observe_store_topics(&store, &[TopicKind::Providers], cx),
             cx.observe(&search, |_, _, cx| cx.notify()),
         ];
         let panel = Self {

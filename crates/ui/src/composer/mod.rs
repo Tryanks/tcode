@@ -47,7 +47,7 @@ use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::ui::WorkspaceMode;
@@ -185,7 +185,17 @@ impl Composer {
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
             // skills feed arrives after session start, feeding the `/`+`$` menus).
-            cx.observe(&workspace_store, |_, _, cx| cx.notify()),
+            observe_store_topics(
+                &workspace_store,
+                &[
+                    TopicKind::ActiveSession,
+                    TopicKind::SessionStatus,
+                    TopicKind::SessionEvents,
+                    TopicKind::Settings,
+                    TopicKind::Providers,
+                ],
+                cx,
+            ),
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
                 match event {
                     InputEvent::PressEnter {
