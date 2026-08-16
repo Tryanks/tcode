@@ -75,10 +75,7 @@ pub fn work_log(
             expanded: false,
             running: false,
             rows: Vec::new(),
-            rows_expanded: false,
-            previous_logs_label: None,
         },
-        |_, _, _| {},
         |_, _, _| {},
         cx,
     )

@@ -47,9 +47,9 @@ use self::model::{
     ListSync, Segment, TurnListItem, TurnRenderArgs, activity_run_duration_ms, auto_expanded,
     displayed_error_text, divergent_served_model, format_compact_span, format_span, index_turns,
     list_sync, live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
-    previous_logs_toggle_label, segment_entries, start_hub_projects, timeline_overdraw,
-    user_content, user_visible_text, work_log_auto_expands, work_log_capsule_label,
-    work_log_counts, work_log_outcome, work_log_row_entries,
+    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
+    work_log_auto_expands, work_log_capsule_label, work_log_counts, work_log_outcome,
+    work_log_row_entries,
 };
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
@@ -58,8 +58,6 @@ pub(crate) use crate::material::{
 /// leading control clears the native macOS traffic lights (which end near x=72
 /// on macOS 26). Only applied on macOS: see `render_header`.
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
-/// How many activity rows to show before the "+N previous log entrys" expander.
-const WORKLOG_VISIBLE_ROWS: usize = 2;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
@@ -666,10 +664,11 @@ impl ChatView {
     ) -> AnyElement {
         let (index, segment_id, turn, cwd, activities, turn_counts, is_last) = args;
         let section_key = format!("worklog-{index}-{segment_id}");
-        let rows_key = format!("worklog-rows-{index}-{segment_id}");
         let running = is_last && turn.running;
         let automatic = work_log_auto_expands(activities, turn.running, is_last);
         let expanded = auto_expanded(&self.expanded, &section_key, automatic);
+        let manually_expanded =
+            expanded && (self.expanded.contains(&manual_override_key(&section_key)) || !automatic);
         let segment_counts = work_log_counts(activities);
         let counts = if is_last {
             turn_counts
@@ -685,18 +684,8 @@ impl ChatView {
         let outcome = work_log_outcome(turn, activities, is_last);
 
         let mut rows = Vec::new();
-        let mut rows_expanded = false;
-        let mut previous_logs_label = None;
         if expanded {
-            let display_activities = work_log_row_entries(activities, turn.running);
-            let total = display_activities.len();
-            rows_expanded = self.expanded.contains(&rows_key);
-            let hidden = total.saturating_sub(WORKLOG_VISIBLE_ROWS);
-            let visible: Vec<&TimelineEntry> = if rows_expanded || hidden == 0 {
-                display_activities
-            } else {
-                display_activities[total - WORKLOG_VISIBLE_ROWS..].to_vec()
-            };
+            let visible = work_log_row_entries(activities, turn.running, !manually_expanded);
 
             for entry in &visible {
                 if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content
@@ -720,11 +709,9 @@ impl ChatView {
                     rows.push(self.compose_activity_row(entry, false, live_reasoning, cx));
                 }
             }
-            previous_logs_label = previous_logs_toggle_label(hidden, rows_expanded);
         }
 
         let toggle_section_key = section_key;
-        let toggle_rows_key = rows_key;
         components::work_log::work_log(
             components::work_log::WorkLogData {
                 index,
@@ -735,14 +722,9 @@ impl ChatView {
                 expanded,
                 running,
                 rows,
-                rows_expanded,
-                previous_logs_label,
             },
             cx.listener(move |this, _, _, cx| {
                 this.toggle_auto_expanded(index, &toggle_section_key, automatic, cx);
-            }),
-            cx.listener(move |this, _, _, cx| {
-                this.toggle_expanded(index, &toggle_rows_key, cx);
             }),
             cx,
         )

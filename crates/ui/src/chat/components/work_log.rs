@@ -1,11 +1,7 @@
-use std::borrow::Cow;
 use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
+use crate::icon::{Icon, IconName};
 use agent::TurnStatus;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
@@ -36,8 +32,6 @@ pub(crate) struct WorkLogData {
     pub(crate) expanded: bool,
     pub(crate) running: bool,
     pub(crate) rows: Vec<AnyElement>,
-    pub(crate) rows_expanded: bool,
-    pub(crate) previous_logs_label: Option<Cow<'static, str>>,
 }
 
 /// One work log as a naked disclosure: a hugging header row, then the trace
@@ -45,7 +39,6 @@ pub(crate) struct WorkLogData {
 pub(crate) fn work_log(
     data: WorkLogData,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_toggle_rows: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let WorkLogData {
@@ -57,8 +50,6 @@ pub(crate) fn work_log(
         expanded,
         running,
         rows,
-        rows_expanded,
-        previous_logs_label,
     } = data;
     let muted = cx.theme().muted_foreground;
     let header = crate::material::accessible_clickable(
@@ -121,39 +112,7 @@ pub(crate) fn work_log(
 
     // Rows line up under the header label: 6px header padding + 12px chevron
     // + 6px gap, minus the 4px an activity row keeps for its hover pill.
-    let mut body = v_flex().w_full().gap_1().pl(px(20.));
-    // The fold hides *earlier* entries, so its switch belongs above them.
-    if let Some(toggle_label) = previous_logs_label {
-        body = body.child(
-            crate::material::accessible_clickable(
-                h_flex(),
-                SharedString::from(format!("worklog-more-{index}-{segment_id}")),
-                Role::Button,
-                toggle_label.clone(),
-                cx,
-            )
-            .aria_expanded(rows_expanded)
-            .self_start()
-            .gap_1()
-            .items_center()
-            .py_0p5()
-            .text_size(px(12.5))
-            .text_color(muted)
-            .cursor_pointer()
-            .hover(|style| style.text_color(cx.theme().foreground))
-            .on_click(on_toggle_rows)
-            .child(
-                Icon::new(if rows_expanded {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                })
-                .xsmall(),
-            )
-            .child(toggle_label),
-        );
-    }
-    body = body.children(rows);
+    let body = v_flex().w_full().gap_1().pl(px(20.)).children(rows);
 
     v_flex()
         .w_full()

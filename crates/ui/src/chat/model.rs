@@ -549,12 +549,15 @@ pub(crate) fn work_log_auto_expands(
 /// File edits are shown only while the turn is still running, so a live turn
 /// names the files it is touching. Once the turn finishes, the turn-level
 /// CHANGED FILES card is the sole per-file presentation and these rows drop out
-/// rather than duplicating it. Either way they still count toward the summary.
+/// rather than duplicating it. An automatically expanded live run is a two-row
+/// ticker; manual expansion returns every displayable row. Either way all
+/// activities still count toward the summary.
 pub(crate) fn work_log_row_entries<'a>(
     activities: &[&'a TimelineEntry],
     turn_running: bool,
+    automatic_expansion: bool,
 ) -> Vec<&'a TimelineEntry> {
-    activities
+    let rows: Vec<_> = activities
         .iter()
         .copied()
         .filter(|entry| {
@@ -564,7 +567,12 @@ pub(crate) fn work_log_row_entries<'a>(
                     EntryContent::Item(ItemContent::FileChange { .. })
                 )
         })
-        .collect()
+        .collect();
+    if automatic_expansion {
+        rows[rows.len().saturating_sub(2)..].to_vec()
+    } else {
+        rows
+    }
 }
 
 /// Format a unix-ms timestamp as a local 12-hour clock, e.g. "2:39 AM".
@@ -617,21 +625,6 @@ pub(crate) fn start_hub_projects(
     });
     projects.truncate(START_HUB_PROJECT_LIMIT);
     projects
-}
-
-/// Localized previous-log toggle. The label remains available while rows are
-/// expanded so the same control can collapse them again.
-pub(crate) fn previous_logs_toggle_label(
-    hidden: usize,
-    expanded: bool,
-) -> Option<Cow<'static, str>> {
-    (hidden > 0).then(|| {
-        if expanded {
-            crate::tr!("chat.hide_previous_logs", count = hidden)
-        } else {
-            crate::tr!("chat.previous_logs", count = hidden)
-        }
-    })
 }
 
 /// Pre-measure this many full-window heights on each side of the chat viewport.
@@ -1133,22 +1126,6 @@ mod tests {
         assert_eq!(timeline_overdraw(1440.), 5760.);
     }
 
-    #[test]
-    fn previous_log_rows_keep_their_toggle_after_expanding() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-
-        assert_eq!(previous_logs_toggle_label(0, false), None);
-        assert_eq!(
-            previous_logs_toggle_label(3, false).as_deref(),
-            Some("前面还有 3 条日志")
-        );
-        assert_eq!(
-            previous_logs_toggle_label(3, true).as_deref(),
-            Some("收起前面的 3 条日志")
-        );
-    }
-
     fn command(id: &str) -> Arc<TimelineEntry> {
         entry(
             id,
@@ -1608,11 +1585,12 @@ mod tests {
     }
 
     #[test]
-    fn work_log_rows_keep_file_changes_only_while_the_turn_runs() {
+    fn work_log_rows_use_a_ticker_only_for_automatic_live_expansion() {
         let entries = [
-            command("cargo test"),
+            command("cargo check"),
             file_change("edit", &["src/foo.rs"]),
-            command("cargo fmt"),
+            command("cargo test"),
+            command("cargo clippy"),
         ];
         let activities = refs(&entries);
         let ids = |rows: Vec<&TimelineEntry>| {
@@ -1622,12 +1600,16 @@ mod tests {
         };
 
         assert_eq!(
-            ids(work_log_row_entries(&activities, true)),
-            ["cargo test", "edit", "cargo fmt"]
+            ids(work_log_row_entries(&activities, true, true)),
+            ["cargo test", "cargo clippy"]
         );
         assert_eq!(
-            ids(work_log_row_entries(&activities, false)),
-            ["cargo test", "cargo fmt"]
+            ids(work_log_row_entries(&activities, true, false)),
+            ["cargo check", "edit", "cargo test", "cargo clippy"]
+        );
+        assert_eq!(
+            ids(work_log_row_entries(&activities, false, false)),
+            ["cargo check", "cargo test", "cargo clippy"]
         );
         // Filtering rows never touches the summary counts.
         assert_eq!(work_log_counts(&activities).files, 1);
