@@ -169,13 +169,11 @@ pub(crate) fn turn_time_footer(
             row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
         })
         .child(
-            // Flush to the content column's trailing edge: the turn's closing
-            // signature, not another left-aligned line of the flow.
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .flex_wrap()
-                .justify_end()
+                .justify_start()
                 .gap_x(px(4.))
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
