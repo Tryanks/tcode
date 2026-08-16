@@ -26,7 +26,6 @@ use gpui_base::{StyledExt as _, v_flex};
 use computer_use_mcp::permissions::{
     self, PermissionKind, PermissionStatus, open_settings_pane, relaunch_app, request,
 };
-use tcode_protocol::Command;
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
@@ -341,11 +340,8 @@ impl SettingsPage {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut settings = self.store.read(cx).settings();
-        mutate(&mut settings);
-        self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::UpdateSettings { settings })
-        });
+        self.store
+            .update(cx, |store, _cx| store.update_settings(mutate));
     }
 
     // -- left nav -----------------------------------------------------------
@@ -606,7 +602,7 @@ impl SettingsPage {
                 )
                 .on_ok(move |_, window, cx| {
                     store.update(cx, |store, _cx| {
-                        store.dispatch(Command::ResetSettings);
+                        store.reset_settings();
                     });
                     // The profile set may have changed; rebuild the rows.
                     page.update(cx, |page, cx| page.build_provider_cards(cx));
@@ -804,8 +800,8 @@ impl SettingsPage {
                 .tooltip(crate::tr!("providers.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.store.update(cx, |store, _cx| {
-                        store.dispatch(Command::RefreshProviderStatus);
-                        store.dispatch(Command::CheckProviderVersions);
+                        store.refresh_provider_status();
+                        store.check_provider_versions();
                     });
                 })),
         );
@@ -944,9 +940,7 @@ impl SettingsPage {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let id = id_unarchive.clone();
                                             this.store.update(cx, |store, _cx| {
-                                                store.dispatch(Command::UnarchiveSession {
-                                                    session_id: id,
-                                                });
+                                                store.unarchive_session(id);
                                             });
                                         })),
                                 )
@@ -1001,10 +995,7 @@ impl SettingsPage {
                 )
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
-                        store.dispatch(Command::DeleteSession {
-                            session_id: session_id.clone(),
-                            remove_worktree: false,
-                        });
+                        store.delete_session(session_id.clone(), false);
                     });
                     true
                 })
@@ -1284,9 +1275,7 @@ impl SettingsPage {
     /// macOS may quit tcode from its own "Quit & Reopen" dialog.
     fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::WriteRelaunchMarker {
-                reopen_settings: "computer_use".into(),
-            });
+            store.write_relaunch_marker("computer_use".into());
         });
         let _ = request(kind);
         open_settings_pane(kind);
@@ -1310,9 +1299,7 @@ impl SettingsPage {
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::WriteRelaunchMarker {
-                reopen_settings: "computer_use".into(),
-            });
+            store.write_relaunch_marker("computer_use".into());
         });
         if let Err(err) = relaunch_app() {
             log::warn!("failed to relaunch tcode: {err}");

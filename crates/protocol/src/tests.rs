@@ -261,7 +261,7 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::StartExternalImport { .. } => {}
         Command::FinishExternalImport { .. } => {}
         Command::ToggleProjectCollapsed { .. } => {}
-        Command::UpdateSettings { .. } => {}
+        Command::PatchSettings { .. } => {}
         Command::ArchiveSession { .. } => {}
         Command::UnarchiveSession { .. } => {}
         Command::AutoArchiveSweep { .. } => {}
@@ -424,8 +424,8 @@ fn every_command_and_query_crosses_ndjson() {
         Command::ToggleProjectCollapsed {
             project_id: "project-1".into(),
         },
-        Command::UpdateSettings {
-            settings: Settings::default(),
+        Command::PatchSettings {
+            patch: SettingsPatch::ThemeMode(tcode_core::settings::ThemeMode::Dark),
         },
         Command::ArchiveSession {
             session_id: "session-1".into(),

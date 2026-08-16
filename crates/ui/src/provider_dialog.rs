@@ -25,7 +25,6 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
-use tcode_protocol::Command;
 
 use crate::provider_models::{
     ResolvedModel, model_capability_label, slug_error_message, validate_slug,
@@ -254,9 +253,9 @@ impl ProviderDialog {
         let profile_id = self.profile_id.clone();
 
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::UpdateProfileSettings {
-                profile_id: profile_id.clone(),
-                patch: tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(Box::new(
+            store.update_profile_settings(
+                profile_id.clone(),
+                tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(Box::new(
                     tcode_core::settings::ProfileConfigurationPatch {
                         display_name,
                         accent_color: accent,
@@ -277,22 +276,14 @@ impl ProviderDialog {
                         hidden_models: hidden,
                     },
                 )),
-            });
+            );
             for (name, value) in secret_writes {
-                store.dispatch(Command::SetProfileSecret {
-                    profile_id: profile_id.clone(),
-                    name,
-                    value: Some(value),
-                });
+                store.set_profile_secret(profile_id.clone(), name, Some(value));
             }
             for name in clears {
-                store.dispatch(Command::SetProfileSecret {
-                    profile_id: profile_id.clone(),
-                    name,
-                    value: None,
-                });
+                store.set_profile_secret(profile_id.clone(), name, None);
             }
-            store.dispatch(Command::ReloadProvider);
+            store.reload_provider();
         });
     }
 
@@ -850,9 +841,7 @@ impl ProviderDialog {
                     })
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, _cx| {
-                            store.dispatch(Command::ToggleFavoriteModel {
-                                model: fav_id.clone(),
-                            });
+                            store.toggle_favorite_model(fav_id.clone());
                         });
                     }),
             )
@@ -951,9 +940,7 @@ pub fn render_footer(
                             )
                             .on_ok(move |_, window, cx| {
                                 delete_store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::DeleteProfile {
-                                        profile_id: delete_id.clone(),
-                                    });
+                                    store.delete_profile(delete_id.clone());
                                 });
                                 // Close the confirm and the underlying settings dialog.
                                 window.close_all_dialogs(cx);

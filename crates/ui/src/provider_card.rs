@@ -21,7 +21,6 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
-use tcode_protocol::Command;
 
 use crate::provider_dialog::ProviderDialog;
 use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
@@ -205,13 +204,13 @@ impl ProviderCard {
                         let checked = *checked;
                         let profile_id = this.profile_id.clone();
                         this.store.update(cx, |store, _cx| {
-                            store.dispatch(Command::UpdateProfileSettings {
+                            store.update_profile_settings(
                                 profile_id,
-                                patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
+                                tcode_core::settings::ProfileSettingsPatch::SetEnabled {
                                     enabled: checked,
                                 },
-                            });
-                            store.dispatch(Command::ReloadProvider);
+                            );
+                            store.reload_provider();
                         });
                     })),
             )
@@ -357,7 +356,7 @@ impl ProviderCard {
                                 let store = store.clone();
                                 move |_, _, cx| {
                                     store.update(cx, |store, _cx| {
-                                        store.dispatch(Command::UpdateProvider { provider });
+                                        store.update_provider(provider);
                                     });
                                 }
                             }),

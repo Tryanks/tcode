@@ -252,10 +252,7 @@ impl Composer {
     ) {
         self.approval_expanded = false;
         self.workspace_store.update(cx, |store, _cx| {
-            store.dispatch(Command::RespondApproval {
-                request_id,
-                decision,
-            })
+            store.respond_approval(request_id, decision)
         });
     }
 }

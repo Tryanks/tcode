@@ -633,7 +633,7 @@ fn dispatch_command(
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
-        Command::UpdateSettings { settings } => app.update_settings(settings, cx),
+        Command::PatchSettings { patch } => app.patch_settings(patch, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
         Command::AutoArchiveSweep { project_id } => {

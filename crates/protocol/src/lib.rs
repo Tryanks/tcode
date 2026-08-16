@@ -9,7 +9,7 @@ mod event;
 mod query;
 mod wire;
 
-pub use command::{Command, CommandResponse};
+pub use command::{Command, CommandResponse, SettingsPatch};
 pub use event::{
     AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
     ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,

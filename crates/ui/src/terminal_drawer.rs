@@ -38,10 +38,8 @@ use term::{
     },
 };
 
-use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
-use tcode_protocol::Command;
-
 use crate::{material, store::WorkspaceStore};
+use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 
 const FONT_SIZE: f32 = 13.;
 #[cfg(target_os = "macos")]
@@ -282,11 +280,6 @@ impl TerminalDrawer {
             .update(cx, |store, cx| store.set_terminal_height(height, cx));
     }
 
-    fn dispatch(&self, command: Command, cx: &mut Context<Self>) {
-        self.workspace_store
-            .update(cx, |store, _cx| store.dispatch(command));
-    }
-
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&term::Terminal)) {
         self.workspace_store
             .read(cx)
@@ -376,12 +369,8 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.dispatch(
-            Command::CaptureTerminalSelection {
-                terminal_id: action.0,
-            },
-            cx,
-        );
+        self.workspace_store
+            .update(cx, |store, _cx| store.capture_terminal_selection(action.0));
     }
 
     /// Keep one gpui-side drain task per live PTY. Terminal restarts retain the
@@ -979,7 +968,8 @@ impl TerminalDrawer {
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
-        self.dispatch(Command::ActivateTerminal { terminal_id }, cx);
+        self.workspace_store
+            .update(cx, |store, _cx| store.activate_terminal(terminal_id));
         let workspace_store = self.workspace_store.clone();
         let mut stop_propagation = false;
         #[cfg(target_os = "linux")]
@@ -1369,7 +1359,9 @@ impl TerminalDrawer {
                         .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.dispatch(Command::CaptureTerminalSelection { terminal_id }, cx);
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.capture_terminal_selection(terminal_id)
+                            });
                         })),
                 )
             })
@@ -1550,7 +1542,8 @@ impl Render for TerminalDrawer {
                     cx.theme().background.opacity(0.)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.dispatch(Command::ActivateTerminal { terminal_id: id }, cx);
+                    this.workspace_store
+                        .update(cx, |store, _cx| store.activate_terminal(id));
                 }))
                 .child(
                     div()
@@ -1608,7 +1601,8 @@ impl Render for TerminalDrawer {
                         .small()
                         .label(crate::tr!("terminal.restart"))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.dispatch(Command::RestartTerminal, cx);
+                            this.workspace_store
+                                .update(cx, |store, _cx| store.restart_terminal());
                         })),
                 )
             })
@@ -1632,12 +1626,9 @@ impl Render for TerminalDrawer {
                             .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.dispatch(
-                                    Command::SplitTerminal {
-                                        direction: TerminalSplitDirection::Horizontal,
-                                    },
-                                    cx,
-                                );
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.split_terminal(TerminalSplitDirection::Horizontal)
+                                });
                             });
                         }
                     })),
@@ -1662,12 +1653,9 @@ impl Render for TerminalDrawer {
                             .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.dispatch(
-                                    Command::SplitTerminal {
-                                        direction: TerminalSplitDirection::Vertical,
-                                    },
-                                    cx,
-                                );
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.split_terminal(TerminalSplitDirection::Vertical)
+                                });
                             });
                         }
                     })),
@@ -1696,7 +1684,8 @@ impl Render for TerminalDrawer {
                             .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.dispatch(Command::NewTerminal, cx);
+                                this.workspace_store
+                                    .update(cx, |store, _cx| store.new_terminal());
                             });
                         }
                     })),
