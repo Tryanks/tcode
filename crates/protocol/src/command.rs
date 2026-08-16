@@ -258,7 +258,6 @@ pub enum Command {
 /// Most mutations return [`CommandResponse::Unit`]. Keeping the few
 /// result-bearing operations on the command plane avoids disguising mutations
 /// as queries.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum CommandResponse {

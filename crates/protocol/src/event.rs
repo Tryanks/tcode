@@ -19,7 +19,6 @@ use tcode_core::{
 /// the protocol wire.
 pub type SessionEventRecord = StoredEvent;
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
@@ -49,7 +48,6 @@ pub struct EventEnvelope {
     pub event: ServerEvent,
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
@@ -223,7 +221,6 @@ pub struct IndexSnapshot {
 pub struct RuntimeSnapshot;
 
 /// Protocol-owned mirror of `tcode_runtime::event::RuntimeEvent`.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotification {
@@ -233,7 +230,6 @@ pub enum RuntimeNotification {
     Effect(RuntimeEffect),
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeEffect {

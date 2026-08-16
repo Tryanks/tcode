@@ -2,14 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanResolution, ProviderCommand,
-    ProviderKind, RewindMode, SessionCommand, SessionOptions, ThreadItem, TurnOptions, TurnStatus,
-    list_models, start_session,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
+    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanResolution,
+    ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionHandle, SessionOptions,
+    ThreadItem, TurnOptions, TurnStatus, list_models,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -90,6 +93,68 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::Pi,
     ProviderKind::OpenCode,
 ];
+
+type ProviderLaunchFuture =
+    Pin<Box<dyn Future<Output = Result<SessionHandle, AgentError>> + Send + 'static>>;
+
+/// Internal seam for starting a provider adapter.
+///
+/// Production uses [`agent::start_session`]; runtime tests install a scripted
+/// adapter while exercising the same command and event paths.
+#[derive(Clone)]
+pub struct ProviderLauncher(
+    Arc<dyn Fn(ProviderKind, SessionOptions) -> ProviderLaunchFuture + Send + Sync>,
+);
+
+impl ProviderLauncher {
+    fn launch(&self, provider: ProviderKind, options: SessionOptions) -> ProviderLaunchFuture {
+        (self.0)(provider, options)
+    }
+}
+
+impl Default for ProviderLauncher {
+    fn default() -> Self {
+        Self(Arc::new(|provider, options| {
+            Box::pin(agent::start_session(provider, options))
+        }))
+    }
+}
+
+/// Test-controlled provider adapter paired with its launcher.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScriptedProvider {
+    pub launcher: ProviderLauncher,
+    pub commands: smol::channel::Receiver<SessionCommand>,
+    pub events: smol::channel::Sender<AgentEvent>,
+}
+
+/// Build a provider launcher whose command and event channels are owned by the test.
+#[cfg(any(test, feature = "test-support"))]
+pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
+    let (commands_tx, commands) = smol::channel::unbounded();
+    let (events, events_rx) = smol::channel::unbounded();
+    let launcher = ProviderLauncher(Arc::new(move |requested, _options| {
+        let commands = commands_tx.clone();
+        let events = events_rx.clone();
+        Box::pin(async move {
+            if requested != provider {
+                return Err(AgentError::Protocol(format!(
+                    "scripted provider expected {provider:?}, got {requested:?}"
+                )));
+            }
+            Ok(SessionHandle {
+                provider,
+                commands,
+                events,
+            })
+        })
+    }));
+    ScriptedProvider {
+        launcher,
+        commands,
+        events,
+    }
+}
 
 fn normalize_terminal_context_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim_matches('\n').to_string()
@@ -265,6 +330,7 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
+    provider_launcher: ProviderLauncher,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
     /// failure to show when there is nothing cached to fall back on.
@@ -410,6 +476,7 @@ impl AppState {
             scheduler_generation: 0,
             resident_idle_grace: RESIDENT_IDLE_GRACE,
             ai_title_generation_enabled,
+            provider_launcher: ProviderLauncher::default(),
             acp_registry: None,
             acp_registry_loading: false,
             acp_registry_error: None,
@@ -443,6 +510,11 @@ impl AppState {
             provider_secret_names,
             pending_relaunch,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_provider_launcher_for_test(&mut self, launcher: ProviderLauncher) {
+        self.provider_launcher = launcher;
     }
 
     fn start_store_writer(&mut self, cx: &mut HostCx) {
@@ -555,7 +627,10 @@ impl AppState {
                 .or_default(),
             Topic::Providers => &mut self.providers_event_seq,
             Topic::GitStatus => &mut self.git_status_event_seq,
-            _ => unreachable!("replication slice does not emit this domain"),
+            Topic::ActiveSession | Topic::RuntimeEvents | Topic::Terminal { .. } => {
+                log::error!("attempted sequenced domain emission for unsequenced topic {topic:?}");
+                return;
+            }
         };
         *seq += 1;
         cx.emit(HostEvent::Domain(EventEnvelope {

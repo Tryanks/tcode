@@ -273,7 +273,6 @@ impl AppShell {
                 return;
             }
             RuntimeEvent::Toast(toast) => toast,
-            _ => return,
         };
 
         let presented = present_runtime_toast(toast);

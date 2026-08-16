@@ -5,6 +5,7 @@ use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 
 use crate::host::HostMsg;
+use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
 pub(super) struct TestStore(SessionStore);
 
@@ -39,6 +40,7 @@ pub(super) struct TestAppContext {
     mailbox_rx: smol::channel::Receiver<HostMsg>,
     outgoing_tx: smol::channel::Sender<String>,
     pub(super) outgoing_rx: smol::channel::Receiver<String>,
+    outgoing: Vec<String>,
     pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
     changed_tx: smol::channel::Sender<()>,
     changed_rx: smol::channel::Receiver<()>,
@@ -55,6 +57,7 @@ impl Default for TestAppContext {
             mailbox_rx,
             outgoing_tx,
             outgoing_rx,
+            outgoing: Vec::new(),
             pending: Arc::new(Mutex::new(HashMap::new())),
             changed_tx,
             changed_rx,
@@ -103,7 +106,8 @@ impl TestAppContext {
                     }
                 }
             }
-            while self.outgoing_rx.try_recv().is_ok() {
+            while let Ok(line) = self.outgoing_rx.try_recv() {
+                self.outgoing.push(line);
                 had_work = true;
             }
             while self.changed_rx.try_recv().is_ok() {
@@ -139,6 +143,18 @@ impl TestAppContext {
         panic!("test host failed to park within five seconds");
     }
 
+    /// Drain and decode every NDJSON line emitted by the host so tests assert
+    /// on the same serialized traffic consumed by production clients.
+    pub(super) fn drain_outgoing(&mut self) -> Vec<HostMessage> {
+        while let Ok(line) = self.outgoing_rx.try_recv() {
+            self.outgoing.push(line);
+        }
+        self.outgoing
+            .drain(..)
+            .map(|line| decode_host_line(&line).expect("decode outgoing host NDJSON"))
+            .collect()
+    }
+
     /// Push a `StoreWrite::Flush` barrier through the store-writer task and
     /// wait for its echo. Returns false when no writer is running.
     fn flush_store_writer(&self, state: &Rc<RefCell<AppState>>, deadline: Instant) -> bool {
@@ -166,6 +182,18 @@ impl TestAppContext {
 pub(super) struct TestEntity(Rc<RefCell<AppState>>);
 
 impl TestEntity {
+    pub(super) fn dispatch_command(&self, cx: &mut TestAppContext, id: u64, command: Command) {
+        let mut host_cx = cx.host_cx();
+        crate::pipe::handle_client_message_for_test(
+            &mut self.0.borrow_mut(),
+            &mut host_cx,
+            ClientMessage {
+                id,
+                payload: ClientPayload::Command(command),
+            },
+        );
+    }
+
     pub(super) fn host_update<R>(
         &self,
         cx: &mut TestAppContext,

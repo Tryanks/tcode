@@ -123,7 +123,6 @@ pub fn import_thread(
         SourceTool::CodexCli | SourceTool::CodexDesktop => {
             codex::convert(&thread.file, &thread.external_id)
         }
-        _ => claude::convert(&thread.file, &thread.external_id),
     };
     let converted = match converted {
         Ok(Some(converted)) => converted,

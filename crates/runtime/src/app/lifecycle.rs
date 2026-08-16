@@ -117,6 +117,7 @@ impl AppState {
         };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let computer_use_registration = self.computer_use_registration.clone();
+        let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
             log::info!(
@@ -143,7 +144,7 @@ impl AppState {
                 orchestrate_registration,
                 computer_use_registration,
             );
-            let result = start_session(meta.provider, opts).await;
+            let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
                 let matches_active = state.active.as_ref().is_some_and(|active| {
                     active.meta.id == session_id && active.is_starting_generation(generation)
