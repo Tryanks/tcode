@@ -103,6 +103,43 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
         .into_any_element()
 }
 
+/// A running turn's liveness, bare in the flow after every segment: the pixel
+/// grid, the shimmer label, the timer, and the served-model warning. It belongs
+/// to the turn, not to any disclosure, so no fold can hide it.
+pub(crate) fn turn_working_indicator(
+    turn: usize,
+    started_at: Option<u64>,
+    served_model: Option<String>,
+    cx: &App,
+) -> AnyElement {
+    h_flex()
+        .gap_2()
+        .items_center()
+        .text_size(px(12.5))
+        .text_color(cx.theme().muted_foreground)
+        .child(working_indicator(
+            SharedString::from(format!("working-{turn}")),
+            started_at,
+            cx,
+        ))
+        .when_some(served_model, |row, served| {
+            let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
+            row.child(
+                h_flex()
+                    .id(SharedString::from(format!("served-model-{turn}")))
+                    .gap_1()
+                    .items_center()
+                    .text_color(cx.theme().warning)
+                    .child(
+                        crate::icon::Icon::new(crate::icon::IconName::TriangleAlert).size(px(12.)),
+                    )
+                    .child(served)
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
+            )
+        })
+        .into_any_element()
+}
+
 /// A finished turn's quiet mono timing row.
 pub(crate) fn turn_time_footer(
     id: SharedString,
@@ -126,10 +163,13 @@ pub(crate) fn turn_time_footer(
             row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
         })
         .child(
+            // Flush to the content column's trailing edge: the turn's closing
+            // signature, not another left-aligned line of the flow.
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .flex_wrap()
+                .justify_end()
                 .gap_x(px(4.))
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
@@ -244,8 +284,8 @@ mod tests {
         }
 
         // Opening the diff panel squeezes the chat column; sweep well below any
-        // practical width. Every clause must stay inside the row and hang under
-        // the clock instead of spilling past the divider.
+        // practical width. Every clause must stay inside the row, and the row
+        // must stay a signature: its final clause flush to the trailing edge.
         for width in 260..=900 {
             cx.simulate_resize(size(px(width as f32), px(120.)));
             draw(cx);
@@ -258,14 +298,18 @@ mod tests {
                     "{selector} escaped the row at {width}px: row={row:?}, clause={clause:?}"
                 );
                 assert!(
-                    clause.left() >= first.left(),
-                    "{selector} broke the hanging indent at {width}px: {clause:?}"
-                );
-                assert!(
                     clause.size.width > px(0.) && clause.size.height > px(0.),
                     "{selector} was squeezed away at {width}px: {clause:?}"
                 );
             }
+            let last_clause = cx
+                .debug_bounds(selectors[selectors.len() - 1])
+                .expect("clause bounds");
+            assert!(
+                (last_clause.right() - row.right()).abs() <= px(0.5),
+                "the footer left the trailing edge at {width}px: \
+                 row={row:?}, clause={last_clause:?}"
+            );
         }
     }
 }

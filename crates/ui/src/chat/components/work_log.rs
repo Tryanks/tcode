@@ -2,8 +2,6 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
-use crate::widgets::spinner::Spinner;
-use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -17,7 +15,6 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use super::super::model::WorkLogCounts;
-use super::indicator;
 use tcode_core::session::{TimelineEntry, TurnMeta};
 
 pub(crate) type WorkLogArgs<'a> = (
@@ -41,8 +38,6 @@ pub(crate) struct WorkLogData {
     pub(crate) rows: Vec<AnyElement>,
     pub(crate) rows_expanded: bool,
     pub(crate) previous_logs_label: Option<Cow<'static, str>>,
-    pub(crate) started_at: Option<u64>,
-    pub(crate) served_model: Option<String>,
 }
 
 /// One work log as a naked disclosure: a hugging header row, then the trace
@@ -64,13 +59,8 @@ pub(crate) fn work_log(
         rows,
         rows_expanded,
         previous_logs_label,
-        started_at,
-        served_model,
     } = data;
     let muted = cx.theme().muted_foreground;
-    // One animation locus at a time: while the body is open the working
-    // indicator carries the motion, so the header only spins when folded.
-    let header_spinner = running && !expanded;
     let header = crate::material::accessible_clickable(
         h_flex(),
         SharedString::from(format!("worklog-header-{index}-{segment_id}")),
@@ -123,9 +113,6 @@ pub(crate) fn work_log(
                 .text_size(px(11.))
                 .child(duration),
         )
-    })
-    .when(header_spinner, |row| {
-        row.child(Spinner::new().xsmall().color(cx.theme().primary))
     });
 
     // Rows line up under the header label: 6px header padding + 12px chevron
@@ -163,38 +150,6 @@ pub(crate) fn work_log(
         );
     }
     body = body.children(rows);
-
-    if running {
-        body = body.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .text_size(px(12.5))
-                .text_color(muted)
-                .child(indicator::working_indicator(
-                    SharedString::from(format!("working-{index}-{segment_id}")),
-                    started_at,
-                    cx,
-                ))
-                .when_some(served_model, |row, served| {
-                    let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
-                    row.child(
-                        h_flex()
-                            .id(SharedString::from(format!(
-                                "served-model-{index}-{segment_id}"
-                            )))
-                            .gap_1()
-                            .items_center()
-                            .text_color(cx.theme().warning)
-                            .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
-                            .child(served)
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(tooltip.clone()).build(window, cx)
-                            }),
-                    )
-                }),
-        );
-    }
 
     v_flex()
         .w_full()

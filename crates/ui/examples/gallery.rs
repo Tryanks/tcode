@@ -258,6 +258,7 @@ impl Render for Gallery {
                         "gallery-s07-assistant-markdown",
                         self.markdown.clone(),
                         cwd,
+                        cx,
                     ),
                     cx,
                 )]),

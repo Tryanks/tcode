@@ -46,7 +46,7 @@ use self::components::assistant::MdState;
 use self::model::{
     ListSync, Segment, TurnListItem, TurnRenderArgs, activity_run_duration_ms, auto_expanded,
     displayed_error_text, divergent_served_model, format_compact_span, format_span, index_turns,
-    list_sync, live_edit_rows, manual_override_key, plain_text_as_markdown,
+    list_sync, live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
     previous_logs_toggle_label, segment_entries, start_hub_projects, timeline_overdraw,
     user_content, user_visible_text, work_log_auto_expands, work_log_capsule_label,
     work_log_counts, work_log_outcome, work_log_row_entries,
@@ -62,7 +62,7 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 const WORKLOG_VISIBLE_ROWS: usize = 2;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
-const TURN_GAP: f32 = 24.;
+const TURN_GAP: f32 = 32.;
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -280,15 +280,7 @@ impl ChatView {
         let segments = &segmented.flow;
         let turn_entries: Vec<&TimelineEntry> = entries.iter().map(AsRef::as_ref).collect();
         let turn_counts = work_log_counts(&turn_entries);
-        let last_segment_is_activity = matches!(segments.last(), Some(Segment::ActivityRun(_)));
-        let append_tail_work_log = turn.running && !last_segment_is_activity;
-        let last_activity_segment = (!append_tail_work_log)
-            .then(|| {
-                segments
-                    .iter()
-                    .rposition(|segment| matches!(segment, Segment::ActivityRun(_)))
-            })
-            .flatten();
+        let last_activity_segment = live_activity_segment(segments, turn.running);
 
         for (segment_index, segment) in segments.iter().enumerate() {
             match segment {
@@ -391,6 +383,7 @@ impl ChatView {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
                             this.mark_copied(mark.clone(), cx);
                         }),
+                        cx,
                     ));
                 }
                 Segment::Error(entry) => {
@@ -411,16 +404,6 @@ impl ChatView {
                     ));
                 }
             }
-        }
-
-        if append_tail_work_log {
-            let segment_id = entries
-                .last()
-                .map(|entry| format!("tail-{}", entry.id))
-                .unwrap_or_else(|| "tail".to_string());
-            column = column.child(
-                self.compose_work_log((index, &segment_id, turn, cwd, &[], &turn_counts, true), cx),
-            );
         }
 
         // Proposed-plan card (the captured plan for this turn).
@@ -486,10 +469,21 @@ impl ChatView {
             ));
         }
 
-        // 5. Turn timestamp row (finished turns with a known end time).
-        if !turn.running
-            && let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts))
-        {
+        // The turn's liveness, bare after everything it produced: no fold can
+        // reach it, so collapsing the last disclosure never hides that we work.
+        if turn.running {
+            let requested_model = self.workspace_store.read(cx).chat_requested_model();
+            let served_model =
+                divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
+                    .map(str::to_owned);
+            column = column.child(components::indicator::turn_working_indicator(
+                index,
+                turn.start_ts,
+                served_model,
+                cx,
+            ));
+        } else if let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts)) {
+            // 5. Turn timestamp row (finished turns with a known end time).
             let requested_model = self.workspace_store.read(cx).chat_requested_model();
             column = column.child(components::indicator::finished_turn_time(
                 ts,
@@ -561,6 +555,7 @@ impl ChatView {
                         conversation: rewind_handler(RewindMode::Conversation),
                         files: rewind_handler(RewindMode::Files),
                     },
+                    cx,
                 )
             })
             .flatten();
@@ -735,13 +730,6 @@ impl ChatView {
             previous_logs_label = previous_logs_toggle_label(hidden, rows_expanded);
         }
 
-        let served_model = if running {
-            let requested_model = self.workspace_store.read(cx).chat_requested_model();
-            divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
-                .map(str::to_owned)
-        } else {
-            None
-        };
         let toggle_section_key = section_key;
         let toggle_rows_key = rows_key;
         components::work_log::work_log(
@@ -756,8 +744,6 @@ impl ChatView {
                 rows,
                 rows_expanded,
                 previous_logs_label,
-                started_at: turn.start_ts,
-                served_model,
             },
             cx.listener(move |this, _, _, cx| {
                 this.toggle_auto_expanded(index, &toggle_section_key, automatic, cx);

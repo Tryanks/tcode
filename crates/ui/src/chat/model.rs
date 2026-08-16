@@ -134,6 +134,19 @@ pub(crate) fn segment_entries<'a>(
     }
 }
 
+/// Which segment, if any, is the turn's *live* work log — the one that opens on
+/// its own and reports the turn's totals.
+///
+/// A running turn whose last segment is prose has none: liveness is carried by
+/// the turn-level working indicator standing bare after every segment, so every
+/// run is already settled. Nothing is appended to host the indicator.
+pub(crate) fn live_activity_segment(segments: &[Segment<'_>], turn_running: bool) -> Option<usize> {
+    let last = segments
+        .iter()
+        .rposition(|segment| matches!(segment, Segment::ActivityRun(_)))?;
+    (!turn_running || last + 1 == segments.len()).then_some(last)
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct WorkLogCounts {
     pub(crate) commands: usize,
@@ -1459,6 +1472,26 @@ mod tests {
             [Segment::ActivityRun(run), Segment::Assistant(entry)]
                 if run.len() == 1 && run[0].id == "reason" && entry.id == "assistant"
         ));
+    }
+
+    #[test]
+    fn only_a_trailing_activity_run_is_live_in_a_running_turn() {
+        let prose_tail = [command("cmd"), entry("assistant", assistant("answer"))];
+        let segments = segment_entries(&prose_tail, true).flow;
+        // Prose, then the bare turn-level indicator: no empty run is invented
+        // to host it, and the earlier run has already settled.
+        assert_eq!(segments.len(), 2);
+        assert_eq!(live_activity_segment(&segments, true), None);
+        // Once the turn ends, that same run carries the turn's snapshot.
+        assert_eq!(live_activity_segment(&segments, false), Some(0));
+
+        let activity_tail = [entry("assistant", assistant("answer")), command("cmd")];
+        let segments = segment_entries(&activity_tail, true).flow;
+        assert_eq!(live_activity_segment(&segments, true), Some(1));
+
+        let prose_only = [entry("assistant", assistant("answer"))];
+        let segments = segment_entries(&prose_only, true).flow;
+        assert_eq!(live_activity_segment(&segments, true), None);
     }
 
     #[test]

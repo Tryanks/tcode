@@ -52,7 +52,9 @@ pub(crate) fn callback_row(
     )
 }
 
-/// A centered disclosure row with a height-capped verbatim body.
+/// A naked disclosure row with a height-capped verbatim body: a hugging,
+/// left-aligned header led by a chevron, so it reads as an expandable row of
+/// the flow rather than an ambient divider.
 pub(crate) fn disclosure(
     key: &str,
     label: SharedString,
@@ -70,20 +72,21 @@ pub(crate) fn disclosure(
         cx,
     )
     .aria_expanded(expanded)
-    .gap_1()
+    .self_start()
+    .h(px(28.))
+    .px_1p5()
+    .gap_1p5()
     .items_center()
-    .px_2()
-    .py_0p5()
-    .rounded(px(8.))
-    .text_size(px(13.))
+    .rounded(crate::material::radius_button())
+    .text_size(px(12.5))
     .text_color(muted)
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
-    .child(label)
-    .child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
+    .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
+    .child(label);
 
-    let mut block = v_flex().w_full().items_center().gap_1().child(row);
+    let mut block = v_flex().w_full().gap_1().child(row);
     if expanded {
         block = block.child(disclosure_body(key, full_text, cx));
     }

@@ -49,6 +49,7 @@ pub struct MarkdownView {
     state: Entity<MarkdownState>,
     style: StyleRefinement,
     selectable: Option<bool>,
+    compact_headings: Option<bool>,
     base_dir: Option<PathBuf>,
 }
 
@@ -60,8 +61,16 @@ impl MarkdownView {
             state: state.clone(),
             style: StyleRefinement::default(),
             selectable: None,
+            compact_headings: None,
             base_dir: None,
         }
+    }
+
+    /// Render headings at chat scale (h1 17px / h2 15px / h3+ 13.5px) instead
+    /// of document scale.
+    pub fn compact_headings(mut self, compact: bool) -> Self {
+        self.compact_headings = Some(compact);
+        self
     }
 
     /// Set whether text participates in window-level selection.
@@ -114,6 +123,9 @@ impl Element for MarkdownView {
         state.update(cx, |state, cx| {
             if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
+            }
+            if let Some(compact) = self.compact_headings {
+                state.set_compact_headings(compact, cx);
             }
             if let Some(base_dir) = &self.base_dir {
                 state.set_base_dir(Some(base_dir.clone()), cx);

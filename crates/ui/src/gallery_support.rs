@@ -77,8 +77,6 @@ pub fn work_log(
             rows: Vec::new(),
             rows_expanded: false,
             previous_logs_label: None,
-            started_at: None,
-            served_model: None,
         },
         |_, _, _| {},
         |_, _, _| {},
@@ -127,7 +125,7 @@ pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App)
     )
 }
 
-pub fn assistant(id: &str, markdown: Entity<MarkdownState>, cwd: &Path) -> AnyElement {
+pub fn assistant(id: &str, markdown: Entity<MarkdownState>, cwd: &Path, cx: &App) -> AnyElement {
     assistant::assistant(
         assistant::AssistantData {
             id,
@@ -139,6 +137,7 @@ pub fn assistant(id: &str, markdown: Entity<MarkdownState>, cwd: &Path) -> AnyEl
             copied: false,
         },
         |_, _, _| {},
+        cx,
     )
 }
 

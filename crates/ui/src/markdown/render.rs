@@ -385,7 +385,16 @@ fn render_block(
                 6 => (1., FontWeight::MEDIUM),
                 _ => (1., FontWeight::NORMAL),
             };
-            let size = HEADING_BASE_FONT_SIZE * scale;
+            // In a chat message a heading is a section label, not a title page.
+            let size = if state.read(cx).compact_headings {
+                match level {
+                    1 => px(17.),
+                    2 => px(15.),
+                    _ => px(13.5),
+                }
+            } else {
+                HEADING_BASE_FONT_SIZE * scale
+            };
             div()
                 .id(options.path.clone())
                 .pb(rems(0.3))

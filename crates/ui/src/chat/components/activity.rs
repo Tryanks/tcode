@@ -45,8 +45,10 @@ pub(crate) fn activity_row(
                 color: Some(muted.opacity(0.45)),
                 ..Default::default()
             };
+            // Same scheme as a tool row: the primary word is the thing's own
+            // identity — the binary here, the tool name there — never a verb.
             let summary = activity_summary(
-                crate::tr!("chat.command_run").into_owned(),
+                binary_name(command),
                 Some(
                     StyledText::new(preview)
                         .with_highlights(breaks.into_iter().map(|range| (range, marker_style)))
@@ -231,6 +233,16 @@ fn activity_summary(
             )
         })
         .into_any_element()
+}
+
+/// The command's first token, which is what a reader scans for. Falls back to
+/// the whole (whitespace-only) command so the row is never left wordless.
+fn binary_name(command: &str) -> String {
+    command
+        .split_whitespace()
+        .next()
+        .unwrap_or(command)
+        .to_string()
 }
 
 fn argument(text: String) -> Option<AnyElement> {

@@ -24,6 +24,7 @@ pub struct MarkdownState {
     pub(super) entity_id: EntityId,
     pub(super) bounds: Bounds<Pixels>,
     pub(super) selectable: bool,
+    pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) pending_context_link: Option<PendingLinkMenu>,
     pub(super) is_selecting: bool,
@@ -46,6 +47,7 @@ impl MarkdownState {
             entity_id: cx.entity_id(),
             bounds: Bounds::default(),
             selectable: false,
+            compact_headings: false,
             base_dir: None,
             pending_context_link: None,
             is_selecting: false,
@@ -121,6 +123,16 @@ impl MarkdownState {
             self.reset_selection();
             window_selection::clear_selection_for_view(self.entity_id, cx);
         }
+        cx.notify();
+    }
+
+    /// Scale headings for a chat message instead of a document. Document scale
+    /// (h1 at 2× body) dwarfs a timeline; chat scale keeps them in the flow.
+    pub fn set_compact_headings(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact_headings == compact {
+            return;
+        }
+        self.compact_headings = compact;
         cx.notify();
     }
 

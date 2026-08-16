@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -59,22 +58,25 @@ pub(crate) fn native_rewind_button(
     turn: usize,
     state: Option<(bool, bool)>,
     handlers: RewindHandlers,
+    cx: &App,
 ) -> Option<AnyElement> {
     let (available, disabled) = state?;
     if !available {
         return None;
     }
 
-    let trigger = Button::new(SharedString::from(format!("rewind-{turn}")))
-        .ghost()
-        .xsmall()
-        .icon(IconName::Undo)
-        .tooltip(if disabled {
-            crate::tr!("chat.rewind_blocked")
+    // Same 24px icon-only geometry as Copy: one row, one button shape.
+    let trigger = assistant::action_button(
+        SharedString::from(format!("rewind-{turn}")),
+        IconName::Undo,
+        if disabled {
+            crate::tr!("chat.rewind_blocked").into_owned()
         } else {
-            crate::tr!("chat.rewind")
-        })
-        .disabled(disabled);
+            crate::tr!("chat.rewind").into_owned()
+        },
+        cx,
+    )
+    .disabled(disabled);
     Some(
         crate::material::overlay_popover(("rewind-menu", turn))
             .anchor(Anchor::TopRight)
@@ -172,12 +174,13 @@ pub(crate) fn user_bubble(
     });
 
     let group_key = SharedString::from(format!("user-{entry_id}"));
-    let mut actions = h_flex().gap_1().items_center().justify_end();
+    let mut actions = h_flex().gap(px(2.)).items_center().justify_end();
     if !visible.trim().is_empty() {
         actions = actions.child(assistant::copy_button(
             &format!("user:{entry_id}"),
             copied,
             copy,
+            cx,
         ));
     }
     if let Some(rewind) = rewind {
@@ -218,6 +221,7 @@ pub(crate) fn user_bubble(
         |markdown| {
             MarkdownView::new(&markdown)
                 .selectable(true)
+                .compact_headings(true)
                 .base_dir(cwd)
                 .into_any_element()
         },
@@ -228,15 +232,18 @@ pub(crate) fn user_bubble(
         .items_end()
         .gap(px(2.))
         .when_some(steering, |column, steering| {
+            // Flush against the bubble's top-trailing corner: chip and bubble
+            // read as one unit instead of a label floating above a message.
             column.child(
                 div()
-                    .h(px(22.))
-                    .px_2()
+                    .h(px(18.))
+                    .px(px(6.))
+                    .mb(px(-2.))
                     .flex()
                     .items_center()
-                    .rounded_full()
+                    .rounded(crate::material::radius_chip())
                     .bg(cx.theme().muted)
-                    .text_size(px(11.5))
+                    .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(match steering {
                         SteeringStatus::Pending => crate::tr!("chat.steering"),
