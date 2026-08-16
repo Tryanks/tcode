@@ -56,14 +56,16 @@ pub(crate) fn subagent_row(
             .xsmall()
             .color(cx.theme().primary)
             .into_any_element(),
+        // The row is a surface, not a trace, so its outcome may carry color:
+        // green settled, red failed — the task-row badge pair.
         ItemStatus::Completed => h_flex()
             .h(px(22.))
             .px_2()
             .gap_1()
             .items_center()
             .rounded(crate::material::radius_chip())
-            .bg(cx.theme().muted)
-            .text_color(muted)
+            .bg(cx.theme().success.opacity(0.12))
+            .text_color(cx.theme().success)
             .text_size(px(11.5))
             .child(Icon::new(IconName::Check).size(px(12.)))
             .child(crate::tr!("chat.subagent_completed"))
@@ -78,7 +80,7 @@ pub(crate) fn subagent_row(
             .text_color(cx.theme().danger)
             .text_size(px(11.5))
             .child(
-                Icon::new(IconName::Redo2)
+                Icon::new(IconName::CircleX)
                     .size(px(12.))
                     .text_color(cx.theme().danger),
             )
@@ -145,12 +147,13 @@ pub(crate) fn subagent_row(
 
     let mut block = v_flex().w_full().gap_1().child(row);
     if expanded {
+        // The same hairline rail the activity drill-downs hang on.
         let mut nested = v_flex()
             .w_full()
             .gap_1()
             .ml_2()
-            .pl_3()
-            .py_1()
+            .pl(px(14.))
+            .py_0p5()
             .border_l_1()
             .border_color(cx.theme().border);
         if truncated {

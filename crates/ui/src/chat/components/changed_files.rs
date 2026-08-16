@@ -1,16 +1,13 @@
 use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
+use crate::widgets::tooltip::Tooltip;
+use crate::icon::{Icon, IconName};
 use agent::{ChangeCompleteness, FileChange};
 use gpui::{
-    AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -30,7 +27,8 @@ pub(crate) struct ChangedFilesHandlers {
     pub(crate) open_files: Vec<ClickHandler>,
 }
 
-/// The CHANGED FILES card: header with totals + file chips.
+/// The changed-file evidence: a quiet header line and a chip row, sitting bare
+/// in the flow under a hairline that separates it from the trace above.
 pub(crate) fn changed_files(
     index: usize,
     cwd: &Path,
@@ -65,7 +63,6 @@ pub(crate) fn changed_files(
     let header = h_flex()
         .w_full()
         .px_1()
-        .py_1()
         .gap_2()
         .items_center()
         .child(
@@ -74,7 +71,7 @@ pub(crate) fn changed_files(
                 .min_w_0()
                 .gap_1p5()
                 .items_center()
-                .text_size(px(11.))
+                .text_size(px(11.5))
                 .font_medium()
                 .text_color(muted)
                 .child(crate::tr!("chat.changed_files", count = changes.len()))
@@ -93,27 +90,32 @@ pub(crate) fn changed_files(
                         .child(format!("-{total_del}")),
                 ),
         )
-        .child(
-            Button::new(("collapse-all", index))
-                .ghost()
-                .xsmall()
-                .label(if collapsed {
-                    crate::tr!("chat.expand_all")
-                } else {
-                    crate::tr!("chat.collapse_all")
-                })
-                .on_click(toggle_collapsed),
-        )
-        .child(
-            Button::new(("view-diff", index))
-                .outline()
-                .xsmall()
-                .label(crate::tr!("chat.view_diff"))
-                .tooltip(crate::tr!("chat.view_diff_tooltip"))
-                .on_click(view_diff),
-        );
+        .child(quiet_control(
+            ("collapse-all", index),
+            if collapsed {
+                crate::tr!("chat.expand_all")
+            } else {
+                crate::tr!("chat.collapse_all")
+            }
+            .into_owned()
+            .into(),
+            toggle_collapsed,
+            cx,
+        ))
+        .child({
+            let tooltip = crate::tr!("chat.view_diff_tooltip").into_owned();
+            quiet_control(
+                ("view-diff", index),
+                crate::tr!("chat.view_diff").into_owned().into(),
+                view_diff,
+                cx,
+            )
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        });
 
-    let mut content = v_flex().w_full().child(header);
+    // Whitespace and the quiet header are separation enough; a full-width
+    // rule here reads as a section divider, not evidence grouping.
+    let mut content = v_flex().w_full().gap_1p5().pt(px(2.)).child(header);
 
     if !collapsed {
         let visible = if show_all {
@@ -121,7 +123,7 @@ pub(crate) fn changed_files(
         } else {
             changes.len().min(3)
         };
-        let mut body = h_flex().w_full().px_1().pb_1().gap_1p5().flex_wrap();
+        let mut body = h_flex().w_full().px_1().gap_1p5().flex_wrap();
         for (file_index, (change, on_click)) in
             changes.iter().zip(open_files).take(visible).enumerate()
         {
@@ -168,34 +170,48 @@ pub(crate) fn changed_files(
         if changes.len() > 3 {
             let hidden = changes.len() - 3;
             body = body.child(
-                crate::material::accessible_clickable(
-                    h_flex(),
+                quiet_control(
                     ("changed-files-more", index),
-                    Role::Button,
-                    crate::tr!("chat.more_files", count = hidden),
+                    if show_all {
+                        crate::tr!("chat.show_fewer_files")
+                    } else {
+                        crate::tr!("chat.more_files", count = hidden)
+                    }
+                    .into_owned()
+                    .into(),
+                    toggle_more,
                     cx,
                 )
-                .h(px(22.))
-                .px_2()
-                .items_center()
-                .rounded(crate::material::radius_chip())
-                .text_size(px(11.5))
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_color(muted)
-                .cursor_pointer()
-                .hover(|chip| chip.bg(cx.theme().accent))
-                .on_click(toggle_more)
-                .child(if show_all {
-                    crate::tr!("chat.show_fewer_files")
-                } else {
-                    crate::tr!("chat.more_files", count = hidden)
-                }),
+                .font_family(cx.theme().mono_font_family.clone()),
             );
         }
         content = content.child(body);
     }
 
     content.into_any_element()
+}
+
+/// A quiet text control in the chip row: no fill, no border, muted until it is
+/// hovered. Every switch next to the file chips wears this, so none of them
+/// competes with the chips for the eye.
+fn quiet_control(
+    id: impl Into<ElementId>,
+    label: SharedString,
+    on_click: ClickHandler,
+    cx: &App,
+) -> Stateful<Div> {
+    let foreground = cx.theme().foreground;
+    crate::material::accessible_clickable(h_flex(), id, Role::Button, label.clone(), cx)
+        .h(px(22.))
+        .px_1p5()
+        .items_center()
+        .rounded(crate::material::radius_chip())
+        .text_size(px(11.5))
+        .text_color(cx.theme().muted_foreground)
+        .cursor_pointer()
+        .hover(move |control| control.text_color(foreground))
+        .on_click(on_click)
+        .child(label)
 }
 
 /// The `+N -N` pair, `flex_none` so it never gives ground to a long path.
