@@ -5,10 +5,10 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Hsla, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
-    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
+    div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::h_flex;
+use gpui_base::{StyledExt as _, h_flex};
 
 use super::super::model::{
     TurnTimeClause, format_elapsed_deciseconds, format_local_time, turn_time_breakdown,
@@ -18,26 +18,41 @@ use crate::time::now_millis;
 use tcode_core::session::TurnMeta;
 
 pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App) -> AnyElement {
-    let quiet = cx.theme().muted_foreground.opacity(0.08);
-    let bright = cx.theme().foreground.opacity(0.18);
-    div()
-        .px_2()
-        .py(px(1.))
-        .rounded(crate::material::radius_chip())
+    let muted = cx.theme().muted_foreground;
+    let foreground = cx.theme().foreground;
+    let char_starts = label
+        .char_indices()
+        .map(|(start, _)| start)
+        .collect::<Vec<_>>();
+    let char_count = char_starts.len().max(1) as f32;
+
+    h_flex()
+        .gap(px(0.))
         .text_size(px(13.))
-        .text_color(cx.theme().foreground)
-        .child(label)
-        .with_animation(
-            id,
-            Animation::new(Duration::from_millis(1400)).repeat(),
-            move |element, delta| {
-                element.bg(linear_gradient(
-                    90.,
-                    linear_color_stop(quiet, (delta - 0.3).clamp(0., 1.)),
-                    linear_color_stop(bright, delta.clamp(0., 1.)),
-                ))
-            },
-        )
+        .line_height(px(18.))
+        .font_medium()
+        .children(char_starts.iter().enumerate().map(|(index, &start)| {
+            let end = char_starts.get(index + 1).copied().unwrap_or(label.len());
+            let glyph = SharedString::from(label[start..end].to_owned());
+            let animation_id = SharedString::from(format!("{id}-glyph-{index}"));
+            let position = (index as f32 + 0.5) / char_count;
+
+            div().child(StyledText::new(glyph)).with_animation(
+                animation_id,
+                Animation::new(Duration::from_millis(1400)).repeat(),
+                move |element, delta| {
+                    // Enter and leave outside the text so every glyph returns to muted.
+                    let center = -0.15 + delta * 1.3;
+                    let intensity = (1. - (position - center).abs() / 0.15).clamp(0., 1.);
+                    element.text_color(Hsla {
+                        h: muted.h + (foreground.h - muted.h) * intensity,
+                        s: muted.s + (foreground.s - muted.s) * intensity,
+                        l: muted.l + (foreground.l - muted.l) * intensity,
+                        a: muted.a + (foreground.a - muted.a) * intensity,
+                    })
+                },
+            )
+        }))
         .into_any_element()
 }
 
@@ -82,6 +97,7 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
             div()
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(12.))
+                .line_height(px(18.))
                 .child(format_elapsed_deciseconds(elapsed_ms)),
         )
         .into_any_element()
