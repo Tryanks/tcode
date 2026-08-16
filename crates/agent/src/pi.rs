@@ -11,10 +11,10 @@ use std::process::{Child, ChildStdin, Stdio};
 
 use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
-use smol::future;
 
 #[cfg(test)]
 use crate::TurnStatus;
+use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -319,6 +319,7 @@ async fn run_actor(
     }
     if opts.interaction_mode == InteractionMode::Plan {
         actor
+            .events
             .emit(AgentEvent::Warning {
                 message: PLAN_MODE_WARNING.into(),
             })
@@ -326,7 +327,7 @@ async fn run_actor(
     }
     let unattached = unattached_servers(&opts);
     if !unattached.is_empty() {
-        actor
+        actor.events
             .emit(AgentEvent::Warning {
                 message: format!(
                     "pi has no MCP client of its own, so tcode's {} tools are unavailable in this session",
@@ -340,52 +341,7 @@ async fn run_actor(
         return;
     }
 
-    let close_reason = loop {
-        enum Input {
-            Command(Result<SessionCommand, smol::channel::RecvError>),
-            Output(Result<ChildOutput, smol::channel::RecvError>),
-        }
-        let input = future::race(async { Input::Command(commands.recv().await) }, async {
-            Input::Output(actor.lines.recv().await)
-        })
-        .await;
-        match input {
-            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => {
-                let _ = actor.cancel_pending_ui();
-                break None;
-            }
-            Input::Command(Ok(command)) => {
-                if let Err(err) = actor.handle_command(command).await {
-                    actor
-                        .emit(AgentEvent::Error {
-                            message: err,
-                            fatal: true,
-                        })
-                        .await;
-                    break Some("pi protocol write failed".into());
-                }
-            }
-            Input::Output(Ok(ChildOutput::Line(line))) => actor.handle_line(&line).await,
-            Input::Output(Ok(ChildOutput::Error(err))) => {
-                actor
-                    .emit(AgentEvent::Error {
-                        message: err.clone(),
-                        fatal: true,
-                    })
-                    .await;
-                break Some(err);
-            }
-            Input::Output(Ok(ChildOutput::Eof)) | Input::Output(Err(_)) => {
-                break Some("pi RPC process closed stdout".into());
-            }
-        }
-    };
-    actor.stop();
-    let reason = close_reason.map(|base| actor.stderr_tail.append_to(base, "\nstderr:\n"));
-    let _ = actor
-        .events
-        .send(AgentEvent::SessionClosed { reason })
-        .await;
+    actor::run(actor, &commands).await;
 }
 
 struct PiActor {
@@ -405,6 +361,51 @@ struct PiActor {
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
     stderr_tail: crate::process::StderrTail,
+}
+
+impl SessionActor for PiActor {
+    type TransportItem = ChildOutput;
+
+    fn transport(&self) -> &Receiver<Self::TransportItem> {
+        &self.lines
+    }
+
+    fn events(&self) -> &Sender<AgentEvent> {
+        &self.events
+    }
+
+    fn command_failure_reason(&self) -> &'static str {
+        "pi protocol write failed"
+    }
+
+    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
+        PiActor::handle_command(self, command).await
+    }
+
+    async fn handle_transport(
+        &mut self,
+        item: Result<ChildOutput, smol::channel::RecvError>,
+    ) -> TransportOutcome {
+        match item {
+            Ok(ChildOutput::Line(line)) => {
+                self.handle_line(&line).await;
+                TransportOutcome::Continue
+            }
+            Ok(ChildOutput::Error(err)) => TransportOutcome::Fatal(err),
+            Ok(ChildOutput::Eof) | Err(_) => {
+                TransportOutcome::Closed("pi RPC process closed stdout".into())
+            }
+        }
+    }
+
+    async fn settle_shutdown(&mut self) {
+        let _ = self.cancel_pending_ui();
+    }
+
+    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
+        self.stop();
+        reason.map(|base| self.stderr_tail.append_to(base, "\nstderr:\n"))
+    }
 }
 
 impl PiActor {
@@ -443,12 +444,13 @@ impl PiActor {
             cursor.insert("session_file".into(), Value::String(path.to_owned()));
         }
         let model = model_wire_id(data.get("model"));
-        self.emit(AgentEvent::SessionStarted {
-            provider_session_id: session_id,
-            resume: ResumeCursor(Value::Object(cursor)),
-            model,
-        })
-        .await;
+        self.events
+            .emit(AgentEvent::SessionStarted {
+                provider_session_id: session_id,
+                resume: ResumeCursor(Value::Object(cursor)),
+                model,
+            })
+            .await;
 
         send_json(
             &mut self.stdin,
@@ -461,7 +463,9 @@ impl PiActor {
                 Vec::new()
             }
         };
-        self.emit(AgentEvent::ProviderCommands { commands }).await;
+        self.events
+            .emit(AgentEvent::ProviderCommands { commands })
+            .await;
         Ok(())
     }
 
@@ -481,7 +485,9 @@ impl PiActor {
                     // while we are still here. Everything else that lands early
                     // belongs to the mapper, not to startup.
                     if let Some(warning) = extension_warning(&message) {
-                        self.emit(AgentEvent::Warning { message: warning }).await;
+                        self.events
+                            .emit(AgentEvent::Warning { message: warning })
+                            .await;
                     } else if is_extension_dialog(&message)
                         && let Some(request_id) = message.get("id").and_then(Value::as_str)
                     {
@@ -509,10 +515,11 @@ impl PiActor {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
             Err(err) => {
-                self.emit(AgentEvent::Warning {
-                    message: format!("ignored invalid pi RPC record: {err}"),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!("ignored invalid pi RPC record: {err}"),
+                    })
+                    .await;
                 return;
             }
         };
@@ -527,14 +534,17 @@ impl PiActor {
                     .and_then(Value::as_str)
                     .and_then(|id| self.pending_steers.remove(id))
                 {
-                    self.emit(AgentEvent::SteerAccepted { request_id }).await;
+                    self.events
+                        .emit(AgentEvent::SteerAccepted { request_id })
+                        .await;
                 }
             } else {
-                self.emit(AgentEvent::Error {
-                    message: response_error(&message),
-                    fatal: false,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Error {
+                        message: response_error(&message),
+                        fatal: false,
+                    })
+                    .await;
             }
             return;
         }
@@ -547,7 +557,7 @@ impl PiActor {
             .iter()
             .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
         for event in events {
-            self.emit(event).await;
+            self.events.emit(event).await;
         }
         if turn_completed {
             let _ = self.cancel_pending_ui();
@@ -558,23 +568,27 @@ impl PiActor {
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         if matches!(method, "select" | "input" | "editor") {
             let Some((id, question)) = extension_dialog_question(message) else {
-                self.emit(AgentEvent::Warning {
-                    message: format!("pi extension `{method}` dialog omitted its id"),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!("pi extension `{method}` dialog omitted its id"),
+                    })
+                    .await;
                 return;
             };
             self.pending_dialogs.insert(id.clone());
-            self.emit(AgentEvent::UserInputRequested {
-                request_id: id,
-                questions: vec![question],
-            })
-            .await;
+            self.events
+                .emit(AgentEvent::UserInputRequested {
+                    request_id: id,
+                    questions: vec![question],
+                })
+                .await;
             return;
         }
         if method != "confirm" {
             if let Some(warning) = extension_warning(message) {
-                self.emit(AgentEvent::Warning { message: warning }).await;
+                self.events
+                    .emit(AgentEvent::Warning { message: warning })
+                    .await;
                 return;
             }
             if matches!(
@@ -588,17 +602,19 @@ impl PiActor {
                 &mut self.stdin,
                 &json!({"type":"extension_ui_response","id":id,"cancelled":true}),
             );
-            self.emit(AgentEvent::Warning {
-                message: format!("pi extension requested unsupported UI method `{method}`"),
-            })
-            .await;
+            self.events
+                .emit(AgentEvent::Warning {
+                    message: format!("pi extension requested unsupported UI method `{method}`"),
+                })
+                .await;
             return;
         }
         let Some(id) = message.get("id").and_then(Value::as_str) else {
-            self.emit(AgentEvent::Warning {
-                message: "pi extension confirmation omitted its id".into(),
-            })
-            .await;
+            self.events
+                .emit(AgentEvent::Warning {
+                    message: "pi extension confirmation omitted its id".into(),
+                })
+                .await;
             return;
         };
         let payload: Value = message
@@ -620,13 +636,14 @@ impl PiActor {
         }
         self.pending_approvals
             .insert(id.to_owned(), tool_name.clone());
-        self.emit(AgentEvent::ApprovalRequested(ApprovalRequest {
-            id: id.to_owned(),
-            turn_id: self.mapper.current_turn.clone(),
-            kind: approval_kind(&tool_name, &payload),
-            options: Vec::new(),
-        }))
-        .await;
+        self.events
+            .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
+                id: id.to_owned(),
+                turn_id: self.mapper.current_turn.clone(),
+                kind: approval_kind(&tool_name, &payload),
+                options: Vec::new(),
+            }))
+            .await;
     }
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
@@ -644,7 +661,9 @@ impl PiActor {
                 }
                 attach_images(&mut request, attachments);
                 send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
-                self.emit(AgentEvent::TurnAccepted { delivery_id }).await;
+                self.events
+                    .emit(AgentEvent::TurnAccepted { delivery_id })
+                    .await;
                 Ok(())
             }
             SessionCommand::Steer {
@@ -694,11 +713,12 @@ impl PiActor {
                     send_json(&mut self.stdin, &json!({"type":"abort"}))
                         .map_err(|err| err.to_string())?;
                 }
-                self.emit(AgentEvent::ApprovalResolved {
-                    request_id,
-                    decision,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::ApprovalResolved {
+                        request_id,
+                        decision,
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
@@ -714,19 +734,21 @@ impl PiActor {
             }
             SessionCommand::SetApprovalMode(mode) => {
                 if mode != self.approval_mode {
-                    self.emit(AgentEvent::Warning {
-                        message: "pi permission changes require restarting the session".into(),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: "pi permission changes require restarting the session".into(),
+                        })
+                        .await;
                 }
                 Ok(())
             }
             SessionCommand::SetInteractionMode(mode) => {
                 if mode == InteractionMode::Plan {
-                    self.emit(AgentEvent::Warning {
-                        message: PLAN_MODE_WARNING.into(),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: PLAN_MODE_WARNING.into(),
+                        })
+                        .await;
                 }
                 Ok(())
             }
@@ -745,10 +767,11 @@ impl PiActor {
                 Ok(())
             }
             SessionCommand::Rewind { .. } => {
-                self.emit(AgentEvent::Warning {
-                    message: "pi rewind is not exposed by tcode's native adapter".into(),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: "pi rewind is not exposed by tcode's native adapter".into(),
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
@@ -771,10 +794,6 @@ impl PiActor {
         }
         cancel_pending_dialogs(&mut self.stdin, &mut self.pending_dialogs)
             .map_err(|err| err.to_string())
-    }
-
-    async fn emit(&self, event: AgentEvent) {
-        let _ = self.events.send(event).await;
     }
 
     fn stop(&mut self) {
@@ -1176,11 +1195,7 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
             status,
         },
     };
-    ThreadItem {
-        id: id.to_owned(),
-        parent_item_id: None,
-        content,
-    }
+    crate::normalize::thread_item(id, content)
 }
 
 fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
@@ -1393,13 +1408,14 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
     let input = crate::json_u64(usage.get("input"));
     let output = crate::json_u64(usage.get("output"));
     let cache_read = crate::json_u64(usage.get("cacheRead"));
-    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
-        input_tokens: input,
-        cached_input_tokens: cache_read,
-        output_tokens: output,
-        used_tokens: crate::json_u64(usage.get("totalTokens")),
-        ..Default::default()
-    })
+    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(
+        crate::normalize::token_usage(
+            input,
+            cache_read,
+            output,
+            crate::json_u64(usage.get("totalTokens")),
+        ),
+    )
 }
 
 fn attach_images(request: &mut Value, attachments: Vec<Attachment>) {
