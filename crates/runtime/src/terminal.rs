@@ -6,8 +6,6 @@ use std::sync::{Arc, RwLock};
 
 pub use tcode_core::ui::TerminalSplitDirection;
 
-pub const MAX_TERMINALS_PER_SESSION: usize = 6;
-
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.
 /// Globally unique tab ids prevent its geometry, selection, bell, and event
 /// caches from aliasing two conversations whose first local tab would both be

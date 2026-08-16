@@ -1,14 +1,14 @@
 //! Dedicated-thread host execution seam.
 //!
 //! `AppState` is a plain `Send` value owned by the host loop. UI clients can
-//! reach it only through typed protocol messages. Background completions use
+//! reach it only through serialized protocol messages. Background completions use
 //! the same mailbox via [`HostCx::enqueue`].
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic};
+use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
 
 use crate::app::AppState;
 use crate::event::HostEvent;
@@ -27,13 +27,13 @@ pub type HostTask<T> = smol::Task<T>;
 /// The only execution/event context accepted by [`AppState`] methods.
 ///
 /// Clones are `Send` and may be held by background work. All state mutation
-/// returns through `mailbox`; emitted events enter the typed host-output
+/// returns through `mailbox`; emitted events enter the serialized host-output
 /// stream; notification-only changes use a bounded channel as a coalescing bit.
 #[derive(Clone)]
 pub struct HostCx {
     mailbox: smol::channel::Sender<HostMsg>,
-    events: smol::channel::Sender<HostMessage>,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+    events: smol::channel::Sender<String>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
     runtime_seq: Arc<Mutex<u64>>,
     changed: smol::channel::Sender<()>,
 }
@@ -41,8 +41,8 @@ pub struct HostCx {
 impl HostCx {
     pub(crate) fn new(
         mailbox: smol::channel::Sender<HostMsg>,
-        events: smol::channel::Sender<HostMessage>,
-        pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+        events: smol::channel::Sender<String>,
+        pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
         changed: smol::channel::Sender<()>,
     ) -> Self {
         Self {
@@ -65,11 +65,11 @@ impl HostCx {
                     seq: *seq,
                     event: ServerEvent::Runtime(notification),
                 };
-                let _ = self.events.try_send(HostMessage::Event(envelope));
+                self.send_message(HostMessage::Event(envelope));
                 return;
             }
         };
-        let _ = self.events.try_send(HostMessage::Event(envelope));
+        self.send_message(HostMessage::Event(envelope));
     }
 
     pub(crate) fn send_message(&self, message: HostMessage) {
@@ -77,12 +77,19 @@ impl HostCx {
             HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. } => Some(*id),
             _ => None,
         };
+        let line = match encode_line(&message) {
+            Ok(line) => line,
+            Err(error) => {
+                log::error!("failed to encode host protocol message: {}", error.message);
+                return;
+            }
+        };
         if let Some(id) = id
             && let Some(waiter) = self.pending.lock().unwrap().remove(&id)
         {
-            let _ = waiter.try_send(message);
+            let _ = waiter.try_send(line);
         } else {
-            let _ = self.events.try_send(message);
+            let _ = self.events.try_send(line);
         }
     }
 

@@ -1,5 +1,5 @@
+use crate::widgets::kbd::Kbd;
 use gpui::{Keystroke, Modifiers};
-use gpui_component::kbd::Kbd;
 
 /// Format a shortcut using GPUI's semantic secondary modifier.
 ///

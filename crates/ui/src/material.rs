@@ -1,4 +1,5 @@
-//! The "Frosted Instrument" material system (docs/visual-redesign.md).
+//! The "Frosted Instrument" material system (docs/visual-redesign.md) carrying
+//! the Beautiful UI component metrics (docs/beautiful-ui-redesign.md).
 //!
 //! The window canvas (theme `background`) is the only intentionally translucent
 //! tier; reading surfaces sit on top of it at near-full opacity so body text
@@ -7,12 +8,21 @@
 //! light effects (faded hairlines, the primary-button top light) the spec
 //! defines.
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::Popover;
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
     linear_color_stop, linear_gradient, px,
 };
-use gpui_component::{ActiveTheme as _, StyledExt as _, popover::Popover, v_flex};
+use gpui_base::{StyledExt as _, v_flex};
+
+/// Height reserved beneath chat messages for hover-revealed actions.
+pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
+/// Maximum width of the shared chat/composer content column.
+pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
+/// Minimum horizontal padding around the shared chat/composer content column.
+pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -48,23 +58,27 @@ pub fn content_surface(cx: &App) -> Hsla {
 // Role-based radius scale — no magic corner numbers outside this table.
 /// Popovers, menus, dialogs, toasts.
 pub fn radius_overlay() -> Pixels {
-    px(14.)
+    px(10.)
 }
 /// Cards, event cards, diff blocks.
 pub fn radius_card() -> Pixels {
-    px(12.)
+    px(10.)
 }
 /// Plain inputs and button-group containers.
 pub fn radius_input() -> Pixels {
-    px(10.)
+    px(8.)
 }
 /// Buttons.
 pub fn radius_button() -> Pixels {
     px(8.)
 }
+/// Chips and compact status badges.
+pub fn radius_chip() -> Pixels {
+    px(6.)
+}
 /// The composer field — the hero element.
 pub fn radius_composer() -> Pixels {
-    px(16.)
+    px(14.)
 }
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the
@@ -139,7 +153,7 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
 /// reimplementing it. Neutral helper: sidebar.rs keeps its own inline copy, this
 /// only lets the settings nav wear the same treatment.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
-    gpui_component::h_flex()
+    gpui_base::h_flex()
         .items_center()
         .gap_2()
         .child(
@@ -172,12 +186,23 @@ pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div 
         .flex_none()
         .px_2()
         .py(px(1.))
-        .rounded_full()
+        .rounded(radius_chip())
         .bg(bg)
         .text_size(px(11.))
         .font_medium()
         .text_color(fg)
         .child(label.into())
+}
+
+/// Uppercase section label with the design system's 0.08em tracking.
+/// GPUI has no letter-spacing primitive, so the 10.5px label is split into
+/// glyph elements with an exact 0.84px inter-glyph gap.
+pub(crate) fn tracked_uppercase(text: &str) -> Div {
+    gpui_base::h_flex().gap(px(0.84)).children(
+        text.to_uppercase()
+            .chars()
+            .map(|character| div().child(character.to_string())),
+    )
 }
 
 /// Gives a raw clickable surface the same keyboard and accessibility treatment
@@ -275,7 +300,7 @@ mod tests {
     #[gpui::test]
     fn raw_controls_follow_root_tab_order_and_activate_from_the_keyboard(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
+            crate::theme::init(cx);
             cx.bind_keys([
                 KeyBinding::new("tab", FocusNext, Some("AccessibleControlsProbe")),
                 KeyBinding::new("shift-tab", FocusPrevious, Some("AccessibleControlsProbe")),

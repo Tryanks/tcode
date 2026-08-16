@@ -1,27 +1,29 @@
 use std::{borrow::Cow, collections::HashSet};
 
+use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
+use crate::scroll::ScrollableElement as _;
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
+use crate::widgets::tooltip::Tooltip;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariant, ButtonVariants as _},
-    dialog::DialogButtonProps,
-    h_flex,
-    input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt as _, DropdownMenu as _},
-    notification::Notification,
-    scroll::ScrollableElement as _,
-    tooltip::Tooltip,
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
-use tcode_core::{project::SessionMeta, settings::SidebarLayout};
+use tcode_core::{
+    project::{ProjectGroup, SessionMeta},
+    settings::SidebarLayout,
+};
 use tcode_protocol::Command;
-use tcode_runtime::app::ProjectGroup;
 
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, WorkspaceStore};
@@ -76,18 +78,10 @@ fn child_count_badge(
         )))
         .flex_none()
         .min_w(px(18.))
-        .px_1()
-        .py(px(1.))
-        .rounded_full()
-        .bg(cx.theme().muted)
         .text_center()
-        .text_size(px(10.))
-        .font_semibold()
-        .text_color(if active > 0 {
-            cx.theme().success
-        } else {
-            cx.theme().muted_foreground
-        })
+        .text_size(px(11.))
+        .line_height(px(18.))
+        .text_color(cx.theme().muted_foreground)
         .tooltip(move |window, cx| {
             Tooltip::new(crate::tr!("sidebar.child_threads", count = total).into_owned())
                 .build(window, cx)
@@ -526,7 +520,7 @@ impl SessionsSidebar {
                     keep = keep
                 ))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_text(crate::tr!("sidebar.auto_archive_dialog.open_settings"))
                         .cancel_text(crate::tr!("sidebar.auto_archive_dialog.got_it"))
                         .show_cancel(true),
@@ -736,7 +730,7 @@ impl SessionsSidebar {
                 .title(crate::tr!("sidebar.archive_all_title"))
                 .description(crate::tr!("sidebar.archive_all_description", count = count))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.archive_all_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
@@ -780,7 +774,7 @@ impl SessionsSidebar {
                     count = count
                 ))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.remove_project_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
@@ -839,7 +833,7 @@ impl SessionsSidebar {
                 .title(crate::tr!("sidebar.archive_title"))
                 .description(crate::tr!("sidebar.archive_description", title = title))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.archive_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
@@ -881,7 +875,7 @@ impl SessionsSidebar {
                 .title(crate::tr!("sidebar.delete_title", title = title.clone()))
                 .description(crate::tr!("sidebar.delete_description"))
                 .button_props(
-                    DialogButtonProps::default()
+                    DialogButtons::default()
                         .ok_variant(ButtonVariant::Danger)
                         .ok_text(crate::tr!("sidebar.delete_action"))
                         .cancel_text(crate::tr!("settings.cancel"))
@@ -1493,6 +1487,7 @@ impl SessionsSidebar {
         } else {
             truncated_sidebar_label()
                 .text_size(px(13.))
+                .line_height(px(18.))
                 .text_color(cx.theme().sidebar_foreground)
                 .when(emphasize_unread && state.show_unread, |title| {
                     title.font_semibold()
@@ -1512,7 +1507,7 @@ impl SessionsSidebar {
         } else if state.waiting_for_input {
             (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
         } else if working {
-            (cx.theme().success, crate::tr!("sidebar.working"))
+            (cx.theme().primary, crate::tr!("sidebar.working"))
         } else {
             return None;
         };
@@ -1526,6 +1521,7 @@ impl SessionsSidebar {
                     div()
                         .whitespace_nowrap()
                         .text_size(px(11.))
+                        .line_height(px(18.))
                         .text_color(color)
                         .child(label),
                 )
@@ -1859,7 +1855,7 @@ impl SessionsSidebar {
                             .flex_none()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(cx.theme().success),
+                            .bg(cx.theme().primary),
                     )
                 })
                 .child(title_or_input)
@@ -1893,7 +1889,7 @@ impl SessionsSidebar {
                     line.child(
                         div()
                             .flex_none()
-                            .text_color(cx.theme().success)
+                            .text_color(cx.theme().primary)
                             .child(crate::tr!("sidebar.working")),
                     )
                 })
@@ -2004,7 +2000,7 @@ fn proceed_delete(
                 path = path.clone()
             ))
             .button_props(
-                DialogButtonProps::default()
+                DialogButtons::default()
                     .ok_variant(ButtonVariant::Danger)
                     .ok_text(crate::tr!("sidebar.worktree_cleanup_remove"))
                     .cancel_text(crate::tr!("sidebar.worktree_cleanup_keep"))

@@ -5,18 +5,20 @@
 //! and the enable switch. The row body and the gear both open the per-profile
 //! settings [`ProviderDialog`], a transactional modal form.
 
+use crate::overlay::OverlayExt as _;
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::switch::Switch;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    switch::Switch,
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_protocol::Command;
@@ -105,6 +107,7 @@ impl ProviderCard {
         let accent = store.provider_profile_accent(&self.profile_id);
 
         let dot_color = match summary.dot {
+            StatusDot::Loading => muted,
             StatusDot::Success => cx.theme().success,
             StatusDot::Warning => cx.theme().warning,
             StatusDot::Error => cx.theme().danger,
@@ -170,7 +173,7 @@ impl ProviderCard {
                 let name = name.clone();
                 move |window, cx| {
                     let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
-                    gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                    crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
                 }
             })
             .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));
@@ -224,6 +227,7 @@ impl ProviderCard {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let (status_bg, status_fg) = match summary.dot {
+            StatusDot::Loading => (cx.theme().muted.opacity(0.), muted),
             StatusDot::Success => (
                 cx.theme().success.opacity(0.12),
                 cx.theme().success_foreground,
@@ -282,7 +286,7 @@ impl ProviderCard {
                                     crate::tr!("providers.reveal_email")
                                 }
                                 .into_owned();
-                                gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                                crate::widgets::tooltip::Tooltip::new(label).build(window, cx)
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.email_revealed = !this.email_revealed;

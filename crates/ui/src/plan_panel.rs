@@ -4,19 +4,20 @@
 
 use std::time::Duration;
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::spinner::Spinner;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    Subscription, Task, Window, div, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    spinner::Spinner,
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::plan_title;
 use tcode_protocol::Command;
@@ -94,13 +95,11 @@ impl PlanPanel {
                     .items_center()
                     .child(
                         div()
-                            .px_2()
-                            .py(px(1.))
-                            .rounded_full()
-                            .bg(cx.theme().info.opacity(0.12))
-                            .text_color(cx.theme().info_foreground)
+                            .flex_none()
                             .text_size(px(11.))
+                            .line_height(px(20.))
                             .font_medium()
+                            .text_color(cx.theme().muted_foreground)
                             .child(crate::tr!("plan.badge")),
                     )
                     .child(
@@ -110,6 +109,7 @@ impl PlanPanel {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(px(15.))
+                            .line_height(px(20.))
                             .font_medium()
                             .child(title),
                     ),
@@ -181,39 +181,45 @@ impl PlanPanel {
 
     fn render_steps(&self, steps: &[PlanStep], cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut col = v_flex().w_full().gap_1().child(
-            div()
-                .pt_1()
-                .text_size(px(11.))
-                .font_medium()
-                .text_color(muted)
-                .child(crate::tr!("plan.steps")),
-        );
+        let mut steps_col = v_flex()
+            .w_full()
+            .gap_1()
+            .ml_2()
+            .pl(px(14.))
+            .py_0p5()
+            .border_l_1()
+            .border_color(cx.theme().border);
         for (index, step) in steps.iter().enumerate() {
-            col = col.child(self.render_step(index, step, cx));
+            steps_col = steps_col.child(self.render_step(index, step, cx));
         }
-        col.into_any_element()
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                div()
+                    .pt_1()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(muted)
+                    .child(crate::tr!("plan.steps")),
+            )
+            .child(steps_col)
+            .into_any_element()
     }
 
     fn render_step(&self, index: usize, step: &PlanStep, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let success = cx.theme().success;
         let primary = cx.theme().primary;
 
-        let (marker, rail): (AnyElement, Option<gpui::Hsla>) = match step.status {
-            PlanStepStatus::Completed => (
-                Icon::new(IconName::CircleCheck)
-                    .xsmall()
-                    .text_color(success)
-                    .into_any_element(),
-                Some(success),
-            ),
-            PlanStepStatus::InProgress => (
-                Spinner::new().xsmall().color(primary).into_any_element(),
-                Some(primary),
-            ),
-            PlanStepStatus::Pending => (
-                // An outlined circle with a muted dot.
+        let marker: AnyElement = match step.status {
+            PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
+                .xsmall()
+                .text_color(muted)
+                .into_any_element(),
+            PlanStepStatus::InProgress => Spinner::new().xsmall().color(primary).into_any_element(),
+            PlanStepStatus::Pending =>
+            // An outlined circle with a muted dot.
+            {
                 div()
                     .size(px(14.))
                     .rounded_full()
@@ -223,9 +229,8 @@ impl PlanPanel {
                     .items_center()
                     .justify_center()
                     .child(div().size(px(4.)).rounded_full().bg(muted))
-                    .into_any_element(),
-                None,
-            ),
+                    .into_any_element()
+            }
         };
 
         let mut text = div()
@@ -240,25 +245,9 @@ impl PlanPanel {
         h_flex()
             .id(("plan-step", index))
             .w_full()
-            .px_2()
-            .py_1p5()
+            .py_1()
             .gap_2()
             .items_start()
-            .relative()
-            .rounded(material::radius_card())
-            .bg(cx.theme().muted)
-            .when_some(rail, |this, color| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(6.))
-                        .bottom(px(6.))
-                        .w(px(2.))
-                        .rounded_full()
-                        .bg(color),
-                )
-            })
             .child(div().flex_none().pt(px(1.)).child(marker))
             .child(text)
             .into_any_element()

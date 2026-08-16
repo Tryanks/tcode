@@ -76,17 +76,15 @@ mod native {
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
+    use crate::theme::ActiveTheme as _;
+    use crate::widgets::button::{Button, ButtonVariants as _};
+    use crate::widgets::input::{Input, InputEvent, InputState};
+    use crate::{icon::IconName, sizing::Sizable as _};
     use gpui::{
         AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
     };
-    use gpui_component::{
-        ActiveTheme as _, IconName, Sizable as _,
-        button::{Button, ButtonVariants as _},
-        h_flex,
-        input::{Input, InputEvent, InputState},
-        v_flex,
-    };
+    use gpui_base::{h_flex, v_flex};
     use gpui_wry::WebView;
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
     use raw_window_handle::HasWindowHandle as _;
@@ -1097,8 +1095,9 @@ mod native {
 /// call answers with an error instead of driving a browser that cannot exist.
 #[cfg(target_os = "linux")]
 mod placeholder {
+    use crate::theme::ActiveTheme as _;
     use gpui::{Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window};
-    use gpui_component::{ActiveTheme as _, v_flex};
+    use gpui_base::v_flex;
     use preview_mcp::PreviewOp;
 
     use super::ReplyTx;

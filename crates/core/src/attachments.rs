@@ -1,9 +1,31 @@
 //! Pure image-attachment validation and image-only message semantics.
 
+use std::path::Path;
+
 /// Maximum images per message.
 pub const MAX_IMAGES: usize = 8;
 /// Maximum bytes per image (10 MiB).
 pub const MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Best-effort MIME type from a file extension.
+pub fn mime_from_path(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
 
 /// A rejected attachment.
 #[derive(Debug, Clone, PartialEq, Eq)]

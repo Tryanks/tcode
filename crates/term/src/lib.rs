@@ -1,9 +1,26 @@
 //! UI-agnostic terminal process management and emulation.
 
 use std::{
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     thread,
+};
+
+pub use rio_vt;
+use rio_vt::{
+    ansi::KeyboardModes,
+    clipboard::ClipboardType,
+    config::colors::{AnsiColor, ColorRgb},
+    crosswords::{
+        Mode,
+        grid::{Indexed, row::Row},
+        pos::{Column, CursorState, Line, Pos},
+        square::{ContentTag, Square, Wide},
+        style::Style,
+    },
+    event::TerminalDamage,
+    selection::SelectionRange,
 };
 
 mod grid_emulator;
@@ -14,40 +31,31 @@ mod pty_info;
 
 pub use hyperlinks::HyperlinkMatch;
 
+/// Renderer-facing graphics values and pure placement geometry from rio.
+pub mod graphics {
+    pub use rio_graphics::{
+        ColorType, GraphicData, GraphicId, GraphicOverlay, atlas_image_key, kitty_image_key,
+    };
+    pub use rio_vt::ansi::graphics::{
+        AtlasPlacement, KittyOverlayGeometry, KittyPlacement, OverlayViewport, UpdateQueues,
+        VirtualPlacement, atlas_overlay_geometry, clip_overlay_to_rect, kitty_overlay_geometry,
+        resolve_source_rect,
+    };
+    pub use rio_vt::ansi::kitty_virtual::{
+        IncompletePlacement, PLACEHOLDER, PlaceholderRun, RunGeometry, compute_run_geometry,
+    };
+}
+
 use grid_emulator::{GridEmulator, GridEvent};
 use pty::{PtyEvent, PtyHandle};
 
 const DEFAULT_COLS: usize = 80;
 const DEFAULT_ROWS: usize = 24;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Color {
-    DefaultForeground,
-    DefaultBackground,
-    Indexed(u8),
-    Rgb(u8, u8, u8),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Cell {
-    pub ch: char,
-    /// The cell's primary character followed by any combining characters.
-    pub text: String,
-    pub fg: Color,
-    pub bg: Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub inverse: bool,
-    pub selected: bool,
-    /// Whether this cell contains a glyph which occupies two grid columns.
-    pub wide: bool,
-    /// Whether this cell is the second-column placeholder for a wide glyph.
-    pub wide_spacer: bool,
-}
+const DEFAULT_CELL_WIDTH_PX: u32 = 8;
+const DEFAULT_CELL_HEIGHT_PX: u32 = 17;
 
 /// A rendering-relevant event emitted by the compatibility terminal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// The terminal grid or cursor changed.
     Wakeup,
@@ -55,6 +63,8 @@ pub enum TermEvent {
     Bell,
     /// The host-side child process exited.
     Exited,
+    /// An OSC 52 request to store decoded UTF-8 text in a clipboard.
+    ClipboardStore { kind: ClipboardType, text: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,38 +74,113 @@ pub struct SelectedText {
     pub text: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TermState {
+#[derive(Clone, Debug)]
+pub struct TermSnapshot {
     pub cols: usize,
-    pub rows: usize,
-    pub cells: Vec<Cell>,
+    pub screen_lines: usize,
+    pub visible_rows: Vec<Row<Square>>,
+    pub row_damage: Vec<bool>,
+    pub damage: TerminalDamage,
+    pub cursor_state: CursorState,
     pub cursor: Option<(usize, usize)>,
-    pub cursor_shape: CursorShape,
     pub cursor_blinking: bool,
     pub title: String,
     pub exited: bool,
     pub exit_code: Option<i32>,
     pub display_offset: usize,
     pub history_size: usize,
-    pub mode: ModeSnapshot,
+    /// Lines evicted from rio's scrollback ring before the retained history.
+    pub lines_evicted: u64,
+    /// Image pixels added or removed since the preceding snapshot.
+    ///
+    /// Pixel buffers appear here once and are consumed by the renderer's image
+    /// registry; placement snapshots below intentionally contain metadata only.
+    pub graphics_updates: Option<graphics::UpdateQueues>,
+    /// Active-screen sixel and iTerm2 placement metadata; geometry filters it to the viewport.
+    pub atlas_placements: Vec<graphics::AtlasPlacement>,
+    /// Active-screen direct kitty placement metadata, sorted by z-index.
+    pub kitty_placements: Vec<graphics::KittyPlacement>,
+    /// Kitty Unicode-placeholder placement metadata keyed by image/placement id.
+    pub kitty_virtual_placements: HashMap<(u32, u32), graphics::VirtualPlacement>,
+    pub mode: Mode,
+    pub keyboard_mode: KeyboardModes,
+    pub selection: Option<SelectionRange>,
+    /// Snapshot of rio's interned style table, indexed by `Square::style_id`.
+    pub styles: Vec<Style>,
+    /// Zero-width continuations for visible squares, indexed by rio extras id.
+    pub zero_width: HashMap<u16, Vec<char>>,
 }
 
-impl TermState {
-    pub fn cell(&self, row: usize, col: usize) -> Option<&Cell> {
-        self.cells.get(row.checked_mul(self.cols)? + col)
+impl TermSnapshot {
+    pub fn cell(&self, row: usize, col: usize) -> Option<&Square> {
+        self.visible_rows.get(row)?.inner.get(col)
+    }
+
+    pub fn style(&self, row: usize, col: usize) -> Option<Style> {
+        let square = *self.cell(row, col)?;
+        Some(match square.content_tag() {
+            ContentTag::Codepoint => self
+                .styles
+                .get(square.style_id() as usize)
+                .copied()
+                .unwrap_or_default(),
+            ContentTag::BgPalette => Style {
+                bg: AnsiColor::Indexed(square.bg_palette_index()),
+                ..Style::default()
+            },
+            ContentTag::BgRgb => {
+                let (r, g, b) = square.bg_rgb();
+                Style {
+                    bg: AnsiColor::Spec(ColorRgb { r, g, b }),
+                    ..Style::default()
+                }
+            }
+        })
+    }
+
+    /// The cell's base character followed by its rio zero-width continuation.
+    pub fn cell_text(&self, row: usize, col: usize) -> Option<String> {
+        let square = *self.cell(row, col)?;
+        if square.content_tag() != ContentTag::Codepoint {
+            return Some(" ".to_string());
+        }
+        let mut text = String::new();
+        text.push(display_char(square.c()));
+        if let Some(extra) = square.extras_id().and_then(|id| self.zero_width.get(&id)) {
+            text.extend(extra.iter().copied().map(display_char));
+        }
+        Some(text)
+    }
+
+    pub fn is_selected(&self, row: usize, col: usize) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        let Some(square) = self.cell(row, col) else {
+            return false;
+        };
+        let pos = Pos::new(Line(row as i32 - self.display_offset as i32), Column(col));
+        selection.contains_square(
+            &Indexed { pos, square },
+            self.cursor_state.pos,
+            self.cursor_state.content,
+        )
     }
 
     pub fn text(&self) -> String {
-        self.cells
-            .chunks(self.cols)
+        self.visible_rows
+            .iter()
+            .enumerate()
             .map(|row| {
-                let text = row.iter().filter(|cell| !cell.wide_spacer).fold(
-                    String::new(),
-                    |mut text, cell| {
-                        text.push_str(&cell.text);
-                        text
-                    },
-                );
+                let (row_index, row) = row;
+                let text = row
+                    .inner
+                    .iter()
+                    .take(self.cols)
+                    .enumerate()
+                    .filter(|(_, square)| square.wide() != Wide::Spacer)
+                    .filter_map(|(col, _)| self.cell_text(row_index, col))
+                    .collect::<String>();
                 text.trim_end().to_string()
             })
             .collect::<Vec<_>>()
@@ -103,37 +188,8 @@ impl TermState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorShape {
-    Block,
-    Underline,
-    Bar,
-    HollowBlock,
-    Hidden,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ModeSnapshot {
-    pub mouse_click: bool,
-    pub mouse_motion: bool,
-    pub mouse_drag: bool,
-    pub sgr_mouse: bool,
-    pub utf8_mouse: bool,
-    pub alt_screen: bool,
-    pub alternate_scroll: bool,
-    pub bracketed_paste: bool,
-    pub app_cursor: bool,
-    pub focus_in_out: bool,
-}
-
-impl ModeSnapshot {
-    pub fn mouse_mode(self) -> bool {
-        self.mouse_click || self.mouse_motion || self.mouse_drag
-    }
-
-    pub fn routes_mouse(self, shift: bool) -> bool {
-        self.mouse_mode() && !shift
-    }
+fn display_char(ch: char) -> char {
+    if ch == '\0' { ' ' } else { ch }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +284,9 @@ impl Terminal {
                             writer.write_raw(bytes);
                             None
                         }
+                        GridEvent::ClipboardStore { kind, text } => {
+                            Some(TermEvent::ClipboardStore { kind, text })
+                        }
                     };
                     if let Some(notification) = notification {
                         let _ = grid_notifications.try_send(notification);
@@ -285,7 +344,27 @@ impl Terminal {
 
     pub fn resize(&self, cols: usize, rows: usize) {
         if self.emulator.resize_if_changed(cols, rows) {
-            let _ = self.pty.resize(cols, rows);
+            let _ = self.pty.resize(self.emulator.window_size());
+        }
+    }
+
+    /// Update the physical pixel dimensions of one terminal cell.
+    ///
+    /// This updates rio's graphics sizing and the host PTY pixel winsize even
+    /// when the grid's row and column counts stay unchanged.
+    pub fn set_cell_size(&self, width_px: u32, height_px: u32) {
+        if self.emulator.set_cell_size(width_px, height_px) {
+            let _ = self.pty.resize(self.emulator.window_size());
+        }
+    }
+
+    /// Resize the grid and update its physical cell metrics as one operation.
+    pub fn resize_with_cell_size(&self, cols: usize, rows: usize, width_px: u32, height_px: u32) {
+        if self
+            .emulator
+            .resize_with_cell_size_if_changed(cols, rows, width_px, height_px)
+        {
+            let _ = self.pty.resize(self.emulator.window_size());
         }
     }
 
@@ -325,7 +404,32 @@ impl Terminal {
         self.emulator.selected_text()
     }
 
-    pub fn snapshot(&self) -> TermState {
+    /// Read terminal modes without consuming renderer damage.
+    pub fn mode(&self) -> Mode {
+        self.emulator.mode()
+    }
+
+    /// Read kitty keyboard protocol flags without consuming renderer damage.
+    pub fn keyboard_mode(&self) -> KeyboardModes {
+        self.emulator.keyboard_mode()
+    }
+
+    /// Read the active xterm modifyOtherKeys level without consuming damage.
+    pub fn modify_other_keys(&self) -> Option<u8> {
+        self.emulator.modify_other_keys()
+    }
+
+    /// Read scrollback size without consuming renderer damage.
+    pub fn history_size(&self) -> usize {
+        self.emulator.history_size()
+    }
+
+    /// Read host process exit state without consuming renderer damage.
+    pub fn exited(&self) -> bool {
+        self.pty.exited()
+    }
+
+    pub fn snapshot(&self) -> TermSnapshot {
         let mut snapshot = self.emulator.snapshot();
         snapshot.title = self.label();
         snapshot.exited = self.pty.exited();
@@ -376,7 +480,7 @@ mod tests {
         Terminal::spawn_command(std::env::temp_dir(), program, args, name).unwrap()
     }
 
-    fn wait_until(terminal: &Terminal, predicate: impl Fn(&TermState) -> bool) -> TermState {
+    fn wait_until(terminal: &Terminal, predicate: impl Fn(&TermSnapshot) -> bool) -> TermSnapshot {
         let start = Instant::now();
         loop {
             let state = terminal.snapshot();
@@ -390,6 +494,23 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    // Only the live-PTY tests use this, and those are unix-gated.
+    #[cfg(unix)]
+    fn find_char(state: &TermSnapshot, needle: char) -> Option<(usize, usize)> {
+        state
+            .visible_rows
+            .iter()
+            .enumerate()
+            .find_map(|(row, cells)| {
+                cells
+                    .inner
+                    .iter()
+                    .take(state.cols)
+                    .position(|square| square.c() == needle)
+                    .map(|col| (row, col))
+            })
     }
 
     #[test]
@@ -531,7 +652,7 @@ mod tests {
         let terminal = command("sleep 1");
         terminal.resize(42, 9);
         let state = terminal.snapshot();
-        assert_eq!((state.cols, state.rows), (42, 9));
+        assert_eq!((state.cols, state.screen_lines), (42, 9));
     }
 
     #[cfg(unix)]
@@ -676,10 +797,54 @@ mod tests {
         require_live_pty!();
         let terminal = command("printf '\\033[?1002h\\033[?1006h'; sleep 1");
         let state = wait_until(&terminal, |state| {
-            state.mode.mouse_drag && state.mode.sgr_mouse
+            state.mode.contains(Mode::MOUSE_DRAG) && state.mode.contains(Mode::SGR_MOUSE)
         });
-        assert!(state.mode.routes_mouse(false));
-        assert!(!state.mode.routes_mouse(true));
+        assert!(mappings::routes_mouse(state.mode, false));
+        assert!(!mappings::routes_mouse(state.mode, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_exposes_active_kitty_keyboard_mode_without_a_snapshot() {
+        require_live_pty!();
+        let terminal = command("printf '\\033[>1u'; sleep 1");
+        let start = Instant::now();
+        while terminal.keyboard_mode() != KeyboardModes::DISAMBIGUATE_ESC_CODES {
+            assert!(
+                start.elapsed() < Duration::from_secs(120),
+                "terminal did not apply kitty keyboard mode"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc52_store_reaches_the_public_terminal_event_stream_decoded() {
+        require_live_pty!();
+        let terminal = command("printf '\\033]52;c;dGNvZGU=\\007'; sleep 1");
+        let events = terminal.events();
+        let start = Instant::now();
+        loop {
+            match events.try_recv() {
+                Ok(TermEvent::ClipboardStore { kind, text }) => {
+                    assert_eq!(kind, ClipboardType::Clipboard);
+                    assert_eq!(text, "tcode");
+                    break;
+                }
+                Ok(_) => {}
+                Err(async_channel::TryRecvError::Empty) => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(120),
+                        "terminal did not emit the OSC 52 store"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(async_channel::TryRecvError::Closed) => {
+                    panic!("terminal event stream closed before the OSC 52 store")
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -690,12 +855,9 @@ mod tests {
         let state = wait_until(&plain, |state| {
             state.text().contains("https://example.com/docs?q=1")
         });
-        let index = state.cells.iter().position(|cell| cell.ch == 'h').unwrap();
+        let (row, col) = find_char(&state, 'h').unwrap();
         assert_eq!(
-            plain
-                .hyperlink_at(index / state.cols, index % state.cols + 10)
-                .unwrap()
-                .url,
+            plain.hyperlink_at(row, col + 10).unwrap().url,
             "https://example.com/docs?q=1"
         );
 
@@ -703,11 +865,9 @@ mod tests {
             "printf '\\033]8;;https://example.com/target\\033\\\\click-me\\033]8;;\\033\\\\'; sleep 1",
         );
         let state = wait_until(&osc, |state| state.text().contains("click-me"));
-        let index = state.cells.iter().position(|cell| cell.ch == 'c').unwrap();
+        let (row, col) = find_char(&state, 'c').unwrap();
         assert_eq!(
-            osc.hyperlink_at(index / state.cols, index % state.cols)
-                .unwrap()
-                .url,
+            osc.hyperlink_at(row, col).unwrap().url,
             "https://example.com/target"
         );
     }
@@ -718,18 +878,16 @@ mod tests {
         require_live_pty!();
         let terminal = command("echo '中文e\u{301}'; sleep 1");
         let state = wait_until(&terminal, |state| state.text().contains("中文e\u{301}"));
-        let first = state.cells.iter().position(|cell| cell.ch == '中').unwrap();
-        let row = first / state.cols;
-        let column = first % state.cols;
-        assert!(state.cells[first].wide);
-        assert!(state.cells[first + 1].wide_spacer);
-        assert_eq!(state.cells[first + 4].text, "e\u{301}");
+        let (row, column) = find_char(&state, '中').unwrap();
+        assert_eq!(state.cell(row, column).unwrap().wide(), Wide::Wide);
+        assert_eq!(state.cell(row, column + 1).unwrap().wide(), Wide::Spacer);
+        assert_eq!(state.cell_text(row, column + 4).unwrap(), "e\u{301}");
 
         terminal.select((row, column + 1), (row, column + 3));
         assert_eq!(terminal.selected_text().unwrap().text, "中文");
         let selected = terminal.snapshot();
-        assert!(selected.cells[first].selected);
-        assert!(selected.cells[first + 1].selected);
+        assert!(selected.is_selected(row, column));
+        assert!(selected.is_selected(row, column + 1));
     }
 
     #[cfg(unix)]
@@ -737,15 +895,19 @@ mod tests {
     fn forwards_primary_device_attribute_response_to_pty() {
         require_live_pty!();
         let terminal = command(
-            "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=5 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
+            "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=16 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
         );
         let state = wait_until(&terminal, |state| {
             let text = state.text();
             let fields = text.split_whitespace().collect::<Vec<_>>();
             state.exited
-                && fields
-                    .windows(5)
-                    .any(|window| window == ["1b", "5b", "3f", "36", "63"])
+                && fields.windows(16).any(|window| {
+                    window
+                        == [
+                            "1b", "5b", "3f", "36", "32", "3b", "34", "3b", "36", "3b", "32", "32",
+                            "3b", "35", "32", "63",
+                        ]
+                })
         });
         assert_eq!(state.exit_code, Some(0));
     }
@@ -803,7 +965,10 @@ mod tests {
 
         let resized = command("timeout /t 1 >nul");
         resized.resize(42, 9);
-        assert_eq!((resized.snapshot().cols, resized.snapshot().rows), (42, 9));
+        assert_eq!(
+            (resized.snapshot().cols, resized.snapshot().screen_lines),
+            (42, 9)
+        );
 
         let input = command("set /p line= && echo %line%");
         input.write_input(b"tcode-term-ok\r".to_vec());

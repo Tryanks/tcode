@@ -29,10 +29,9 @@ impl Drop for TestLocaleGuard {
 }
 
 /// Resolve the persisted override against the current system preference and
-/// update the process-global locale shared by tcode-ui and gpui-component.
+/// update tcode's process-global locale.
 pub fn apply_locale(override_locale: Option<&str>) {
-    let locale = crate::apply_locale(override_locale);
-    gpui_component::set_locale(locale);
+    crate::apply_locale(override_locale);
 }
 
 pub use tcode_core::settings::{

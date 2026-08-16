@@ -1,8 +1,8 @@
 use std::ops::Range;
 
+use crate::highlight::HighlightTheme;
 use agent::FileChangeKind;
 use gpui::{HighlightStyle, Hsla};
-use gpui_component::highlighter::HighlightTheme;
 
 use super::algorithm::{line_diff, word_diff_ranges};
 use super::parse::{RowKind, parse_hunk_header, parse_unified_diff};

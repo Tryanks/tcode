@@ -1941,7 +1941,11 @@ impl Mapper {
                             if let Some(path) = path {
                                 change.path = path.to_owned();
                             }
-                            change.diff = diff.clone();
+                            // Successful writes can report `structuredPatch: []`;
+                            // that omission must not erase the input-derived diff.
+                            if let Some(diff) = &diff {
+                                change.diff = Some(diff.clone());
+                            }
                         }
                     }
                     ItemContent::FileChange { changes, status }
@@ -3997,6 +4001,37 @@ mod tests {
             },
             other => panic!("expected ItemStarted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn empty_structured_patch_preserves_external_file_diff() {
+        let mut mapper = Mapper::new();
+        let started = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-external","content":[{"type":"tool_use","id":"toolu-external","name":"Write","input":{"file_path":"/tmp/tcode-outside-workspace.txt","content":"visible diff\n"}}]}}"#,
+        );
+        assert!(matches!(
+            &started[0],
+            AgentEvent::ItemStarted(ThreadItem {
+                content: ItemContent::FileChange { changes, .. },
+                ..
+            }) if changes[0].diff.as_deref() == Some("+visible diff")
+        ));
+
+        let completed = feed(
+            &mut mapper,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-external","content":"File created successfully"}]},"tool_use_result":{"type":"create","filePath":"/tmp/tcode-outside-workspace.txt","content":"visible diff\n","structuredPatch":[]}}"#,
+        );
+
+        assert!(matches!(
+            &completed[0],
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::FileChange { changes, status },
+                ..
+            }) if *status == ItemStatus::Completed
+                && changes[0].path == "/tmp/tcode-outside-workspace.txt"
+                && changes[0].diff.as_deref() == Some("+visible diff")
+        ));
     }
 
     #[test]

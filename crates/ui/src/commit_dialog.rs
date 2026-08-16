@@ -5,19 +5,20 @@
 
 use std::collections::HashSet;
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::checkbox::Checkbox;
+use crate::widgets::input::{Textarea, TextareaState};
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Task,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
-    h_flex,
-    input::{Input, InputState},
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
 use tcode_protocol::Command;
@@ -26,7 +27,7 @@ use crate::store::WorkspaceStore;
 
 pub struct CommitDialog {
     store: Entity<WorkspaceStore>,
-    message: Entity<InputState>,
+    message: Entity<TextareaState>,
     files: Vec<GitFileEntry>,
     /// User-*excluded* (unchecked) paths — kept out of the commit via pathspec.
     excluded: HashSet<String>,
@@ -47,10 +48,12 @@ impl CommitDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (files, branch, on_default_branch) = store.read(cx).commit_dialog_state();
+        let state = store.read(cx).commit_dialog_state();
+        let files = state.files;
+        let branch = state.branch;
+        let on_default_branch = state.on_default_branch;
         let message = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(3, 10)
                 .placeholder(crate::tr!("git.commit.message_placeholder"))
         });
@@ -359,7 +362,7 @@ impl Render for CommitDialog {
                 .w_full()
                 .gap_1()
                 .child(message_header)
-                .child(Input::new(&self.message).rounded(crate::material::radius_input())),
+                .child(Textarea::new(&self.message).rounded(crate::material::radius_input())),
         );
 
         crate::material::overlay_contour(

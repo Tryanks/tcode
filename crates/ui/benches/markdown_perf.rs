@@ -151,7 +151,7 @@ impl RenderHarness {
 
 fn initialized_context() -> TestAppContext {
     let cx = TestAppContext::single();
-    cx.update(gpui_component::init);
+    cx.update(tcode_ui::theme::init);
     cx.update(tcode_ui::markdown::init);
     cx
 }

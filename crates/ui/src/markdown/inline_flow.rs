@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity,
     GlobalElementId, HighlightStyle, Hsla, InspectorElementId, InteractiveElement as _,
@@ -14,7 +15,6 @@ use gpui::{
     StyledImage as _, TextRun, TextStyle, WhiteSpace, Window, div, img, point,
     prelude::FluentBuilder as _, px, relative, size,
 };
-use gpui_component::tooltip::Tooltip;
 
 use super::{
     inline::{Inline, InlineState},

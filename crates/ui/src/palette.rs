@@ -10,17 +10,19 @@
 //!
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex,
-    input::{Input, InputEvent, InputState},
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_protocol::Command;
 
@@ -631,7 +633,7 @@ mod tests {
     fn arrow_keys_move_and_clamp_the_highlight_while_the_query_keeps_focus(
         cx: &mut TestAppContext,
     ) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-palette-keyboard-test-{}",
             tcode_services::store::now_millis()
