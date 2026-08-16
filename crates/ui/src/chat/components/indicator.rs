@@ -98,6 +98,12 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(12.))
                 .line_height(px(18.))
+                // Flex has no text baselines (taffy sees opaque boxes), so the
+                // 12px digits render top-aligned beside the 13px label; drop
+                // them onto the label's baseline. Measured against DM Sans at
+                // 2x; both fonts ship with the app.
+                .relative()
+                .top(px(2.))
                 .child(format_elapsed_deciseconds(elapsed_ms)),
         )
         .into_any_element()

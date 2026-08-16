@@ -111,6 +111,10 @@ pub(crate) fn work_log(
                 .flex_none()
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(11.))
+                // Baseline compensation: flex can't baseline-align text boxes,
+                // and the 11px digits sit visibly high beside the 12.5px label.
+                .relative()
+                .top(px(1.))
                 .child(duration),
         )
     });

@@ -127,6 +127,10 @@ pub(crate) fn subagent_row(
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(11.))
                 .text_color(muted)
+                // Baseline compensation beside the 13px row text (see
+                // work_log.rs — flex can't baseline-align text boxes).
+                .relative()
+                .top(px(1.))
                 .child(duration),
         )
     });
