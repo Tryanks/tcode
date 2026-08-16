@@ -150,6 +150,7 @@ fn next_sidebar_overlay_visibility(
     transition: SidebarHoverTransition,
     collapsed: bool,
     route: Route,
+    popover_open: bool,
 ) -> bool {
     if !collapsed || route != Route::Chat {
         return false;
@@ -158,7 +159,11 @@ fn next_sidebar_overlay_visibility(
     match transition {
         SidebarHoverTransition::Trigger(true) | SidebarHoverTransition::Overlay(true) => true,
         SidebarHoverTransition::Trigger(false) => currently_visible,
-        SidebarHoverTransition::Overlay(false) => false,
+        // A menu spawned from the sidebar (new-thread dropdown, row context
+        // menu) is an occluding deferred layer: hovering it reads as leaving
+        // the overlay. Treat an open popover's lifetime as continued hover;
+        // the render pass reaps the overlay once the popover dismisses.
+        SidebarHoverTransition::Overlay(false) => currently_visible && popover_open,
     }
 }
 
@@ -539,6 +544,17 @@ impl Render for AppShell {
             // and runs to the window's left edge. The trigger and overlay are
             // independent absolute siblings, so neither reflows the columns.
             let overlay_width = self.sidebar_width.get();
+            // A popover keeps the overlay alive through its occluded-hover
+            // false transition (see next_sidebar_overlay_visibility). When the
+            // popover dismisses with the pointer already outside the overlay,
+            // no hover event follows — reap the stale overlay here instead
+            // (dismissal refreshes the window, so this pass always runs).
+            if self.sidebar_overlay_visible
+                && !gpui_base::GlobalState::is_in_deferred_context(cx)
+                && window.mouse_position().x > overlay_width
+            {
+                self.sidebar_overlay_visible = false;
+            }
             div()
                 .relative()
                 .size_full()
@@ -565,6 +581,7 @@ impl Render for AppShell {
                                 SidebarHoverTransition::Trigger(*hovered),
                                 collapsed,
                                 route,
+                                gpui_base::GlobalState::is_in_deferred_context(cx),
                             );
                             if this.sidebar_overlay_visible != visible {
                                 this.sidebar_overlay_visible = visible;
@@ -601,6 +618,7 @@ impl Render for AppShell {
                                     SidebarHoverTransition::Overlay(*hovered),
                                     collapsed,
                                     route,
+                                    gpui_base::GlobalState::is_in_deferred_context(cx),
                                 );
                                 if this.sidebar_overlay_visible != visible {
                                     this.sidebar_overlay_visible = visible;
@@ -659,7 +677,7 @@ mod tests {
     use super::*;
 
     fn transition(current: bool, transition: SidebarHoverTransition) -> bool {
-        next_sidebar_overlay_visibility(current, transition, true, Route::Chat)
+        next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false)
     }
 
     #[test]
@@ -685,12 +703,32 @@ mod tests {
     }
 
     #[test]
+    fn open_popover_keeps_overlay_through_occluded_hover_loss() {
+        assert!(next_sidebar_overlay_visibility(
+            true,
+            SidebarHoverTransition::Overlay(false),
+            true,
+            Route::Chat,
+            true,
+        ));
+        // But a popover cannot conjure an overlay that is already closed.
+        assert!(!next_sidebar_overlay_visibility(
+            false,
+            SidebarHoverTransition::Overlay(false),
+            true,
+            Route::Chat,
+            true,
+        ));
+    }
+
+    #[test]
     fn expanded_sidebar_forces_overlay_closed() {
         assert!(!next_sidebar_overlay_visibility(
             true,
             SidebarHoverTransition::Overlay(true),
             false,
             Route::Chat,
+            false,
         ));
     }
 
@@ -701,6 +739,7 @@ mod tests {
             SidebarHoverTransition::Overlay(true),
             true,
             Route::Settings,
+            false,
         ));
     }
 }
