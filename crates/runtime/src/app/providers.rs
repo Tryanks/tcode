@@ -1,5 +1,77 @@
 use super::*;
 
+pub struct ProviderCatalog {
+    pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+    pub models_loading: HashMap<ProviderKind, bool>,
+    pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
+    pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
+}
+
+impl ProviderCatalog {
+    pub(super) fn new(
+        model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+        provider_secret_names: HashMap<String, HashSet<String>>,
+    ) -> Self {
+        Self {
+            model_catalogs,
+            models_loading: HashMap::new(),
+            provider_versions: HashMap::new(),
+            provider_snapshots: HashMap::new(),
+            provider_secret_names,
+        }
+    }
+
+    pub(super) fn status_snapshot(
+        &self,
+        acp_marketplace_items: Vec<AcpMarketplaceItem>,
+        acp_registry_loading: bool,
+        acp_registry_error: Option<String>,
+        acp_installing: HashSet<String>,
+    ) -> ProvidersStatus {
+        ProvidersStatus {
+            model_catalogs: self.model_catalogs.clone(),
+            models_loading: self.models_loading.clone(),
+            provider_versions: self
+                .provider_versions
+                .iter()
+                .map(|(&provider, status)| {
+                    (
+                        provider,
+                        ProtocolProviderVersionStatus {
+                            installed: status.installed.clone(),
+                            latest: status.latest.clone(),
+                            update_available: status.update_available,
+                            checking: status.checking,
+                            updating: status.updating,
+                            update_command: update_command_string(provider, status.install_source),
+                        },
+                    )
+                })
+                .collect(),
+            provider_snapshots: self.provider_snapshots.clone(),
+            acp_marketplace_items,
+            acp_registry_loading,
+            acp_registry_error,
+            acp_installing,
+            providers_checked_at: self
+                .provider_snapshots
+                .values()
+                .filter_map(|snapshot| snapshot.checked_at)
+                .max(),
+            providers_checking: self
+                .provider_snapshots
+                .values()
+                .any(|snapshot| snapshot.checking)
+                || self
+                    .provider_versions
+                    .values()
+                    .any(|status| status.checking),
+            secret_names: self.provider_secret_names.clone(),
+        }
+    }
+}
+
 impl AppState {
     /// Kick off a background refresh of every provider's model catalog (called
     /// at app start and after a binary-path change). Results update
@@ -9,8 +81,7 @@ impl AppState {
             let binary = self.settings.provider(provider).binary_path;
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
-            self.models_loading.insert(provider, true);
-            self.emit_providers_status(cx);
+            self.providers.models_loading.insert(provider, true);
             let store = self.store.clone();
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -22,25 +93,21 @@ impl AppState {
                     })
                     .await;
                 let result = list_models(provider, binary, launch_env).await;
-                host_cx.enqueue(move |state, cx| {
-                    state.models_loading.insert(provider, false);
+                host_cx.enqueue(move |state, _cx| {
+                    state.providers.models_loading.insert(provider, false);
                     match result {
                         Ok(models) if !models.is_empty() => {
                             if let Err(err) = store.save_models(provider, &models) {
                                 log::warn!("failed to persist {provider:?} model catalog: {err}");
                             }
-                            state.model_catalogs.insert(provider, models);
+                            state.providers.model_catalogs.insert(provider, models);
                         }
                         Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }
-                    state.emit_active_session_status(cx);
-                    state.emit_providers_status(cx);
-                    cx.notify();
                 });
             });
         }
-        cx.notify();
     }
 
     // -- provider version checks (Group C / s3 §6) --------------------------
@@ -115,8 +182,7 @@ impl AppState {
                 target.binary_path = configuration.binary_path;
                 target.home_path = configuration.home_path;
                 target.launch_args = configuration.launch_args;
-                target.pi_trust_project_extensions = configuration.pi_trust_project_extensions;
-                target.pi_native_approvals = configuration.pi_native_approvals;
+                target.pi = configuration.pi;
                 target.custom_models = configuration.custom_models;
                 target.hidden_models = configuration.hidden_models;
             }
@@ -141,6 +207,7 @@ impl AppState {
             cx,
         );
         let names = self
+            .providers
             .provider_secret_names
             .entry(id.to_string())
             .or_default();
@@ -149,8 +216,6 @@ impl AppState {
         } else {
             names.remove(name);
         }
-        self.emit_providers_status(cx);
-        cx.notify();
     }
 
     /// Create a first-class *third-party* Claude Code profile from the Add-agent
@@ -238,12 +303,11 @@ impl AppState {
                     cx,
                 );
                 state
+                    .providers
                     .provider_secret_names
                     .entry(id.clone())
                     .or_default()
                     .insert("ANTHROPIC_API_KEY".to_string());
-                state.emit_providers_status(cx);
-                cx.notify();
             });
         });
         result_id
@@ -261,16 +325,15 @@ impl AppState {
             return;
         }
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
-        self.provider_secret_names.remove(id);
+        self.providers.provider_secret_names.remove(id);
         self.update_settings(settings, cx);
-        cx.notify();
     }
 
     // -- provider status snapshots (Settings → Providers card) --------------
 
     #[allow(dead_code)]
     pub(crate) fn profile_snapshot(&self, id: &str) -> Option<&ProviderSnapshot> {
-        self.provider_snapshots.get(id)
+        self.providers.provider_snapshots.get(id)
     }
 
     #[allow(dead_code)]
@@ -279,19 +342,6 @@ impl AppState {
     }
 
     /// The most recent probe time across providers (the section's "Checked …").
-    pub(crate) fn providers_checked_at(&self) -> Option<u64> {
-        self.provider_snapshots
-            .values()
-            .filter_map(|s| s.checked_at)
-            .max()
-    }
-
-    /// Whether any provider probe is currently in flight (spins the refresh icon).
-    pub(crate) fn providers_checking(&self) -> bool {
-        self.provider_snapshots.values().any(|s| s.checking)
-            || self.provider_versions.values().any(|s| s.checking)
-    }
-
     /// Probe every provider profile: is the CLI there, what version, and who is signed
     /// in? Runs the same `--version` call the version check uses, plus the
     /// provider's own auth surface where one is unambiguous (`claude auth
@@ -302,6 +352,7 @@ impl AppState {
             let profile_id = profile.id;
             let provider = profile.kind;
             let snapshot = self
+                .providers
                 .provider_snapshots
                 .entry(profile_id.clone())
                 .or_default();
@@ -309,7 +360,6 @@ impl AppState {
                 continue;
             }
             snapshot.checking = true;
-            self.emit_providers_status(cx);
             let binary = self.resolve_profile_binary(&profile_id);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
@@ -324,14 +374,14 @@ impl AppState {
                     .await;
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
-                host_cx.enqueue(move |state, cx| {
-                    state.provider_snapshots.insert(profile_id, snapshot);
-                    state.emit_providers_status(cx);
-                    cx.notify();
+                host_cx.enqueue(move |state, _cx| {
+                    state
+                        .providers
+                        .provider_snapshots
+                        .insert(profile_id, snapshot);
                 });
             });
         }
-        cx.notify();
     }
 
     /// Check every provider's installed vs. latest version in the background,
@@ -340,12 +390,15 @@ impl AppState {
     pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.resolve_provider_binary(provider);
-            let status = self.provider_versions.entry(provider).or_default();
+            let status = self
+                .providers
+                .provider_versions
+                .entry(provider)
+                .or_default();
             if status.checking {
                 continue;
             }
             status.checking = true;
-            self.emit_providers_status(cx);
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -378,6 +431,7 @@ impl AppState {
                         _ => false,
                     };
                     let already = state
+                        .providers
                         .provider_versions
                         .get(&provider)
                         .map(|s| s.update_available)
@@ -393,7 +447,11 @@ impl AppState {
                     };
                     let installed_pretty = pretty(&installed);
                     let latest_pretty = pretty(&latest);
-                    let status = state.provider_versions.entry(provider).or_default();
+                    let status = state
+                        .providers
+                        .provider_versions
+                        .entry(provider)
+                        .or_default();
                     status.checking = false;
                     status.install_source = source;
                     status.installed = installed_pretty;
@@ -412,18 +470,16 @@ impl AppState {
                             }),
                         );
                     }
-                    state.emit_providers_status(cx);
-                    cx.notify();
                 });
             });
         }
-        cx.notify();
     }
 
     /// Run the provider's self-update command (per its detected install source),
     /// showing an "updating" toast, then re-check its version.
     pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut HostCx) {
         let source = self
+            .providers
             .provider_versions
             .get(&provider)
             .map(|s| s.install_source)
@@ -432,23 +488,25 @@ impl AppState {
             self.report_error(RuntimeError::UpdateUnknown { provider }, cx);
             return;
         };
-        let status = self.provider_versions.entry(provider).or_default();
+        let status = self
+            .providers
+            .provider_versions
+            .entry(provider)
+            .or_default();
         if status.updating {
             return;
         }
         status.updating = true;
-        self.emit_providers_status(cx);
         emit_runtime(
             cx,
             RuntimeEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
         );
-        cx.notify();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
             let ok = run_status(&command[0], &args).await;
             host_cx.enqueue(move |state, cx| {
-                if let Some(status) = state.provider_versions.get_mut(&provider) {
+                if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
                     status.updating = false;
                 }
                 if ok {
@@ -461,8 +519,6 @@ impl AppState {
                 } else {
                     state.report_error(RuntimeError::UpdateFailed { provider }, cx);
                 }
-                state.emit_providers_status(cx);
-                cx.notify();
             });
         });
     }
@@ -471,7 +527,11 @@ impl AppState {
     /// already been detected. The install-source detail stays inside runtime.
     #[cfg(test)]
     pub(super) fn provider_update_command(&self, provider: ProviderKind) -> Option<String> {
-        let source = self.provider_versions.get(&provider)?.install_source;
+        let source = self
+            .providers
+            .provider_versions
+            .get(&provider)?
+            .install_source;
         update_command_string(provider, source)
     }
 
@@ -485,7 +545,8 @@ impl AppState {
 
     /// The cached model catalog for `provider` (empty when never fetched).
     pub(crate) fn models_for(&self, provider: ProviderKind) -> &[ModelSpec] {
-        self.model_catalogs
+        self.providers
+            .model_catalogs
             .get(&provider)
             .map(Vec::as_slice)
             .unwrap_or(&[])
@@ -495,7 +556,6 @@ impl AppState {
         // Persist so the choice survives a restart (save errors are cosmetic).
         self.settings.sidebar_collapsed = collapsed;
         self.persist_settings(cx);
-        cx.notify();
     }
 }
 
@@ -582,13 +642,19 @@ pub(super) fn session_launch_env(
     settings_store: &SettingsStore,
     meta: &SessionMeta,
 ) -> LaunchEnv {
-    if meta.provider != ProviderKind::Acp {
-        let profile_id = meta
-            .profile_id
-            .clone()
-            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
-        let secrets = settings_store.profile_secrets(&profile_id);
-        return launch_env_for_profile(settings, &profile_id, secrets);
+    match meta.provider {
+        ProviderKind::Acp => {}
+        ProviderKind::Codex
+        | ProviderKind::ClaudeCode
+        | ProviderKind::Pi
+        | ProviderKind::OpenCode => {
+            let profile_id = meta
+                .profile_id
+                .clone()
+                .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
+            let secrets = settings_store.profile_secrets(&profile_id);
+            return launch_env_for_profile(settings, &profile_id, secrets);
+        }
     }
     let env = meta
         .acp_agent_id
@@ -623,8 +689,11 @@ pub(super) fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
-    let approval_mode = if meta.provider == ProviderKind::Pi
-        && !provider_settings.pi_native_approvals
+    let approval_mode = if meta
+        .provider
+        .caps()
+        .downgrade_approval_without_native_approvals
+        && !provider_settings.pi.native_approvals
     {
         match meta.approval_mode {
             ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits => ApprovalMode::FullAccess,
@@ -644,7 +713,9 @@ pub(super) fn session_options(
         option_selections: meta.option_selections.clone(),
         interaction_mode: meta.interaction_mode,
         mcp_servers: [
-            (meta.provider != ProviderKind::Pi)
+            meta.provider
+                .caps()
+                .preview_mcp
                 .then_some(mcp_server)
                 .flatten(),
             meta.orchestrate_enabled
@@ -662,20 +733,24 @@ pub(super) fn session_options(
         launch_env,
         // Native providers that expose "Launch arguments" use their profile;
         // an ACP agent carries its own from the installed-agent card.
-        extra_args: match meta.provider {
-            ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
-            ProviderKind::Pi => {
-                let mut extra_args = provider_settings.extra_args();
-                if provider_settings.pi_trust_project_extensions {
-                    extra_args.push("--approve".into());
+        extra_args: if meta.provider.caps().launch_args {
+            match meta.provider {
+                ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
+                ProviderKind::Pi => {
+                    let mut extra_args = provider_settings.extra_args();
+                    if provider_settings.pi.trust_project_extensions {
+                        extra_args.push("--approve".into());
+                    }
+                    extra_args
                 }
-                extra_args
+                ProviderKind::Acp => acp_agent
+                    .as_ref()
+                    .map(|agent| agent.extra_args())
+                    .unwrap_or_default(),
+                ProviderKind::Codex => Vec::new(),
             }
-            ProviderKind::Codex => Vec::new(),
-            ProviderKind::Acp => acp_agent
-                .as_ref()
-                .map(|agent| agent.extra_args())
-                .unwrap_or_default(),
+        } else {
+            Vec::new()
         },
         acp: acp_agent.map(|agent| agent::AcpAgent {
             id: agent.id.clone(),

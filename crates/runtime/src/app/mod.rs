@@ -2,14 +2,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
-    AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode, ItemContent,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanResolution, ProviderCommand,
-    ProviderKind, RewindMode, SessionCommand, SessionOptions, ThreadItem, TurnOptions, TurnStatus,
-    list_models, start_session,
+    AgentError, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
+    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors, OptionSelection,
+    PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -44,7 +47,7 @@ use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
 use tcode_protocol::{
-    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, PathEntry,
+    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot, PathEntry,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
     RecentDir, ServerEvent, SessionEventRecord, SessionStatus, TerminalContextStatus,
     TerminalSplitStatus, TerminalStatus, Topic,
@@ -90,6 +93,68 @@ const NATIVE_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::Pi,
     ProviderKind::OpenCode,
 ];
+
+type ProviderLaunchFuture =
+    Pin<Box<dyn Future<Output = Result<SessionHandle, AgentError>> + Send + 'static>>;
+
+/// Internal seam for starting a provider adapter.
+///
+/// Production uses [`agent::start_session`]; runtime tests install a scripted
+/// adapter while exercising the same command and event paths.
+#[derive(Clone)]
+pub struct ProviderLauncher(
+    Arc<dyn Fn(ProviderKind, SessionOptions) -> ProviderLaunchFuture + Send + Sync>,
+);
+
+impl ProviderLauncher {
+    fn launch(&self, provider: ProviderKind, options: SessionOptions) -> ProviderLaunchFuture {
+        (self.0)(provider, options)
+    }
+}
+
+impl Default for ProviderLauncher {
+    fn default() -> Self {
+        Self(Arc::new(|provider, options| {
+            Box::pin(agent::start_session(provider, options))
+        }))
+    }
+}
+
+/// Test-controlled provider adapter paired with its launcher.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ScriptedProvider {
+    pub launcher: ProviderLauncher,
+    pub commands: smol::channel::Receiver<SessionCommand>,
+    pub events: smol::channel::Sender<AgentEvent>,
+}
+
+/// Build a provider launcher whose command and event channels are owned by the test.
+#[cfg(any(test, feature = "test-support"))]
+pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
+    let (commands_tx, commands) = smol::channel::unbounded();
+    let (events, events_rx) = smol::channel::unbounded();
+    let launcher = ProviderLauncher(Arc::new(move |requested, _options| {
+        let commands = commands_tx.clone();
+        let events = events_rx.clone();
+        Box::pin(async move {
+            if requested != provider {
+                return Err(AgentError::Protocol(format!(
+                    "scripted provider expected {provider:?}, got {requested:?}"
+                )));
+            }
+            Ok(SessionHandle {
+                provider,
+                commands,
+                events,
+            })
+        })
+    }));
+    ScriptedProvider {
+        launcher,
+        commands,
+        events,
+    }
+}
 
 fn normalize_terminal_context_text(text: &str) -> String {
     text.replace("\r\n", "\n").trim_matches('\n').to_string()
@@ -190,11 +255,15 @@ use active_session::{
     PendingRelay, Runtime, SendRouting, attachment_paths, conversation_destination,
     wire_text_with_placeholder,
 };
+use orchestrate::McpWiring;
+pub use providers::ProviderCatalog;
 use providers::{
     effort_selection, normalized_selections, provider_secret_names, session_launch_env,
     session_options,
 };
-use store_write::{StoreWrite, StoreWriteFailure, run_store_write};
+pub use sessions::ResidentSessions;
+pub(crate) use snapshots::DomainDiff;
+use store_write::{StoreWrite, run_store_write};
 
 /// The result of a provider version check (Group C / s3 §6).
 #[derive(Debug, Clone, Default)]
@@ -218,23 +287,11 @@ pub struct AppState {
     settings_store: SettingsStore,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
-    store_write_failures: smol::channel::Sender<StoreWriteFailure>,
-    store_write_failure_receiver: Option<smol::channel::Receiver<StoreWriteFailure>>,
+    store_write_failures: smol::channel::Sender<Result<RuntimeError, String>>,
+    store_write_failure_receiver: Option<smol::channel::Receiver<Result<RuntimeError, String>>>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
-    pub active: Option<ActiveSession>,
-    /// Sessions whose provider outlives their place on screen. Switching threads
-    /// used to kill the live process outright — mid-turn — which is the same
-    /// failure T3 Code's 30-minute idle reaper inflicts on autonomous overnight
-    /// sessions, except triggered by a glance at another thread. A session with
-    /// work left (turn in flight, or queued messages) is parked here instead:
-    /// its process, event pump and queue stay alive, events keep landing in its
-    /// JSONL (`record_event` routes by id), queued messages keep dispatching as
-    /// turns complete, and selecting the thread re-adopts it seamlessly. Once a
-    /// parked session runs out of work it is shut down for real — no reaper, no
-    /// timer, just "finish what you were given, then rest". (The parked
-    /// `timeline` goes stale by design; re-adoption replays the JSONL.)
-    background: HashMap<String, ActiveSession>,
+    pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
     /// client-owned; this map retains only PTYs, tabs, splits, and contexts.
     terminal_workspaces: HashMap<ConversationDestination, TerminalWorkspace>,
@@ -246,13 +303,7 @@ pub struct AppState {
     /// provider response is the only authority that can complete it.
     pending_native_rewinds: HashMap<String, (String, RewindMode)>,
     pub settings: Settings,
-    /// Per-provider model catalog (from `agent::list_models`): loaded instantly
-    /// from the persisted cache, then refreshed in the background at start and
-    /// whenever a binary path changes. Absent entry = never fetched.
-    pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
-    /// Providers whose catalog is currently being fetched (drives the picker's
-    /// "Loading models…" row when the cache is also empty).
-    pub models_loading: HashMap<ProviderKind, bool>,
+    pub providers: ProviderCatalog,
     terminal_preferences_path: PathBuf,
     terminal_preferences: HashMap<String, TerminalPreferences>,
     next_terminal_spawn_id: u64,
@@ -265,6 +316,7 @@ pub struct AppState {
     /// Kept off in unit tests so dispatching a synthetic turn never launches a
     /// real provider process. Production titles are generated in the background.
     ai_title_generation_enabled: bool,
+    provider_launcher: ProviderLauncher,
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
     /// failure to show when there is nothing cached to fall back on.
@@ -273,19 +325,7 @@ pub struct AppState {
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
-    /// App-wide preview endpoint and its per-session bearer-token issuer.
-    preview_url: Option<String>,
-    preview_tokens: Option<preview_mcp::TokenRegistry>,
-    preview_registrations: HashMap<String, agent::McpRegistration>,
-    /// App-wide orchestrator endpoint and its per-parent bearer-token issuer.
-    orchestrate_url: Option<String>,
-    orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
-    orchestrate_registrations: HashMap<String, agent::McpRegistration>,
-    /// Requests from the orchestrate MCP runtime, pumped by the host executor.
-    pub orchestrate_requests: Option<smol::channel::Receiver<orchestrate_mcp::BrokerRequest>>,
-    /// Process-wide computer-use MCP registration, supplied only to sessions
-    /// while the global computer-use setting is enabled.
-    computer_use_registration: Option<agent::McpRegistration>,
+    mcp: McpWiring,
     callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
     /// Live provider approvals for every resident session. This is the sole
@@ -300,13 +340,6 @@ pub struct AppState {
     pub git_busy: bool,
     /// Source of ids used to correlate semantic operation lifecycle events.
     next_operation_id: u64,
-    /// Per-topic sequence numbers for replicated protocol domains.
-    index_event_seq: u64,
-    settings_event_seq: u64,
-    session_event_seqs: HashMap<String, u64>,
-    session_status_event_seqs: HashMap<String, u64>,
-    providers_event_seq: u64,
-    git_status_event_seq: u64,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -317,14 +350,6 @@ pub struct AppState {
     timeline_load_generations: HashMap<String, u64>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
-    /// Per-provider version-check results (Group C). Populated on launch (when
-    /// the toggle is on) and by Settings → "Check now".
-    pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
-    /// Per-profile install/auth probe results, driving the Settings → Providers
-    /// card status dot + summary line. Absent until the first probe lands.
-    pub provider_snapshots: HashMap<String, ProviderSnapshot>,
-    /// Profile environment names visible to the UI. Values remain backend-only.
-    provider_secret_names: HashMap<String, HashSet<String>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
     /// Present only after an app-relaunch triggered by a permission grant; applied
     /// once by [`AppState::apply_pending_relaunch`] and then cleared.
@@ -337,12 +362,13 @@ fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
 
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
-        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default())
+        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default(), false)
     }
 
     pub(crate) fn new_with_terminal_registry(
         store: SessionStore,
         terminal_registry: LocalTerminalRegistry,
+        ai_title_generation_enabled: bool,
     ) -> Self {
         // Load + migrate once and persist so derived project ids stay stable.
         let file = store.read_file();
@@ -393,14 +419,12 @@ impl AppState {
             store_write_failure_receiver: Some(store_write_failure_receiver),
             sessions,
             projects,
-            active: None,
-            background: HashMap::new(),
+            residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry,
             pending_native_rewinds: HashMap::new(),
             settings,
-            model_catalogs,
-            models_loading: HashMap::new(),
+            providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
             terminal_preferences_path,
             terminal_preferences,
             next_terminal_spawn_id: 0,
@@ -408,40 +432,30 @@ impl AppState {
             next_start_generation: 0,
             scheduler_generation: 0,
             resident_idle_grace: RESIDENT_IDLE_GRACE,
-            ai_title_generation_enabled: !cfg!(any(test, feature = "test-support")),
+            ai_title_generation_enabled,
+            provider_launcher: ProviderLauncher::default(),
             acp_registry: None,
             acp_registry_loading: false,
             acp_registry_error: None,
             acp_installing: std::collections::HashSet::new(),
-            preview_url: None,
-            preview_tokens: None,
-            preview_registrations: HashMap::new(),
-            orchestrate_url: None,
-            orchestrate_tokens: None,
-            orchestrate_registrations: HashMap::new(),
-            orchestrate_requests: None,
-            computer_use_registration: None,
+            mcp: McpWiring::default(),
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
             approvals: HashMap::new(),
             git_status: None,
             git_busy: false,
             next_operation_id: 1,
-            index_event_seq: 0,
-            settings_event_seq: 0,
-            session_event_seqs: HashMap::new(),
-            session_status_event_seqs: HashMap::new(),
-            providers_event_seq: 0,
-            git_status_event_seq: 0,
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
             review_comment_drafts: HashMap::new(),
-            provider_versions: HashMap::new(),
-            provider_snapshots: HashMap::new(),
-            provider_secret_names,
             pending_relaunch,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_provider_launcher_for_test(&mut self, launcher: ProviderLauncher) {
+        self.provider_launcher = launcher;
     }
 
     fn start_store_writer(&mut self, cx: &mut HostCx) {
@@ -465,28 +479,8 @@ impl AppState {
             HostCx::spawn_detached(cx, async move {
                 while let Ok(failure) = failures.recv().await {
                     host_cx.enqueue(move |state, cx| match failure {
-                        StoreWriteFailure::PersistEvent(error) => {
-                            state.report_error(RuntimeError::PersistEvent { error }, cx);
-                        }
-                        StoreWriteFailure::PersistSession(error) => {
-                            state.report_error(RuntimeError::PersistSession { error }, cx);
-                        }
-                        StoreWriteFailure::PersistSessionIndex(error) => {
-                            state.report_error(RuntimeError::PersistSessionIndex { error }, cx);
-                        }
-                        StoreWriteFailure::PersistProject(error) => {
-                            state.report_error(RuntimeError::PersistProject { error }, cx);
-                        }
-                        StoreWriteFailure::DeleteSession(error) => {
-                            state.report_error(RuntimeError::DeleteSession { error }, cx);
-                        }
-                        StoreWriteFailure::DeleteProject(error) => {
-                            state.report_error(RuntimeError::DeleteProject { error }, cx);
-                        }
-                        StoreWriteFailure::PersistSettings(error) => {
-                            state.report_error(RuntimeError::PersistSettings { error }, cx);
-                        }
-                        StoreWriteFailure::Log(message) => log::warn!("{message}"),
+                        Ok(error) => state.report_error(error, cx),
+                        Err(message) => log::warn!("{message}"),
                     });
                 }
             });
@@ -494,24 +488,6 @@ impl AppState {
     }
 
     fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut HostCx) {
-        let index_event = match &write {
-            StoreWrite::UpsertMeta { meta, .. } => {
-                Some(ServerEvent::IndexUpsertSession((**meta).clone()))
-            }
-            StoreWrite::UpsertProject(project) => {
-                Some(ServerEvent::IndexUpsertProject(project.clone()))
-            }
-            StoreWrite::RemoveSession(session_id) => Some(ServerEvent::IndexRemoveSession {
-                session_id: session_id.clone(),
-            }),
-            StoreWrite::RemoveProject(project_id) => Some(ServerEvent::IndexRemoveProject {
-                project_id: project_id.clone(),
-            }),
-            _ => None,
-        };
-        if let Some(event) = index_event {
-            self.emit_domain(Topic::Index, event, cx);
-        }
         self.start_store_writer(cx);
         if self.store_writes.try_send(write).is_err() {
             log::error!("session store writer stopped before accepting a write");
@@ -519,11 +495,6 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
-        self.emit_domain(
-            Topic::Settings,
-            ServerEvent::SettingsReplaced(settings.clone()),
-            cx,
-        );
         match serde_json::to_vec_pretty(settings) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
             Err(err) => self.report_error(
@@ -540,27 +511,7 @@ impl AppState {
         self.enqueue_settings(&settings, cx);
     }
 
-    fn emit_domain(&mut self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
-        let seq = match &topic {
-            Topic::Index => &mut self.index_event_seq,
-            Topic::Settings => &mut self.settings_event_seq,
-            Topic::SessionEvents { session_id } => self
-                .session_event_seqs
-                .entry(session_id.clone())
-                .or_default(),
-            Topic::SessionStatus { session_id } => self
-                .session_status_event_seqs
-                .entry(session_id.clone())
-                .or_default(),
-            Topic::Providers => &mut self.providers_event_seq,
-            Topic::GitStatus => &mut self.git_status_event_seq,
-            _ => unreachable!("replication slice does not emit this domain"),
-        };
-        *seq += 1;
-        cx.emit(HostEvent::Domain(EventEnvelope {
-            topic,
-            seq: *seq,
-            event,
-        }));
+    fn emit_domain(&self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
+        cx.emit(HostEvent::Domain(EventEnvelope { topic, event }));
     }
 }

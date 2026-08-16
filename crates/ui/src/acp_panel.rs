@@ -19,10 +19,9 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::acp::InstalledAcpAgent;
 use tcode_protocol::AcpMarketplaceItem;
-use tcode_protocol::Command;
 
 use crate::material;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
@@ -53,7 +52,7 @@ impl AcpAgentCard {
             input.set_value(format_env(&agent.env), window, cx);
             input
         });
-        let subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
+        let subscriptions = vec![observe_store_topics(&store, &[TopicKind::Settings], cx)];
         Self {
             store,
             agent_id: agent.id.clone(),
@@ -145,12 +144,10 @@ impl AcpAgentCard {
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         let (id, checked) = (toggle_id.clone(), *checked);
                         this.store.update(cx, |store, _cx| {
-                            store.dispatch(Command::UpdateAcpAgent {
+                            store.update_acp_agent(
                                 id,
-                                patch: tcode_core::acp::AcpAgentPatch::SetEnabled {
-                                    enabled: checked,
-                                },
-                            });
+                                tcode_core::acp::AcpAgentPatch::SetEnabled { enabled: checked },
+                            );
                         });
                     })),
             )
@@ -200,15 +197,14 @@ impl AcpAgentCard {
                                         let parsed_env = parse_env(&env.read(cx).value());
                                         let id = save_id.clone();
                                         this.store.update(cx, |store, _cx| {
-                                            store.dispatch(Command::UpdateAcpAgent {
-                                            id,
-                                            patch:
+                                            store.update_acp_agent(
+                                                id,
                                                 tcode_core::acp::AcpAgentPatch::SetLaunchOptions {
                                                     launch_args: (!launch_args.is_empty())
                                                         .then_some(launch_args),
                                                     env: parsed_env,
                                                 },
-                                        });
+                                            );
                                         });
                                     },
                                 )),
@@ -228,7 +224,7 @@ impl AcpAgentCard {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let id = remove_id.clone();
                             this.store.update(cx, |store, _cx| {
-                                store.dispatch(Command::RemoveAcpAgent { id });
+                                store.remove_acp_agent(id);
                             });
                         })),
                 ),
@@ -302,7 +298,7 @@ impl AcpPanel {
         };
         let search = input(&crate::tr!("providers.acp.search"), window, cx);
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            observe_store_topics(&store, &[TopicKind::Providers], cx),
             cx.observe(&search, |_, _, cx| cx.notify()),
         ];
         let panel = Self {
@@ -322,7 +318,7 @@ impl AcpPanel {
         };
         panel
             .store
-            .update(cx, |store, _cx| store.dispatch(Command::RefreshAcpRegistry));
+            .update(cx, |store, _cx| store.refresh_acp_registry());
         panel
     }
 
@@ -423,7 +419,7 @@ impl AcpPanel {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = id.clone();
                     this.store.update(cx, |store, _cx| {
-                        store.dispatch(Command::InstallAcpAgent { id });
+                        store.install_acp_agent(id);
                     });
                 }))
                 .into_any_element()
@@ -724,12 +720,12 @@ impl AcpPanel {
                                     return;
                                 }
                                 this.store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::CreateThirdPartyProfile {
+                                    store.create_third_party_profile(
                                         name,
                                         base_url,
-                                        model: Some(model),
-                                        api_key: key,
-                                    });
+                                        Some(model),
+                                        key,
+                                    );
                                 });
                                 this.view = PanelView::Home;
                                 window.close_dialog(cx);
@@ -808,12 +804,7 @@ impl AcpPanel {
                                     .collect();
                                 let env = parse_env(&env.read(cx).value());
                                 this.store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::AddCustomAcpAgent {
-                                        name,
-                                        command,
-                                        args,
-                                        env,
-                                    });
+                                    store.add_custom_acp_agent(name, command, args, env);
                                 });
                                 this.view = PanelView::Home;
                                 window.close_dialog(cx);

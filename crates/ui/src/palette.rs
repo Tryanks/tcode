@@ -24,12 +24,10 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use tcode_protocol::Command;
-
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
 
@@ -116,7 +114,7 @@ impl CommandPalette {
             cx.new(|cx| InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder")));
 
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            observe_store_topics(&store, &[TopicKind::Index, TopicKind::Settings], cx),
             cx.subscribe_in(
                 &query,
                 window,
@@ -290,7 +288,7 @@ impl CommandPalette {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
                 self.store.update(cx, |store, _cx| {
-                    store.dispatch(Command::StartDraft { project_id, cwd });
+                    store.start_draft(project_id, cwd);
                 });
             }
             Action::OpenSettings => {
@@ -305,9 +303,7 @@ impl CommandPalette {
                     ThemeMode::Dark
                 };
                 self.store.update(cx, |store, _cx| {
-                    let mut settings = store.settings();
-                    settings.theme_mode = next;
-                    store.dispatch(Command::UpdateSettings { settings });
+                    store.set_theme_mode(next);
                 });
                 apply_theme(next, window, cx);
                 self.close(cx);
@@ -328,14 +324,13 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::CheckUpdates => {
-                self.store.update(cx, |store, _cx| {
-                    store.dispatch(Command::CheckProviderVersions)
-                });
+                self.store
+                    .update(cx, |store, _cx| store.check_provider_versions());
                 self.close(cx);
             }
             Action::OpenThread { session_id } => {
                 self.store.update(cx, |store, _cx| {
-                    store.dispatch(Command::SelectSession { session_id });
+                    store.select_session(session_id);
                 });
                 self.close(cx);
             }

@@ -180,7 +180,11 @@ fn main() {
     // Hidden debug/dev flag: open the most recently updated session on launch.
     let open_latest = std::env::args().any(|arg| arg == "--open-latest");
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
-    let mut host_services = HostServices::default();
+    let mut host_services = HostServices {
+        background_startup_probes: true,
+        ai_title_generation: true,
+        ..HostServices::default()
+    };
     match mcp_host::Host::bind() {
         Ok(mut mcp_host) => {
             host_services.preview = Some(preview_mcp::start(&mut mcp_host));
@@ -188,7 +192,9 @@ fn main() {
             host_services.computer_use = Some(computer_use_mcp::start(&mut mcp_host));
             if let Err(error) = mcp_host.start() {
                 log::warn!("MCP host failed to start: {error}");
-                host_services = HostServices::default();
+                host_services.preview = None;
+                host_services.orchestrate = None;
+                host_services.computer_use = None;
             }
         }
         Err(error) => log::warn!("MCP host failed to bind: {error}"),

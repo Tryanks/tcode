@@ -169,13 +169,11 @@ pub(crate) fn turn_time_footer(
             row.tooltip(move |window, cx| Tooltip::new(breakdown.clone()).build(window, cx))
         })
         .child(
-            // Flush to the content column's trailing edge: the turn's closing
-            // signature, not another left-aligned line of the flow.
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .flex_wrap()
-                .justify_end()
+                .justify_start()
                 .gap_x(px(4.))
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
@@ -291,7 +289,7 @@ mod tests {
 
         // Opening the diff panel squeezes the chat column; sweep well below any
         // practical width. Every clause must stay inside the row, and the row
-        // must stay a signature: its final clause flush to the trailing edge.
+        // must preserve the intentionally left-aligned footer.
         for width in 260..=900 {
             cx.simulate_resize(size(px(width as f32), px(120.)));
             draw(cx);
@@ -308,13 +306,11 @@ mod tests {
                     "{selector} was squeezed away at {width}px: {clause:?}"
                 );
             }
-            let last_clause = cx
-                .debug_bounds(selectors[selectors.len() - 1])
-                .expect("clause bounds");
+            let first_clause = cx.debug_bounds(selectors[0]).expect("clause bounds");
             assert!(
-                (last_clause.right() - row.right()).abs() <= px(0.5),
-                "the footer left the trailing edge at {width}px: \
-                 row={row:?}, clause={last_clause:?}"
+                (first_clause.left() - row.left()).abs() <= px(0.5),
+                "the footer left the leading edge at {width}px: \
+                 row={row:?}, clause={first_clause:?}"
             );
         }
     }

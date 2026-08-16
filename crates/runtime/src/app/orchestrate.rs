@@ -1,22 +1,35 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) struct McpWiring {
+    pub(super) preview_url: Option<String>,
+    pub(super) preview_tokens: Option<preview_mcp::TokenRegistry>,
+    pub(super) preview_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) orchestrate_url: Option<String>,
+    pub(super) orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
+    pub(super) orchestrate_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) orchestrate_requests:
+        Option<smol::channel::Receiver<orchestrate_mcp::BrokerRequest>>,
+    pub(super) computer_use_registration: Option<agent::McpRegistration>,
+}
+
 impl AppState {
     /// Attach the serializable registration half of the preview MCP server.
     /// Its non-serializable broker receiver is moved exactly once into the
     /// client handle by `pipe::spawn_host`.
     pub fn attach_preview_mcp(&mut self, url: String, tokens: preview_mcp::TokenRegistry) {
-        self.preview_url = Some(url);
-        self.preview_tokens = Some(tokens);
+        self.mcp.preview_url = Some(url);
+        self.mcp.preview_tokens = Some(tokens);
     }
 
     pub fn attach_orchestrate_mcp(&mut self, server: orchestrate_mcp::OrchestrateMcpServer) {
-        self.orchestrate_url = Some(server.url);
-        self.orchestrate_tokens = Some(server.tokens);
-        self.orchestrate_requests = Some(server.requests);
+        self.mcp.orchestrate_url = Some(server.url);
+        self.mcp.orchestrate_tokens = Some(server.tokens);
+        self.mcp.orchestrate_requests = Some(server.requests);
     }
 
     pub fn attach_computer_use_mcp(&mut self, url: String, token: String) {
-        self.computer_use_registration = Some(agent::McpRegistration {
+        self.mcp.computer_use_registration = Some(agent::McpRegistration {
             name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
             url,
             bearer_token: token,
@@ -28,7 +41,7 @@ impl AppState {
     /// Taking the receiver makes repeated calls harmless: exactly one pump can
     /// own the request stream.
     pub fn pump_orchestrate_requests(&mut self, cx: &mut HostCx) {
-        let Some(requests) = self.orchestrate_requests.take() else {
+        let Some(requests) = self.mcp.orchestrate_requests.take() else {
             return;
         };
         let host_cx = cx.clone();
@@ -80,7 +93,7 @@ impl AppState {
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.residents.active.as_ref() else {
             return;
         };
         let provider = active.meta.provider;
@@ -107,7 +120,7 @@ impl AppState {
                 self.report_error(RuntimeError::External(message), cx);
                 return;
             }
-            if let Some(active) = self.active.as_mut() {
+            if let Some(active) = self.residents.active.as_mut() {
                 active.shutdown_to_idle();
             }
         }
@@ -115,7 +128,7 @@ impl AppState {
         // Stage the split so the next `push_queued` records it on the user
         // message. (A mid-turn steer clears it instead — see `steer` — so the
         // annotation never leaks onto an unrelated later message.)
-        if let Some(active) = self.active.as_mut() {
+        if let Some(active) = self.residents.active.as_mut() {
             active.pending_context_len = Some(context_len);
         }
 
@@ -132,16 +145,17 @@ impl AppState {
         if !meta.orchestrate_enabled {
             return None;
         }
-        if let Some(registration) = self.orchestrate_registrations.get(&meta.id) {
+        if let Some(registration) = self.mcp.orchestrate_registrations.get(&meta.id) {
             return Some(registration.clone());
         }
-        let token = self.orchestrate_tokens.as_ref()?.register(&meta.id);
+        let token = self.mcp.orchestrate_tokens.as_ref()?.register(&meta.id);
         let registration = agent::McpRegistration {
             name: agent::McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
-            url: self.orchestrate_url.clone()?,
+            url: self.mcp.orchestrate_url.clone()?,
             bearer_token: token,
         };
-        self.orchestrate_registrations
+        self.mcp
+            .orchestrate_registrations
             .insert(meta.id.clone(), registration.clone());
         Some(registration)
     }
@@ -150,16 +164,17 @@ impl AppState {
         &mut self,
         meta: &SessionMeta,
     ) -> Option<agent::McpRegistration> {
-        if let Some(registration) = self.preview_registrations.get(&meta.id) {
+        if let Some(registration) = self.mcp.preview_registrations.get(&meta.id) {
             return Some(registration.clone());
         }
-        let token = self.preview_tokens.as_ref()?.register(&meta.id);
+        let token = self.mcp.preview_tokens.as_ref()?.register(&meta.id);
         let registration = agent::McpRegistration {
             name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
-            url: self.preview_url.clone()?,
+            url: self.mcp.preview_url.clone()?,
             bearer_token: token,
         };
-        self.preview_registrations
+        self.mcp
+            .preview_registrations
             .insert(meta.id.clone(), registration.clone());
         Some(registration)
     }
@@ -218,10 +233,8 @@ impl AppState {
         child.meta = meta;
         child.draft = false;
         child.push_queued(brief, Vec::new());
-        self.background.insert(id.clone(), child);
+        self.residents.parked.insert(id.clone(), child);
         self.ensure_session_started(&id, cx);
-        self.emit_session_status(&id, cx);
-        cx.notify();
         Ok(id)
     }
 
@@ -371,7 +384,7 @@ impl AppState {
                     // redirect (and never, if the turn hangs).
                     let can_steer = self
                         .resident(&thread_id)
-                        .is_some_and(|child| child.turn_in_flight && child.supports_steering());
+                        .is_some_and(|child| child.turn_in_flight && child.can_steer());
                     if can_steer {
                         let request_id = self.record_steer_request(&thread_id, &message, &[], cx);
                         let sent = self.resident_mut(&thread_id).is_some_and(|child| {
@@ -380,14 +393,13 @@ impl AppState {
                                 .is_ok()
                         });
                         if sent {
-                            cx.notify();
                             return Ok(serde_json::json!({ "ok": true, "delivery": "steered" }));
                         }
                         // Provider channel gone: fall through so the text survives
                         // in the queue for the wake-up path.
                     }
                     if self.active_session_id() == Some(&thread_id) {
-                        let child = self.active.as_mut().unwrap();
+                        let child = self.residents.active.as_mut().unwrap();
                         child.push_queued(message, Vec::new());
                         let idle = matches!(child.runtime, Runtime::Idle);
                         if self.dispatch_next_queued(cx).is_err() {
@@ -396,11 +408,10 @@ impl AppState {
                         if idle {
                             self.ensure_started(cx);
                         }
-                        self.emit_session_status(&thread_id, cx);
                         return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                     }
                     self.ensure_child_loaded(&thread_id, cx)?;
-                    let child = self.background.get_mut(&thread_id).unwrap();
+                    let child = self.resident_mut(&thread_id).unwrap();
                     child.push_queued(message, Vec::new());
                     let idle = matches!(child.runtime, Runtime::Idle);
                     if !idle && !child.turn_in_flight {
@@ -409,7 +420,6 @@ impl AppState {
                     if idle {
                         self.ensure_session_started(&thread_id, cx);
                     }
-                    self.emit_session_status(&thread_id, cx);
                     Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
                 })();
                 let _ = reply.try_send(result);
@@ -422,7 +432,7 @@ impl AppState {
                     self.require_child(&parent_id, &thread_id)?;
                     self.clear_approvals(&thread_id);
                     if self.active_session_id() == Some(&thread_id) {
-                        if let Some(child) = self.active.as_mut() {
+                        if let Some(child) = self.residents.active.as_mut() {
                             child.queue.clear();
                             child.timeline.mark_idle();
                             child.shutdown_to_idle();
@@ -454,7 +464,6 @@ impl AppState {
                         ));
                     }
                     self.archive_session_ids(&thread_ids, now_secs(), cx);
-                    cx.notify();
                     Ok(serde_json::json!({
                         "ok": true,
                         "archived": thread_ids.len(),
@@ -493,7 +502,6 @@ impl AppState {
                     let decision = resolve_approval_decision(&decision)?;
                     let request_id = request.id;
                     self.respond_session_approval(&thread_id, request_id.clone(), decision)?;
-                    cx.notify();
                     Ok(serde_json::json!({ "ok": true, "request_id": request_id }))
                 })();
                 let _ = reply.try_send(result);
@@ -519,7 +527,7 @@ impl AppState {
         thread_id: &str,
         cx: &mut HostCx,
     ) -> Result<(), String> {
-        if self.background.contains_key(thread_id) {
+        if self.residents.parked.contains_key(thread_id) {
             return Ok(());
         }
         let meta = self
@@ -548,8 +556,7 @@ impl AppState {
         );
         child.meta = meta;
         child.draft = false;
-        self.background.insert(thread_id.clone(), child);
-        self.emit_session_status(&thread_id, cx);
+        self.residents.parked.insert(thread_id.clone(), child);
         self.schedule_timeline_load(
             thread_id,
             TimelineLoadTarget::Background { mark_idle: true },
@@ -832,7 +839,6 @@ impl AppState {
             ) {
                 log::warn!("failed to auto-approve child {child_id}: {err}");
             }
-            cx.notify();
             return;
         }
         if !self
@@ -874,7 +880,7 @@ impl AppState {
     ) {
         let can_steer = self
             .resident(parent_id)
-            .is_some_and(|parent| parent.turn_in_flight && parent.supports_steering());
+            .is_some_and(|parent| parent.turn_in_flight && parent.can_steer());
         if can_steer {
             // A steered callback is already part of this turn, so persist it just
             // like a user-triggered steer before handing it to the provider.
@@ -885,12 +891,11 @@ impl AppState {
             if !sent {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
-            cx.notify();
             return;
         }
 
         if self.active_session_id() == Some(parent_id) {
-            let parent = self.active.as_mut().unwrap();
+            let parent = self.residents.active.as_mut().unwrap();
             parent.push_or_merge_orchestrate_callback(text);
 
             // Match ordinary sends when a launch-time selection changed while
@@ -908,12 +913,10 @@ impl AppState {
             if should_start {
                 self.ensure_started(cx);
             }
-            self.emit_session_status(parent_id, cx);
-            cx.notify();
             return;
         }
 
-        if !self.background.contains_key(parent_id)
+        if !self.residents.parked.contains_key(parent_id)
             && let Some(parent) = self
                 .sessions
                 .iter()
@@ -922,7 +925,7 @@ impl AppState {
         {
             self.load_background_session(parent, cx);
         }
-        if let Some(parent) = self.background.get_mut(parent_id) {
+        if let Some(parent) = self.resident_mut(parent_id) {
             parent.push_or_merge_orchestrate_callback(text);
             let idle_runtime = matches!(parent.runtime, Runtime::Idle);
             let can_dispatch = !parent.turn_in_flight && matches!(parent.runtime, Runtime::Live(_));
@@ -932,8 +935,6 @@ impl AppState {
             if idle_runtime {
                 self.ensure_session_started(parent_id, cx);
             }
-            self.emit_session_status(parent_id, cx);
-            cx.notify();
         }
     }
 }

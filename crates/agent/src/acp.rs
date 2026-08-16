@@ -1282,14 +1282,13 @@ async fn finish_turn(
     let (status, message, usage) = match outcome.result {
         Ok(response) => {
             let usage = response.usage.as_ref().map(|usage| TokenUsage {
-                input_tokens: Some(usage.input_tokens),
-                cached_input_tokens: usage.cached_read_tokens,
-                output_tokens: Some(usage.output_tokens),
-                used_tokens: None,
-                context_window: None,
                 total_processed_tokens: Some(usage.total_tokens),
-                cost_usd: None,
-                duration_ms: None,
+                ..crate::normalize::token_usage(
+                    Some(usage.input_tokens),
+                    usage.cached_read_tokens,
+                    Some(usage.output_tokens),
+                    None,
+                )
             });
             let (status, message) = stop_reason_status(response.stop_reason);
             (status, message, usage)
@@ -1852,11 +1851,7 @@ impl State {
             // read | search | fetch | switch_mode | other
             _ => tool_call_content(tool, status, self.tool_output(tool)),
         };
-        ThreadItem {
-            id: id.to_string(),
-            parent_item_id: None,
-            content,
-        }
+        crate::normalize::thread_item(id, content)
     }
 
     /// Everything the tool produced, as display text: its content blocks plus
@@ -1986,20 +1981,20 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
         .filter_map(|content| match content {
             acp::ToolCallContent::Diff(diff) => {
                 let path = diff.path.to_string_lossy().into_owned();
-                Some(FileChange {
-                    kind: match (tool.kind, diff.old_text.as_deref()) {
+                Some(crate::normalize::file_change(
+                    path.clone(),
+                    match (tool.kind, diff.old_text.as_deref()) {
                         (acp::ToolKind::Delete, _) => FileChangeKind::Delete,
                         (acp::ToolKind::Move, _) => FileChangeKind::Rename,
                         (_, None | Some("")) => FileChangeKind::Create,
                         _ => FileChangeKind::Modify,
                     },
-                    diff: Some(unified_diff(
+                    Some(unified_diff(
                         &path,
                         diff.old_text.as_deref().unwrap_or(""),
                         &diff.new_text,
                     )),
-                    path,
-                })
+                ))
             }
             _ => None,
         })
@@ -2009,13 +2004,15 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
         changes = tool
             .locations
             .iter()
-            .map(|location| FileChange {
-                path: location.path.to_string_lossy().into_owned(),
-                kind: match tool.kind {
-                    acp::ToolKind::Delete => FileChangeKind::Delete,
-                    _ => FileChangeKind::Rename,
-                },
-                diff: None,
+            .map(|location| {
+                crate::normalize::file_change(
+                    location.path.to_string_lossy(),
+                    match tool.kind {
+                        acp::ToolKind::Delete => FileChangeKind::Delete,
+                        _ => FileChangeKind::Rename,
+                    },
+                    None,
+                )
             })
             .collect();
     }

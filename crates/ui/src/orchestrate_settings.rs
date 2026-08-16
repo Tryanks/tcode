@@ -17,7 +17,6 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
-use tcode_protocol::Command;
 
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
@@ -25,7 +24,7 @@ use crate::settings::{
     ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings,
     provider_label,
 };
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 struct IdentityRowState {
     provider: ProviderKind,
@@ -85,7 +84,7 @@ impl OrchestrateSettingsPanel {
             )
         });
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            observe_store_topics(&store, &[TopicKind::Settings], cx),
             cx.subscribe_in(
                 &identity_model_picker,
                 window,
@@ -120,11 +119,8 @@ impl OrchestrateSettingsPanel {
     }
 
     fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        let mut settings = self.store.read(cx).settings();
-        mutate(&mut settings);
-        self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::UpdateSettings { settings })
-        });
+        self.store
+            .update(cx, |store, _cx| store.update_settings(mutate));
     }
 
     fn commit_generic_identity(&self, cx: &mut Context<Self>) {

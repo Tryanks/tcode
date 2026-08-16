@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{App, Context, EventEmitter, Task};
+use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
@@ -18,7 +18,7 @@ use tcode_core::{
 };
 use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
 use tcode_protocol::{
-    Command, EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
+    EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
     ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent,
     SessionStatus, Subscription, Topic,
 };
@@ -29,9 +29,59 @@ use tcode_services::import::ExternalImportUpdate;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
+mod intents;
 mod snapshots;
 
 pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, ShellPanelState};
+
+/// Payload-free topic discriminant used by views to subscribe only to the
+/// store projections they render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopicKind {
+    SessionEvents,
+    SessionStatus,
+    Index,
+    Settings,
+    Providers,
+    GitStatus,
+    RuntimeEvents,
+    ActiveSession,
+    Terminal,
+}
+
+impl From<&Topic> for TopicKind {
+    fn from(topic: &Topic) -> Self {
+        match topic {
+            Topic::SessionEvents { .. } => Self::SessionEvents,
+            Topic::SessionStatus { .. } => Self::SessionStatus,
+            Topic::Index => Self::Index,
+            Topic::Settings => Self::Settings,
+            Topic::Providers => Self::Providers,
+            Topic::GitStatus => Self::GitStatus,
+            Topic::RuntimeEvents => Self::RuntimeEvents,
+            Topic::ActiveSession => Self::ActiveSession,
+            Topic::Terminal { .. } => Self::Terminal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoreChange {
+    pub(crate) topic: TopicKind,
+}
+
+/// Observe selected store domains while keeping topic filtering out of views.
+pub(crate) fn observe_store_topics<V: 'static>(
+    store: &Entity<WorkspaceStore>,
+    topics: &'static [TopicKind],
+    cx: &mut Context<V>,
+) -> GpuiSubscription {
+    cx.subscribe(store, move |_, _, change: &StoreChange, cx| {
+        if topics.contains(&change.topic) {
+            cx.notify();
+        }
+    })
+}
 
 /// The client-facing projection and command boundary for workspace state.
 ///
@@ -115,7 +165,6 @@ impl WorkspaceStore {
             Topic::Providers,
             Topic::GitStatus,
             Topic::ActiveSession,
-            Topic::RuntimeEvents,
         ];
         for topic in &seed_topics {
             if let Err(error) = host.subscribe(Subscription {
@@ -128,9 +177,16 @@ impl WorkspaceStore {
         let mut seeded = HashSet::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
-            let Ok(message) = events.try_recv() else {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                continue;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let received = smol::block_on(smol::future::race(
+                async { Some(events.recv().await) },
+                async {
+                    smol::Timer::after(remaining).await;
+                    None
+                },
+            ));
+            let Some(Ok(message)) = received else {
+                break;
             };
             if let HostMessage::Event(envelope) = message {
                 match (&envelope.topic, &envelope.event) {
@@ -138,8 +194,7 @@ impl WorkspaceStore {
                     | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
                     | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
                     | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
-                    | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_))
-                    | (Topic::RuntimeEvents, ServerEvent::RuntimeSnapshot(_)) => {
+                    | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
                         seeded.insert(envelope.topic.clone());
                     }
                     _ => {}
@@ -173,20 +228,14 @@ impl WorkspaceStore {
                                 cx.emit(event.clone());
                             } else {
                                 store.apply_domain_event(&envelope);
+                                cx.emit(StoreChange {
+                                    topic: TopicKind::from(&envelope.topic),
+                                });
                             }
                             cx.notify();
                         })
                         .is_err()
                     {
-                        break;
-                    }
-                }
-            })
-            .detach();
-            let changed = host.changed_receiver();
-            cx.spawn(async move |this, cx| {
-                while changed.recv().await.is_ok() {
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
                 }
@@ -464,30 +513,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// Dispatch a typed backend mutation.
-    pub fn dispatch(&mut self, command: Command) {
-        if let Err(error) = self.host.dispatch(command) {
-            log::error!("failed to dispatch host command: {}", error.message);
-        }
-    }
-
-    pub fn command(
-        &self,
-        command: Command,
-        cx: &mut App,
-    ) -> Task<Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>> {
-        let host = self.host.clone();
-        #[cfg(test)]
-        {
-            let result = smol::block_on(host.command(command));
-            cx.spawn(async move |_| result)
-        }
-        #[cfg(not(test))]
-        {
-            cx.spawn(async move |_| host.command(command).await)
-        }
-    }
-
     #[cfg(test)]
     fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
         let events = self.host.event_receiver();
@@ -499,11 +524,12 @@ impl WorkspaceStore {
                 cx.emit(event.clone());
             } else {
                 self.apply_domain_event(&envelope);
+                cx.emit(StoreChange {
+                    topic: TopicKind::from(&envelope.topic),
+                });
             }
             cx.notify();
         }
-        let changed = self.host.changed_receiver();
-        while changed.try_recv().is_ok() {}
     }
 
     pub fn working_sessions_count(&self) -> usize {
@@ -747,49 +773,6 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        let opening = !self
-            .active_conversation_ui()
-            .is_some_and(|ui| ui.terminal_open);
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = opening;
-        }
-        if opening {
-            self.dispatch(Command::ToggleTerminalPanel);
-        } else {
-            self.dispatch(Command::CloseTerminalPanel);
-        }
-        cx.notify();
-    }
-
-    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = false;
-        }
-        self.dispatch(Command::CloseTerminalPanel);
-        cx.notify();
-    }
-
-    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_height = height;
-        }
-        self.dispatch(Command::SetTerminalHeight { height });
-        cx.notify();
-    }
-
-    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
-        let closes_drawer = self
-            .session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.terminals.len() <= 1);
-        if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = false;
-        }
-        self.dispatch(Command::CloseTerminal { terminal_id });
-        cx.notify();
-    }
-
     pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
         let visible: Vec<_> = self
             .index_replica
@@ -937,7 +920,7 @@ impl WorkspaceStore {
         else {
             return ForkAvailability::Available;
         };
-        if !meta.provider.supports_fork() {
+        if !meta.provider.caps().supports_fork {
             ForkAvailability::Unsupported
         } else if meta.resume_cursor.is_none() {
             ForkAvailability::Empty
@@ -1538,7 +1521,7 @@ impl WorkspaceStore {
             })
             .unwrap_or(false);
         Some((
-            status.provider == agent::ProviderKind::ClaudeCode && has_checkpoint,
+            status.provider.caps().native_rewind && has_checkpoint,
             status.turn_running
                 || !status.queued_messages.is_empty()
                 || status.native_rewind_pending,
@@ -1605,6 +1588,7 @@ impl WorkspaceStore {
 }
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
+impl EventEmitter<StoreChange> for WorkspaceStore {}
 
 #[cfg(test)]
 mod tests {
@@ -1654,7 +1638,7 @@ mod tests {
             if ready(cx) {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            smol::block_on(smol::Timer::after(std::time::Duration::from_millis(1)));
         }
         panic!("timed out waiting for {description}");
     }
@@ -1748,6 +1732,7 @@ mod tests {
             let event_session_id = session_id.clone();
             update_host!(&host, move |state, cx| {
                 state
+                    .residents
                     .active
                     .as_mut()
                     .expect("active session")
@@ -1757,7 +1742,6 @@ mod tests {
                     topic: Topic::SessionEvents {
                         session_id: event_session_id,
                     },
-                    seq: 10 + offset as u64,
                     event: ServerEvent::SessionEvent(SessionEventRecord {
                         ts: Some(200 + offset as u64),
                         event,
@@ -1766,7 +1750,12 @@ mod tests {
             });
         }
         let live = update_host!(&host, |state, _| {
-            let timeline = &state.active.as_ref().expect("active session").timeline;
+            let timeline = &state
+                .residents
+                .active
+                .as_ref()
+                .expect("active session")
+                .timeline;
             (
                 timeline
                     .entries
@@ -1845,7 +1834,12 @@ mod tests {
         let mut settings = workspace.read_with(cx, |store, _cx| store.settings());
         settings.word_wrap_diffs = !settings.word_wrap_diffs;
         let expected_word_wrap = settings.word_wrap_diffs;
-        command(&host, Command::UpdateSettings { settings });
+        command(
+            &host,
+            Command::PatchSettings {
+                patch: tcode_protocol::SettingsPatch::WordWrapDiffs(settings.word_wrap_diffs),
+            },
+        );
         wait_until(cx, &workspace, "index and settings replicas", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.index_replica.1.len() == 2
@@ -2025,7 +2019,6 @@ mod tests {
                 topic: Topic::SessionStatus {
                     session_id: background_session_id.clone(),
                 },
-                seq: 1,
                 event: ServerEvent::SessionStatusReplaced(status),
             });
         });
@@ -2082,7 +2075,6 @@ mod tests {
                 topic: Topic::SessionStatus {
                     session_id: first.id.clone(),
                 },
-                seq: 1,
                 event: ServerEvent::SessionStatusReplaced(parked.clone()),
             });
 
@@ -2095,12 +2087,10 @@ mod tests {
                 topic: Topic::SessionStatus {
                     session_id: second.id.clone(),
                 },
-                seq: 1,
                 event: ServerEvent::SessionStatusReplaced(next.clone()),
             });
             store.apply_domain_event(&EventEnvelope {
                 topic: Topic::ActiveSession,
-                seq: 2,
                 event: ServerEvent::ActiveSessionReplaced(Some(next)),
             });
         });
@@ -2149,16 +2139,15 @@ mod tests {
             })
         });
 
-        for (seq, session_id, text) in [
-            (1, first.id.clone(), "first parked prefill".to_string()),
-            (2, second.id.clone(), "second parked prefill".to_string()),
+        for (session_id, text) in [
+            (first.id.clone(), "first parked prefill".to_string()),
+            (second.id.clone(), "second parked prefill".to_string()),
         ] {
             update_host!(&host, move |_state, cx| {
                 cx.emit(HostEvent::Domain(EventEnvelope {
                     topic: Topic::SessionStatus {
                         session_id: session_id.clone(),
                     },
-                    seq,
                     event: ServerEvent::NativeRewindPrefill { session_id, text },
                 }));
             });
@@ -2206,7 +2195,7 @@ mod tests {
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
-        update_host!(&host, |state, cx| {
+        update_host!(&host, |state, _cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
                     "agents": [{
@@ -2222,6 +2211,7 @@ mod tests {
             state.acp_registry_loading = false;
             state.acp_registry_error = None;
             state
+                .providers
                 .provider_versions
                 .entry(ProviderKind::Codex)
                 .or_default()
@@ -2238,7 +2228,6 @@ mod tests {
                 ..Default::default()
             });
             state.git_busy = true;
-            state.emit_provider_and_git_replicas_for_test(cx);
         });
         wait_until(cx, &workspace, "provider and git replicas", |cx| {
             workspace.read_with(cx, |store, _| {

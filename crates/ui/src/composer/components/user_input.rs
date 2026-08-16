@@ -497,10 +497,7 @@ impl Composer {
         self.ui_selections.clear();
         self.ui_question_index = 0;
         self.workspace_store.update(cx, |store, _cx| {
-            store.dispatch(Command::RespondUserInput {
-                request_id,
-                answers,
-            })
+            store.respond_user_input(request_id, answers)
         });
         cx.notify();
     }

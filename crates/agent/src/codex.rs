@@ -10,8 +10,9 @@ use std::process::{Child, ChildStdin, Stdio};
 
 use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
-use smol::future;
 
+use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
+use crate::pending::{PendingRequests, drain_resolved};
 use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -383,14 +384,19 @@ struct Actor {
     approvals: HashMap<String, Value>,
     /// Pending `item/tool/requestUserInput` requests: canonical request_id → the
     /// server-to-client JSON-RPC id we must reply to.
-    user_inputs: HashMap<String, Value>,
+    user_inputs: PendingRequests<String, Value>,
     /// Pending `mcpServer/elicitation/request`s: canonical request_id → the
     /// JSON-RPC id and field typing needed to rebuild a typed response.
-    elicitations: HashMap<String, PendingElicitation>,
+    elicitations: PendingRequests<String, PendingElicitation>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
+}
+
+struct CodexSessionActor {
+    actor: Actor,
+    stderr_tail: StderrTail,
 }
 
 #[derive(Debug, Clone)]
@@ -469,6 +475,7 @@ async fn run_actor(
     // Replace the composer's cached `/` + `$` menu data even when discovery is
     // empty, so removed prompts/skills do not linger from a prior session.
     actor
+        .events
         .emit(AgentEvent::ProviderCommands {
             commands: provider_commands,
         })
@@ -478,64 +485,56 @@ async fn run_actor(
         return;
     }
 
-    let close_reason = loop {
-        enum Input {
-            Command(Result<SessionCommand, smol::channel::RecvError>),
-            Output(Result<ChildOutput, smol::channel::RecvError>),
-        }
-        let input = future::race(async { Input::Command(commands.recv().await) }, async {
-            Input::Output(actor.lines.recv().await)
-        })
-        .await;
+    actor::run(CodexSessionActor { actor, stderr_tail }, &commands).await;
+}
 
-        match input {
-            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => {
-                actor.settle_pending_user_inputs_on_shutdown().await;
-                break None;
+impl SessionActor for CodexSessionActor {
+    type TransportItem = ChildOutput;
+
+    fn transport(&self) -> &Receiver<Self::TransportItem> {
+        &self.actor.lines
+    }
+
+    fn events(&self) -> &Sender<AgentEvent> {
+        &self.actor.events
+    }
+
+    fn command_failure_reason(&self) -> &'static str {
+        "protocol write failed"
+    }
+
+    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
+        self.actor.handle_command(command).await
+    }
+
+    async fn handle_transport(
+        &mut self,
+        item: Result<ChildOutput, smol::channel::RecvError>,
+    ) -> TransportOutcome {
+        match item {
+            Ok(ChildOutput::Line(line)) => {
+                self.actor.handle_line(&line).await;
+                TransportOutcome::Continue
             }
-            Input::Command(Ok(command)) => {
-                if let Err(err) = actor.handle_command(command).await {
-                    actor
-                        .emit(AgentEvent::Error {
-                            message: err,
-                            fatal: true,
-                        })
-                        .await;
-                    break Some("protocol write failed".into());
-                }
-            }
-            Input::Output(Ok(ChildOutput::Line(line))) => actor.handle_line(&line).await,
-            Input::Output(Ok(ChildOutput::Eof)) | Input::Output(Err(_)) => {
-                let status = actor.child.try_wait().ok().flatten();
-                break Some(match status {
+            Ok(ChildOutput::Eof) | Err(_) => {
+                let status = self.actor.child.try_wait().ok().flatten();
+                TransportOutcome::Closed(match status {
                     Some(status) => format!("codex app-server exited with {status}"),
                     None => "codex app-server closed stdout".into(),
-                });
+                })
             }
-            Input::Output(Ok(ChildOutput::Error(err))) => {
-                actor
-                    .emit(AgentEvent::Error {
-                        message: err.clone(),
-                        fatal: true,
-                    })
-                    .await;
-                break Some(err);
-            }
+            Ok(ChildOutput::Error(err)) => TransportOutcome::Fatal(err),
         }
-    };
+    }
 
-    stop_child(&mut actor.child, actor.stdin);
-    // Every Some(_) reason is an abnormal death (user shutdowns break with
-    // None), so the child's last stderr lines belong in the message.
-    let close_reason =
-        close_reason.map(|reason| describe_child_failure(reason, None, &mut stderr_tail));
-    actor
-        .events
-        .send(AgentEvent::SessionClosed {
-            reason: close_reason,
-        })
-        .await
-        .ok();
+    async fn settle_shutdown(&mut self) {
+        self.actor.settle_pending_user_inputs_on_shutdown().await;
+    }
+
+    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
+        stop_child(&mut self.actor.child, self.actor.stdin);
+        reason.map(|reason| describe_child_failure(reason, None, &mut self.stderr_tail))
+    }
 }
 
 fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
@@ -921,10 +920,6 @@ fn settle_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
 }
 
 impl Actor {
-    async fn emit(&self, event: AgentEvent) {
-        self.events.send(event).await.ok();
-    }
-
     fn request(&mut self, method: &str, params: Value, kind: PendingRequest) -> Result<(), String> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1007,7 +1002,9 @@ impl Actor {
             } => {
                 let params = self.build_turn_params(&text, options.as_ref(), &attachments);
                 self.request("turn/start", params, PendingRequest::TurnStart)?;
-                self.emit(AgentEvent::TurnAccepted { delivery_id }).await;
+                self.events
+                    .emit(AgentEvent::TurnAccepted { delivery_id })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetInteractionMode(mode) => {
@@ -1018,10 +1015,11 @@ impl Actor {
             }
             SessionCommand::Interrupt => {
                 let Some(turn_id) = self.active_turn.clone() else {
-                    self.emit(AgentEvent::Warning {
-                        message: "cannot interrupt: no active Codex turn".into(),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: "cannot interrupt: no active Codex turn".into(),
+                        })
+                        .await;
                     return Ok(());
                 };
                 let thread_id = self.thread_id.clone();
@@ -1036,10 +1034,11 @@ impl Actor {
                 decision,
             } => {
                 let Some(json_rpc_id) = self.approvals.remove(&request_id) else {
-                    self.emit(AgentEvent::Warning {
-                        message: format!("unknown Codex approval request id: {request_id}"),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("unknown Codex approval request id: {request_id}"),
+                        })
+                        .await;
                     return Ok(());
                 };
                 // `cancel` is protocol-defined as deny + immediate turn
@@ -1062,11 +1061,12 @@ impl Actor {
                     &json!({ "id": json_rpc_id, "result": { "decision": wire_decision } }),
                 )
                 .map_err(|e| e.to_string())?;
-                self.emit(AgentEvent::ApprovalResolved {
-                    request_id,
-                    decision,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::ApprovalResolved {
+                        request_id,
+                        decision,
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::RespondUserInput {
@@ -1094,17 +1094,19 @@ impl Actor {
                     )
                     .map_err(|e| e.to_string())?;
                 } else {
-                    self.emit(AgentEvent::Warning {
-                        message: format!("unknown Codex user-input request id: {request_id}"),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("unknown Codex user-input request id: {request_id}"),
+                        })
+                        .await;
                     return Ok(());
                 }
-                self.emit(AgentEvent::UserInputResolved {
-                    request_id,
-                    answers,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::UserInputResolved {
+                        request_id,
+                        answers,
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetApprovalMode(mode) => {
@@ -1113,12 +1115,13 @@ impl Actor {
                 // request. Signal the UI to fall back to a resume-restart (the
                 // fresh thread/resume carries the new mode), mirroring the
                 // model-switch path.
-                self.emit(AgentEvent::Warning {
-                    message: format!(
-                        "codex: applying approval mode {mode:?} requires a session restart"
-                    ),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!(
+                            "codex: applying approval mode {mode:?} requires a session restart"
+                        ),
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetOption { id, .. } => {
@@ -1141,10 +1144,11 @@ impl Actor {
                 // which is exactly the race we want to lose loudly rather than
                 // silently start a second turn.
                 let Some(turn_id) = self.active_turn.clone() else {
-                    self.emit(AgentEvent::Warning {
-                        message: "cannot steer: no active Codex turn".into(),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: "cannot steer: no active Codex turn".into(),
+                        })
+                        .await;
                     return Ok(());
                 };
                 let thread_id = self.thread_id.clone();
@@ -1162,13 +1166,15 @@ impl Actor {
                 checkpoint_id,
                 mode,
             } => {
-                self.emit(AgentEvent::RewindFailed {
-                    checkpoint_id,
-                    mode,
-                    error: "Codex app-server has no stable native file-and-conversation rewind API"
-                        .into(),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::RewindFailed {
+                        checkpoint_id,
+                        mode,
+                        error:
+                            "Codex app-server has no stable native file-and-conversation rewind API"
+                                .into(),
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::Shutdown => Ok(()),
@@ -1179,11 +1185,12 @@ impl Actor {
         let value: Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(err) => {
-                self.emit(AgentEvent::Error {
-                    message: format!("invalid JSON from codex: {err}: {line}"),
-                    fatal: false,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Error {
+                        message: format!("invalid JSON from codex: {err}: {line}"),
+                        fatal: false,
+                    })
+                    .await;
                 return;
             }
         };
@@ -1195,25 +1202,27 @@ impl Actor {
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
             if let Some(error) = value.get("error") {
-                self.emit(AgentEvent::Error {
-                    message: format!(
-                        "Codex request {} failed: {}",
-                        pending_name(pending.as_ref()),
-                        describe_rpc_error(error)
-                    ),
-                    fatal: false,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Error {
+                        message: format!(
+                            "Codex request {} failed: {}",
+                            pending_name(pending.as_ref()),
+                            describe_rpc_error(error)
+                        ),
+                        fatal: false,
+                    })
+                    .await;
                 self.fail_rejected_turn_start(pending.as_ref()).await;
             } else if value.get("result").is_none() {
-                self.emit(AgentEvent::Error {
-                    message: format!(
-                        "Codex request {} returned no result",
-                        pending_name(pending.as_ref())
-                    ),
-                    fatal: false,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Error {
+                        message: format!(
+                            "Codex request {} returned no result",
+                            pending_name(pending.as_ref())
+                        ),
+                        fatal: false,
+                    })
+                    .await;
                 self.fail_rejected_turn_start(pending.as_ref()).await;
             } else {
                 match pending {
@@ -1225,7 +1234,9 @@ impl Actor {
                         }
                     }
                     Some(PendingRequest::Steer(request_id)) => {
-                        self.emit(AgentEvent::SteerAccepted { request_id }).await;
+                        self.events
+                            .emit(AgentEvent::SteerAccepted { request_id })
+                            .await;
                     }
                     _ => {}
                 }
@@ -1243,12 +1254,13 @@ impl Actor {
         if !matches!(pending, Some(PendingRequest::TurnStart)) || self.active_turn.is_some() {
             return;
         }
-        self.emit(AgentEvent::TurnCompleted {
-            turn_id: String::new(),
-            status: TurnStatus::Failed,
-            usage: None,
-        })
-        .await;
+        self.events
+            .emit(AgentEvent::TurnCompleted {
+                turn_id: String::new(),
+                status: TurnStatus::Failed,
+                usage: None,
+            })
+            .await;
     }
 
     async fn handle_server_request(&mut self, value: &Value) {
@@ -1273,11 +1285,12 @@ impl Actor {
         if method == "item/tool/requestUserInput" {
             let questions = parse_codex_user_input(params);
             self.user_inputs.insert(key.clone(), id);
-            self.emit(AgentEvent::UserInputRequested {
-                request_id: key,
-                questions,
-            })
-            .await;
+            self.events
+                .emit(AgentEvent::UserInputRequested {
+                    request_id: key,
+                    questions,
+                })
+                .await;
             return;
         }
 
@@ -1320,22 +1333,24 @@ impl Actor {
                     &mut self.stdin,
                     &json!({ "id": id, "error": { "code": -32601, "message": format!("unsupported server request: {method}") } }),
                 );
-                self.emit(AgentEvent::Warning {
-                    message: format!("unsupported Codex server request: {method}"),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!("unsupported Codex server request: {method}"),
+                    })
+                    .await;
                 return;
             }
         };
         self.approvals.insert(key.clone(), id);
-        self.emit(AgentEvent::ApprovalRequested(ApprovalRequest {
-            id: key,
-            turn_id,
-            kind,
-            // Native approvals use the fixed four decisions.
-            options: Vec::new(),
-        }))
-        .await;
+        self.events
+            .emit(AgentEvent::ApprovalRequested(ApprovalRequest {
+                id: key,
+                turn_id,
+                kind,
+                // Native approvals use the fixed four decisions.
+                options: Vec::new(),
+            }))
+            .await;
     }
 
     async fn handle_elicitation_request(
@@ -1375,17 +1390,18 @@ impl Actor {
                     "codex: MCP server {server_name} sent an unsupported \"{mode}\" elicitation; declined"
                 )
             };
-            self.emit(AgentEvent::Warning { message }).await;
+            self.events.emit(AgentEvent::Warning { message }).await;
             return;
         };
 
         self.elicitations
             .insert(request_id.clone(), PendingElicitation { rpc_id, fields });
-        self.emit(AgentEvent::UserInputRequested {
-            request_id,
-            questions,
-        })
-        .await;
+        self.events
+            .emit(AgentEvent::UserInputRequested {
+                request_id,
+                questions,
+            })
+            .await;
     }
 
     async fn handle_notification(&mut self, method: &str, params: &Value) {
@@ -1397,7 +1413,8 @@ impl Actor {
             "turn/started" => {
                 if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
                     self.active_turn = Some(id.into());
-                    self.emit(AgentEvent::TurnStarted { turn_id: id.into() })
+                    self.events
+                        .emit(AgentEvent::TurnStarted { turn_id: id.into() })
                         .await;
                 }
             }
@@ -1415,12 +1432,13 @@ impl Actor {
                 };
                 self.active_turn = None;
                 let usage = self.usage_by_turn.remove(&id);
-                self.emit(AgentEvent::TurnCompleted {
-                    turn_id: id,
-                    status,
-                    usage,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::TurnCompleted {
+                        turn_id: id,
+                        status,
+                        usage,
+                    })
+                    .await;
             }
             "turn/diff/updated" => {
                 let turn_id = notification_turn_id(params, &self.active_turn).unwrap_or_default();
@@ -1430,18 +1448,20 @@ impl Actor {
                     .unwrap_or_default();
                 match file_changes_from_unified_diff(diff) {
                     Ok(changes) => {
-                        self.emit(AgentEvent::TurnChangesUpdated {
-                            turn_id,
-                            changes,
-                            completeness: ChangeCompleteness::Exact,
-                        })
-                        .await;
+                        self.events
+                            .emit(AgentEvent::TurnChangesUpdated {
+                                turn_id,
+                                changes,
+                                completeness: ChangeCompleteness::Exact,
+                            })
+                            .await;
                     }
                     Err(err) => {
-                        self.emit(AgentEvent::Warning {
-                            message: format!("Codex supplied an invalid turn diff: {err}"),
-                        })
-                        .await;
+                        self.events
+                            .emit(AgentEvent::Warning {
+                                message: format!("Codex supplied an invalid turn diff: {err}"),
+                            })
+                            .await;
                     }
                 }
             }
@@ -1455,17 +1475,18 @@ impl Actor {
                         if method == "item/completed"
                             && let Some(item) = item_value
                         {
-                            self.emit(AgentEvent::ProposedPlan {
-                                item_id: string_field(item, "id"),
-                                markdown: string_field(item, "text"),
-                            })
-                            .await;
+                            self.events
+                                .emit(AgentEvent::ProposedPlan {
+                                    item_id: string_field(item, "id"),
+                                    markdown: string_field(item, "text"),
+                                })
+                                .await;
                         }
                         return;
                     }
                     Some("contextCompaction") => {
                         if method == "item/completed" {
-                            self.emit(AgentEvent::ContextCompacted).await;
+                            self.events.emit(AgentEvent::ContextCompacted).await;
                         }
                         return;
                     }
@@ -1490,17 +1511,18 @@ impl Actor {
                             summary: summary.clone(),
                         };
                         if method == "item/completed" {
-                            self.emit(AgentEvent::ItemCompleted(ThreadItem {
-                                id: subagent.child_item_id.clone(),
-                                parent_item_id: Some(item.id.clone()),
-                                content: ItemContent::Subagent {
-                                    agent_type: subagent.agent_type.clone(),
-                                    description: "child thread".into(),
-                                    status,
-                                    summary,
-                                },
-                            }))
-                            .await;
+                            self.events
+                                .emit(AgentEvent::ItemCompleted(ThreadItem {
+                                    id: subagent.child_item_id.clone(),
+                                    parent_item_id: Some(item.id.clone()),
+                                    content: ItemContent::Subagent {
+                                        agent_type: subagent.agent_type.clone(),
+                                        description: "child thread".into(),
+                                        status,
+                                        summary,
+                                    },
+                                }))
+                                .await;
                         }
                     }
                     self.items.insert(item.id.clone(), item.clone());
@@ -1509,7 +1531,7 @@ impl Actor {
                         "item/updated" => AgentEvent::ItemUpdated(item),
                         _ => AgentEvent::ItemCompleted(item),
                     };
-                    self.emit(event).await;
+                    self.events.emit(event).await;
                 }
             }
             "turn/plan/updated" => {
@@ -1525,12 +1547,13 @@ impl Actor {
                     .and_then(Value::as_array)
                     .map(|steps| steps.iter().map(map_plan_step).collect())
                     .unwrap_or_default();
-                self.emit(AgentEvent::PlanUpdated {
-                    turn_id,
-                    explanation,
-                    steps,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::PlanUpdated {
+                        turn_id,
+                        explanation,
+                        steps,
+                    })
+                    .await;
             }
             "item/plan/delta" => {
                 if let (Some(item_id), Some(text)) = (
@@ -1540,11 +1563,12 @@ impl Actor {
                         .and_then(Value::as_str)
                         .filter(|d| !d.is_empty()),
                 ) {
-                    self.emit(AgentEvent::ProposedPlanDelta {
-                        item_id: item_id.to_owned(),
-                        text: text.to_owned(),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::ProposedPlanDelta {
+                            item_id: item_id.to_owned(),
+                            text: text.to_owned(),
+                        })
+                        .await;
                 }
             }
             "item/agentMessage/delta" => self.emit_delta(params, DeltaKind::AssistantText).await,
@@ -1559,12 +1583,14 @@ impl Actor {
                     if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
                         self.usage_by_turn.insert(turn_id.into(), usage);
                     }
-                    self.emit(AgentEvent::TokenUsage(usage)).await;
+                    self.events.emit(AgentEvent::TokenUsage(usage)).await;
                 }
             }
             "model/rerouted" => {
                 if let Some((model, reason)) = model_reroute(params) {
-                    self.emit(AgentEvent::ServedModel { model, reason }).await;
+                    self.events
+                        .emit(AgentEvent::ServedModel { model, reason })
+                        .await;
                 }
             }
             "error" => {
@@ -1579,21 +1605,23 @@ impl Actor {
                     .get("willRetry")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                self.emit(AgentEvent::Error { message, fatal }).await;
+                self.events.emit(AgentEvent::Error { message, fatal }).await;
             }
             "warning" | "configWarning" | "deprecationNotice" => {
                 if let Some(message) = params.get("message").and_then(Value::as_str) {
-                    self.emit(AgentEvent::Warning {
-                        message: message.into(),
-                    })
-                    .await;
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: message.into(),
+                        })
+                        .await;
                 }
             }
             "thread/closed" => {
-                self.emit(AgentEvent::Warning {
-                    message: "Codex thread was closed by the server".into(),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: "Codex thread was closed by the server".into(),
+                    })
+                    .await;
             }
             _ => log::trace!("ignored Codex notification {method}: {params}"),
         }
@@ -1657,7 +1685,7 @@ impl Actor {
             },
         };
         self.items.insert(parent_id.to_owned(), parent.clone());
-        self.emit(AgentEvent::ItemUpdated(parent)).await;
+        self.events.emit(AgentEvent::ItemUpdated(parent)).await;
 
         let child = ThreadItem {
             id: subagent.child_item_id,
@@ -1677,27 +1705,31 @@ impl Actor {
         } else {
             AgentEvent::ItemUpdated(child)
         };
-        self.emit(event).await;
+        self.events.emit(event).await;
     }
 
     /// Settle every outstanding native user-input request and MCP elicitation
     /// on teardown, replying with the protocol's empty/cancel outcome.
     async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let mut pending = self
-            .user_inputs
-            .drain()
-            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
-            .collect::<Vec<_>>();
-        pending.extend(self.elicitations.drain().map(|(request_id, pending)| {
-            (request_id, pending.rpc_id, json!({ "action": "cancel" }))
-        }));
-        for (request_id, rpc_id, result) in pending {
-            let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
-            self.emit(AgentEvent::UserInputResolved {
-                request_id,
-                answers: serde_json::Map::new(),
+        let mut pending = drain_resolved(&mut self.user_inputs)
+            .into_iter()
+            .map(|(request_id, rpc_id, event)| {
+                (request_id, rpc_id, json!({ "answers": {} }), event)
             })
-            .await;
+            .collect::<Vec<_>>();
+        pending.extend(drain_resolved(&mut self.elicitations).into_iter().map(
+            |(request_id, pending, event)| {
+                (
+                    request_id,
+                    pending.rpc_id,
+                    json!({ "action": "cancel" }),
+                    event,
+                )
+            },
+        ));
+        for (_request_id, rpc_id, result, event) in pending {
+            let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
+            self.events.emit(event).await;
         }
     }
 
@@ -1706,12 +1738,13 @@ impl Actor {
             params.get("itemId").and_then(Value::as_str),
             params.get("delta").and_then(Value::as_str),
         ) {
-            self.emit(AgentEvent::Delta {
-                item_id: item_id.into(),
-                kind,
-                text: text.into(),
-            })
-            .await;
+            self.events
+                .emit(AgentEvent::Delta {
+                    item_id: item_id.into(),
+                    kind,
+                    text: text.into(),
+                })
+                .await;
         }
     }
 }
@@ -2220,14 +2253,14 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
         }
         _ => FileChangeKind::Modify,
     };
-    Some(FileChange {
-        path: change.get("path").and_then(Value::as_str)?.into(),
+    Some(crate::normalize::file_change(
+        change.get("path").and_then(Value::as_str)?,
         kind,
-        diff: change
+        change
             .get("diff")
             .and_then(Value::as_str)
             .map(str::to_owned),
-    })
+    ))
 }
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
@@ -2235,14 +2268,14 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
     // The session-cumulative running total lives in a sibling `total` object.
     let total_processed_tokens = value.pointer("/total/totalTokens").and_then(Value::as_u64);
     Some(TokenUsage {
-        input_tokens: last.get("inputTokens").and_then(Value::as_u64),
-        cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_u64),
-        output_tokens: last.get("outputTokens").and_then(Value::as_u64),
-        used_tokens: last.get("totalTokens").and_then(Value::as_u64),
         context_window: value.get("modelContextWindow").and_then(Value::as_u64),
         total_processed_tokens,
-        cost_usd: None,
-        duration_ms: None,
+        ..crate::normalize::token_usage(
+            last.get("inputTokens").and_then(Value::as_u64),
+            last.get("cachedInputTokens").and_then(Value::as_u64),
+            last.get("outputTokens").and_then(Value::as_u64),
+            last.get("totalTokens").and_then(Value::as_u64),
+        )
     })
 }
 

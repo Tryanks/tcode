@@ -47,11 +47,11 @@ use crate::palette::fuzzy_score;
 use crate::provider_card::{CLAUDE_BRAND_COLOR, provider_glyph};
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::ui::WorkspaceMode;
-use tcode_protocol::{Command, PathEntry};
+use tcode_protocol::PathEntry;
 
 /// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
 const METER_BLUE: u32 = 0x3B82F6;
@@ -185,7 +185,17 @@ impl Composer {
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
             // skills feed arrives after session start, feeding the `/`+`$` menus).
-            cx.observe(&workspace_store, |_, _, cx| cx.notify()),
+            observe_store_topics(
+                &workspace_store,
+                &[
+                    TopicKind::ActiveSession,
+                    TopicKind::SessionStatus,
+                    TopicKind::SessionEvents,
+                    TopicKind::Settings,
+                    TopicKind::Providers,
+                ],
+                cx,
+            ),
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
                 match event {
                     InputEvent::PressEnter {
@@ -373,11 +383,7 @@ impl Composer {
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
             self.workspace_store.update(cx, |store, _cx| {
-                store.dispatch(Command::ScheduleTurn {
-                    text: message,
-                    attachment_paths,
-                    fire_at_unix_secs,
-                });
+                store.schedule_turn(message, attachment_paths, fire_at_unix_secs);
             });
             cx.emit(ComposerEvent::Submitted);
             cx.notify();
@@ -391,17 +397,13 @@ impl Composer {
             self.text_cache.clear_current();
             input.update(cx, |state, cx| state.set_value("", window, cx));
             match command {
-                SlashCommand::Plan => self.workspace_store.update(cx, |store, _cx| {
-                    store.dispatch(Command::SetInteractionMode {
-                        mode: InteractionMode::Plan,
-                    })
+                SlashIntent::Plan => self.workspace_store.update(cx, |store, _cx| {
+                    store.set_interaction_mode(InteractionMode::Plan)
                 }),
-                SlashCommand::Default => self.workspace_store.update(cx, |store, _cx| {
-                    store.dispatch(Command::SetInteractionMode {
-                        mode: InteractionMode::Build,
-                    })
+                SlashIntent::Default => self.workspace_store.update(cx, |store, _cx| {
+                    store.set_interaction_mode(InteractionMode::Build)
                 }),
-                SlashCommand::Model => {
+                SlashIntent::Model => {
                     self.model_picker_token = self.model_picker_token.wrapping_add(1);
                 }
             }
@@ -491,28 +493,15 @@ impl Composer {
         self.image_load_generation = self.image_load_generation.wrapping_add(1);
         self.pending_image_loads = 0;
         self.workspace_store.update(cx, |store, _cx| {
-            let command = if relay {
-                Command::ConfirmRelayAndSend {
-                    text: sent_text,
-                    attachment_paths,
-                }
+            if relay {
+                store.confirm_relay_and_send(sent_text, attachment_paths);
             } else if orchestrate {
-                Command::OrchestrateTurn {
-                    text: sent_text,
-                    attachment_paths,
-                }
+                store.orchestrate_turn(sent_text, attachment_paths);
             } else if steer {
-                Command::Steer {
-                    text: sent_text,
-                    attachment_paths,
-                }
+                store.steer(sent_text, attachment_paths);
             } else {
-                Command::SendTurn {
-                    text: sent_text,
-                    attachment_paths,
-                }
-            };
-            store.dispatch(command);
+                store.send_turn(sent_text, attachment_paths);
+            }
         });
         cx.emit(ComposerEvent::Submitted);
         cx.notify();
@@ -536,7 +525,7 @@ impl Composer {
                 .workspace_store
                 .read(cx)
                 .composer_state()
-                .supports_steering;
+                .steering_supported;
             let has_text = !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
                 .gap_2()
@@ -601,7 +590,7 @@ impl Composer {
                     .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace_store
-                            .update(cx, |store, _cx| store.dispatch(Command::Interrupt));
+                            .update(cx, |store, _cx| store.interrupt());
                     })),
                 )
                 .into_any_element();
@@ -829,9 +818,8 @@ impl Render for Composer {
                         .label(format!("{} · {}  ×", context.terminal_label, range))
                         .tooltip(context.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.dispatch(Command::RemoveTerminalContext { context_id: id })
-                            });
+                            this.workspace_store
+                                .update(cx, |store, _cx| store.remove_terminal_context(id));
                         }))
                 }));
         let review_comments = self.workspace_store.read(cx).review_comments();
@@ -856,9 +844,8 @@ impl Render for Composer {
                         .label(format!("{} {}  ×", comment.file, range))
                         .tooltip(comment.text)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.dispatch(Command::RemoveReviewComment { index })
-                            });
+                            this.workspace_store
+                                .update(cx, |store, _cx| store.remove_review_comment(index));
                         }))
                 }),
         );
@@ -950,9 +937,8 @@ impl Render for Composer {
             // Shift+Tab toggles Build ↔ Plan (S1 §4).
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
-                    this.workspace_store.update(cx, |store, _cx| {
-                        store.dispatch(Command::ToggleInteractionMode)
-                    });
+                    this.workspace_store
+                        .update(cx, |store, _cx| store.toggle_interaction_mode());
                     cx.notify();
                 }
             }))

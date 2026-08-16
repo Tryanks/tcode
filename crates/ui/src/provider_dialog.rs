@@ -25,13 +25,12 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
-use tcode_protocol::Command;
 
 use crate::provider_models::{
     ResolvedModel, model_capability_label, slug_error_message, validate_slug,
 };
 use crate::settings::{ACCENT_PRESETS, EnvVar, provider_label};
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// One environment-variable row's live inputs and its draft flags.
 struct EnvRow {
@@ -138,7 +137,11 @@ impl ProviderDialog {
             cx,
         );
 
-        let mut subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
+        let mut subscriptions = vec![observe_store_topics(
+            &store,
+            &[TopicKind::Settings, TopicKind::Providers],
+            cx,
+        )];
         subscriptions.push(
             cx.subscribe_in(&custom_model, window, |this, _, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {
@@ -177,8 +180,8 @@ impl ProviderDialog {
             binary,
             home,
             launch_args,
-            pi_trust_project_extensions: settings.pi_trust_project_extensions,
-            pi_native_approvals: settings.pi_native_approvals,
+            pi_trust_project_extensions: settings.pi.trust_project_extensions,
+            pi_native_approvals: settings.pi.native_approvals,
             custom_model,
             slug_error: None,
             accent: settings.accent_color.clone(),
@@ -254,45 +257,38 @@ impl ProviderDialog {
         let profile_id = self.profile_id.clone();
 
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::UpdateProfileSettings {
-                profile_id: profile_id.clone(),
-                patch: tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(Box::new(
+            store.update_profile_settings(
+                profile_id.clone(),
+                tcode_core::settings::ProfileSettingsPatch::ReplaceConfiguration(Box::new(
                     tcode_core::settings::ProfileConfigurationPatch {
                         display_name,
                         accent_color: accent,
                         env,
                         binary_path: binary.map(Into::into),
                         // OpenCode has no single-home override.
-                        home_path: (provider != ProviderKind::OpenCode)
+                        home_path: provider
+                            .caps()
+                            .home_path
                             .then(|| home.map(Into::into))
                             .flatten(),
                         // Codex ignores launch arguments (no field is rendered).
-                        launch_args: match provider {
-                            ProviderKind::Codex => None,
-                            _ => launch,
+                        launch_args: provider.caps().launch_args.then_some(launch).flatten(),
+                        pi: tcode_core::settings::PiProviderSettings {
+                            trust_project_extensions: pi_trust_project_extensions,
+                            native_approvals: pi_native_approvals,
                         },
-                        pi_trust_project_extensions,
-                        pi_native_approvals,
                         custom_models: custom,
                         hidden_models: hidden,
                     },
                 )),
-            });
+            );
             for (name, value) in secret_writes {
-                store.dispatch(Command::SetProfileSecret {
-                    profile_id: profile_id.clone(),
-                    name,
-                    value: Some(value),
-                });
+                store.set_profile_secret(profile_id.clone(), name, Some(value));
             }
             for name in clears {
-                store.dispatch(Command::SetProfileSecret {
-                    profile_id: profile_id.clone(),
-                    name,
-                    value: None,
-                });
+                store.set_profile_secret(profile_id.clone(), name, None);
             }
-            store.dispatch(Command::ReloadProvider);
+            store.reload_provider();
         });
     }
 
@@ -550,7 +546,7 @@ impl ProviderDialog {
                 cx,
             ),
         ];
-        if provider != ProviderKind::OpenCode {
+        if provider.caps().home_path {
             let &[_, _, home_label, home_help, _, _] = provider_copy(provider);
             blocks.push(
                 self.field_block(
@@ -582,7 +578,7 @@ impl ProviderDialog {
             );
         }
         blocks.push(self.render_env(cx));
-        if provider != ProviderKind::Codex {
+        if provider.caps().launch_args {
             blocks.push(
                 self.field_block(
                     crate::tr!("providers.launch_args").into_owned().into(),
@@ -594,7 +590,7 @@ impl ProviderDialog {
                 ),
             );
         }
-        if provider == ProviderKind::Pi {
+        if provider.caps().trust_project_extensions {
             blocks.push(
                 self.field_block(
                     crate::tr!("providers.pi_trust_project_extensions")
@@ -850,9 +846,7 @@ impl ProviderDialog {
                     })
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, _cx| {
-                            store.dispatch(Command::ToggleFavoriteModel {
-                                model: fav_id.clone(),
-                            });
+                            store.toggle_favorite_model(fav_id.clone());
                         });
                     }),
             )
@@ -951,9 +945,7 @@ pub fn render_footer(
                             )
                             .on_ok(move |_, window, cx| {
                                 delete_store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::DeleteProfile {
-                                        profile_id: delete_id.clone(),
-                                    });
+                                    store.delete_profile(delete_id.clone());
                                 });
                                 // Close the confirm and the underlying settings dialog.
                                 window.close_all_dialogs(cx);

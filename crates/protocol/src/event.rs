@@ -19,7 +19,6 @@ use tcode_core::{
 /// the protocol wire.
 pub type SessionEventRecord = StoredEvent;
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
@@ -45,11 +44,9 @@ pub enum Topic {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub topic: Topic,
-    pub seq: u64,
     pub event: ServerEvent,
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
@@ -77,7 +74,6 @@ pub enum ServerEvent {
     SessionSnapshot(Vec<StoredEvent>),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
-    RuntimeSnapshot(RuntimeSnapshot),
 }
 
 /// Full provider/settings-page read projection.
@@ -122,13 +118,11 @@ pub struct AcpMarketplaceItem {
     pub supported: bool,
 }
 
-/// Full active-workspace Git projection. `generation` identifies the refresh
-/// whose result is represented and lets replicas preserve the host's ordering.
+/// Full active-workspace Git projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GitStatusStatus {
     pub status: Option<GitStatus>,
     pub busy: bool,
-    pub generation: u64,
 }
 
 /// Full, ephemeral runtime status for one session.
@@ -163,7 +157,8 @@ pub struct SessionStatus {
     pub working: bool,
     pub pending_approval: bool,
     pub pending_user_input: bool,
-    pub supports_steering: bool,
+    #[serde(rename = "supports_steering")]
+    pub steering_supported: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
     pub provider_option_selections: Vec<OptionSelection>,
     pub provider_commands: Vec<ProviderCommand>,
@@ -219,11 +214,7 @@ pub struct IndexSnapshot {
     pub projects: Vec<Project>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeSnapshot;
-
 /// Protocol-owned mirror of `tcode_runtime::event::RuntimeEvent`.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotification {
@@ -233,7 +224,6 @@ pub enum RuntimeNotification {
     Effect(RuntimeEffect),
 }
 
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeEffect {

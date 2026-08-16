@@ -23,7 +23,6 @@ pub struct ClientMessage {
     pub payload: ClientPayload,
 }
 
-#[non_exhaustive]
 #[allow(clippy::large_enum_variant)] // Boxing would complicate the public contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
@@ -33,7 +32,6 @@ pub enum ClientPayload {
     Subscribe(Subscription),
 }
 
-#[non_exhaustive]
 #[allow(clippy::large_enum_variant)] // Wire messages favor a direct typed API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]

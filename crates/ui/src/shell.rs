@@ -13,7 +13,6 @@ use gpui::{
 };
 use gpui_base::{ResizableState, h_resizable, resizable_panel};
 use tcode_core::ui::RightTab;
-use tcode_protocol::Command;
 use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
@@ -273,7 +272,6 @@ impl AppShell {
                 return;
             }
             RuntimeEvent::Toast(toast) => toast,
-            _ => return,
         };
 
         let presented = present_runtime_toast(toast);
@@ -298,12 +296,12 @@ impl AppShell {
                     window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
                     let request = request.clone();
                     store.update(cx, |store, _cx| {
-                        store.dispatch(Command::RunGitAction {
-                            action: request.action,
-                            message: request.message,
-                            included: request.included,
-                            feature_branch: request.feature_branch,
-                        });
+                        store.run_git_action(
+                            request.action,
+                            request.message,
+                            request.included,
+                            request.feature_branch,
+                        );
                     });
                 }),
             }

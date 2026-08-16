@@ -3,7 +3,243 @@ use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::project::group_sessions;
-use tcode_protocol::HostMessage;
+use tcode_core::settings::ThemeMode;
+use tcode_protocol::{Command, CommandResponse, HostMessage};
+
+#[test]
+fn settings_patch_preserves_concurrently_changed_other_field() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-dispatch-settings-seam-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let settings = Settings {
+        sidebar_collapsed: true,
+        ..Settings::default()
+    };
+
+    state.update(cx, |state, cx| state.update_settings(settings.clone(), cx));
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
+    state.dispatch_command(
+        cx,
+        41,
+        Command::PatchSettings {
+            patch: tcode_protocol::SettingsPatch::ThemeMode(ThemeMode::Dark),
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 41,
+            result: Ok(CommandResponse::Unit)
+        }
+    )));
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::Settings,
+            event: ServerEvent::SettingsReplaced(replaced),
+            ..
+        }) if replaced.sidebar_collapsed && replaced.theme_mode == ThemeMode::Dark
+    )));
+}
+
+#[test]
+fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-provider-diff-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let command = Command::SetProfileSecret {
+        profile_id: "codex".into(),
+        name: "OPENAI_API_KEY".into(),
+        value: Some("test-secret".into()),
+    };
+
+    state.dispatch_command(cx, 43, command.clone());
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    let provider_events: Vec<_> = outgoing
+        .iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::Providers,
+                event: ServerEvent::ProvidersReplaced(status),
+            }) => Some(status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(provider_events.len(), 1);
+    assert!(
+        provider_events[0]
+            .secret_names
+            .get("codex")
+            .is_some_and(|names| names.contains("OPENAI_API_KEY"))
+    );
+
+    state.dispatch_command(cx, 44, command);
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(!outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::Providers,
+            event: ServerEvent::ProvidersReplaced(_),
+        })
+    )));
+}
+
+#[test]
+fn parked_session_projection_diff_emits_session_status() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-parked-session-diff-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let parked = live_session(ProviderKind::Codex, smol::channel::unbounded().0);
+    let parked_id = parked.meta.id.clone();
+
+    state.host_update(cx, |state, _cx| {
+        state.sessions.push(parked.meta.clone());
+        state
+            .residents
+            .parked
+            .insert(parked.meta.id.clone(), parked);
+    });
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
+    state.dispatch_command(
+        cx,
+        45,
+        Command::RenameSession {
+            session_id: parked_id.clone(),
+            title: "Renamed while parked".into(),
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    let statuses: Vec<_> = outgoing
+        .iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::SessionStatus { session_id },
+                event: ServerEvent::SessionStatusReplaced(status),
+            }) if session_id == &parked_id => Some(status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].title, "Renamed while parked");
+    state.read_with(cx, |state, _| {
+        assert!(state.residents.active.is_none());
+        assert!(state.residents.parked.contains_key(&parked_id));
+    });
+}
+
+#[test]
+fn dispatched_start_draft_emits_session_status_over_ndjson() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-dispatch-session-status-seam-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let cwd = test_store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    state.dispatch_command(
+        cx,
+        42,
+        Command::StartDraft {
+            project_id: "project-1".into(),
+            cwd: cwd.clone(),
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionStatus { session_id },
+            event: ServerEvent::SessionStatusReplaced(status),
+            ..
+        }) if session_id == &status.session_id
+            && status.project_id.as_deref() == Some("project-1")
+            && status.cwd == cwd
+            && status.draft
+    )));
+}
+
+#[test]
+fn scripted_provider_connects_command_launch_and_agent_event_paths() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-scripted-provider-seam-test");
+    let scripted = scripted_provider(ProviderKind::ClaudeCode);
+    let commands = scripted.commands.clone();
+    let events = scripted.events.clone();
+    let state = cx.new_entity(|_| {
+        let mut state = AppState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    let cwd = test_store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    state.dispatch_command(
+        cx,
+        51,
+        Command::StartDraft {
+            project_id: "project-1".into(),
+            cwd,
+        },
+    );
+    state.dispatch_command(
+        cx,
+        52,
+        Command::SendTurn {
+            text: "exercise the adapter".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    cx.run_until_parked();
+
+    let delivery_id = match commands.try_recv() {
+        Ok(SessionCommand::SendTurn {
+            delivery_id, text, ..
+        }) => {
+            assert_eq!(text, "exercise the adapter");
+            delivery_id
+        }
+        other => panic!("expected scripted provider SendTurn, got {other:?}"),
+    };
+    events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    events
+        .try_send(AgentEvent::TurnStarted {
+            turn_id: "scripted-turn".into(),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionEvents { .. },
+            event: ServerEvent::SessionEvent(SessionEventRecord {
+                event: AgentEvent::TurnStarted { turn_id },
+                ..
+            }),
+            ..
+        }) if turn_id == "scripted-turn"
+    )));
+    state.read_with(cx, |state, _| {
+        assert!(state.residents.active.as_ref().unwrap().turn_in_flight);
+    });
+}
 
 #[test]
 fn archive_and_unarchive_apply_exact_timestamp_cascades() {
@@ -290,14 +526,14 @@ fn provider_update_command_hides_install_source() {
     let test_store = TestStore::new("tcode-provider-update-view-test");
     let store = (*test_store).clone();
     let mut state = AppState::new(store);
-    state.provider_versions.insert(
+    state.providers.provider_versions.insert(
         ProviderKind::ClaudeCode,
         ProviderVersionState {
             install_source: InstallSource::Npm,
             ..ProviderVersionState::default()
         },
     );
-    state.provider_versions.insert(
+    state.providers.provider_versions.insert(
         ProviderKind::Codex,
         ProviderVersionState {
             install_source: InstallSource::Native,
@@ -382,7 +618,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
             line_end: 13,
             text: "cargo test\nok".into(),
         });
-        state.active = Some(active);
+        state.residents.active = Some(active);
         state.add_review_comment(
             ReviewComment::new(
                 "src/lib.rs".into(),
@@ -421,6 +657,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
         );
         assert!(
             state
+                .residents
                 .active
                 .as_ref()
                 .unwrap()
@@ -453,7 +690,7 @@ fn orchestrate_turn_records_the_context_split_on_the_user_message() {
         // than a restart (which would flush through a different path).
         active.live_model = active.meta.model.clone();
         active.live_approval_mode = Some(active.meta.approval_mode);
-        state.active = Some(active);
+        state.residents.active = Some(active);
 
         state.orchestrate_turn("执行某某任务".into(), Vec::new(), cx);
         let delivery_id = match receiver.try_recv() {
@@ -628,7 +865,7 @@ fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
 
         // A turn finishes while the user is watching: updated_at moves past
         // the watermark stamped on entry, and the meta is persisted.
-        let active = state.active.as_mut().unwrap();
+        let active = state.residents.active.as_mut().unwrap();
         active.meta.updated_at = now_secs() + 10;
         let meta = active.meta.clone();
         state.persist_meta(&meta, cx);
@@ -676,14 +913,14 @@ fn draft_send_creates_session_with_project_cwd() {
     assert!(matches!(draft.runtime, Runtime::Idle));
     let draft_id = draft.meta.id.clone();
     state.host_update(cx, |state, cx| {
-        state.active = Some(draft);
+        state.residents.active = Some(draft);
         // Not in the index until the first send materializes it.
         assert!(!state.sessions.iter().any(|m| m.id == draft_id));
 
         // The first send commits the draft: it becomes a real session whose
         // cwd is the project root and shows up in the sidebar index.
         state.commit_draft(cx).unwrap();
-        assert!(!state.active.as_ref().unwrap().draft);
+        assert!(!state.residents.active.as_ref().unwrap().draft);
         let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
         assert_eq!(created.cwd, project.root);
         assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
@@ -758,7 +995,7 @@ fn draft_inherits_newest_unarchived_session_from_same_project() {
         state.sessions = vec![other_project, target_older, target_archived, target_newest];
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
-        let draft = state.active.as_ref().unwrap();
+        let draft = state.residents.active.as_ref().unwrap();
         assert!(draft.draft);
         assert_eq!(draft.meta.provider, ProviderKind::Codex);
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.2-codex"));
@@ -794,7 +1031,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
         state.sessions = vec![previous];
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
-        let draft = state.active.as_ref().unwrap();
+        let draft = state.residents.active.as_ref().unwrap();
         assert_eq!(draft.meta.provider, ProviderKind::Codex);
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
 
@@ -807,7 +1044,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
             cx,
         );
 
-        let draft = state.active.as_ref().unwrap();
+        let draft = state.residents.active.as_ref().unwrap();
         assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
         assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5"));
         assert!(draft.meta.acp_agent_id.is_none());
@@ -862,7 +1099,7 @@ fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted() {
 
         state.start_draft("project-empty".into(), PathBuf::from("/tmp/empty"), cx);
 
-        let draft = state.active.as_ref().unwrap();
+        let draft = state.residents.active.as_ref().unwrap();
         let draft_id = draft.meta.id.clone();
         assert!(draft.draft);
         assert_eq!(draft.meta.provider, ProviderKind::Acp);
@@ -1093,7 +1330,8 @@ fn provider_env_home_and_launch_args_reach_session_options() {
 
     settings
         .provider_mut(ProviderKind::Pi)
-        .pi_trust_project_extensions = true;
+        .pi
+        .trust_project_extensions = true;
     let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
     assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
 }
@@ -1155,14 +1393,14 @@ fn provider_snapshots_are_isolated_by_profile() {
     let test_store = TestStore::new("tcode-profile-snapshot-test");
     let store = (*test_store).clone();
     let mut state = AppState::new(store);
-    state.provider_snapshots.insert(
+    state.providers.provider_snapshots.insert(
         "claude".into(),
         ProviderSnapshot {
             version: Some("1.0.0".into()),
             ..ProviderSnapshot::default()
         },
     );
-    state.provider_snapshots.insert(
+    state.providers.provider_snapshots.insert(
         "kimi".into(),
         ProviderSnapshot {
             version: Some("2.0.0".into()),
@@ -1382,7 +1620,7 @@ fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
 #[test]
 fn pi_session_options_preserve_supervised_with_native_approvals() {
     let mut settings = Settings::default();
-    settings.provider_mut(ProviderKind::Pi).pi_native_approvals = true;
+    settings.provider_mut(ProviderKind::Pi).pi.native_approvals = true;
     let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
     meta.approval_mode = ApprovalMode::Supervised;
 
@@ -1623,7 +1861,10 @@ fn terminal_callback_archives_only_when_requested() {
         let mut parent = live_session(ProviderKind::Codex, parent_commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
-        state.background.insert(parent.meta.id.clone(), parent);
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
 
         for (id, archive_on_complete, status) in [
             ("auto", true, TurnStatus::Completed),
@@ -1637,7 +1878,7 @@ fn terminal_callback_archives_only_when_requested() {
             child.meta.archive_on_complete = archive_on_complete;
             child.turn_in_flight = true;
             state.sessions.push(child.meta.clone());
-            state.background.insert(child.meta.id.clone(), child);
+            state.residents.parked.insert(child.meta.id.clone(), child);
 
             state.on_event(id, persisted_assistant_event("done"), cx);
             state.on_event(
@@ -1685,7 +1926,7 @@ fn orchestrate_send_unarchives_the_child() {
         child.meta.archived_at = Some(1);
         child.turn_in_flight = true;
         state.sessions.push(child.meta.clone());
-        state.background.insert(child.meta.id.clone(), child);
+        state.residents.parked.insert(child.meta.id.clone(), child);
 
         let (reply, response) = smol::channel::bounded(1);
         state.handle_orchestrate_op(
@@ -1779,7 +2020,10 @@ fn child_approval_request_sends_exactly_one_parent_callback() {
         let mut parent = live_session(ProviderKind::Codex, commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
-        state.background.insert(parent.meta.id.clone(), parent);
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
 
         let mut child = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
         child.id = "child".into();
@@ -1835,13 +2079,16 @@ fn child_approval_always_allow_responds_without_parent_callback() {
         let mut parent = live_session(ProviderKind::Codex, parent_commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
-        state.background.insert(parent.meta.id.clone(), parent);
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
 
         let mut child = live_session(ProviderKind::Codex, child_commands);
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
         state.sessions.push(child.meta.clone());
-        state.background.insert(child.meta.id.clone(), child);
+        state.residents.parked.insert(child.meta.id.clone(), child);
 
         state.on_event(
             "child",
@@ -1886,14 +2133,14 @@ fn child_approval_manual_preserves_legacy_notice_without_auto_response() {
         let mut parent = live_session(ProviderKind::Codex, parent_commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
-        state.background.insert(parent.meta.id.clone(), parent);
+        state.residents.parked.insert(parent.meta.id.clone(), parent);
 
         let mut child = live_session(ProviderKind::Codex, child_commands);
         child.meta.id = "child".into();
         child.meta.title = "Manual child".into();
         child.meta.parent_session_id = Some("parent".into());
         state.sessions.push(child.meta.clone());
-        state.background.insert(child.meta.id.clone(), child);
+        state.residents.parked.insert(child.meta.id.clone(), child);
 
         state.on_event(
             "child",
@@ -1934,7 +2181,7 @@ fn orchestrate_approve_routes_decisions_and_validates_scope() {
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
         state.sessions.push(child.meta.clone());
-        state.background.insert(child.meta.id.clone(), child);
+        state.residents.parked.insert(child.meta.id.clone(), child);
         state.record_approval_event(
             "child",
             &AgentEvent::ApprovalRequested(agent::ApprovalRequest {
@@ -2092,7 +2339,7 @@ fn resident_background_child_result_uses_completed_live_timeline() {
 
         state.sessions.push(parent);
         state.sessions.push(child.meta.clone());
-        state.background.insert(child.meta.id.clone(), child);
+        state.residents.parked.insert(child.meta.id.clone(), child);
 
         state.on_event("child", persisted_assistant_event(&report), cx);
         state.on_event(
@@ -2105,7 +2352,7 @@ fn resident_background_child_result_uses_completed_live_timeline() {
             cx,
         );
 
-        let child = state.background.get("child").unwrap();
+        let child = state.residents.parked.get("child").unwrap();
         assert!(
             child.idle_since.is_some(),
             "completed child must remain resident in background"
@@ -2140,7 +2387,10 @@ fn steering_parked_orchestrator_callback_uses_recorded_id() {
         let mut parent = live_session(ProviderKind::Codex, commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
-        state.background.insert(parent.meta.id.clone(), parent);
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
 
         state.deliver_orchestrate_callback_to_parent(
             "parent",
@@ -2148,7 +2398,7 @@ fn steering_parked_orchestrator_callback_uses_recorded_id() {
             cx,
         );
 
-        let parent = state.background.get("parent").unwrap();
+        let parent = state.residents.parked.get("parent").unwrap();
         assert!(parent.queue.is_empty(), "parallel result must not queue");
         assert!(parent.turn_in_flight);
         let command = receiver.try_recv().unwrap();
@@ -2199,13 +2449,13 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
                 },
             }),
         );
-        state.active = Some(active);
+        state.residents.active = Some(active);
 
         state.steer("redirect".into(), Vec::new(), cx);
         let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
             panic!("user steer command missing")
         };
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(active.timeline.entries.iter().any(|entry| matches!(
             &entry.content,
             EntryContent::Steer {
@@ -2216,6 +2466,7 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
         )));
 
         let queued_id = state
+            .residents
             .active
             .as_mut()
             .unwrap()
@@ -2224,7 +2475,7 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
         let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
             panic!("queue-to-steer command missing")
         };
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(active.queue.is_empty());
         assert!(active.timeline.entries.iter().any(|entry| matches!(
             &entry.content,
@@ -2248,7 +2499,10 @@ fn callbacks_racing_provider_start_share_one_wakeup_turn() {
         let mut parent = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
         parent.meta.id = "parent".into();
         parent.runtime = Runtime::Starting { generation: 1 };
-        state.background.insert(parent.meta.id.clone(), parent);
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
 
         state.deliver_orchestrate_callback_to_parent(
             "parent",
@@ -2261,14 +2515,14 @@ fn callbacks_racing_provider_start_share_one_wakeup_turn() {
             cx,
         );
 
-        let parent = state.background.get("parent").unwrap();
+        let parent = state.residents.parked.get("parent").unwrap();
         assert_eq!(parent.queue.len(), 1);
         assert_eq!(parent.queue[0].kind, QueuedMessageKind::OrchestrateCallback);
         assert!(parent.queue[0].text.contains("result a"));
         assert!(parent.queue[0].text.contains("result b"));
 
         let (commands, receiver) = smol::channel::unbounded();
-        state.background.get_mut("parent").unwrap().runtime = Runtime::Live(commands);
+        state.residents.parked.get_mut("parent").unwrap().runtime = Runtime::Live(commands);
         state.on_background_turn_completed("parent", cx);
 
         let delivery_id = match receiver.try_recv() {
@@ -2277,9 +2531,9 @@ fn callbacks_racing_provider_start_share_one_wakeup_turn() {
             }) if text.contains("result a") && text.contains("result b") => delivery_id,
             other => panic!("expected merged callback SendTurn, got {other:?}"),
         };
-        assert_eq!(state.background["parent"].queue.len(), 1);
+        assert_eq!(state.residents.parked["parent"].queue.len(), 1);
         state.on_event("parent", AgentEvent::TurnAccepted { delivery_id }, cx);
-        let parent = state.background.get("parent").unwrap();
+        let parent = state.residents.parked.get("parent").unwrap();
         assert!(parent.queue.is_empty());
         assert!(parent.turn_in_flight);
     });
@@ -2320,10 +2574,10 @@ fn shutdown_active_notifies_live_provider() {
     };
 
     state.host_update(cx, |state, cx| {
-        state.active = Some(active);
+        state.residents.active = Some(active);
         state.shutdown_active(cx);
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert!(state.active.is_none());
+        assert!(state.residents.active.is_none());
     });
 }
 
@@ -2336,7 +2590,7 @@ fn background_tasks_alone_count_as_working() {
     let store = (*test_store).clone();
     let mut state = AppState::new(store);
     let (commands, _receiver) = smol::channel::unbounded();
-    state.active = Some(ActiveSession {
+    state.residents.active = Some(ActiveSession {
         meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
         timeline: Timeline::default(),
         git_branch: None,
@@ -2363,10 +2617,15 @@ fn background_tasks_alone_count_as_working() {
         _pump: None,
     });
 
-    assert!(!state.active.as_ref().unwrap().turn_in_flight);
+    assert!(!state.residents.active.as_ref().unwrap().turn_in_flight);
     assert_eq!(state.working_sessions_count(), 1);
 
-    state.active.as_mut().unwrap().background_task_count = 0;
+    state
+        .residents
+        .active
+        .as_mut()
+        .unwrap()
+        .background_task_count = 0;
     assert_eq!(state.working_sessions_count(), 0);
 }
 
@@ -2469,7 +2728,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
     state.host_update(cx, |state, cx| {
         let mut active = live_session(ProviderKind::Codex, commands);
         active.meta.id = "scheduled-active".into();
-        state.active = Some(active);
+        state.residents.active = Some(active);
         state.schedule_turn("scheduled".into(), Vec::new(), fire_at, cx);
 
         let status = state.session_status_snapshot("scheduled-active").unwrap();
@@ -2486,7 +2745,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
             Ok(SessionCommand::SendTurn { .. })
         ));
 
-        let active = state.active.as_mut().unwrap();
+        let active = state.residents.active.as_mut().unwrap();
         active.delivery_in_flight = None;
         active.turn_in_flight = false;
         active.queue.clear();
@@ -2496,7 +2755,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
             SystemTime::now() + Duration::from_secs(7_200),
         );
         state.drop_queued(drop_id, cx);
-        assert!(state.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
     });
 }
 
@@ -2516,11 +2775,11 @@ fn due_scheduled_message_reenters_the_ordinary_send_path() {
             Vec::new(),
             SystemTime::now() - Duration::from_secs(1),
         );
-        state.active = Some(active);
+        state.residents.active = Some(active);
 
         state.fire_due_scheduled(cx);
 
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.queue[0].text, "due now");
         assert_eq!(active.queue[0].not_before, None);
@@ -2575,11 +2834,11 @@ fn implement_plan_waits_for_pending_relay_without_mutating_state() {
                 usage: None,
             },
         );
-        state.active = Some(active);
+        state.residents.active = Some(active);
 
         state.implement_plan(cx);
 
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.interaction_mode, InteractionMode::Plan);
         assert!(active.timeline.plan_ready().is_some());
         assert!(receiver.try_recv().is_err());
@@ -2618,7 +2877,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
                 usage: None,
             },
         );
-        state.active = Some(active);
+        state.residents.active = Some(active);
 
         // Same ProviderKind, different profile: a different backend. The
         // selection must park behind the relay confirmation and rebind the
@@ -2629,7 +2888,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
             Some("kimi".into()),
             cx,
         );
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.profile_id.as_deref(), Some("kimi"));
         assert_eq!(active.meta.model.as_deref(), Some("kimi-k3"));
         let pending = active.pending_relay.as_ref().expect("relay pending");
@@ -2648,7 +2907,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
             None,
             cx,
         );
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(active.pending_relay.is_none());
         assert_eq!(active.meta.profile_id, None);
         assert!(state.relay_confirmation().is_none());
@@ -2775,9 +3034,19 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
                 },
             );
         }
-        state.active = Some(active);
+        state.residents.active = Some(active);
         state.rewind_turn(1, RewindMode::Conversation, cx);
-        assert_eq!(state.active.as_ref().unwrap().timeline.turns.len(), 2);
+        assert_eq!(
+            state
+                .residents
+                .active
+                .as_ref()
+                .unwrap()
+                .timeline
+                .turns
+                .len(),
+            2
+        );
         assert!(matches!(
             receiver.try_recv(),
             Ok(SessionCommand::Rewind {
@@ -2795,7 +3064,17 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
             },
             cx,
         );
-        assert_eq!(state.active.as_ref().unwrap().timeline.turns.len(), 1);
+        assert_eq!(
+            state
+                .residents
+                .active
+                .as_ref()
+                .unwrap()
+                .timeline
+                .turns
+                .len(),
+            1
+        );
         assert!(!state.native_rewind_pending());
     });
     let mut serialized_prefill = None;
@@ -2826,9 +3105,12 @@ fn shutdown_all_notifies_active_and_parked_live_providers() {
     let (other_commands, other_receiver) = smol::channel::unbounded();
     let other = live_session(ProviderKind::Acp, other_commands);
     state.host_update(cx, |state, cx| {
-        state.active = Some(live_session(ProviderKind::Codex, active_commands));
-        state.background.insert(parked.meta.id.clone(), parked);
-        state.background.insert(other.meta.id.clone(), other);
+        state.residents.active = Some(live_session(ProviderKind::Codex, active_commands));
+        state
+            .residents
+            .parked
+            .insert(parked.meta.id.clone(), parked);
+        state.residents.parked.insert(other.meta.id.clone(), other);
         state.shutdown_all(cx);
 
         assert!(matches!(
@@ -2843,8 +3125,8 @@ fn shutdown_all_notifies_active_and_parked_live_providers() {
             other_receiver.try_recv(),
             Ok(SessionCommand::Shutdown)
         ));
-        assert!(state.active.is_none());
-        assert!(state.background.is_empty());
+        assert!(state.residents.active.is_none());
+        assert!(state.residents.parked.is_empty());
     });
 }
 
@@ -3087,7 +3369,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
     let session_id = session.meta.id.clone();
 
     state.host_update(cx, |state, cx| {
-        state.active = Some(session);
+        state.residents.active = Some(session);
         // The preceding model turn has completed, but Claude still owns a
         // background process. This is the idle-send window from the repro.
         state.on_event(
@@ -3119,7 +3401,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
             }) => (delivery_id, text),
             other => panic!("expected submitted SendTurn, got {other:?}"),
         };
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.delivery_in_flight, Some(delivery_id));
         assert!(!state.store.read_events(&session_id).iter().any(|stored| {
@@ -3140,13 +3422,13 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
             },
             cx,
         );
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(matches!(active.runtime, Runtime::Idle));
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.delivery_in_flight, None);
 
         let (resumed_commands, resumed_actor) = smol::channel::unbounded();
-        state.active.as_mut().unwrap().runtime = Runtime::Live(resumed_commands);
+        state.residents.active.as_mut().unwrap().runtime = Runtime::Live(resumed_commands);
         assert_eq!(state.dispatch_next_queued(cx), Ok(true));
         let retried_delivery = match resumed_actor.try_recv() {
             Ok(SessionCommand::SendTurn {
@@ -3173,7 +3455,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
             },
             cx,
         );
-        assert!(state.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
@@ -3208,7 +3490,7 @@ fn inferred_startup_model_updates_live_model_without_restart() {
     session.meta.id = "model-sync".into();
 
     state.host_update(cx, |state, cx| {
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.on_event(
             "model-sync",
             AgentEvent::SessionStarted {
@@ -3220,7 +3502,7 @@ fn inferred_startup_model_updates_live_model_without_restart() {
             },
             cx,
         );
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(active.live_model, active.meta.model);
         assert!(!active.model_changed_while_live());
@@ -3245,12 +3527,12 @@ fn park_active_retains_provider_with_background_tasks() {
     session.meta.id = "background-owner".into();
     session.background_task_count = 1;
     state.host_update(cx, |state, cx| {
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.park_active(cx);
 
-        assert!(state.active.is_none());
+        assert!(state.residents.active.is_none());
         assert_eq!(
-            state.background["background-owner"].background_task_count,
+            state.residents.parked["background-owner"].background_task_count,
             1
         );
         assert!(actor.try_recv().is_err(), "parking killed background work");
@@ -3268,15 +3550,15 @@ fn park_active_retains_idle_live_provider() {
     session.meta.id = "idle-resident".into();
 
     state.host_update(cx, |state, cx| {
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.park_active(cx);
 
-        assert!(state.active.is_none());
+        assert!(state.residents.active.is_none());
         assert!(matches!(
-            state.background["idle-resident"].runtime,
+            state.residents.parked["idle-resident"].runtime,
             Runtime::Live(_)
         ));
-        assert!(state.background["idle-resident"].idle_since.is_some());
+        assert!(state.residents.parked["idle-resident"].idle_since.is_some());
         assert!(actor.try_recv().is_err(), "parking sent Shutdown");
     });
 }
@@ -3294,15 +3576,15 @@ fn select_session_readopts_idle_resident_without_shutdown() {
 
     state.host_update(cx, |state, cx| {
         state.sessions.push(meta);
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.park_active(cx);
         state.select_session("idle-resident", cx);
 
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(active.idle_since.is_none());
-        assert!(!state.background.contains_key("idle-resident"));
+        assert!(!state.residents.parked.contains_key("idle-resident"));
         assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
     });
 }
@@ -3319,13 +3601,13 @@ fn resident_idle_reaper_shuts_down_untouched_provider() {
 
     state.host_update(cx, |state, cx| {
         state.resident_idle_grace = Duration::from_millis(1);
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.park_active(cx);
     });
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        assert!(!state.background.contains_key("idle-resident"));
+        assert!(!state.residents.parked.contains_key("idle-resident"));
         assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
     });
 }
@@ -3344,14 +3626,14 @@ fn resident_idle_reaper_ignores_readopted_session() {
     state.host_update(cx, |state, cx| {
         state.resident_idle_grace = Duration::from_millis(1);
         state.sessions.push(meta);
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.park_active(cx);
         state.select_session("idle-resident", cx);
     });
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
@@ -3374,19 +3656,22 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
             resident.meta.id = format!("resident-{index}");
             resident.idle_since =
                 Some(base - Duration::from_secs((MAX_IDLE_RESIDENTS - index) as u64));
-            state.background.insert(resident.meta.id.clone(), resident);
+            state
+                .residents
+                .parked
+                .insert(resident.meta.id.clone(), resident);
             actors.push(actor);
         }
 
         let (commands, newest_actor) = smol::channel::unbounded();
         let mut newest = live_session(ProviderKind::ClaudeCode, commands);
         newest.meta.id = "resident-newest".into();
-        state.active = Some(newest);
+        state.residents.active = Some(newest);
         state.park_active(cx);
         actors.push(newest_actor);
 
-        assert!(!state.background.contains_key("resident-0"));
-        assert_eq!(state.background.len(), MAX_IDLE_RESIDENTS);
+        assert!(!state.residents.parked.contains_key("resident-0"));
+        assert_eq!(state.residents.parked.len(), MAX_IDLE_RESIDENTS);
     });
 
     assert!(matches!(actors[0].try_recv(), Ok(SessionCommand::Shutdown)));
@@ -3413,10 +3698,10 @@ fn settings_restart_waits_for_background_follow_up() {
             .settings
             .provider_mut(ProviderKind::ClaudeCode)
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.send_turn("use the new model later".into(), Vec::new(), cx);
         assert!(actor.try_recv().is_err());
-        assert_eq!(state.active.as_ref().unwrap().queue.len(), 1);
+        assert_eq!(state.residents.active.as_ref().unwrap().queue.len(), 1);
 
         // Claude publishes zero immediately before its self-invoked result;
         // the restart is still deferred until that follow-up turn closes.
@@ -3443,7 +3728,7 @@ fn settings_restart_waits_for_background_follow_up() {
             cx,
         );
         assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert_eq!(state.active.as_ref().unwrap().queue.len(), 1);
+        assert_eq!(state.residents.active.as_ref().unwrap().queue.len(), 1);
     });
 }
 
@@ -3604,7 +3889,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
     cx.run_until_parked();
 
     state.update(cx, |state, _cx| {
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         let fork = &active.meta;
         assert_ne!(fork.id, source.id);
         assert!(fork.pending_fork);
@@ -3715,7 +4000,7 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     let state = cx.new_entity(|_| AppState::new(store));
 
     state.update(cx, |state, _| {
-        state.active = Some(AppState::build_draft_session(
+        state.residents.active = Some(AppState::build_draft_session(
             "terminal-project".into(),
             root.clone(),
             ProviderKind::Codex,
@@ -3730,6 +4015,7 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     state.read_with(cx, |state, _| {
         assert!(
             state
+                .residents
                 .active
                 .as_ref()
                 .unwrap()
@@ -3742,7 +4028,7 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     cx.run_until_parked();
 
     state.read_with(cx, |state, _| {
-        let workspace = &state.active.as_ref().unwrap().terminal_workspace;
+        let workspace = &state.residents.active.as_ref().unwrap().terminal_workspace;
         assert_eq!(workspace.terminals.len(), 1);
         assert!(state.terminal_panel_open());
         assert_eq!(workspace.terminals[0].terminal.cwd(), override_cwd);
@@ -3799,7 +4085,7 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
 
     state.host_update(cx, |state, cx| {
         state.select_session(&id, cx);
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.id, id);
         assert!(active.timeline.entries.is_empty());
     });
@@ -3807,7 +4093,7 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+        assert!(state.residents.active.as_ref().unwrap().timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "persisted cold output")
         ));
     });
@@ -3829,7 +4115,7 @@ fn parked_readopt_refolds_events_appended_while_parked() {
     state.host_update(cx, |state, cx| state.select_session(&id, cx));
     cx.run_until_parked();
     state.host_update(cx, |state, cx| {
-        let active = state.active.as_mut().unwrap();
+        let active = state.residents.active.as_mut().unwrap();
         active.turn_in_flight = true;
         active.runtime = Runtime::Starting { generation: 1 };
         state.start_draft("other".into(), PathBuf::from("/tmp/other"), cx);
@@ -3843,7 +4129,7 @@ fn parked_readopt_refolds_events_appended_while_parked() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+        assert!(state.residents.active.as_ref().unwrap().timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "while parked")
         ));
     });
@@ -3876,7 +4162,7 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.id, id_b);
         assert!(active.timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "only session B")
@@ -3908,7 +4194,7 @@ fn timeline_load_retries_when_append_watermark_moves() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let timeline = &state.active.as_ref().unwrap().timeline;
+        let timeline = &state.residents.active.as_ref().unwrap().timeline;
         assert!(timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "before load")
         ));
@@ -3950,9 +4236,9 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // Send → the provider command is queued, then the adapter's
         // acceptance commits the user bubble.
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.send_turn("first message".into(), Vec::new(), cx);
-        let id_a = state.active.as_ref().unwrap().meta.id.clone();
+        let id_a = state.residents.active.as_ref().unwrap().meta.id.clone();
         let first_delivery = match commands_a.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
             other => panic!("expected first SendTurn, got {other:?}"),
@@ -3964,7 +4250,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
             },
             cx,
         );
-        assert!(state.active.as_ref().unwrap().timeline.entries.iter().any(
+        assert!(state.residents.active.as_ref().unwrap().timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "first message")
         ));
 
@@ -4007,13 +4293,13 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
         // visible in the queue strip — never dropped).
         state.start_draft("proj-t3".into(), cwd.clone(), cx);
         state.send_turn("second message".into(), Vec::new(), cx);
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         id_b = active.meta.id.clone();
         assert_ne!(id_a, id_b);
         assert_eq!(active.queue.len(), 1);
 
         // Provider comes up (simulated — the queue flush on start).
-        state.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
+        state.residents.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
         assert_eq!(state.dispatch_next_queued(cx), Ok(true));
         let second_delivery = match receiver_b.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
@@ -4029,7 +4315,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // THE assertion: the new thread's first message is a visible user
         // entry in a rendered turn, and session A's error did not leak in.
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         let users: Vec<&str> = active
             .timeline
             .entries
@@ -4081,7 +4367,7 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
     state.host_update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.send_turn("finish this task".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
@@ -4141,7 +4427,7 @@ fn dead_event_stream_without_close_clears_working_flags() {
         let id = active.meta.id.clone();
         state.store.upsert_meta(&active.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.active = Some(active);
+        state.residents.active = Some(active);
         assert!(state.turn_running_for(&id));
 
         state.on_event_stream_ended(&id, &commands, cx);
@@ -4150,7 +4436,7 @@ fn dead_event_stream_without_close_clears_working_flags() {
             !state.turn_running_for(&id),
             "a dead event stream must not pin the session at Working"
         );
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(matches!(active.runtime, Runtime::Idle));
         id
     });
@@ -4184,7 +4470,7 @@ fn dead_event_stream_clears_parked_working_flags() {
         let id = parked.meta.id.clone();
         state.store.upsert_meta(&parked.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.background.insert(id.clone(), parked);
+        state.residents.parked.insert(id.clone(), parked);
         assert!(state.turn_running_for(&id));
 
         state.on_event_stream_ended(&id, &commands, cx);
@@ -4214,12 +4500,12 @@ fn stale_pump_close_leaves_successor_runtime_alone() {
         let id = active.meta.id.clone();
         state.store.upsert_meta(&active.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.active = Some(active);
+        state.residents.active = Some(active);
 
         // The old pump drains after the session moved to a new provider.
         state.on_event_stream_ended(&id, &old_commands, cx);
 
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(
             matches!(active.runtime, Runtime::Live(_)),
             "a stale pump must not tear down the successor provider"
@@ -4228,8 +4514,8 @@ fn stale_pump_close_leaves_successor_runtime_alone() {
         assert!(state.turn_running_for(&id));
 
         // And an idle session ignores stream-end noise entirely.
-        state.active.as_mut().unwrap().runtime = Runtime::Idle;
-        state.active.as_mut().unwrap().turn_in_flight = false;
+        state.residents.active.as_mut().unwrap().runtime = Runtime::Idle;
+        state.residents.active.as_mut().unwrap().turn_in_flight = false;
         state.on_event_stream_ended(&id, &old_commands, cx);
         assert!(!state.turn_running_for(&id));
     });
@@ -4281,11 +4567,11 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             ("stale timeline", stale_timeline, false),
         ] {
             let id = session.meta.id.clone();
-            state.active = Some(session);
+            state.residents.active = Some(session);
             let active_answer = state.turn_running_for(&id);
 
-            let parked = state.active.take().unwrap();
-            state.background.insert(id.clone(), parked);
+            let parked = state.residents.active.take().unwrap();
+            state.residents.parked.insert(id.clone(), parked);
             let parked_answer = state.turn_running_for(&id);
 
             assert_eq!(
@@ -4293,7 +4579,7 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
                 "{label} changed answer when moved between active and parked"
             );
             assert_eq!(active_answer, expected, "{label} work predicate");
-            state.background.remove(&id);
+            state.residents.parked.remove(&id);
         }
     });
 }
@@ -4325,7 +4611,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
         // A live session with a running turn (the overnight workflow).
         state.store.upsert_meta(&session.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.send_turn("run the long migration".into(), Vec::new(), cx);
         state.send_turn("queued follow-up".into(), Vec::new(), cx);
         let first_delivery = match commands_a.try_recv() {
@@ -4404,7 +4690,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
     cx.run_until_parked();
 
     state.host_update(cx, |state, cx| {
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert_eq!(active.meta.id, id_a);
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(active.turn_in_flight);
@@ -4455,7 +4741,7 @@ fn drained_parked_session_stays_resident() {
     state.host_update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.active = Some(session);
+        state.residents.active = Some(session);
         state.send_turn("one last thing".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
@@ -4477,8 +4763,8 @@ fn drained_parked_session_stays_resident() {
             cx,
         );
         assert!(commands.try_recv().is_err(), "drain sent Shutdown");
-        assert!(state.background.contains_key(&id));
-        assert!(state.background[&id].idle_since.is_some());
+        assert!(state.residents.parked.contains_key(&id));
+        assert!(state.residents.parked[&id].idle_since.is_some());
         assert!(!state.turn_running_for(&id));
     });
 
@@ -4505,14 +4791,14 @@ fn failed_provider_start_keeps_the_queued_message() {
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
         state.start_draft("proj-fail".into(), cwd.clone(), cx);
         state.send_turn("do not lose me".into(), Vec::new(), cx);
-        assert_eq!(state.active.as_ref().unwrap().queue.len(), 1);
+        assert_eq!(state.residents.active.as_ref().unwrap().queue.len(), 1);
     });
 
     // Let the spawned start attempt run to its failure.
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let active = state.active.as_ref().unwrap();
+        let active = state.residents.active.as_ref().unwrap();
         assert!(
             matches!(active.runtime, Runtime::Idle),
             "failed start must return to Idle"

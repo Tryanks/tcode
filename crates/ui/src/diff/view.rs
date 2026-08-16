@@ -39,7 +39,7 @@ use tcode_core::{
     session::{ReviewComment, ReviewSide},
     ui::RightTab,
 };
-use tcode_protocol::{Command, GitDiffResult, GitDiffScope, GitFileText};
+use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
 use tcode_services::user_files::relativize_to_workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1304,7 +1304,7 @@ impl DiffPanel {
             selection.end_index,
         );
         self.workspace_store.update(cx, |store, _cx| {
-            store.dispatch(Command::AddReviewComment { comment });
+            store.add_review_comment(comment);
         });
         self.selection = None;
         self.comment_input = None;

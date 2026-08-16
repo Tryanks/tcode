@@ -25,7 +25,7 @@ impl AppState {
             return;
         }
 
-        let commit_draft = self.active.as_ref().is_some_and(|active| {
+        let commit_draft = self.residents.active.as_ref().is_some_and(|active| {
             active.draft && !matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. })
         });
         if commit_draft && let Err(err) = self.commit_draft(cx) {
@@ -38,7 +38,7 @@ impl AppState {
             return;
         }
 
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         active.push_scheduled(text, attachments, not_before);
@@ -52,8 +52,6 @@ impl AppState {
             self.ensure_started(cx);
         }
         self.clear_consumed_draft_context(cx);
-        self.emit_active_session_status(cx);
-        cx.notify();
         self.reschedule_scheduled_wake(cx);
     }
 
@@ -64,9 +62,10 @@ impl AppState {
         self.scheduler_generation = self.scheduler_generation.wrapping_add(1);
         let generation = self.scheduler_generation;
         let earliest = self
+            .residents
             .active
             .iter()
-            .chain(self.background.values())
+            .chain(self.residents.parked.values())
             .flat_map(|session| {
                 session
                     .queue
@@ -99,6 +98,7 @@ impl AppState {
     pub(super) fn fire_due_scheduled(&mut self, cx: &mut HostCx) {
         let now = SystemTime::now();
         let active_due: Vec<u64> = self
+            .residents
             .active
             .iter()
             .flat_map(|active| active.queue.iter())
@@ -107,22 +107,23 @@ impl AppState {
             .collect();
         for id in active_due {
             let message = self
+                .residents
                 .active
                 .as_mut()
                 .and_then(|active| active.take_queued(id));
             let Some(message) = message else {
                 continue;
             };
-            if let Some(active) = self.active.as_mut() {
+            if let Some(active) = self.residents.active.as_mut() {
                 active.pending_ultrathink = message.ultrathink;
             }
             self.send_turn_assembled(message.text, message.attachments, cx);
         }
 
-        let parked_ids: Vec<String> = self.background.keys().cloned().collect();
+        let parked_ids: Vec<String> = self.residents.parked.keys().cloned().collect();
         for session_id in parked_ids {
             let mut had_due = false;
-            if let Some(parked) = self.background.get_mut(&session_id) {
+            if let Some(parked) = self.residents.parked.get_mut(&session_id) {
                 for message in &mut parked.queue {
                     if message.not_before.is_some_and(|time| time <= now) {
                         // Parked turns cannot re-enter the active-only send
@@ -138,7 +139,8 @@ impl AppState {
             }
 
             let (settings_changed, restart_deferred, is_live, has_queue) = self
-                .background
+                .residents
+                .parked
                 .get(&session_id)
                 .map(|parked| {
                     (
@@ -155,14 +157,15 @@ impl AppState {
                         "parked session {session_id}: deferring scheduled-send settings restart"
                     );
                 } else {
-                    if let Some(parked) = self.background.get_mut(&session_id) {
+                    if let Some(parked) = self.residents.parked.get_mut(&session_id) {
                         parked.shutdown_to_idle();
                     }
                     self.ensure_session_started(&session_id, cx);
                 }
             } else if is_live {
                 if self
-                    .background
+                    .residents
+                    .parked
                     .get_mut(&session_id)
                     .is_some_and(|parked| parked.dispatch_next_pending().is_err())
                 {
@@ -173,9 +176,7 @@ impl AppState {
             } else if has_queue {
                 self.ensure_session_started(&session_id, cx);
             }
-            self.emit_session_status(&session_id, cx);
         }
-        cx.notify();
         self.reschedule_scheduled_wake(cx);
     }
 
@@ -184,13 +185,11 @@ impl AppState {
     /// observes a real adapter thread.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
-    pub fn queue_message_for_replica_test(&mut self, text: String, cx: &mut HostCx) {
-        let Some(active) = self.active.as_mut() else {
+    pub fn queue_message_for_replica_test(&mut self, text: String, _cx: &mut HostCx) {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         active.push_queued(text, Vec::new());
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     pub(super) fn send_turn_assembled(
@@ -205,7 +204,7 @@ impl AppState {
         }
         // Group C: a draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
-        if let Some(active) = self.active.as_ref()
+        if let Some(active) = self.residents.active.as_ref()
             && active.draft
             && !active.preparing_worktree
             && let WorkspaceMode::NewWorktree { base } = active.draft_workspace.clone()
@@ -228,7 +227,7 @@ impl AppState {
             return;
         }
 
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
 
@@ -283,8 +282,6 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     /// Display labels (from, to) for the confirmation dialog, when the current
@@ -300,7 +297,7 @@ impl AppState {
     }
 
     pub(super) fn relay_confirmation(&self) -> Option<(String, String)> {
-        let active = self.active.as_ref()?;
+        let active = self.residents.active.as_ref()?;
         let pending = active.pending_relay.as_ref()?;
         if !has_meaningful_history(&active.timeline) {
             return None;
@@ -331,7 +328,7 @@ impl AppState {
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         let Some(pending) = active.pending_relay.take() else {
@@ -361,7 +358,7 @@ impl AppState {
         self.persist_meta(&meta, cx);
         self.record_event(&session_id, &event, cx);
 
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         active.push_queued(text, attachments);
@@ -373,36 +370,32 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     /// Submit the first eligible queue entry when the live provider can accept
     /// a turn. It remains queued until the adapter emits its correlated `TurnAccepted`;
     /// only that provider-boundary acknowledgement persists the user bubble.
     pub(super) fn dispatch_next_queued(&mut self, _cx: &mut HostCx) -> Result<bool, ()> {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.residents.active.as_ref() else {
             return Ok(false);
         };
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
-        self.active.as_mut().ok_or(())?.dispatch_next_pending()
+        self.residents
+            .active
+            .as_mut()
+            .ok_or(())?
+            .dispatch_next_pending()
     }
 
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
     /// acceptance events idempotent, including after a provider close.
     pub(super) fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut HostCx) {
         let is_active = self.active_session_id() == Some(session_id);
-        let accepted = if is_active {
-            self.active
-                .as_mut()
-                .and_then(|active| active.accept_turn_delivery(delivery_id))
-        } else {
-            self.background
-                .get_mut(session_id)
-                .and_then(|parked| parked.accept_turn_delivery(delivery_id))
-        };
+        let accepted = self
+            .resident_mut(session_id)
+            .and_then(|resident| resident.accept_turn_delivery(delivery_id));
         let Some(message) = accepted else {
             log::debug!(
                 "ignoring stale or duplicate turn acceptance {delivery_id} for {session_id}"
@@ -419,14 +412,12 @@ impl AppState {
         if is_active {
             self.maybe_generate_title(&message.text, &message.attachments, cx);
         }
-        self.emit_session_status(session_id, cx);
-        cx.notify();
     }
 
     /// A parked session finished a turn: keep working through its queue, then
     /// retain its provider for the bounded resident-idle grace period.
     pub(super) fn on_background_turn_completed(&mut self, session_id: &str, cx: &mut HostCx) {
-        let Some(parked) = self.background.get_mut(session_id) else {
+        let Some(parked) = self.residents.parked.get_mut(session_id) else {
             return;
         };
         parked.turn_in_flight = false;
@@ -436,14 +427,10 @@ impl AppState {
                     "parked session {session_id}: deferring settings restart for {} background task(s)",
                     parked.background_task_count
                 );
-                self.emit_session_status(session_id, cx);
-                cx.notify();
                 return;
             }
             parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
-            self.emit_session_status(session_id, cx);
-            cx.notify();
             return;
         }
         if parked.queue.is_empty() {
@@ -452,17 +439,14 @@ impl AppState {
                     "retaining parked session {session_id} for {} background task(s)",
                     parked.background_task_count
                 );
-                self.emit_session_status(session_id, cx);
-                cx.notify();
                 return;
             }
             self.mark_resident_idle(session_id, cx);
-            self.emit_session_status(session_id, cx);
-            cx.notify();
             return;
         }
         match self
-            .background
+            .residents
+            .parked
             .get_mut(session_id)
             .unwrap()
             .dispatch_next_pending()
@@ -475,8 +459,6 @@ impl AppState {
                 log::warn!("parked session {session_id}: dispatch failed (process gone)");
             }
         }
-        self.emit_session_status(session_id, cx);
-        cx.notify();
     }
 
     /// Append a user message to the session transcript. Providers don't echo
@@ -545,7 +527,7 @@ impl AppState {
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.residents.active.as_ref() else {
             return;
         };
         match active.route(true) {
@@ -577,7 +559,7 @@ impl AppState {
                 // *queued* message does not — see `dispatch_next_queued`.)
                 let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);
 
-                let Some(active) = self.active.as_mut() else {
+                let Some(active) = self.residents.active.as_mut() else {
                     return;
                 };
                 active.pending_ultrathink = false;
@@ -592,8 +574,6 @@ impl AppState {
                 {
                     self.report_error(RuntimeError::ProcessGone, cx);
                 }
-                self.emit_session_status(&session_id, cx);
-                cx.notify();
             }
         }
     }
@@ -601,7 +581,7 @@ impl AppState {
     /// Queue strip: convert an already-queued message into a steering message —
     /// pull it out of the queue and inject it into the running turn.
     pub fn steer_queued(&mut self, id: u64, cx: &mut HostCx) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         let Some(message) = active.take_queued(id) else {
@@ -618,35 +598,31 @@ impl AppState {
     /// so nothing needs undoing. A submitted head cannot be removed until its
     /// correlated provider acknowledgement commits it.
     pub fn drop_queued(&mut self, id: u64, cx: &mut HostCx) {
-        if let Some(active) = self.active.as_mut() {
+        if let Some(active) = self.residents.active.as_mut() {
             let _ = active.take_queued(id);
         }
-        self.emit_active_session_status(cx);
-        cx.notify();
         self.reschedule_scheduled_wake(cx);
     }
 
-    pub fn interrupt(&mut self, cx: &mut HostCx) {
+    pub fn interrupt(&mut self, _cx: &mut HostCx) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
-        }) = &self.active
+        }) = &self.residents.active
         {
             let _ = commands.try_send(SessionCommand::Interrupt);
         }
-        cx.notify();
     }
 
     pub fn respond_approval(
         &mut self,
         request_id: String,
         decision: ApprovalDecision,
-        cx: &mut HostCx,
+        _cx: &mut HostCx,
     ) {
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             let _ = self.respond_session_approval(&session_id, request_id, decision);
         }
-        cx.notify();
     }
 
     /// Answer a pending user-input request (Claude `AskUserQuestion` / Codex
@@ -656,18 +632,17 @@ impl AppState {
         &mut self,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
-        cx: &mut HostCx,
+        _cx: &mut HostCx,
     ) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
-        }) = &self.active
+        }) = &self.residents.active
         {
             let _ = commands.try_send(SessionCommand::RespondUserInput {
                 request_id,
                 answers,
             });
         }
-        cx.notify();
     }
 }

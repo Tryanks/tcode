@@ -55,7 +55,7 @@ impl Composer {
                 .on_open_change(move |open, _window, cx| {
                     // Load branches lazily each time the popover opens.
                     if *open {
-                        store_open.update(cx, |store, _cx| store.dispatch(Command::LoadBranches));
+                        store_open.update(cx, |store, _cx| store.load_branches());
                     }
                 })
                 .content(move |_state, _window, cx| {
@@ -122,19 +122,16 @@ impl Composer {
                                     .on_click(move |_, window, cx| {
                                         let branch_name = branch_name.clone();
                                         store_pick.update(cx, |store, _cx| {
-                                            let command = if worktree_mode {
+                                            if worktree_mode {
                                                 // Choose the worktree's base branch.
-                                                Command::SetDraftWorkspace {
-                                                    mode: WorkspaceMode::NewWorktree {
+                                                store.set_draft_workspace(
+                                                    WorkspaceMode::NewWorktree {
                                                         base: branch_name,
                                                     },
-                                                }
+                                                );
                                             } else {
-                                                Command::CheckoutBranch {
-                                                    branch: branch_name,
-                                                }
-                                            };
-                                            store.dispatch(command);
+                                                store.checkout_branch(branch_name);
+                                            }
                                         });
                                         pop.update(cx, |st, cx| st.dismiss(window, cx));
                                     }),
@@ -267,9 +264,7 @@ impl Composer {
                         .id("workspace-local")
                         .on_click(move |_, window, cx| {
                             store_local.update(cx, |store, _cx| {
-                                store.dispatch(Command::SetDraftWorkspace {
-                                    mode: WorkspaceMode::LocalCheckout,
-                                });
+                                store.set_draft_workspace(WorkspaceMode::LocalCheckout);
                             });
                             pop_local.update(cx, |st, cx| st.dismiss(window, cx));
                         }),
@@ -284,9 +279,7 @@ impl Composer {
                         .on_click(move |_, window, cx| {
                             let base = base.clone();
                             store_worktree.update(cx, |store, _cx| {
-                                store.dispatch(Command::SetDraftWorkspace {
-                                    mode: WorkspaceMode::NewWorktree { base },
-                                });
+                                store.set_draft_workspace(WorkspaceMode::NewWorktree { base });
                             });
                             pop_worktree.update(cx, |st, cx| st.dismiss(window, cx));
                         }),

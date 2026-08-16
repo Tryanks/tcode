@@ -21,11 +21,10 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
-use tcode_protocol::Command;
 
 use crate::provider_dialog::ProviderDialog;
 use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// Claude's official Clay brand color from Anthropic's media resources.
 pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
@@ -50,7 +49,8 @@ impl ProviderCard {
         profile_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&store, |_, _, cx| cx.notify());
+        let subscription =
+            observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
         Self {
             store,
             provider,
@@ -205,13 +205,13 @@ impl ProviderCard {
                         let checked = *checked;
                         let profile_id = this.profile_id.clone();
                         this.store.update(cx, |store, _cx| {
-                            store.dispatch(Command::UpdateProfileSettings {
+                            store.update_profile_settings(
                                 profile_id,
-                                patch: tcode_core::settings::ProfileSettingsPatch::SetEnabled {
+                                tcode_core::settings::ProfileSettingsPatch::SetEnabled {
                                     enabled: checked,
                                 },
-                            });
-                            store.dispatch(Command::ReloadProvider);
+                            );
+                            store.reload_provider();
                         });
                     })),
             )
@@ -357,7 +357,7 @@ impl ProviderCard {
                                 let store = store.clone();
                                 move |_, _, cx| {
                                     store.update(cx, |store, _cx| {
-                                        store.dispatch(Command::UpdateProvider { provider });
+                                        store.update_provider(provider);
                                     });
                                 }
                             }),

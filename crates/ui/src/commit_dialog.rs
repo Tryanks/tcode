@@ -21,7 +21,6 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::{GitAction, GitFileEntry, feature_branch_name, included_paths};
-use tcode_protocol::Command;
 
 use crate::store::WorkspaceStore;
 
@@ -133,12 +132,7 @@ impl CommitDialog {
         };
         let action = self.action;
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::RunGitAction {
-                action,
-                message: Some(message),
-                included,
-                feature_branch,
-            });
+            store.run_git_action(action, Some(message), included, feature_branch);
         });
         true
     }

@@ -5,10 +5,10 @@ impl AppState {
     /// operation is performed: the canonical timeline changes only after the
     /// provider confirms the native request.
     pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode, cx: &mut HostCx) {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.residents.active.as_ref() else {
             return;
         };
-        if active.meta.provider != ProviderKind::ClaudeCode
+        if !active.meta.provider.caps().native_rewind
             || active.turn_in_flight
             || active.delivery_in_flight.is_some()
             || active.background_task_count > 0
@@ -58,8 +58,6 @@ impl AppState {
         } else {
             self.ensure_started(cx);
         }
-        self.emit_session_status(&session_id, cx);
-        cx.notify();
     }
 
     #[cfg(test)]
@@ -79,12 +77,14 @@ impl AppState {
     /// Spawn a provider for either the foreground session or a parked child.
     pub(super) fn ensure_session_started(&mut self, session_id: &str, cx: &mut HostCx) {
         let idle = self
+            .residents
             .active
             .as_ref()
             .filter(|active| active.meta.id == session_id)
             .map(|active| matches!(active.runtime, Runtime::Idle))
             .or_else(|| {
-                self.background
+                self.residents
+                    .parked
                     .get(session_id)
                     .map(|active| matches!(active.runtime, Runtime::Idle))
             })
@@ -107,16 +107,16 @@ impl AppState {
         active.live_option_selections = active.meta.option_selections.clone();
 
         let meta = active.meta.clone();
-        self.emit_session_status(session_id, cx);
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
-        let preview_registration = if meta.provider == ProviderKind::Pi {
-            None
-        } else {
+        let preview_registration = if meta.provider.caps().preview_mcp {
             self.preview_registration_for(&meta)
+        } else {
+            None
         };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
-        let computer_use_registration = self.computer_use_registration.clone();
+        let computer_use_registration = self.mcp.computer_use_registration.clone();
+        let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
             log::info!(
@@ -143,17 +143,16 @@ impl AppState {
                 orchestrate_registration,
                 computer_use_registration,
             );
-            let result = start_session(meta.provider, opts).await;
+            let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
-                let matches_active = state.active.as_ref().is_some_and(|active| {
+                let matches_active = state.residents.active.as_ref().is_some_and(|active| {
                     active.meta.id == session_id && active.is_starting_generation(generation)
                 });
                 // The session may have been parked (thread switch) while its
                 // start was in flight; the attempt then adopts the parked entry.
                 let matches_parked = !matches_active
                     && state
-                        .background
-                        .get(&session_id)
+                        .resident(&session_id)
                         .is_some_and(|parked| parked.is_starting_generation(generation));
                 match result {
                     Ok(handle) => {
@@ -178,10 +177,11 @@ impl AppState {
                                 state.on_event_stream_ended(&pump_session, &pump_commands, cx);
                             });
                         });
+                        if let Some(resident) = state.resident_mut(&session_id) {
+                            resident.runtime = Runtime::Live(commands.clone());
+                            resident._pump = Some(pump);
+                        }
                         if matches_active {
-                            let active = state.active.as_mut().unwrap();
-                            active.runtime = Runtime::Live(commands.clone());
-                            active._pump = Some(pump);
                             if let Some((checkpoint_id, mode)) =
                                 state.pending_native_rewinds.get(&session_id).cloned()
                             {
@@ -199,9 +199,6 @@ impl AppState {
                                 state.report_error(RuntimeError::ProcessGone, cx);
                             }
                         } else {
-                            let parked = state.background.get_mut(&session_id).unwrap();
-                            parked.runtime = Runtime::Live(commands.clone());
-                            parked._pump = Some(pump);
                             if let Some((checkpoint_id, mode)) =
                                 state.pending_native_rewinds.get(&session_id).cloned()
                             {
@@ -221,8 +218,6 @@ impl AppState {
                                 state.on_background_turn_completed(&session_id, cx);
                             }
                         }
-                        state.emit_session_status(&session_id, cx);
-                        cx.notify();
                     }
                     Err(err) => {
                         if matches_active || matches_parked {
@@ -232,16 +227,11 @@ impl AppState {
                             // flushes on the next successful start; clearing it
                             // would destroy their words along with the process
                             // (the T3 bug family this app tests against).
-                            if let Some(active) = state.active.as_mut().filter(|_| matches_active) {
-                                active.runtime = Runtime::Idle;
-                                active.delivery_in_flight = None;
-                                active.turn_in_flight = false;
-                                active.background_task_count = 0;
-                            } else if let Some(parked) = state.background.get_mut(&session_id) {
-                                parked.runtime = Runtime::Idle;
-                                parked.delivery_in_flight = None;
-                                parked.turn_in_flight = false;
-                                parked.background_task_count = 0;
+                            if let Some(resident) = state.resident_mut(&session_id) {
+                                resident.runtime = Runtime::Idle;
+                                resident.delivery_in_flight = None;
+                                resident.turn_in_flight = false;
+                                resident.background_task_count = 0;
                             }
                             state.pending_native_rewinds.remove(&session_id);
                             let error_event = AgentEvent::ProviderStartFailed {
@@ -252,7 +242,7 @@ impl AppState {
                                 meta.id == session_id && meta.parent_session_id.is_some()
                             });
                             if is_child {
-                                if let Some(child) = state.background.get_mut(&session_id) {
+                                if let Some(child) = state.resident_mut(&session_id) {
                                     child.queue.clear();
                                 }
                                 state.deliver_child_callback(&session_id, TurnStatus::Failed, cx);
@@ -263,8 +253,6 @@ impl AppState {
                                 },
                                 cx,
                             );
-                            state.emit_session_status(&session_id, cx);
-                            cx.notify();
                         }
                     }
                 }
@@ -341,8 +329,6 @@ impl AppState {
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
-        self.emit_session_status(&meta.id, cx);
-        cx.notify();
     }
 
     pub(crate) fn shutdown_active(&mut self, _cx: &mut HostCx) {
@@ -350,7 +336,7 @@ impl AppState {
             self.clear_approvals(&session_id);
             self.pending_native_rewinds.remove(&session_id);
         }
-        if let Some(active) = self.active.take()
+        if let Some(active) = self.residents.active.take()
             && let Runtime::Live(commands) = active.runtime
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
@@ -360,7 +346,7 @@ impl AppState {
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
         self.shutdown_active(cx);
-        for (_, parked) in self.background.drain() {
+        for (_, parked) in self.residents.parked.drain() {
             if let Runtime::Live(commands) = parked.runtime {
                 let _ = commands.try_send(SessionCommand::Shutdown);
             }
@@ -375,7 +361,7 @@ impl AppState {
     /// Every "switch away" path goes through here; only destructive paths use
     /// `shutdown_active` directly.
     pub(super) fn park_active(&mut self, cx: &mut HostCx) {
-        let Some(mut active) = self.active.take() else {
+        let Some(mut active) = self.residents.active.take() else {
             return;
         };
         self.park_terminal_workspace(&mut active);
@@ -398,35 +384,43 @@ impl AppState {
             if has_work {
                 active.idle_since = None;
             }
-            self.background.insert(session_id.clone(), active);
+            self.residents.park(active);
             self.reschedule_scheduled_wake(cx);
             if !has_work {
                 self.mark_resident_idle(&session_id, cx);
             }
-            self.emit_session_status(&session_id, cx);
         }
     }
 
     /// Start a fresh idle grace period, enforce the resident LRU bound, and
     /// reap only if no intervening work or re-adoption made the timer stale.
     pub(super) fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
-        let fully_idle = self.background.get(session_id).is_some_and(|session| {
-            session.queue.is_empty()
-                && !session.turn_in_flight
-                && session.delivery_in_flight.is_none()
-                && session.background_task_count == 0
-        }) && !self.pending_native_rewinds.contains_key(session_id);
+        let fully_idle = self
+            .residents
+            .parked
+            .get(session_id)
+            .is_some_and(|session| {
+                session.queue.is_empty()
+                    && !session.turn_in_flight
+                    && session.delivery_in_flight.is_none()
+                    && session.background_task_count == 0
+            })
+            && !self.pending_native_rewinds.contains_key(session_id);
         if !fully_idle {
             return;
         }
 
         let idle_since = Instant::now();
-        self.background.get_mut(session_id).unwrap().idle_since = Some(idle_since);
-        self.emit_session_status(session_id, cx);
+        self.residents
+            .parked
+            .get_mut(session_id)
+            .unwrap()
+            .idle_since = Some(idle_since);
 
         let oldest = {
             let mut residents: Vec<_> = self
-                .background
+                .residents
+                .parked
                 .iter()
                 .filter(|(id, session)| {
                     session.queue.is_empty()
@@ -455,16 +449,20 @@ impl AppState {
         HostCx::spawn_detached(cx, async move {
             smol::Timer::after(resident_idle_grace).await;
             host_cx.enqueue(move |state, cx| {
-                let still_idle = state.background.get(&session_id).is_some_and(|session| {
-                    session.idle_since == Some(idle_since)
-                        && session.queue.is_empty()
-                        && !session.turn_in_flight
-                        && session.delivery_in_flight.is_none()
-                        && session.background_task_count == 0
-                }) && !state.pending_native_rewinds.contains_key(&session_id);
+                let still_idle = state
+                    .residents
+                    .parked
+                    .get(&session_id)
+                    .is_some_and(|session| {
+                        session.idle_since == Some(idle_since)
+                            && session.queue.is_empty()
+                            && !session.turn_in_flight
+                            && session.delivery_in_flight.is_none()
+                            && session.background_task_count == 0
+                    })
+                    && !state.pending_native_rewinds.contains_key(&session_id);
                 if still_idle {
                     state.drop_background(&session_id, cx);
-                    cx.notify();
                 }
             });
         });
@@ -474,7 +472,7 @@ impl AppState {
     pub(super) fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
         self.clear_approvals(session_id);
         self.pending_native_rewinds.remove(session_id);
-        if let Some(parked) = self.background.remove(session_id)
+        if let Some(parked) = self.residents.evict(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
@@ -494,16 +492,16 @@ impl AppState {
             self.revoke_preview_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
-        if let Some(registration) = self.orchestrate_registrations.remove(parent_id)
-            && let Some(tokens) = &self.orchestrate_tokens
+        if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
+            && let Some(tokens) = &self.mcp.orchestrate_tokens
         {
             tokens.revoke(&registration.bearer_token);
         }
     }
 
     pub(super) fn revoke_preview_registration(&mut self, session_id: &str) {
-        if let Some(registration) = self.preview_registrations.remove(session_id)
-            && let Some(tokens) = &self.preview_tokens
+        if let Some(registration) = self.mcp.preview_registrations.remove(session_id)
+            && let Some(tokens) = &self.mcp.preview_tokens
         {
             tokens.revoke(&registration.bearer_token);
         }

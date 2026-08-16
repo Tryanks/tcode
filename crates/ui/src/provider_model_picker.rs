@@ -24,7 +24,7 @@ use tcode_core::settings::Settings;
 
 use crate::provider_card::provider_glyph;
 use crate::settings::provider_label;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelOption {
@@ -66,7 +66,8 @@ impl ProviderModelPicker {
         label: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
+        let store_subscription =
+            observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
         Self {
             store,
             popover_id,
@@ -88,7 +89,8 @@ impl ProviderModelPicker {
         profile_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
+        let store_subscription =
+            observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
         let model = model.into();
         Self {
             store,
