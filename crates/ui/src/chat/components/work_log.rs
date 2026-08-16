@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::spinner::Spinner;
+use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
@@ -37,7 +38,6 @@ pub(crate) struct WorkLogData {
     pub(crate) outcome: TurnStatus,
     pub(crate) expanded: bool,
     pub(crate) running: bool,
-    pub(crate) subagent_count: usize,
     pub(crate) rows: Vec<AnyElement>,
     pub(crate) rows_expanded: bool,
     pub(crate) previous_logs_label: Option<Cow<'static, str>>,
@@ -45,6 +45,8 @@ pub(crate) struct WorkLogData {
     pub(crate) served_model: Option<String>,
 }
 
+/// One work log as a naked disclosure: a hugging header row, then the trace
+/// itself in the flow. No capsule — execution traces carry no surface.
 pub(crate) fn work_log(
     data: WorkLogData,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -59,7 +61,6 @@ pub(crate) fn work_log(
         outcome,
         expanded,
         running,
-        subagent_count,
         rows,
         rows_expanded,
         previous_logs_label,
@@ -67,6 +68,9 @@ pub(crate) fn work_log(
         served_model,
     } = data;
     let muted = cx.theme().muted_foreground;
+    // One animation locus at a time: while the body is open the working
+    // indicator carries the motion, so the header only spins when folded.
+    let header_spinner = running && !expanded;
     let header = crate::material::accessible_clickable(
         h_flex(),
         SharedString::from(format!("worklog-header-{index}-{segment_id}")),
@@ -75,52 +79,44 @@ pub(crate) fn work_log(
         cx,
     )
     .aria_expanded(expanded)
-    .w_full()
-    .h(px(30.))
-    .px_3()
-    .gap_2()
+    .self_start()
+    .h(px(28.))
+    .px_1p5()
+    .gap_1p5()
     .items_center()
+    .rounded(crate::material::radius_button())
     .text_size(px(12.5))
     .font_medium()
     .text_color(muted)
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
-    .when(running, |row| {
-        row.child(Spinner::new().xsmall().color(cx.theme().primary))
-    })
+    .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
+    .child(capsule_label)
     .when(!running, |row| {
-        let (icon, label) = match outcome {
-            TurnStatus::Completed => {
-                return row.child(Icon::new(IconName::Check).size(px(12.)).text_color(muted));
-            }
-            TurnStatus::Failed => (IconName::Redo2, crate::tr!("chat.work_log_failed")),
-            TurnStatus::Interrupted => (IconName::CircleX, crate::tr!("chat.work_log_interrupted")),
+        // A settled run needs no badge; only a bad ending is called out.
+        let failure = match outcome {
+            TurnStatus::Completed => None,
+            TurnStatus::Failed => Some(crate::tr!("chat.work_log_failed")),
+            TurnStatus::Interrupted => Some(crate::tr!("chat.work_log_interrupted")),
         };
-        row.child(
-            h_flex()
-                .flex_none()
-                .h(px(22.))
-                .px_2()
-                .gap_1()
-                .items_center()
-                .rounded(crate::material::radius_chip())
-                .bg(cx.theme().danger.opacity(0.12))
-                .text_color(cx.theme().danger)
-                .text_size(px(11.5))
-                .child(Icon::new(icon).size(px(12.)))
-                .child(label),
-        )
-    })
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .text_ellipsis()
-            .child(capsule_label),
-    )
-    .when(!running, |row| {
-        row.child(
+        row.when_some(failure, |row, label| {
+            row.child(
+                h_flex()
+                    .flex_none()
+                    .h(px(22.))
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .rounded(crate::material::radius_chip())
+                    .bg(cx.theme().danger.opacity(0.12))
+                    .text_color(cx.theme().danger)
+                    .text_size(px(11.5))
+                    .child(Icon::new(IconName::CircleX).size(px(12.)))
+                    .child(label),
+            )
+        })
+        .child(
             div()
                 .flex_none()
                 .font_family(cx.theme().mono_font_family.clone())
@@ -128,23 +124,14 @@ pub(crate) fn work_log(
                 .child(duration),
         )
     })
-    .when(subagent_count > 0, |row| {
-        row.child(
-            div()
-                .flex_none()
-                .h(px(22.))
-                .px_2()
-                .items_center()
-                .rounded(crate::material::radius_chip())
-                .bg(cx.theme().muted)
-                .text_size(px(11.5))
-                .font_family(cx.theme().mono_font_family.clone())
-                .child(crate::tr!("chat.subagent_count", count = subagent_count)),
-        )
-    })
-    .child(Icon::new(chevron(expanded)).xsmall().text_color(muted));
+    .when(header_spinner, |row| {
+        row.child(Spinner::new().xsmall().color(cx.theme().primary))
+    });
 
-    let mut body = v_flex().w_full().gap_1p5().px_3().pb_3().children(rows);
+    // Rows line up under the header label: 6px header padding + 12px chevron
+    // + 6px gap, minus the 4px an activity row keeps for its hover pill.
+    let mut body = v_flex().w_full().gap_1().pl(px(20.));
+    // The fold hides *earlier* entries, so its switch belongs above them.
     if let Some(toggle_label) = previous_logs_label {
         body = body.child(
             crate::material::accessible_clickable(
@@ -155,6 +142,7 @@ pub(crate) fn work_log(
                 cx,
             )
             .aria_expanded(rows_expanded)
+            .self_start()
             .gap_1()
             .items_center()
             .py_0p5()
@@ -174,6 +162,7 @@ pub(crate) fn work_log(
             .child(toggle_label),
         );
     }
+    body = body.children(rows);
 
     if running {
         body = body.child(
@@ -188,10 +177,20 @@ pub(crate) fn work_log(
                     cx,
                 ))
                 .when_some(served_model, |row, served| {
+                    let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
                     row.child(
-                        div()
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "served-model-{index}-{segment_id}"
+                            )))
+                            .gap_1()
+                            .items_center()
                             .text_color(cx.theme().warning)
-                            .child(format!("⚠ {served}")),
+                            .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                            .child(served)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            }),
                     )
                 }),
         );
@@ -199,13 +198,9 @@ pub(crate) fn work_log(
 
     v_flex()
         .w_full()
-        .rounded(crate::material::radius_card())
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().muted.opacity(0.42))
-        .overflow_hidden()
+        .gap_1()
         .child(header)
-        .when(expanded, |capsule| capsule.child(body))
+        .when(expanded, |flow| flow.child(body))
         .into_any_element()
 }
 

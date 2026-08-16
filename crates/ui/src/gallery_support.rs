@@ -74,7 +74,6 @@ pub fn work_log(
             outcome,
             expanded: false,
             running: false,
-            subagent_count: 0,
             rows: Vec::new(),
             rows_expanded: false,
             previous_logs_label: None,

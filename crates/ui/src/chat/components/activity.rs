@@ -5,7 +5,7 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, Div, HighlightStyle, InteractiveElement as _, IntoElement as _,
+    AnyElement, App, ClickEvent, Div, HighlightStyle, InteractiveElement as _, IntoElement,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledText, Window, div, prelude::FluentBuilder as _, px,
 };
@@ -45,24 +45,16 @@ pub(crate) fn activity_row(
                 color: Some(muted.opacity(0.45)),
                 ..Default::default()
             };
-            let summary = h_flex()
-                .min_w_0()
-                .flex_1()
-                .gap_1()
-                .overflow_hidden()
-                .child(div().flex_none().child(crate::tr!("chat.command_run")))
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_color(muted)
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .child(StyledText::new(preview).with_highlights(
-                            breaks.into_iter().map(|range| (range, marker_style)),
-                        )),
-                )
-                .into_any_element();
+            let summary = activity_summary(
+                crate::tr!("chat.command_run").into_owned(),
+                Some(
+                    StyledText::new(preview)
+                        .with_highlights(breaks.into_iter().map(|range| (range, marker_style)))
+                        .into_any_element(),
+                ),
+                true,
+                cx,
+            );
             (*status, icon, summary)
         }
         EntryContent::Item(ItemContent::ToolCall {
@@ -77,44 +69,11 @@ pub(crate) fn activity_row(
             {
                 brief = one_line(output);
             }
-            let summary = h_flex()
-                .min_w_0()
-                .flex_1()
-                .gap_1()
-                .overflow_hidden()
-                .child(div().flex_none().child(name.clone()))
-                .when(!brief.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(muted)
-                            .child(brief),
-                    )
-                })
-                .into_any_element();
+            let summary = activity_summary(name.clone(), argument(brief), true, cx);
             (*status, activity_icon(*status), summary)
         }
         EntryContent::Item(ItemContent::WebSearch { query }) => {
-            let brief = one_line(query);
-            let summary = h_flex()
-                .min_w_0()
-                .flex_1()
-                .gap_1()
-                .overflow_hidden()
-                .child(div().flex_none().child("web_search"))
-                .when(!brief.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(muted)
-                            .child(brief),
-                    )
-                })
-                .into_any_element();
+            let summary = activity_summary("web_search", argument(one_line(query)), false, cx);
             (
                 ItemStatus::Completed,
                 activity_icon(ItemStatus::Completed),
@@ -125,24 +84,12 @@ pub(crate) fn activity_row(
             provider_kind,
             summary: item_summary,
         }) => {
-            let brief = one_line(item_summary);
-            let summary = h_flex()
-                .min_w_0()
-                .flex_1()
-                .gap_1()
-                .overflow_hidden()
-                .child(div().flex_none().child(provider_kind.clone()))
-                .when(!brief.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(muted)
-                            .child(brief),
-                    )
-                })
-                .into_any_element();
+            let summary = activity_summary(
+                provider_kind.clone(),
+                argument(one_line(item_summary)),
+                false,
+                cx,
+            );
             (
                 ItemStatus::Completed,
                 activity_icon(ItemStatus::Completed),
@@ -189,6 +136,7 @@ pub(crate) fn activity_row(
     let row = h_flex()
         .w_full()
         .min_h(px(28.))
+        .px_1()
         .gap_2()
         .items_center()
         .when(!compact, |row| row.py_0p5())
@@ -221,7 +169,6 @@ pub(crate) fn activity_row(
             cx,
         )
         .aria_expanded(expanded)
-        .px_1()
         .rounded(crate::material::radius_chip())
         .cursor_pointer()
         .hover(|row| row.bg(cx.theme().accent))
@@ -236,6 +183,58 @@ pub(crate) fn activity_row(
         block = block.child(activity_detail(entry, cx));
     }
     block.into_any_element()
+}
+
+/// A row summary in the tool-chips grammar: the bare verb, then its argument
+/// in the row's one and only surface — a 22px chip.
+fn activity_summary(
+    primary: impl IntoElement,
+    argument: Option<AnyElement>,
+    monospace: bool,
+    cx: &App,
+) -> AnyElement {
+    h_flex()
+        .min_w_0()
+        .flex_1()
+        .gap_2()
+        .overflow_hidden()
+        .child(
+            div()
+                .flex_none()
+                .font_medium()
+                .text_color(cx.theme().foreground)
+                .child(primary),
+        )
+        .when_some(argument, |row, argument| {
+            row.child(
+                h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .h(px(22.))
+                    .px_1p5()
+                    .items_center()
+                    .overflow_hidden()
+                    .rounded(crate::material::radius_chip())
+                    .bg(cx.theme().muted)
+                    .text_size(px(11.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .when(monospace, |chip| {
+                        chip.font_family(cx.theme().mono_font_family.clone())
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(argument),
+                    ),
+            )
+        })
+        .into_any_element()
+}
+
+fn argument(text: String) -> Option<AnyElement> {
+    (!text.is_empty()).then(|| text.into_any_element())
 }
 
 fn activity_detail(entry: &TimelineEntry, cx: &App) -> AnyElement {
@@ -293,11 +292,6 @@ fn activity_detail(entry: &TimelineEntry, cx: &App) -> AnyElement {
         }
         EntryContent::Item(ItemContent::Reasoning { text }) => div()
             .w_full()
-            .ml(px(5.))
-            .pl(px(16.))
-            .py_1()
-            .border_l_1()
-            .border_color(cx.theme().border)
             .text_size(px(11.5))
             .line_height(px(18.))
             .text_color(muted)
@@ -306,11 +300,15 @@ fn activity_detail(entry: &TimelineEntry, cx: &App) -> AnyElement {
             .into_any_element(),
         _ => div().into_any_element(),
     };
+    // Every drill-down hangs off the same hairline rail — no inset panel.
     div()
         .w_full()
-        .rounded(crate::material::radius_input())
-        .bg(cx.theme().background.opacity(0.45))
-        .p(px(10.))
+        .ml_2()
+        .pl(px(14.))
+        .py_0p5()
+        .border_l_1()
+        .border_color(cx.theme().border)
+        .text_size(px(11.5))
         .child(detail)
         .into_any_element()
 }
@@ -319,7 +317,7 @@ fn activity_icon(status: ItemStatus) -> IconName {
     match status {
         ItemStatus::InProgress => IconName::LoaderCircle,
         ItemStatus::Completed => IconName::Check,
-        ItemStatus::Failed | ItemStatus::Declined => IconName::Redo2,
+        ItemStatus::Failed | ItemStatus::Declined => IconName::CircleX,
     }
 }
 

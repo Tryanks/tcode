@@ -682,15 +682,6 @@ impl ChatView {
         let running = is_last && turn.running;
         let automatic = work_log_auto_expands(activities, turn.running, is_last);
         let expanded = auto_expanded(&self.expanded, &section_key, automatic);
-        let subagent_count = activities
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.content,
-                    EntryContent::Item(ItemContent::Subagent { .. })
-                )
-            })
-            .count();
         let segment_counts = work_log_counts(activities);
         let counts = if is_last {
             turn_counts
@@ -762,7 +753,6 @@ impl ChatView {
                 outcome,
                 expanded,
                 running,
-                subagent_count,
                 rows,
                 rows_expanded,
                 previous_logs_label,

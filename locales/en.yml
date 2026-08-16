@@ -17,6 +17,7 @@ chat:
   work_log_activities: "%{count} activities"
   work_log_failed: "Failed"
   work_log_interrupted: "Interrupted"
+  served_model_tooltip: "Serving model differs from the requested model"
   context_compacted: "Context compacted"
   previous_logs: "+%{count} previous log entries"
   hide_previous_logs: "Hide %{count} previous log entries"
