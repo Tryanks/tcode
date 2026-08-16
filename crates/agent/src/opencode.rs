@@ -15,6 +15,7 @@ use smol::future;
 
 #[cfg(test)]
 use crate::TurnStatus;
+use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
@@ -160,6 +161,7 @@ async fn run_actor(
         pending_permissions: HashSet::new(),
     };
     actor
+        .events
         .emit(AgentEvent::SessionStarted {
             provider_session_id: session_id.clone(),
             resume: ResumeCursor(json!({"session_id":session_id})),
@@ -167,12 +169,13 @@ async fn run_actor(
         })
         .await;
     actor
+        .events
         .emit(AgentEvent::ProviderCommands {
             commands: provider_commands,
         })
         .await;
     if opts.launch_env.home.is_some() {
-        actor
+        actor.events
             .emit(AgentEvent::Warning {
                 message:
                 "OpenCode has no supported single-directory home override; custom environment variables still apply"
@@ -185,54 +188,7 @@ async fn run_actor(
         return;
     }
 
-    let close_reason = loop {
-        enum Input {
-            Command(Result<SessionCommand, smol::channel::RecvError>),
-            Event(Result<SseOutput, smol::channel::RecvError>),
-        }
-        let input = future::race(async { Input::Command(commands.recv().await) }, async {
-            Input::Event(actor.sse.recv().await)
-        })
-        .await;
-        match input {
-            Input::Command(Ok(SessionCommand::Shutdown)) | Input::Command(Err(_)) => break None,
-            Input::Command(Ok(command)) => {
-                if let Err(err) = actor.handle_command(command).await {
-                    actor
-                        .emit(AgentEvent::Error {
-                            message: err,
-                            fatal: true,
-                        })
-                        .await;
-                    break Some("OpenCode REST command failed".into());
-                }
-            }
-            Input::Event(Ok(SseOutput::Event(event))) => actor.handle_event(&event).await,
-            Input::Event(Ok(SseOutput::Error(err))) => {
-                actor
-                    .emit(AgentEvent::Error {
-                        message: err.clone(),
-                        fatal: true,
-                    })
-                    .await;
-                break Some(err);
-            }
-            Input::Event(Ok(SseOutput::Eof)) | Input::Event(Err(_)) => {
-                break Some("OpenCode SSE stream closed".into());
-            }
-        }
-    };
-    actor.shutdown().await;
-    let reason = close_reason.map(|reason| {
-        actor
-            .server
-            .stderr_tail
-            .append_to(reason, "\nserver output:\n")
-    });
-    let _ = actor
-        .events
-        .send(AgentEvent::SessionClosed { reason })
-        .await;
+    actor::run(actor, &commands).await;
 }
 
 struct OpenCodeActor {
@@ -247,6 +203,51 @@ struct OpenCodeActor {
     pending_permissions: HashSet<String>,
 }
 
+impl SessionActor for OpenCodeActor {
+    type TransportItem = SseOutput;
+
+    fn transport(&self) -> &Receiver<Self::TransportItem> {
+        &self.sse
+    }
+
+    fn events(&self) -> &Sender<AgentEvent> {
+        &self.events
+    }
+
+    fn command_failure_reason(&self) -> &'static str {
+        "OpenCode REST command failed"
+    }
+
+    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
+        OpenCodeActor::handle_command(self, command).await
+    }
+
+    async fn handle_transport(
+        &mut self,
+        item: Result<SseOutput, smol::channel::RecvError>,
+    ) -> TransportOutcome {
+        match item {
+            Ok(SseOutput::Event(event)) => {
+                self.handle_event(&event).await;
+                TransportOutcome::Continue
+            }
+            Ok(SseOutput::Error(err)) => TransportOutcome::Fatal(err),
+            Ok(SseOutput::Eof) | Err(_) => {
+                TransportOutcome::Closed("OpenCode SSE stream closed".into())
+            }
+        }
+    }
+
+    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
+        self.shutdown().await;
+        reason.map(|reason| {
+            self.server
+                .stderr_tail
+                .append_to(reason, "\nserver output:\n")
+        })
+    }
+}
+
 impl OpenCodeActor {
     async fn handle_event(&mut self, event: &Value) {
         let mapped = self.mapper.on_event(event);
@@ -254,16 +255,17 @@ impl OpenCodeActor {
             self.pending_permissions.insert(request_id);
         }
         for event in mapped.events {
-            self.emit(event).await;
+            self.events.emit(event).await;
         }
         if mapped.fetch_diff {
             match self.fetch_diff() {
-                Ok(event) => self.emit(event).await,
+                Ok(event) => self.events.emit(event).await,
                 Err(err) => {
-                    self.emit(AgentEvent::Warning {
-                        message: format!("failed to fetch OpenCode session diff: {err}"),
-                    })
-                    .await
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("failed to fetch OpenCode session diff: {err}"),
+                        })
+                        .await
                 }
             }
         }
@@ -310,7 +312,9 @@ impl OpenCodeActor {
                         "OpenCode prompt_async returned unexpected HTTP {status}"
                     ));
                 }
-                self.emit(AgentEvent::TurnAccepted { delivery_id }).await;
+                self.events
+                    .emit(AgentEvent::TurnAccepted { delivery_id })
+                    .await;
                 Ok(())
             }
             SessionCommand::Interrupt => {
@@ -352,16 +356,17 @@ impl OpenCodeActor {
                         &json!({}),
                     );
                 }
-                self.emit(AgentEvent::ApprovalResolved {
-                    request_id,
-                    decision,
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::ApprovalResolved {
+                        request_id,
+                        decision,
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetApprovalMode(mode) => {
                 if mode != self.approval_mode {
-                    self.emit(AgentEvent::Warning {
+                    self.events.emit(AgentEvent::Warning {
                         message:
                             "OpenCode permission changes require restarting the per-session server"
                                 .into(),
@@ -379,26 +384,30 @@ impl OpenCodeActor {
                 Ok(())
             }
             SessionCommand::Steer { .. } => {
-                self.emit(AgentEvent::Warning {
-                    message: "OpenCode's server API does not support steering an active turn"
-                        .into(),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: "OpenCode's server API does not support steering an active turn"
+                            .into(),
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::RespondUserInput { .. } => {
-                self.emit(AgentEvent::Warning {
-                    message: "OpenCode structured questions are not yet bridged by this adapter"
-                        .into(),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message:
+                            "OpenCode structured questions are not yet bridged by this adapter"
+                                .into(),
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::Rewind { .. } => {
-                self.emit(AgentEvent::Warning {
-                    message: "OpenCode rewind is not exposed by tcode's native adapter".into(),
-                })
-                .await;
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: "OpenCode rewind is not exposed by tcode's native adapter".into(),
+                    })
+                    .await;
                 Ok(())
             }
             SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
@@ -426,10 +435,6 @@ impl OpenCodeActor {
             );
         }
         self.server.stop();
-    }
-
-    async fn emit(&self, event: AgentEvent) {
-        let _ = self.events.send(event).await;
     }
 }
 
@@ -829,11 +834,7 @@ fn open_code_tool_item(
             status,
         }
     };
-    ThreadItem {
-        id: id.to_owned(),
-        parent_item_id: None,
-        content,
-    }
+    crate::normalize::thread_item(id, content)
 }
 
 fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
@@ -914,17 +915,18 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
         crate::json_u64(tokens.get("output")).map(|output| output.saturating_add(reasoning));
     let cache_read = crate::json_u64(tokens.pointer("/cache/read"));
     let cache_write = crate::json_u64(tokens.pointer("/cache/write")).unwrap_or(0);
-    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
-        input_tokens: input,
-        cached_input_tokens: cache_read,
-        output_tokens: output,
-        used_tokens: input
-            .unwrap_or(0)
-            .checked_add(output.unwrap_or(0))
-            .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
-            .and_then(|total| total.checked_add(cache_write)),
-        ..Default::default()
-    })
+    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(
+        crate::normalize::token_usage(
+            input,
+            cache_read,
+            output,
+            input
+                .unwrap_or(0)
+                .checked_add(output.unwrap_or(0))
+                .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
+                .and_then(|total| total.checked_add(cache_write)),
+        ),
+    )
 }
 
 fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
@@ -939,11 +941,11 @@ fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
                 Some("deleted") => FileChangeKind::Delete,
                 _ => FileChangeKind::Modify,
             };
-            Some(FileChange {
+            Some(crate::normalize::file_change(
                 path,
                 kind,
-                diff: diff.get("patch").and_then(Value::as_str).map(str::to_owned),
-            })
+                diff.get("patch").and_then(Value::as_str).map(str::to_owned),
+            ))
         })
         .collect()
 }

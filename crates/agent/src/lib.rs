@@ -7,9 +7,12 @@
 //! which is intentionally opaque.
 
 pub mod acp;
+mod actor;
 pub mod claude;
 pub mod codex;
+mod normalize;
 pub mod opencode;
+mod pending;
 pub mod pi;
 mod process;
 mod subagent_tail;
