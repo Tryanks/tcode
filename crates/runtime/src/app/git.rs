@@ -13,7 +13,7 @@ impl AppState {
     /// session open, after each turn, and after each git action). A stale result
     /// (session switched, or a newer refresh superseded it) is discarded.
     pub(crate) fn refresh_git_status(&mut self, cx: &mut HostCx) {
-        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             self.git_status = None;
             return;
         };
@@ -63,7 +63,7 @@ impl AppState {
         included: Option<Vec<String>>,
         cx: &HostCx,
     ) -> HostTask<Result<String, String>> {
-        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             return HostCx::spawn_background(cx, async { Err("no active session".to_string()) });
         };
         let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
@@ -98,7 +98,7 @@ impl AppState {
             emit_runtime(cx, RuntimeEvent::Toast(RuntimeToast::GitBusy));
             return;
         }
-        let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             return;
         };
         let current_branch = self.git_branch_name();
@@ -147,7 +147,7 @@ impl AppState {
                         }),
                     ),
                 }
-                if let Some(active) = state.active.as_mut() {
+                if let Some(active) = state.residents.active.as_mut() {
                     active.git_branch = git_branch;
                 }
                 state.refresh_git_status(cx);

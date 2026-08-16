@@ -112,7 +112,7 @@ mod tests {
     fn live_session_pending_approval_sets_and_clears() {
         let (_store, mut state) = state("approval-live-test");
         let (commands, _receiver) = smol::channel::unbounded();
-        state.active = Some(live_session("live", commands));
+        state.residents.active = Some(live_session("live", commands));
 
         let request = request("approval-live");
         state.record_approval_event("live", &AgentEvent::ApprovalRequested(request.clone()));
@@ -134,7 +134,8 @@ mod tests {
         let (_store, mut state) = state("approval-parked-test");
         let (commands, _receiver) = smol::channel::unbounded();
         state
-            .background
+            .residents
+            .parked
             .insert("parked".into(), live_session("parked", commands));
 
         state.record_approval_event(
@@ -142,7 +143,7 @@ mod tests {
             &AgentEvent::ApprovalRequested(request("approval-parked")),
         );
 
-        assert!(state.active.is_none());
+        assert!(state.residents.active.is_none());
         assert!(
             state
                 .session_status_snapshot("parked")
@@ -175,7 +176,7 @@ mod tests {
         let mut child = live_session("child", commands);
         child.meta.parent_session_id = Some("parent".into());
         state.sessions.push(child.meta.clone());
-        state.background.insert("child".into(), child);
+        state.residents.parked.insert("child".into(), child);
         state.record_approval_event(
             "child",
             &AgentEvent::ApprovalRequested(request("approval-response")),

@@ -1873,7 +1873,7 @@ This begins after the hard break."#;
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
             state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
-            let active = state.active.as_mut().expect("active draft");
+            let active = state.residents.active.as_mut().expect("active draft");
             active.timeline = Timeline::default();
             active.timeline.turns = vec![TurnMeta::default()];
             active.timeline.entries = vec![

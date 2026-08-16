@@ -338,6 +338,15 @@ impl ActiveSession {
         self._pump = None;
     }
 
+    /// Forget a provider process that has already closed on its own.
+    pub(super) fn mark_dead(&mut self) {
+        self.runtime = Runtime::Idle;
+        self.delivery_in_flight = None;
+        self.turn_in_flight = false;
+        self.background_task_count = 0;
+        self._pump = None;
+    }
+
     /// Whether a message typed right now could be STEERED into the turn that is
     /// already running — i.e. the provider has a native mid-turn injection
     /// mechanism (Claude: a stream-json user message; Codex: `turn/steer`) and

@@ -187,7 +187,7 @@ impl AppState {
     }
 
     pub(super) fn preview_draft_or_persist_active(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         if active.draft {
@@ -203,7 +203,7 @@ impl AppState {
     /// models over the wire once the session starts.
     pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
         let provider_commands = self.cached_provider_commands(ProviderKind::Acp, Some(id));
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         if active.meta.provider == ProviderKind::Acp

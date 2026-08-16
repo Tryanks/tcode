@@ -109,35 +109,12 @@ impl AppState {
     /// Build the complete provider read projection. This is the sole
     /// constructor for the replicated providers domain.
     pub fn providers_status_snapshot(&self) -> ProvidersStatus {
-        ProvidersStatus {
-            model_catalogs: self.model_catalogs.clone(),
-            models_loading: self.models_loading.clone(),
-            provider_versions: self
-                .provider_versions
-                .iter()
-                .map(|(&provider, status)| {
-                    (
-                        provider,
-                        ProtocolProviderVersionStatus {
-                            installed: status.installed.clone(),
-                            latest: status.latest.clone(),
-                            update_available: status.update_available,
-                            checking: status.checking,
-                            updating: status.updating,
-                            update_command: update_command_string(provider, status.install_source),
-                        },
-                    )
-                })
-                .collect(),
-            provider_snapshots: self.provider_snapshots.clone(),
-            acp_marketplace_items: self.acp_marketplace_items(),
-            acp_registry_loading: self.acp_registry_loading,
-            acp_registry_error: self.acp_registry_error.clone(),
-            acp_installing: self.acp_installing.clone(),
-            providers_checked_at: self.providers_checked_at(),
-            providers_checking: self.providers_checking(),
-            secret_names: self.provider_secret_names.clone(),
-        }
+        self.providers.status_snapshot(
+            self.acp_marketplace_items(),
+            self.acp_registry_loading,
+            self.acp_registry_error.clone(),
+            self.acp_installing.clone(),
+        )
     }
 
     /// Build the complete active-workspace Git projection.
@@ -153,11 +130,13 @@ impl AppState {
     /// layout and context data are emitted in `SessionStatus`.
     pub(crate) fn sync_terminal_handles(&self) {
         self.terminal_registry.replace_from(
-            self.active
+            self.residents
+                .active
                 .iter()
                 .map(|session| &session.terminal_workspace)
                 .chain(
-                    self.background
+                    self.residents
+                        .parked
                         .values()
                         .map(|session| &session.terminal_workspace),
                 )
@@ -325,16 +304,10 @@ impl AppState {
     }
 
     fn resident_session_status_snapshots(&self) -> HashMap<String, SessionStatus> {
-        let mut statuses =
-            HashMap::with_capacity(self.background.len() + usize::from(self.active.is_some()));
-        if let Some(active) = &self.active
-            && let Some(status) = self.session_status_snapshot(&active.meta.id)
-        {
-            statuses.insert(active.meta.id.clone(), status);
-        }
-        for id in self.background.keys() {
+        let mut statuses = HashMap::new();
+        for id in self.residents.ids() {
             if let Some(status) = self.session_status_snapshot(id) {
-                statuses.insert(id.clone(), status);
+                statuses.insert(id.to_string(), status);
             }
         }
         statuses
