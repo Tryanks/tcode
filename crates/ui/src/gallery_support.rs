@@ -111,12 +111,8 @@ pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App)
         cwd,
         changes,
         ChangeCompleteness::Exact,
-        changed_files::ChangedFilesState {
-            collapsed: false,
-            show_all: false,
-        },
+        false,
         changed_files::ChangedFilesHandlers {
-            toggle_collapsed: click(),
             view_diff: click(),
             toggle_more: click(),
             open_files: changes.iter().map(|_| click()).collect(),

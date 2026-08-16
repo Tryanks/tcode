@@ -15,13 +15,7 @@ use super::super::model::{LiveEditRow, diff_stats};
 
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-pub(crate) struct ChangedFilesState {
-    pub(crate) collapsed: bool,
-    pub(crate) show_all: bool,
-}
-
 pub(crate) struct ChangedFilesHandlers {
-    pub(crate) toggle_collapsed: ClickHandler,
     pub(crate) view_diff: ClickHandler,
     pub(crate) toggle_more: ClickHandler,
     pub(crate) open_files: Vec<ClickHandler>,
@@ -34,17 +28,12 @@ pub(crate) fn changed_files(
     cwd: &Path,
     changes: &[FileChange],
     completeness: ChangeCompleteness,
-    state: ChangedFilesState,
+    show_all: bool,
     handlers: ChangedFilesHandlers,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let ChangedFilesState {
-        collapsed,
-        show_all,
-    } = state;
     let ChangedFilesHandlers {
-        toggle_collapsed,
         view_diff,
         toggle_more,
         open_files,
@@ -90,18 +79,6 @@ pub(crate) fn changed_files(
                         .child(format!("-{total_del}")),
                 ),
         )
-        .child(quiet_control(
-            ("collapse-all", index),
-            if collapsed {
-                crate::tr!("chat.expand_all")
-            } else {
-                crate::tr!("chat.collapse_all")
-            }
-            .into_owned()
-            .into(),
-            toggle_collapsed,
-            cx,
-        ))
         .child({
             let tooltip = crate::tr!("chat.view_diff_tooltip").into_owned();
             quiet_control(
@@ -117,76 +94,77 @@ pub(crate) fn changed_files(
     // rule here reads as a section divider, not evidence grouping.
     let mut content = v_flex().w_full().gap_1p5().pt(px(2.)).child(header);
 
-    if !collapsed {
-        let visible = if show_all {
-            changes.len()
-        } else {
-            changes.len().min(3)
-        };
-        let mut body = h_flex().w_full().px_1().gap_1p5().flex_wrap();
-        for (file_index, (change, on_click)) in
-            changes.iter().zip(open_files).take(visible).enumerate()
-        {
-            let display = tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
-            let name = Path::new(&display)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| display.clone());
-            let (added, deleted) = diff_stats(change.diff.as_deref());
-            body = body.child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    SharedString::from(format!("changed-file-chip-{index}-{file_index}")),
-                    Role::Button,
-                    format!("{}: {display}", crate::tr!("chat.view_diff")),
-                    cx,
-                )
-                .h(px(22.))
-                .px_2()
-                .gap_1()
-                .items_center()
-                .rounded(crate::material::radius_chip())
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(crate::material::content_surface(cx))
-                .font_family(cx.theme().mono_font_family.clone())
-                .text_size(px(11.5))
-                .cursor_pointer()
-                .hover(|chip| chip.bg(cx.theme().accent))
-                .on_click(on_click)
-                .child(name)
-                .child(
-                    div()
-                        .text_color(cx.theme().success)
-                        .child(format!("+{added}")),
-                )
-                .child(
-                    div()
-                        .text_color(cx.theme().danger)
-                        .child(format!("-{deleted}")),
-                ),
+    let visible = if show_all {
+        changes.len()
+    } else {
+        changes.len().min(3)
+    };
+    let mut body = h_flex().w_full().px_1().gap_1p5().flex_wrap();
+    for (file_index, (change, on_click)) in
+        changes.iter().zip(open_files).take(visible).enumerate()
+    {
+        let display = tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
+        let name = Path::new(&display)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| display.clone());
+        let (added, deleted) = diff_stats(change.diff.as_deref());
+        let chip = h_flex()
+            .h(px(22.))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .rounded(crate::material::radius_chip())
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(crate::material::content_surface(cx))
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_size(px(11.5))
+            .child(name)
+            .child(
+                div()
+                    .text_color(cx.theme().success)
+                    .child(format!("+{added}")),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(format!("-{deleted}")),
             );
-        }
-        if changes.len() > 3 {
-            let hidden = changes.len() - 3;
-            body = body.child(
-                quiet_control(
-                    ("changed-files-more", index),
-                    if show_all {
-                        crate::tr!("chat.show_fewer_files")
-                    } else {
-                        crate::tr!("chat.more_files", count = hidden)
-                    }
-                    .into_owned()
-                    .into(),
-                    toggle_more,
-                    cx,
-                )
-                .font_family(cx.theme().mono_font_family.clone()),
-            );
-        }
-        content = content.child(body);
+        body = body.child(
+            crate::material::accessible_clickable(
+                chip,
+                SharedString::from(format!("changed-file-chip-{index}-{file_index}")),
+                Role::Button,
+                format!("{}: {display}", crate::tr!("chat.view_diff")),
+                cx,
+            )
+            .cursor_pointer()
+            .hover(|chip| chip.bg(cx.theme().accent))
+            .on_click(on_click)
+            .into_any_element(),
+        );
     }
+    if changes.len() > 3 {
+        let hidden = changes.len() - 3;
+        body = body.child(
+            quiet_control(
+                ("changed-files-more", index),
+                if show_all {
+                    crate::tr!("chat.show_fewer_files")
+                } else {
+                    crate::tr!("chat.more_files", count = hidden)
+                }
+                .into_owned()
+                .into(),
+                toggle_more,
+                cx,
+            )
+            .font_family(cx.theme().mono_font_family.clone())
+            .into_any_element(),
+        );
+    }
+    content = content.child(body);
 
     content.into_any_element()
 }

@@ -423,22 +423,15 @@ impl ChatView {
                 column.child(self.compose_proposed_plan_card(index, &item_id, &markdown, cwd, cx));
         }
 
-        // Changed-file evidence lives outside Work Log disclosure, so it stays
-        // visible when an earlier activity segment settles and folds mid-turn.
+        // Changed-file evidence is the turn's settled summary: while the turn
+        // still runs, the live per-file rows inside the work log carry this
+        // information, so the section appears only once the turn finishes.
         let (changes, completeness) = self.workspace_store.read(cx).chat_turn_changes(index);
-        if !changes.is_empty() {
-            let card_key = format!("card-{index}");
+        if !turn.running && !changes.is_empty() {
             let more_key = format!("changed-files-more-{index}");
-            let state = components::changed_files::ChangedFilesState {
-                collapsed: self.expanded.contains(&card_key),
-                show_all: self.expanded.contains(&more_key),
-            };
-            let toggle_card_key = card_key;
+            let show_all = self.expanded.contains(&more_key);
             let toggle_more_key = more_key;
             let handlers = components::changed_files::ChangedFilesHandlers {
-                toggle_collapsed: Box::new(cx.listener(move |this, _, _, cx| {
-                    this.toggle_expanded(index, &toggle_card_key, cx);
-                })),
                 view_diff: Box::new(cx.listener(move |this, _, _, cx| {
                     this.workspace_store
                         .update(cx, |store, cx| store.open_diff_for_turn(index, cx));
@@ -463,7 +456,7 @@ impl ChatView {
                 cwd,
                 &changes,
                 completeness,
-                state,
+                show_all,
                 handlers,
                 cx,
             ));
