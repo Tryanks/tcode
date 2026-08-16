@@ -1451,21 +1451,15 @@ impl DiffPanel {
             FileChangeKind::Modify => None,
         };
         let kind_label = match file.kind {
-            FileChangeKind::Create => Some((
-                crate::tr!("diff.created"),
-                cx.theme().success.opacity(0.12),
-                cx.theme().success_foreground,
-            )),
-            FileChangeKind::Delete => Some((
-                crate::tr!("diff.deleted"),
-                cx.theme().danger.opacity(0.12),
-                cx.theme().danger_foreground,
-            )),
-            FileChangeKind::Rename => Some((
-                crate::tr!("diff.renamed"),
-                cx.theme().info.opacity(0.12),
-                cx.theme().info_foreground,
-            )),
+            FileChangeKind::Create => {
+                Some((crate::tr!("diff.created"), cx.theme().success_foreground))
+            }
+            FileChangeKind::Delete => {
+                Some((crate::tr!("diff.deleted"), cx.theme().danger_foreground))
+            }
+            FileChangeKind::Rename => {
+                Some((crate::tr!("diff.renamed"), cx.theme().info_foreground))
+            }
             FileChangeKind::Modify => None,
         };
         h_flex()
@@ -1494,16 +1488,15 @@ impl DiffPanel {
             .child(
                 div()
                     .text_size(px(13.))
+                    .line_height(px(18.))
                     .font_medium()
                     .child(file.path.clone()),
             )
-            .when_some(kind_label, |this, (label, background, foreground)| {
+            .when_some(kind_label, |this, (label, foreground)| {
                 this.child(
                     div()
-                        .px_1p5()
-                        .rounded_full()
-                        .bg(background)
                         .text_size(px(11.))
+                        .line_height(px(18.))
                         .text_color(foreground)
                         .child(label),
                 )

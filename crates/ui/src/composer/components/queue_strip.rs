@@ -52,24 +52,16 @@ impl Composer {
         }
 
         let muted = cx.theme().muted_foreground;
-        let mut strip = v_flex()
-            .w_full()
-            .gap_1()
-            .p_2()
-            .rounded(crate::material::radius_card())
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary.opacity(0.5))
-            .child(
-                div()
-                    .flex_none()
-                    .px_1()
-                    .text_size(px(11.))
-                    .text_color(muted)
-                    .child(crate::tr!("composer.queued_count", count = queued.len())),
-            );
+        let mut strip = v_flex().w_full().gap_1().child(
+            div()
+                .flex_none()
+                .px_1()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child(crate::tr!("composer.queued_count", count = queued.len())),
+        );
 
-        for message in queued {
+        for (index, message) in queued.into_iter().enumerate() {
             let id = message.id;
             let scheduled = message.fire_at_unix_secs.is_some();
             let steer_tooltip = if scheduled {
@@ -93,6 +85,9 @@ impl Composer {
                     .gap_1()
                     .items_center()
                     .px_1()
+                    .when(index > 0, |row| {
+                        row.pt_1().border_t_1().border_color(cx.theme().border)
+                    })
                     .child(
                         div()
                             .flex_1()

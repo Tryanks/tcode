@@ -117,12 +117,10 @@ impl Composer {
             .border_color(cx.theme().border)
             .child(
                 div()
-                    .px_2()
-                    .py(px(1.))
-                    .rounded(px(4.))
-                    .bg(cx.theme().primary)
-                    .text_color(cx.theme().primary_foreground)
+                    .flex_none()
+                    .text_color(cx.theme().primary)
                     .text_size(px(11.))
+                    .line_height(px(18.))
                     .font_medium()
                     .child(crate::tr!("plan.ready")),
             )
@@ -133,6 +131,7 @@ impl Composer {
                     .overflow_hidden()
                     .text_ellipsis()
                     .text_size(px(13.))
+                    .line_height(px(18.))
                     .text_color(cx.theme().muted_foreground)
                     .child(title),
             )

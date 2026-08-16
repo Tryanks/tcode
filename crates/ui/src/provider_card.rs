@@ -107,6 +107,7 @@ impl ProviderCard {
         let accent = store.provider_profile_accent(&self.profile_id);
 
         let dot_color = match summary.dot {
+            StatusDot::Loading => muted,
             StatusDot::Success => cx.theme().success,
             StatusDot::Warning => cx.theme().warning,
             StatusDot::Error => cx.theme().danger,
@@ -226,6 +227,7 @@ impl ProviderCard {
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let (status_bg, status_fg) = match summary.dot {
+            StatusDot::Loading => (cx.theme().muted.opacity(0.), muted),
             StatusDot::Success => (
                 cx.theme().success.opacity(0.12),
                 cx.theme().success_foreground,

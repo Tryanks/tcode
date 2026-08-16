@@ -474,8 +474,8 @@ impl OrchestrateSettingsPanel {
             .display_name(provider, model, profile_id, cx)
     }
 
-    /// A status message in the shared rail language: a soft neutral fill with a
-    /// floating 2px rail in the semantic color — no colored slab.
+    /// A status message in the shared rail language: inline copy beside a
+    /// semantic 2px rail, with no enclosing surface.
     fn status_note(
         &self,
         accent: gpui::Hsla,
@@ -485,24 +485,20 @@ impl OrchestrateSettingsPanel {
         h_flex()
             .w_full()
             .items_stretch()
-            .rounded(crate::material::radius_card())
-            .overflow_hidden()
-            .bg(cx.theme().muted.opacity(0.6))
+            .gap_2()
             .child(
                 div()
                     .flex_none()
                     .w(px(2.))
-                    .ml(px(8.))
-                    .my(px(8.))
+                    .my_0p5()
                     .rounded_full()
                     .bg(accent),
             )
             .child(
                 div()
                     .flex_1()
-                    .px_3()
-                    .py_2p5()
                     .text_size(px(13.))
+                    .line_height(px(18.))
                     .text_color(cx.theme().foreground)
                     .child(text.into()),
             )

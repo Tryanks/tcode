@@ -78,18 +78,10 @@ fn child_count_badge(
         )))
         .flex_none()
         .min_w(px(18.))
-        .px_1()
-        .py(px(1.))
-        .rounded_full()
-        .bg(cx.theme().muted)
         .text_center()
-        .text_size(px(10.))
-        .font_semibold()
-        .text_color(if active > 0 {
-            cx.theme().success
-        } else {
-            cx.theme().muted_foreground
-        })
+        .text_size(px(11.))
+        .line_height(px(18.))
+        .text_color(cx.theme().muted_foreground)
         .tooltip(move |window, cx| {
             Tooltip::new(crate::tr!("sidebar.child_threads", count = total).into_owned())
                 .build(window, cx)
@@ -1495,6 +1487,7 @@ impl SessionsSidebar {
         } else {
             truncated_sidebar_label()
                 .text_size(px(13.))
+                .line_height(px(18.))
                 .text_color(cx.theme().sidebar_foreground)
                 .when(emphasize_unread && state.show_unread, |title| {
                     title.font_semibold()
@@ -1514,7 +1507,7 @@ impl SessionsSidebar {
         } else if state.waiting_for_input {
             (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
         } else if working {
-            (cx.theme().success, crate::tr!("sidebar.working"))
+            (cx.theme().primary, crate::tr!("sidebar.working"))
         } else {
             return None;
         };
@@ -1528,6 +1521,7 @@ impl SessionsSidebar {
                     div()
                         .whitespace_nowrap()
                         .text_size(px(11.))
+                        .line_height(px(18.))
                         .text_color(color)
                         .child(label),
                 )
@@ -1861,7 +1855,7 @@ impl SessionsSidebar {
                             .flex_none()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(cx.theme().success),
+                            .bg(cx.theme().primary),
                     )
                 })
                 .child(title_or_input)
@@ -1895,7 +1889,7 @@ impl SessionsSidebar {
                     line.child(
                         div()
                             .flex_none()
-                            .text_color(cx.theme().success)
+                            .text_color(cx.theme().primary)
                             .child(crate::tr!("sidebar.working")),
                     )
                 })
