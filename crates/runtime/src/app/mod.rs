@@ -337,12 +337,13 @@ fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
 
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
-        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default())
+        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default(), false)
     }
 
     pub(crate) fn new_with_terminal_registry(
         store: SessionStore,
         terminal_registry: LocalTerminalRegistry,
+        ai_title_generation_enabled: bool,
     ) -> Self {
         // Load + migrate once and persist so derived project ids stay stable.
         let file = store.read_file();
@@ -408,7 +409,7 @@ impl AppState {
             next_start_generation: 0,
             scheduler_generation: 0,
             resident_idle_grace: RESIDENT_IDLE_GRACE,
-            ai_title_generation_enabled: !cfg!(any(test, feature = "test-support")),
+            ai_title_generation_enabled,
             acp_registry: None,
             acp_registry_loading: false,
             acp_registry_error: None,
