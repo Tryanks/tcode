@@ -35,6 +35,10 @@ pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::proc
     smol::process::Command::from(command(program))
 }
 
+pub(crate) async fn unblock<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    smol::unblock(f).await
+}
+
 pub(crate) async fn probe_version(
     binary: &std::path::Path,
     launch_env: &crate::LaunchEnv,

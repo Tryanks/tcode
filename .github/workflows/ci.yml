@@ -40,12 +40,35 @@ jobs:
       - name: Enforce process helper boundaries
         if: runner.os == 'Linux'
         run: |
-          ! grep -rn "smol::unblock" crates --include="*.rs" \
-            | grep -v "runtime/src/blocking.rs" \
-            | grep -v '^[^:]*:[0-9]*:[[:space:]]*//'
-          ! grep -rn "Command::new(" crates --include="*.rs" \
-            | grep -v -e "crates/services/src/process.rs:" -e "crates/agent/src/process.rs:" \
-            | grep -v '^[^:]*:[0-9]*:[[:space:]]*//'
+          violations=0
+
+          smol_unblock_violations="$(
+            grep -rn "smol::unblock" crates --include="*.rs" \
+              | grep -v -e "crates/runtime/src/host.rs:" -e "crates/agent/src/process.rs:" \
+              | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' \
+              || true
+          )"
+          if [[ -n "$smol_unblock_violations" ]]; then
+            echo "Direct smol::unblock calls found outside approved helpers:"
+            echo "$smol_unblock_violations"
+            violations=1
+          fi
+
+          command_new_violations="$(
+            grep -rn "Command::new(" crates --include="*.rs" \
+              | grep -v -e "crates/services/src/process.rs:" -e "crates/agent/src/process.rs:" \
+              | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' \
+              || true
+          )"
+          if [[ -n "$command_new_violations" ]]; then
+            echo "Direct Command::new calls found outside approved helpers:"
+            echo "$command_new_violations"
+            violations=1
+          fi
+
+          if (( violations != 0 )); then
+            exit 1
+          fi
 
       - name: Disable Windows Defender real-time scanning
         if: runner.os == 'Windows'
