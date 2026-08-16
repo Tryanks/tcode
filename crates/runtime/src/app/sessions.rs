@@ -51,7 +51,6 @@ impl AppState {
         let id = project.id.clone();
         self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
         self.projects.push(project);
-        cx.notify();
         Some(id)
     }
 
@@ -140,8 +139,6 @@ impl AppState {
             let mut settings = self.settings.clone();
             settings.collapsed_projects.retain(|id| id != project_id);
             self.update_settings(settings, cx);
-        } else {
-            cx.notify();
         }
     }
 
@@ -216,8 +213,6 @@ impl AppState {
             cx,
             RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { language }),
         );
-        self.emit_providers_status(cx);
-        cx.notify();
     }
 
     /// Persist a restart-continuity marker naming the Settings page to reopen and
@@ -244,7 +239,6 @@ impl AppState {
         {
             self.select_session(id, cx);
         }
-        cx.notify();
         Some(marker.reopen_settings)
     }
 
@@ -536,7 +530,6 @@ impl AppState {
                 });
             });
         }
-        cx.notify();
     }
 
     /// Permanently remove a project and all of its threads from tcode. Project
@@ -573,7 +566,6 @@ impl AppState {
             .retain(|id| id != project_id);
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
-        cx.notify();
     }
 
     /// Whether `session_id` owns live or queued work.
@@ -617,7 +609,6 @@ impl AppState {
             .last_visited
             .insert(session_id.to_string(), updated.saturating_sub(1));
         self.persist_settings(cx);
-        cx.notify();
     }
 
     /// Whether a thread shows an unread dot: it has been visited before, its
@@ -639,11 +630,9 @@ impl AppState {
 
     /// Choose the draft's workspace mode (checkout-row picker). No-op unless the
     /// active thread is an unstarted draft.
-    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, cx: &mut HostCx) {
+    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, _cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut().filter(|a| a.draft) {
             active.draft_workspace = mode;
-            self.emit_active_session_status(cx);
-            cx.notify();
         }
     }
 
@@ -662,8 +651,6 @@ impl AppState {
         active.preparing_worktree = true;
         let session_id = active.meta.id.clone();
         let root = active.meta.cwd.clone();
-        self.emit_session_status(&session_id, cx);
-        cx.notify();
 
         let path = worktree_path_for(&session_id);
         let branch = format!("tcode/{session_id}");
@@ -719,7 +706,6 @@ impl AppState {
                         );
                     }
                 }
-                state.emit_session_status(&session_id, cx);
             });
         });
     }
@@ -821,7 +807,6 @@ impl AppState {
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_terminal = self.restore_terminal_workspace(&mut draft);
         self.active = Some(draft);
-        self.emit_active_session_status(cx);
         if let Some(active) = self.active.as_ref() {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
@@ -829,7 +814,6 @@ impl AppState {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
-        cx.notify();
     }
 
     /// Whether the active thread is an unsent draft.
@@ -868,7 +852,6 @@ impl AppState {
                 cx,
             );
             self.upsert_session_in_memory(meta);
-            self.emit_active_session_status(cx);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
@@ -997,7 +980,6 @@ impl AppState {
                             ServerEvent::SessionSnapshot(records),
                             cx,
                         );
-                        state.emit_session_status(&session_id, cx);
                     }
                     TimelineLoadTarget::Background { .. } => {
                         if let Some(background) = state.background.get_mut(&session_id) {
@@ -1005,7 +987,6 @@ impl AppState {
                         }
                     }
                 }
-                cx.notify();
             });
         });
     }
@@ -1088,8 +1069,6 @@ impl AppState {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     /// Open the most recently updated stored session (replay only). Used by the

@@ -52,8 +52,6 @@ impl AppState {
             self.ensure_started(cx);
         }
         self.clear_consumed_draft_context(cx);
-        self.emit_active_session_status(cx);
-        cx.notify();
         self.reschedule_scheduled_wake(cx);
     }
 
@@ -173,9 +171,7 @@ impl AppState {
             } else if has_queue {
                 self.ensure_session_started(&session_id, cx);
             }
-            self.emit_session_status(&session_id, cx);
         }
-        cx.notify();
         self.reschedule_scheduled_wake(cx);
     }
 
@@ -184,13 +180,11 @@ impl AppState {
     /// observes a real adapter thread.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
-    pub fn queue_message_for_replica_test(&mut self, text: String, cx: &mut HostCx) {
+    pub fn queue_message_for_replica_test(&mut self, text: String, _cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
         active.push_queued(text, Vec::new());
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     pub(super) fn send_turn_assembled(
@@ -283,8 +277,6 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     /// Display labels (from, to) for the confirmation dialog, when the current
@@ -373,8 +365,6 @@ impl AppState {
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     /// Submit the first eligible queue entry when the live provider can accept
@@ -419,8 +409,6 @@ impl AppState {
         if is_active {
             self.maybe_generate_title(&message.text, &message.attachments, cx);
         }
-        self.emit_session_status(session_id, cx);
-        cx.notify();
     }
 
     /// A parked session finished a turn: keep working through its queue, then
@@ -436,14 +424,10 @@ impl AppState {
                     "parked session {session_id}: deferring settings restart for {} background task(s)",
                     parked.background_task_count
                 );
-                self.emit_session_status(session_id, cx);
-                cx.notify();
                 return;
             }
             parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
-            self.emit_session_status(session_id, cx);
-            cx.notify();
             return;
         }
         if parked.queue.is_empty() {
@@ -452,13 +436,9 @@ impl AppState {
                     "retaining parked session {session_id} for {} background task(s)",
                     parked.background_task_count
                 );
-                self.emit_session_status(session_id, cx);
-                cx.notify();
                 return;
             }
             self.mark_resident_idle(session_id, cx);
-            self.emit_session_status(session_id, cx);
-            cx.notify();
             return;
         }
         match self
@@ -475,8 +455,6 @@ impl AppState {
                 log::warn!("parked session {session_id}: dispatch failed (process gone)");
             }
         }
-        self.emit_session_status(session_id, cx);
-        cx.notify();
     }
 
     /// Append a user message to the session transcript. Providers don't echo
@@ -592,8 +570,6 @@ impl AppState {
                 {
                     self.report_error(RuntimeError::ProcessGone, cx);
                 }
-                self.emit_session_status(&session_id, cx);
-                cx.notify();
             }
         }
     }
@@ -621,12 +597,10 @@ impl AppState {
         if let Some(active) = self.active.as_mut() {
             let _ = active.take_queued(id);
         }
-        self.emit_active_session_status(cx);
-        cx.notify();
         self.reschedule_scheduled_wake(cx);
     }
 
-    pub fn interrupt(&mut self, cx: &mut HostCx) {
+    pub fn interrupt(&mut self, _cx: &mut HostCx) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
@@ -634,19 +608,17 @@ impl AppState {
         {
             let _ = commands.try_send(SessionCommand::Interrupt);
         }
-        cx.notify();
     }
 
     pub fn respond_approval(
         &mut self,
         request_id: String,
         decision: ApprovalDecision,
-        cx: &mut HostCx,
+        _cx: &mut HostCx,
     ) {
         if let Some(session_id) = self.active_session_id().map(str::to_string) {
             let _ = self.respond_session_approval(&session_id, request_id, decision);
         }
-        cx.notify();
     }
 
     /// Answer a pending user-input request (Claude `AskUserQuestion` / Codex
@@ -656,7 +628,7 @@ impl AppState {
         &mut self,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
-        cx: &mut HostCx,
+        _cx: &mut HostCx,
     ) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
@@ -668,6 +640,5 @@ impl AppState {
                 answers,
             });
         }
-        cx.notify();
     }
 }

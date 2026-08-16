@@ -220,8 +220,6 @@ impl AppState {
         child.push_queued(brief, Vec::new());
         self.background.insert(id.clone(), child);
         self.ensure_session_started(&id, cx);
-        self.emit_session_status(&id, cx);
-        cx.notify();
         Ok(id)
     }
 
@@ -380,7 +378,6 @@ impl AppState {
                                 .is_ok()
                         });
                         if sent {
-                            cx.notify();
                             return Ok(serde_json::json!({ "ok": true, "delivery": "steered" }));
                         }
                         // Provider channel gone: fall through so the text survives
@@ -396,7 +393,6 @@ impl AppState {
                         if idle {
                             self.ensure_started(cx);
                         }
-                        self.emit_session_status(&thread_id, cx);
                         return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                     }
                     self.ensure_child_loaded(&thread_id, cx)?;
@@ -409,7 +405,6 @@ impl AppState {
                     if idle {
                         self.ensure_session_started(&thread_id, cx);
                     }
-                    self.emit_session_status(&thread_id, cx);
                     Ok(serde_json::json!({ "ok": true, "delivery": "queued" }))
                 })();
                 let _ = reply.try_send(result);
@@ -454,7 +449,6 @@ impl AppState {
                         ));
                     }
                     self.archive_session_ids(&thread_ids, now_secs(), cx);
-                    cx.notify();
                     Ok(serde_json::json!({
                         "ok": true,
                         "archived": thread_ids.len(),
@@ -493,7 +487,6 @@ impl AppState {
                     let decision = resolve_approval_decision(&decision)?;
                     let request_id = request.id;
                     self.respond_session_approval(&thread_id, request_id.clone(), decision)?;
-                    cx.notify();
                     Ok(serde_json::json!({ "ok": true, "request_id": request_id }))
                 })();
                 let _ = reply.try_send(result);
@@ -549,7 +542,6 @@ impl AppState {
         child.meta = meta;
         child.draft = false;
         self.background.insert(thread_id.clone(), child);
-        self.emit_session_status(&thread_id, cx);
         self.schedule_timeline_load(
             thread_id,
             TimelineLoadTarget::Background { mark_idle: true },
@@ -832,7 +824,6 @@ impl AppState {
             ) {
                 log::warn!("failed to auto-approve child {child_id}: {err}");
             }
-            cx.notify();
             return;
         }
         if !self
@@ -885,7 +876,6 @@ impl AppState {
             if !sent {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
-            cx.notify();
             return;
         }
 
@@ -908,8 +898,6 @@ impl AppState {
             if should_start {
                 self.ensure_started(cx);
             }
-            self.emit_session_status(parent_id, cx);
-            cx.notify();
             return;
         }
 
@@ -932,8 +920,6 @@ impl AppState {
             if idle_runtime {
                 self.ensure_session_started(parent_id, cx);
             }
-            self.emit_session_status(parent_id, cx);
-            cx.notify();
         }
     }
 }

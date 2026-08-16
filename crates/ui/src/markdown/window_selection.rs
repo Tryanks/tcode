@@ -335,7 +335,7 @@ fn endpoint_for_position(
     }
 }
 
-fn notify_views(state: &mut WindowSelectionState, cx: &mut App) {
+fn refresh_views(state: &mut WindowSelectionState, cx: &mut App) {
     state.views.retain(|_, (view, _)| {
         let Some(view) = view.upgrade() else {
             return false;
@@ -488,7 +488,7 @@ fn update_selection(position: Point<Pixels>, window: &mut Window, cx: &mut App) 
         let (delta, dispatch_position) = compute_auto_scroll(state, position);
         state.auto_scroll_delta = delta;
         state.auto_scroll_position = dispatch_position;
-        notify_views(state, cx);
+        refresh_views(state, cx);
         true
     });
     if active {
@@ -521,7 +521,7 @@ fn end_selection(_window: &Window, cx: &mut App) {
                 cx.notify();
             });
         }
-        notify_views(state, cx);
+        refresh_views(state, cx);
     });
 }
 

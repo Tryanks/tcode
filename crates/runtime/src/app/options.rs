@@ -41,8 +41,6 @@ impl AppState {
             active.meta.option_selections.clear();
             active.provider_commands = store.load_commands(active.meta.provider, None);
             active.pending_ultrathink = false;
-            self.emit_active_session_status(cx);
-            cx.notify();
             return;
         }
         // Established sessions can preview a different provider — or a
@@ -74,8 +72,6 @@ impl AppState {
             active.provider_options.clear();
             active.pending_ultrathink = false;
             if active.pending_relay.is_some() {
-                self.emit_active_session_status(cx);
-                cx.notify();
                 return;
             }
             self.preview_draft_or_persist_active(cx);
@@ -88,8 +84,6 @@ impl AppState {
         active.meta.option_selections.clear();
         active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
-            self.emit_active_session_status(cx);
-            cx.notify();
             return;
         }
         self.preview_draft_or_persist_active(cx);
@@ -140,11 +134,9 @@ impl AppState {
     /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
     /// T3 does not persist this as an option (it resolves back to the default),
     /// so it lives as a transient per-send flag.
-    pub fn select_ultrathink(&mut self, cx: &mut HostCx) {
+    pub fn select_ultrathink(&mut self, _cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut() {
             active.pending_ultrathink = true;
-            self.emit_active_session_status(cx);
-            cx.notify();
         }
     }
 
@@ -237,7 +229,6 @@ impl AppState {
             },
             cx,
         );
-        cx.notify();
     }
 
     /// Accept the proposed plan in a fresh thread in the same project (same
@@ -303,7 +294,6 @@ impl AppState {
         );
         self.refresh_session_git_branch(session_id, cwd, cx);
         self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
-        cx.notify();
     }
 
     /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
@@ -325,7 +315,7 @@ impl AppState {
             let result = host_cx
                 .unblock(move || user_files::save_plan_to_workspace(&cwd, &markdown))
                 .await;
-            host_cx.enqueue(move |state, cx| state.notify_plan_saved(result, cx));
+            host_cx.enqueue(move |state, cx| state.finish_plan_save(result, cx));
         });
     }
 
@@ -342,11 +332,11 @@ impl AppState {
                     user_files::save_plan_download(&filename, &markdown, fallback_cwd.as_deref())
                 })
                 .await;
-            host_cx.enqueue(move |state, cx| state.notify_plan_saved(result, cx));
+            host_cx.enqueue(move |state, cx| state.finish_plan_save(result, cx));
         });
     }
 
-    pub(super) fn notify_plan_saved(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
+    pub(super) fn finish_plan_save(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
         match result {
             Ok(path) => {
                 let name = path
@@ -365,7 +355,6 @@ impl AppState {
                 cx,
             ),
         }
-        cx.notify();
     }
 
     // -- git branch picker (checkout row) -----------------------------------
@@ -381,13 +370,11 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let branches = host_cx.unblock(move || list_git_branches(&cwd)).await;
-            host_cx.enqueue(move |state, cx| {
+            host_cx.enqueue(move |state, _cx| {
                 if let Some(active) = state.active.as_mut()
                     && active.meta.id == session_id
                 {
                     active.branches = branches;
-                    state.emit_session_status(&session_id, cx);
-                    cx.notify();
                 }
             });
         });
@@ -411,30 +398,27 @@ impl AppState {
             let result = host_cx
                 .unblock(move || checkout_if_clean(&cwd, &branch_for_task))
                 .await;
-            host_cx.enqueue(move |state, cx| {
-                match result {
-                    Ok(()) => {
-                        if let Some(cwd) = state
-                            .active
-                            .as_ref()
-                            .filter(|active| active.meta.id == session_id)
-                            .map(|active| active.meta.cwd.clone())
-                        {
-                            state.refresh_session_git_branch(session_id.clone(), cwd, cx);
-                        }
-                        emit_runtime(
-                            cx,
-                            RuntimeEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
-                        );
+            host_cx.enqueue(move |state, cx| match result {
+                Ok(()) => {
+                    if let Some(cwd) = state
+                        .active
+                        .as_ref()
+                        .filter(|active| active.meta.id == session_id)
+                        .map(|active| active.meta.cwd.clone())
+                    {
+                        state.refresh_session_git_branch(session_id.clone(), cwd, cx);
                     }
-                    Err(CheckoutError::Dirty) => {
-                        emit_runtime(cx, RuntimeEvent::Error(RuntimeError::DirtyTree));
-                    }
-                    Err(CheckoutError::Git(message)) => {
-                        emit_runtime(cx, RuntimeEvent::Error(RuntimeError::External(message)))
-                    }
+                    emit_runtime(
+                        cx,
+                        RuntimeEvent::Notice(RuntimeNotice::SwitchedBranch { branch }),
+                    );
                 }
-                cx.notify();
+                Err(CheckoutError::Dirty) => {
+                    emit_runtime(cx, RuntimeEvent::Error(RuntimeError::DirtyTree));
+                }
+                Err(CheckoutError::Git(message)) => {
+                    emit_runtime(cx, RuntimeEvent::Error(RuntimeError::External(message)))
+                }
             });
         });
     }

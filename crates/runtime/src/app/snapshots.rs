@@ -1,6 +1,111 @@
 use super::*;
 
+/// Last emitted values for every replace-style replica domain.
+///
+/// The host turn is the single seam that reconciles these projections. Timeline
+/// appends and one-shot events deliberately remain on their existing paths.
+pub(crate) struct DomainDiff {
+    index: IndexSnapshot,
+    settings: Settings,
+    providers: ProvidersStatus,
+    git_status: GitStatusStatus,
+    active_session: Option<SessionStatus>,
+    session_statuses: HashMap<String, SessionStatus>,
+}
+
+impl DomainDiff {
+    pub(crate) fn new(state: &AppState) -> Self {
+        Self {
+            index: state.index_snapshot(),
+            settings: state.settings_snapshot(),
+            providers: state.providers_status_snapshot(),
+            git_status: state.git_status_snapshot(),
+            active_session: state.active_session_status_snapshot(),
+            session_statuses: state.resident_session_status_snapshots(),
+        }
+    }
+
+    pub(crate) fn emit_changes(&mut self, state: &AppState, cx: &mut HostCx) {
+        if self.index.sessions != state.sessions || self.index.projects != state.projects {
+            let index = state.index_snapshot();
+            self.index = index.clone();
+            emit_replacement(Topic::Index, ServerEvent::IndexSnapshot(index), cx);
+        }
+
+        if self.settings != state.settings {
+            let settings = state.settings_snapshot();
+            self.settings = settings.clone();
+            emit_replacement(Topic::Settings, ServerEvent::SettingsReplaced(settings), cx);
+        }
+
+        let providers = state.providers_status_snapshot();
+        if self.providers != providers {
+            self.providers = providers.clone();
+            emit_replacement(
+                Topic::Providers,
+                ServerEvent::ProvidersReplaced(providers),
+                cx,
+            );
+        }
+
+        let git_status = state.git_status_snapshot();
+        if self.git_status != git_status {
+            self.git_status = git_status.clone();
+            emit_replacement(
+                Topic::GitStatus,
+                ServerEvent::GitStatusReplaced(git_status),
+                cx,
+            );
+        }
+
+        let active_session = state.active_session_status_snapshot();
+        if self.active_session != active_session {
+            self.active_session = active_session.clone();
+            emit_replacement(
+                Topic::ActiveSession,
+                ServerEvent::ActiveSessionReplaced(active_session),
+                cx,
+            );
+        }
+
+        let session_statuses = state.resident_session_status_snapshots();
+        let mut changed_ids: Vec<_> = session_statuses
+            .iter()
+            .filter_map(|(id, status)| {
+                (self.session_statuses.get(id) != Some(status)).then_some(id.as_str())
+            })
+            .collect();
+        changed_ids.sort_unstable();
+        for id in changed_ids {
+            let status = session_statuses[id].clone();
+            emit_replacement(
+                Topic::SessionStatus {
+                    session_id: id.to_string(),
+                },
+                ServerEvent::SessionStatusReplaced(status),
+                cx,
+            );
+        }
+        self.session_statuses = session_statuses;
+    }
+}
+
+fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
+    cx.emit(HostEvent::Domain(EventEnvelope { topic, event }));
+}
+
 impl AppState {
+    pub fn index_snapshot(&self) -> IndexSnapshot {
+        IndexSnapshot {
+            sessions: self.sessions.clone(),
+            projects: self.projects.clone(),
+        }
+    }
+
+    pub fn settings_snapshot(&self) -> Settings {
+        self.settings.clone()
+    }
+
     /// Build the complete provider read projection. This is the sole
     /// constructor for the replicated providers domain.
     pub fn providers_status_snapshot(&self) -> ProvidersStatus {
@@ -35,20 +140,11 @@ impl AppState {
         }
     }
 
-    pub(super) fn emit_providers_status(&mut self, cx: &mut HostCx) {
-        self.emit_domain(
-            Topic::Providers,
-            ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
-            cx,
-        );
-    }
-
     /// Build the complete active-workspace Git projection.
     pub fn git_status_snapshot(&self) -> GitStatusStatus {
         GitStatusStatus {
             status: self.git_status.clone(),
             busy: self.git_busy,
-            generation: self.git_status_generation,
         }
     }
 
@@ -71,60 +167,28 @@ impl AppState {
 
     /// Build the serialized snapshot associated with one subscription.
     pub(crate) fn subscription_snapshot(&self, topic: &Topic) -> Option<EventEnvelope> {
-        let (seq, event) = match topic {
-            Topic::Index => (
-                self.index_event_seq,
-                ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
-                    sessions: self.sessions.clone(),
-                    projects: self.projects.clone(),
-                }),
+        let event = match topic {
+            Topic::Index => ServerEvent::IndexSnapshot(self.index_snapshot()),
+            Topic::Settings => ServerEvent::SettingsSnapshot(self.settings_snapshot()),
+            Topic::Providers => ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
+            Topic::GitStatus => ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
+            Topic::ActiveSession => {
+                ServerEvent::ActiveSessionReplaced(self.active_session_status_snapshot())
+            }
+            Topic::SessionStatus { session_id } => {
+                ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?)
+            }
+            Topic::SessionEvents { session_id } => ServerEvent::SessionSnapshot(
+                self.store
+                    .read_events(session_id)
+                    .into_iter()
+                    .map(|stored| SessionEventRecord {
+                        ts: stored.ts,
+                        event: stored.event,
+                    })
+                    .collect(),
             ),
-            Topic::Settings => (
-                self.settings_event_seq,
-                ServerEvent::SettingsSnapshot(self.settings.clone()),
-            ),
-            Topic::Providers => (
-                self.providers_event_seq,
-                ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
-            ),
-            Topic::GitStatus => (
-                self.git_status_event_seq,
-                ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
-            ),
-            Topic::ActiveSession => (
-                0,
-                ServerEvent::ActiveSessionReplaced(
-                    self.active_session_id()
-                        .and_then(|id| self.session_status_snapshot(id)),
-                ),
-            ),
-            Topic::SessionStatus { session_id } => (
-                self.session_status_event_seqs
-                    .get(session_id)
-                    .copied()
-                    .unwrap_or_default(),
-                ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?),
-            ),
-            Topic::SessionEvents { session_id } => (
-                self.session_event_seqs
-                    .get(session_id)
-                    .copied()
-                    .unwrap_or_default(),
-                ServerEvent::SessionSnapshot(
-                    self.store
-                        .read_events(session_id)
-                        .into_iter()
-                        .map(|stored| SessionEventRecord {
-                            ts: stored.ts,
-                            event: stored.event,
-                        })
-                        .collect(),
-                ),
-            ),
-            Topic::RuntimeEvents => (
-                0,
-                ServerEvent::RuntimeSnapshot(tcode_protocol::RuntimeSnapshot),
-            ),
+            Topic::RuntimeEvents => return None,
             // Raw terminal bytes never travel through JSON in the local
             // transport. The construction-time handle registry carries the
             // split term channels instead.
@@ -132,23 +196,8 @@ impl AppState {
         };
         Some(EventEnvelope {
             topic: topic.clone(),
-            seq,
             event,
         })
-    }
-
-    pub(super) fn emit_git_status(&mut self, cx: &mut HostCx) {
-        self.emit_domain(
-            Topic::GitStatus,
-            ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
-            cx,
-        );
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn emit_provider_and_git_replicas_for_test(&mut self, cx: &mut HostCx) {
-        self.emit_providers_status(cx);
-        self.emit_git_status(cx);
     }
 
     /// Build the complete non-event-stream status projection for one resident
@@ -270,22 +319,25 @@ impl AppState {
         })
     }
 
-    pub(super) fn emit_session_status(&mut self, session_id: &str, cx: &mut HostCx) {
-        if let Some(status) = self.session_status_snapshot(session_id) {
-            self.emit_domain(
-                Topic::SessionStatus {
-                    session_id: session_id.to_string(),
-                },
-                ServerEvent::SessionStatusReplaced(status),
-                cx,
-            );
-        }
+    fn active_session_status_snapshot(&self) -> Option<SessionStatus> {
+        self.active_session_id()
+            .and_then(|id| self.session_status_snapshot(id))
     }
 
-    pub(super) fn emit_active_session_status(&mut self, cx: &mut HostCx) {
-        if let Some(session_id) = self.active_session_id().map(str::to_owned) {
-            self.emit_session_status(&session_id, cx);
+    fn resident_session_status_snapshots(&self) -> HashMap<String, SessionStatus> {
+        let mut statuses =
+            HashMap::with_capacity(self.background.len() + usize::from(self.active.is_some()));
+        if let Some(active) = &self.active
+            && let Some(status) = self.session_status_snapshot(&active.meta.id)
+        {
+            statuses.insert(active.meta.id.clone(), status);
         }
+        for id in self.background.keys() {
+            if let Some(status) = self.session_status_snapshot(id) {
+                statuses.insert(id.clone(), status);
+            }
+        }
+        statuses
     }
 
     pub(super) fn upsert_session_in_memory(&mut self, meta: SessionMeta) {

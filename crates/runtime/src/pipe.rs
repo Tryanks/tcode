@@ -5,14 +5,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tcode_protocol::{
-    ClientMessage, ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage,
-    ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic, decode_client_line,
-    decode_host_line, encode_line,
+    ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, ProtocolError, Query,
+    QueryResponse, Subscription, decode_client_line, decode_host_line, encode_line,
 };
+#[cfg(test)]
+use tcode_protocol::{EventEnvelope, ServerEvent, Topic};
 use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
-use crate::app::AppState;
+use crate::app::{AppState, DomainDiff};
 use crate::event::HostEvent;
 use crate::host::{HostCx, HostMsg};
 use crate::terminal::LocalTerminalRegistry;
@@ -41,7 +42,6 @@ pub struct HostServices {
 struct HostHandleInner {
     client_tx: smol::channel::Sender<String>,
     event_rx: smol::channel::Receiver<String>,
-    changed_rx: smol::channel::Receiver<()>,
     stopped_rx: smol::channel::Receiver<()>,
     #[cfg(feature = "test-support")]
     test_mailbox: smol::channel::Sender<HostMsg>,
@@ -186,11 +186,6 @@ impl HostHandle {
         HostEventReceiver {
             wire: self.inner.event_rx.clone(),
         }
-    }
-
-    /// Coalesced notification-only changes consumed by the client-side pump.
-    pub fn changed_receiver(&self) -> smol::channel::Receiver<()> {
-        self.inner.changed_rx.clone()
     }
 
     /// Take the preview MCP request receiver once.
@@ -341,7 +336,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
 
     let (client_tx, client_rx) = smol::channel::unbounded::<String>();
     let (event_tx, event_rx) = smol::channel::unbounded::<String>();
-    let (changed_tx, changed_rx) = smol::channel::bounded(1);
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
     let terminals = LocalTerminalRegistry::default();
@@ -363,7 +357,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     let inner = Arc::new(HostHandleInner {
         client_tx,
         event_rx,
-        changed_rx,
         stopped_rx,
         #[cfg(feature = "test-support")]
         test_mailbox: mailbox_tx.clone(),
@@ -392,7 +385,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.token);
             }
-            let mut cx = HostCx::new(mailbox_tx, event_tx, pending, changed_tx);
+            let mut cx = HostCx::new(mailbox_tx, event_tx, pending);
             state.pump_orchestrate_requests(&mut cx);
             if services.background_startup_probes {
                 state.refresh_model_catalogs(&mut cx);
@@ -423,8 +416,7 @@ async fn host_loop(
     mailbox: smol::channel::Receiver<HostMsg>,
     import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
 ) {
-    let mut active_seq = 0_u64;
-    let mut last_active: Option<Option<tcode_protocol::SessionStatus>> = None;
+    let mut domain_diff = DomainDiff::new(&state);
     loop {
         enum Input {
             Client(Result<String, smol::channel::RecvError>),
@@ -453,18 +445,7 @@ async fn host_loop(
             },
         }
         state.sync_terminal_handles();
-        let active = state
-            .active_session_id()
-            .and_then(|id| state.session_status_snapshot(id));
-        if last_active.as_ref() != Some(&active) {
-            active_seq = active_seq.wrapping_add(1);
-            last_active = Some(active.clone());
-            cx.emit(HostEvent::Domain(EventEnvelope {
-                topic: Topic::ActiveSession,
-                seq: active_seq,
-                event: ServerEvent::ActiveSessionReplaced(active),
-            }));
-        }
+        domain_diff.emit_changes(&state, &mut cx);
     }
 }
 
@@ -892,17 +873,23 @@ mod tests {
             CommandResponse::ProjectId(Some(project_id)) => project_id,
             other => panic!("unexpected create-project response: {other:?}"),
         };
-        let upsert = next_event(&events, |event| {
+        let replacement = next_event(&events, |event| {
             event.topic == Topic::Index
                 && matches!(
                     &event.event,
-                    ServerEvent::IndexUpsertProject(project) if project.id == project_id
+                    ServerEvent::IndexSnapshot(snapshot)
+                        if snapshot.projects.iter().any(|project| project.id == project_id)
                 )
         });
-        assert!(matches!(
-            upsert.event,
-            ServerEvent::IndexUpsertProject(project) if project.root == project_root
-        ));
+        let ServerEvent::IndexSnapshot(snapshot) = replacement.event else {
+            unreachable!("filtered to index snapshots")
+        };
+        assert!(
+            snapshot
+                .projects
+                .iter()
+                .any(|project| project.id == project_id && project.root == project_root)
+        );
 
         let import_progress =
             smol::block_on(host.start_external_import(project_id.clone(), Vec::new()))

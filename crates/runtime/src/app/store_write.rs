@@ -34,17 +34,6 @@ pub(super) enum StoreWrite {
     Flush(smol::channel::Sender<()>),
 }
 
-pub(super) enum StoreWriteFailure {
-    PersistEvent(String),
-    PersistSession(String),
-    PersistSessionIndex(String),
-    PersistProject(String),
-    DeleteSession(String),
-    DeleteProject(String),
-    PersistSettings(String),
-    Log(String),
-}
-
 pub(super) fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, bytes)?;
@@ -56,31 +45,41 @@ pub(super) fn run_store_write(
     settings_store: &SettingsStore,
     terminal_preferences_path: &Path,
     write: StoreWrite,
-) -> Option<StoreWriteFailure> {
+) -> Option<Result<RuntimeError, String>> {
     match write {
-        StoreWrite::AppendEvent { id, ts, event } => store
-            .append_event(&id, ts, &event)
-            .err()
-            .map(|err| StoreWriteFailure::PersistEvent(err.to_string())),
+        StoreWrite::AppendEvent { id, ts, event } => {
+            store.append_event(&id, ts, &event).err().map(|err| {
+                Ok(RuntimeError::PersistEvent {
+                    error: err.to_string(),
+                })
+            })
+        }
         StoreWrite::UpsertMeta { meta, initial } => store.upsert_meta(&meta).err().map(|err| {
             if initial {
-                StoreWriteFailure::PersistSession(err.to_string())
+                Ok(RuntimeError::PersistSession {
+                    error: err.to_string(),
+                })
             } else {
-                StoreWriteFailure::PersistSessionIndex(err.to_string())
+                Ok(RuntimeError::PersistSessionIndex {
+                    error: err.to_string(),
+                })
             }
         }),
-        StoreWrite::UpsertProject(project) => store
-            .upsert_project(&project)
-            .err()
-            .map(|err| StoreWriteFailure::PersistProject(err.to_string())),
-        StoreWrite::RemoveSession(id) => store
-            .remove_session(&id)
-            .err()
-            .map(|err| StoreWriteFailure::DeleteSession(err.to_string())),
-        StoreWrite::RemoveProject(id) => store
-            .remove_project(&id)
-            .err()
-            .map(|err| StoreWriteFailure::DeleteProject(err.to_string())),
+        StoreWrite::UpsertProject(project) => store.upsert_project(&project).err().map(|err| {
+            Ok(RuntimeError::PersistProject {
+                error: err.to_string(),
+            })
+        }),
+        StoreWrite::RemoveSession(id) => store.remove_session(&id).err().map(|err| {
+            Ok(RuntimeError::DeleteSession {
+                error: err.to_string(),
+            })
+        }),
+        StoreWrite::RemoveProject(id) => store.remove_project(&id).err().map(|err| {
+            Ok(RuntimeError::DeleteProject {
+                error: err.to_string(),
+            })
+        }),
         StoreWrite::CloneEvents {
             src,
             dst,
@@ -100,20 +99,22 @@ pub(super) fn run_store_write(
             .save_commands(provider, acp_agent_id.as_deref(), &commands)
             .err()
             .map(|err| {
-                StoreWriteFailure::Log(format!(
+                Err(format!(
                     "failed to persist {provider:?} command cache: {err}"
                 ))
             }),
         StoreWrite::WriteTerminalUi(bytes) => {
             atomic_write(terminal_preferences_path.to_path_buf(), bytes)
                 .err()
-                .map(|err| {
-                    StoreWriteFailure::Log(format!("failed to persist terminal UI state: {err}"))
-                })
+                .map(|err| Err(format!("failed to persist terminal UI state: {err}")))
         }
         StoreWrite::WriteSettings(bytes) => atomic_write(store.root().join("settings.json"), bytes)
             .err()
-            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+            .map(|err| {
+                Ok(RuntimeError::PersistSettings {
+                    error: err.to_string(),
+                })
+            }),
         StoreWrite::SetProfileSecret {
             profile_id,
             key,
@@ -121,11 +122,19 @@ pub(super) fn run_store_write(
         } => settings_store
             .set_profile_secret(&profile_id, &key, value.as_deref())
             .err()
-            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+            .map(|err| {
+                Ok(RuntimeError::PersistSettings {
+                    error: err.to_string(),
+                })
+            }),
         StoreWrite::ClearProfileSecrets(profile_id) => settings_store
             .clear_profile_secrets(&profile_id)
             .err()
-            .map(|err| StoreWriteFailure::PersistSettings(err.to_string())),
+            .map(|err| {
+                Ok(RuntimeError::PersistSettings {
+                    error: err.to_string(),
+                })
+            }),
         StoreWrite::Flush(completion) => {
             let _ = completion.try_send(());
             None
