@@ -43,7 +43,7 @@ pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
-    smol::unblock(move || {
+    crate::process::unblock(move || {
         let cwd = std::env::current_dir()?;
         let mut server = OpenCodeServer::spawn(
             binary_path.as_deref(),
