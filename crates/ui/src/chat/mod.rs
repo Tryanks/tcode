@@ -29,7 +29,6 @@ use tcode_core::session::{
     EntryContent, OrchestrateCallback, TimelineEntry, parse_orchestrate_callback,
 };
 use tcode_core::ui::RightTab;
-use tcode_protocol::Command;
 
 use crate::commit_dialog::CommitDialog;
 use crate::composer::{Composer, ComposerEvent};
@@ -533,9 +532,7 @@ impl ChatView {
                 let rewind_handler = |mode| {
                     let workspace_store = self.workspace_store.clone();
                     Arc::new(cx.listener(move |_, _, _, cx| {
-                        workspace_store.update(cx, |store, _cx| {
-                            store.dispatch(Command::RewindTurn { turn, mode })
-                        });
+                        workspace_store.update(cx, |store, _cx| store.rewind_turn(turn, mode));
                     })) as components::bubble::SharedClickHandler
                 };
                 components::bubble::native_rewind_button(
@@ -856,26 +853,21 @@ impl ChatView {
                 })),
                 copy: Box::new(cx.listener(move |this, _, _, cx| {
                     let markdown = md_copy.clone();
-                    this.workspace_store.update(cx, |store, _cx| {
-                        store.dispatch(Command::CopyPlan { markdown })
-                    });
+                    this.workspace_store
+                        .update(cx, |store, _cx| store.copy_plan(markdown));
                     this.mark_copied("plan".into(), cx);
                 })),
                 download: Box::new(cx.listener(move |this, _, _, cx| {
                     let markdown = md_download.clone();
                     let fallback_title = crate::tr!("plan.proposed_plan").into_owned();
                     this.workspace_store.update(cx, |store, _cx| {
-                        store.dispatch(Command::DownloadPlan {
-                            markdown,
-                            fallback_title,
-                        })
+                        store.download_plan(markdown, fallback_title)
                     });
                 })),
                 save: Box::new(cx.listener(move |this, _, _, cx| {
                     let markdown = md_save.clone();
-                    this.workspace_store.update(cx, |store, _cx| {
-                        store.dispatch(Command::SavePlanToWorkspace { markdown })
-                    });
+                    this.workspace_store
+                        .update(cx, |store, _cx| store.save_plan_to_workspace(markdown));
                 })),
             },
             cx,
@@ -1222,12 +1214,7 @@ impl ChatView {
             self.open_commit_dialog(action, window, cx);
         } else {
             self.workspace_store.update(cx, |store, _cx| {
-                store.dispatch(Command::RunGitAction {
-                    action,
-                    message: None,
-                    included: None,
-                    feature_branch: None,
-                })
+                store.run_git_action(action, None, None, None)
             });
         }
     }
@@ -1449,10 +1436,7 @@ impl ChatView {
                     .hover(|row| row.bg(cx.theme().accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.workspace_store.update(cx, |store, _cx| {
-                            store.dispatch(Command::StartDraft {
-                                project_id: project_id.clone(),
-                                cwd: cwd.clone(),
-                            });
+                            store.start_draft(project_id.clone(), cwd.clone());
                         });
                     }))
                     .child(

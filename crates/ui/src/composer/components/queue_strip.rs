@@ -117,9 +117,8 @@ impl Composer {
                             .disabled(!scheduled && !can_steer)
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::SteerQueued { id })
-                                });
+                                this.workspace_store
+                                    .update(cx, |store, _cx| store.steer_queued(id));
                             })),
                     )
                     .child(
@@ -129,9 +128,8 @@ impl Composer {
                             .icon(IconName::Close)
                             .tooltip(crate::tr!("composer.drop_queued"))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::DropQueued { id })
-                                });
+                                this.workspace_store
+                                    .update(cx, |store, _cx| store.drop_queued(id));
                             })),
                     ),
             );

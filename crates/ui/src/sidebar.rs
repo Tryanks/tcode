@@ -23,7 +23,6 @@ use tcode_core::{
     project::{ProjectGroup, SessionMeta},
     settings::SidebarLayout,
 };
-use tcode_protocol::Command;
 
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, WorkspaceStore};
@@ -380,9 +379,7 @@ impl SessionsSidebar {
         let project_ids = store.read(cx).project_ids();
         let mut sweeps = Vec::with_capacity(project_ids.len());
         for project_id in project_ids {
-            sweeps.push(store.update(cx, |store, cx| {
-                store.command(Command::AutoArchiveSweep { project_id }, cx)
-            }));
+            sweeps.push(store.update(cx, |store, cx| store.auto_archive_sweep(project_id, cx)));
         }
         cx.spawn(async move |sidebar, cx| {
             let mut archived = 0;
@@ -458,12 +455,7 @@ impl SessionsSidebar {
                 )
             };
             let sweep = self.store.update(cx, |store, cx| {
-                store.command(
-                    Command::AutoArchiveSweep {
-                        project_id: project_id.to_string(),
-                    },
-                    cx,
-                )
+                store.auto_archive_sweep(project_id.to_string(), cx)
             });
             self.expanded_groups.insert(project_id.to_string());
             let project_id = project_id.to_string();
@@ -502,10 +494,8 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut settings = self.store.read(cx).settings();
-        settings.auto_archive_notice_shown = true;
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::UpdateSettings { settings });
+            store.set_auto_archive_notice_shown(true);
         });
         let window_state = self.window_state.clone();
         window.open_alert_dialog(cx, move |alert, _, cx| {
@@ -563,10 +553,7 @@ impl SessionsSidebar {
             return;
         };
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::StartDraft {
-                project_id: project.id,
-                cwd: project.root,
-            });
+            store.start_draft(project.id, project.root);
         });
     }
 
@@ -617,7 +604,7 @@ impl SessionsSidebar {
         }
         let id = action.0.clone();
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::ForkThread { id });
+            store.fork_thread(id);
         });
     }
 
@@ -625,10 +612,7 @@ impl SessionsSidebar {
         if let Some(state) = self.renaming.take() {
             let value = state.input.read(cx).value().to_string();
             self.store.update(cx, |store, _cx| {
-                store.dispatch(Command::RenameSession {
-                    session_id: state.session_id,
-                    title: value,
-                });
+                store.rename_session(state.session_id, value);
             });
             cx.notify();
         }
@@ -648,7 +632,7 @@ impl SessionsSidebar {
     ) {
         let id = action.0.clone();
         self.store.update(cx, |store, _cx| {
-            store.dispatch(Command::MarkSessionUnread { session_id: id });
+            store.mark_session_unread(id);
         });
     }
 
@@ -739,9 +723,7 @@ impl SessionsSidebar {
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
                         for session_id in &session_ids {
-                            store.dispatch(Command::ArchiveSession {
-                                session_id: session_id.clone(),
-                            });
+                            store.archive_session(session_id.clone());
                         }
                     });
                     true
@@ -782,9 +764,7 @@ impl SessionsSidebar {
                 )
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
-                        store.dispatch(Command::DeleteProject {
-                            project_id: project_id.clone(),
-                        });
+                        store.delete_project(project_id.clone());
                     });
                     true
                 })
@@ -818,9 +798,7 @@ impl SessionsSidebar {
         let session_id = session_id.to_string();
         if store.read(cx).settings().skip_delete_confirmation {
             store.update(cx, |store, _cx| {
-                store.dispatch(Command::ArchiveSession {
-                    session_id: session_id.clone(),
-                });
+                store.archive_session(session_id.clone());
             });
             return;
         }
@@ -841,9 +819,7 @@ impl SessionsSidebar {
                 )
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
-                        store.dispatch(Command::ArchiveSession {
-                            session_id: session_id.clone(),
-                        });
+                        store.archive_session(session_id.clone());
                     });
                     true
                 })
@@ -985,13 +961,12 @@ impl SessionsSidebar {
             .icon(IconName::LayoutDashboard)
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let mut settings = this.store.read(cx).settings();
-                settings.sidebar_layout = match layout {
+                let next = match layout {
                     SidebarLayout::Flat => SidebarLayout::Grouped,
                     SidebarLayout::Grouped => SidebarLayout::Flat,
                 };
                 this.store.update(cx, |store, _cx| {
-                    store.dispatch(Command::UpdateSettings { settings });
+                    store.set_sidebar_layout(next);
                 });
             }))
     }
@@ -1024,7 +999,7 @@ impl SessionsSidebar {
                             .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::CycleProjectSort);
+                                    store.cycle_project_sort();
                                 });
                             })),
                     )
@@ -1095,10 +1070,7 @@ impl SessionsSidebar {
                 .tooltip(crate::tr!("sidebar.create_thread"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.store.update(cx, |store, _cx| {
-                        store.dispatch(Command::StartDraft {
-                            project_id: project_id.clone(),
-                            cwd: cwd.clone(),
-                        });
+                        store.start_draft(project_id.clone(), cwd.clone());
                     });
                 }))
                 .into_any_element()
@@ -1211,9 +1183,7 @@ impl SessionsSidebar {
         .hover(|s| s.bg(cx.theme().sidebar_accent))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.store.update(cx, |store, _cx| {
-                store.dispatch(Command::ToggleProjectCollapsed {
-                    project_id: header_toggle_id.clone(),
-                });
+                store.toggle_project_collapsed(header_toggle_id.clone());
             });
         }))
         .child(
@@ -1276,7 +1246,7 @@ impl SessionsSidebar {
                 let cwd = plus_cwd.clone();
                 let project_id = plus_project_id.clone();
                 this.store.update(cx, |store, _cx| {
-                    store.dispatch(Command::StartDraft { project_id, cwd });
+                    store.start_draft(project_id, cwd);
                 });
             }))
             .child(
@@ -1447,9 +1417,7 @@ impl SessionsSidebar {
                 has_direct_children,
             );
             this.store.update(cx, |store, _cx| {
-                store.dispatch(Command::SelectSession {
-                    session_id: session_id.clone(),
-                });
+                store.select_session(session_id.clone());
             });
             cx.notify();
         }))
@@ -1978,10 +1946,7 @@ fn proceed_delete(
     let orphan = store.read(cx).worktree_orphaned_by_delete(&session_id);
     let Some(worktree) = orphan else {
         store.update(cx, |store, _cx| {
-            store.dispatch(Command::DeleteSession {
-                session_id,
-                remove_worktree: false,
-            });
+            store.delete_session(session_id, false);
         });
         return;
     };
@@ -2008,19 +1973,13 @@ fn proceed_delete(
             )
             .on_ok(move |_, _, cx| {
                 store_remove.update(cx, |store, _cx| {
-                    store.dispatch(Command::DeleteSession {
-                        session_id: remove.clone(),
-                        remove_worktree: true,
-                    });
+                    store.delete_session(remove.clone(), true);
                 });
                 true
             })
             .on_cancel(move |_, _, cx| {
                 store.update(cx, |store, _cx| {
-                    store.dispatch(Command::DeleteSession {
-                        session_id: keep.clone(),
-                        remove_worktree: false,
-                    });
+                    store.delete_session(keep.clone(), false);
                 });
                 true
             })

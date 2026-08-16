@@ -20,7 +20,6 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::plan_title;
-use tcode_protocol::Command;
 
 use crate::markdown::{MarkdownState, MarkdownView};
 use crate::material;
@@ -139,7 +138,7 @@ impl PlanPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_copy.clone();
                                 this.store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::CopyPlan { markdown: md });
+                                    store.copy_plan(md);
                                 });
                                 this.mark_copied(cx);
                             })),
@@ -154,10 +153,7 @@ impl PlanPanel {
                                 let md = md_download.clone();
                                 let fallback = crate::tr!("plan.proposed_plan").into_owned();
                                 this.store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::DownloadPlan {
-                                        markdown: md,
-                                        fallback_title: fallback,
-                                    });
+                                    store.download_plan(md, fallback);
                                 });
                             })),
                     )
@@ -170,7 +166,7 @@ impl PlanPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let md = md_save.clone();
                                 this.store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::SavePlanToWorkspace { markdown: md });
+                                    store.save_plan_to_workspace(md);
                                 });
                             })),
                     ),

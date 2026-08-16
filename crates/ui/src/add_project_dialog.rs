@@ -16,7 +16,7 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use crate::store::WorkspaceStore;
 use crate::time::{humanize_ago, now_secs};
-use tcode_protocol::{Command, ExternalThread, RecentDir, SourceTool};
+use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
 use tcode_services::import::ExternalImportUpdate;
 
 const RECENT_LIMIT: usize = 15;
@@ -126,9 +126,9 @@ impl AddProjectDialog {
     }
 
     fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let create = self.store.update(cx, |store, cx| {
-            store.command(Command::CreateProject { root: path.clone() }, cx)
-        });
+        let create = self
+            .store
+            .update(cx, |store, cx| store.create_project(path.clone(), cx));
         cx.spawn_in(window, async move |this, cx| {
             let Ok(tcode_protocol::CommandResponse::ProjectId(Some(project_id))) = create.await
             else {
@@ -140,10 +140,7 @@ impl AddProjectDialog {
             };
             let _ = this.update_in(cx, |dialog, window, cx| {
                 dialog.store.update(cx, |store, _cx| {
-                    store.dispatch(Command::StartDraft {
-                        project_id,
-                        cwd: path,
-                    });
+                    store.start_draft(project_id, path);
                 });
                 window.close_dialog(cx);
             });
@@ -153,9 +150,9 @@ impl AddProjectDialog {
 
     fn choose_recent(&mut self, recent: RecentDir, window: &mut Window, cx: &mut Context<Self>) {
         let path = recent.path.clone();
-        let create = self.store.update(cx, |store, cx| {
-            store.command(Command::CreateProject { root: path }, cx)
-        });
+        let create = self
+            .store
+            .update(cx, |store, cx| store.create_project(path, cx));
         let threads = recent.threads;
         let total = threads.len();
         let current_tool = threads
@@ -384,9 +381,7 @@ impl ImportProgress {
                         ExternalImportUpdate::Finished { imported, skipped } => {
                             progress.summary = Some((imported, skipped));
                             progress.store.update(cx, |store, _cx| {
-                                store.dispatch(Command::FinishExternalImport {
-                                    project_id: progress.project_id.clone(),
-                                });
+                                store.finish_external_import(progress.project_id.clone());
                             });
                         }
                     }

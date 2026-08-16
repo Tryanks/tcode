@@ -18,7 +18,7 @@ use tcode_core::{
 };
 use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
 use tcode_protocol::{
-    Command, EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
+    EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
     ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent,
     SessionStatus, Subscription, Topic,
 };
@@ -29,6 +29,7 @@ use tcode_services::import::ExternalImportUpdate;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
+mod intents;
 mod snapshots;
 
 pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, ShellPanelState};
@@ -127,9 +128,16 @@ impl WorkspaceStore {
         let mut seeded = HashSet::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
-            let Ok(message) = events.try_recv() else {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                continue;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let received = smol::block_on(smol::future::race(
+                async { Some(events.recv().await) },
+                async {
+                    smol::Timer::after(remaining).await;
+                    None
+                },
+            ));
+            let Some(Ok(message)) = received else {
+                break;
             };
             if let HostMessage::Event(envelope) = message {
                 match (&envelope.topic, &envelope.event) {
@@ -453,30 +461,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// Dispatch a typed backend mutation.
-    pub fn dispatch(&mut self, command: Command) {
-        if let Err(error) = self.host.dispatch(command) {
-            log::error!("failed to dispatch host command: {}", error.message);
-        }
-    }
-
-    pub fn command(
-        &self,
-        command: Command,
-        cx: &mut App,
-    ) -> Task<Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>> {
-        let host = self.host.clone();
-        #[cfg(test)]
-        {
-            let result = smol::block_on(host.command(command));
-            cx.spawn(async move |_| result)
-        }
-        #[cfg(not(test))]
-        {
-            cx.spawn(async move |_| host.command(command).await)
-        }
-    }
-
     #[cfg(test)]
     fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
         let events = self.host.event_receiver();
@@ -732,49 +716,6 @@ impl WorkspaceStore {
             ui.preview_canvas = None;
             cx.notify();
         }
-    }
-
-    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        let opening = !self
-            .active_conversation_ui()
-            .is_some_and(|ui| ui.terminal_open);
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = opening;
-        }
-        if opening {
-            self.dispatch(Command::ToggleTerminalPanel);
-        } else {
-            self.dispatch(Command::CloseTerminalPanel);
-        }
-        cx.notify();
-    }
-
-    pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = false;
-        }
-        self.dispatch(Command::CloseTerminalPanel);
-        cx.notify();
-    }
-
-    pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_height = height;
-        }
-        self.dispatch(Command::SetTerminalHeight { height });
-        cx.notify();
-    }
-
-    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
-        let closes_drawer = self
-            .session_status_replica
-            .as_ref()
-            .is_some_and(|status| status.terminals.len() <= 1);
-        if closes_drawer && let Some(ui) = self.active_conversation_ui_mut() {
-            ui.terminal_open = false;
-        }
-        self.dispatch(Command::CloseTerminal { terminal_id });
-        cx.notify();
     }
 
     pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
@@ -1641,7 +1582,7 @@ mod tests {
             if ready(cx) {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            smol::block_on(smol::Timer::after(std::time::Duration::from_millis(1)));
         }
         panic!("timed out waiting for {description}");
     }
@@ -1837,7 +1778,12 @@ mod tests {
         let mut settings = workspace.read_with(cx, |store, _cx| store.settings());
         settings.word_wrap_diffs = !settings.word_wrap_diffs;
         let expected_word_wrap = settings.word_wrap_diffs;
-        command(&host, Command::UpdateSettings { settings });
+        command(
+            &host,
+            Command::PatchSettings {
+                patch: tcode_protocol::SettingsPatch::WordWrapDiffs(settings.word_wrap_diffs),
+            },
+        );
         wait_until(cx, &workspace, "index and settings replicas", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.index_replica.1.len() == 2

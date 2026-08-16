@@ -3,10 +3,11 @@ use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::project::group_sessions;
+use tcode_core::settings::ThemeMode;
 use tcode_protocol::{Command, CommandResponse, HostMessage};
 
 #[test]
-fn dispatched_settings_command_crosses_outgoing_ndjson() {
+fn settings_patch_preserves_concurrently_changed_other_field() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-settings-seam-test");
     let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
@@ -15,11 +16,15 @@ fn dispatched_settings_command_crosses_outgoing_ndjson() {
         ..Settings::default()
     };
 
+    state.update(cx, |state, cx| state.update_settings(settings.clone(), cx));
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
     state.dispatch_command(
         cx,
         41,
-        Command::UpdateSettings {
-            settings: settings.clone(),
+        Command::PatchSettings {
+            patch: tcode_protocol::SettingsPatch::ThemeMode(ThemeMode::Dark),
         },
     );
     cx.run_until_parked();
@@ -38,7 +43,7 @@ fn dispatched_settings_command_crosses_outgoing_ndjson() {
             topic: Topic::Settings,
             event: ServerEvent::SettingsReplaced(replaced),
             ..
-        }) if replaced.sidebar_collapsed && replaced == &settings
+        }) if replaced.sidebar_collapsed && replaced.theme_mode == ThemeMode::Dark
     )));
 }
 

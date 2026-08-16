@@ -257,6 +257,44 @@ impl AppState {
         );
     }
 
+    pub fn patch_settings(&mut self, patch: tcode_protocol::SettingsPatch, cx: &mut HostCx) {
+        let mut settings = self.settings.clone();
+        match patch {
+            tcode_protocol::SettingsPatch::Language(value) => settings.language = value,
+            tcode_protocol::SettingsPatch::ThemeMode(value) => settings.theme_mode = value,
+            tcode_protocol::SettingsPatch::WordWrapDiffs(value) => settings.word_wrap_diffs = value,
+            tcode_protocol::SettingsPatch::SkipDeleteConfirmation(value) => {
+                settings.skip_delete_confirmation = value;
+            }
+            tcode_protocol::SettingsPatch::AutoOpenTaskPanel(value) => {
+                settings.auto_open_task_panel = value;
+            }
+            tcode_protocol::SettingsPatch::ProviderUpdateChecksDisabled(value) => {
+                settings.provider_update_checks_disabled = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveDisabled(value) => {
+                settings.auto_archive_disabled = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveMaxIdleDays(value) => {
+                settings.auto_archive_max_idle_days = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveKeepCount(value) => {
+                settings.auto_archive_keep_count = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveNoticeShown(value) => {
+                settings.auto_archive_notice_shown = value;
+            }
+            tcode_protocol::SettingsPatch::Orchestrate(value) => settings.orchestrate = value,
+            tcode_protocol::SettingsPatch::ComputerUse(value) => settings.computer_use = value,
+            tcode_protocol::SettingsPatch::Browser(value) => settings.browser = value,
+            tcode_protocol::SettingsPatch::TitleGeneration(value) => {
+                settings.title_generation = value;
+            }
+            tcode_protocol::SettingsPatch::SidebarLayout(value) => settings.sidebar_layout = value,
+        }
+        self.update_settings(settings, cx);
+    }
+
     /// Persist a restart-continuity marker naming the Settings page to reopen and
     /// the session that is active now. Written *before* a permission grant or an
     /// explicit relaunch, so an externally-initiated quit reopens cleanly.

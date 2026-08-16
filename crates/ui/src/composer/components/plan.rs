@@ -61,7 +61,7 @@ impl Composer {
                                         }
                                         None => crate::tr!("plan.implement_untitled").into_owned(),
                                     };
-                                    store.dispatch(Command::ImplementPlanInNewThread { title });
+                                    store.implement_plan_in_new_thread(title);
                                 });
                                 let _ = &app;
                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
@@ -91,7 +91,7 @@ impl Composer {
                     .hover(|s| s.opacity(0.9))
                     .child(crate::tr!("plan.implement"))
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        store_impl.update(cx, |store, _cx| store.dispatch(Command::ImplementPlan));
+                        store_impl.update(cx, |store, _cx| store.implement_plan());
                     })),
             )
             .child(div().w_px().h(px(16.)).bg(fg).opacity(0.3))
@@ -142,7 +142,7 @@ impl Composer {
                     .icon(IconName::Close)
                     .tooltip(crate::tr!("plan.dismiss"))
                     .on_click(move |_, _, cx| {
-                        store.update(cx, |store, _cx| store.dispatch(Command::DismissPlan));
+                        store.update(cx, |store, _cx| store.dismiss_plan());
                     }),
             )
             .into_any_element()
