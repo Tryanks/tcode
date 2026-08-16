@@ -11,7 +11,7 @@ use tcode_core::{
 };
 use tcode_protocol::{Command, CommandResponse, ProtocolError, SettingsPatch};
 
-use super::WorkspaceStore;
+use super::{StoreChange, TopicKind, WorkspaceStore};
 
 impl WorkspaceStore {
     pub(super) fn dispatch(&mut self, command: Command) {
@@ -329,6 +329,9 @@ impl WorkspaceStore {
         } else {
             self.dispatch(Command::CloseTerminalPanel);
         }
+        cx.emit(StoreChange {
+            topic: TopicKind::ActiveSession,
+        });
         cx.notify();
     }
     pub fn close_terminal_panel(&mut self, cx: &mut Context<Self>) {
@@ -336,6 +339,9 @@ impl WorkspaceStore {
             ui.terminal_open = false;
         }
         self.dispatch(Command::CloseTerminalPanel);
+        cx.emit(StoreChange {
+            topic: TopicKind::ActiveSession,
+        });
         cx.notify();
     }
     pub fn set_terminal_height(&mut self, height: f32, cx: &mut Context<Self>) {
@@ -343,6 +349,9 @@ impl WorkspaceStore {
             ui.terminal_height = height;
         }
         self.dispatch(Command::SetTerminalHeight { height });
+        cx.emit(StoreChange {
+            topic: TopicKind::ActiveSession,
+        });
         cx.notify();
     }
     pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
@@ -354,6 +363,9 @@ impl WorkspaceStore {
             ui.terminal_open = false;
         }
         self.dispatch(Command::CloseTerminal { terminal_id });
+        cx.emit(StoreChange {
+            topic: TopicKind::ActiveSession,
+        });
         cx.notify();
     }
     pub fn restart_terminal(&mut self) {

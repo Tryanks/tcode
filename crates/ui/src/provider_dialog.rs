@@ -30,7 +30,7 @@ use crate::provider_models::{
     ResolvedModel, model_capability_label, slug_error_message, validate_slug,
 };
 use crate::settings::{ACCENT_PRESETS, EnvVar, provider_label};
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// One environment-variable row's live inputs and its draft flags.
 struct EnvRow {
@@ -137,7 +137,11 @@ impl ProviderDialog {
             cx,
         );
 
-        let mut subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
+        let mut subscriptions = vec![observe_store_topics(
+            &store,
+            &[TopicKind::Settings, TopicKind::Providers],
+            cx,
+        )];
         subscriptions.push(
             cx.subscribe_in(&custom_model, window, |this, _, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event {

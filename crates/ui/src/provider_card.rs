@@ -24,7 +24,7 @@ use agent::ProviderKind;
 
 use crate::provider_dialog::ProviderDialog;
 use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// Claude's official Clay brand color from Anthropic's media resources.
 pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
@@ -49,7 +49,8 @@ impl ProviderCard {
         profile_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&store, |_, _, cx| cx.notify());
+        let subscription =
+            observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
         Self {
             store,
             provider,

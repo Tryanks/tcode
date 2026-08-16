@@ -23,7 +23,7 @@ use tcode_core::session::plan_title;
 
 use crate::markdown::{MarkdownState, MarkdownView};
 use crate::material;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
@@ -39,7 +39,15 @@ pub struct PlanPanel {
 
 impl PlanPanel {
     pub fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![cx.observe(&store, |_, _, cx| cx.notify())];
+        let subscriptions = vec![observe_store_topics(
+            &store,
+            &[
+                TopicKind::ActiveSession,
+                TopicKind::SessionStatus,
+                TopicKind::SessionEvents,
+            ],
+            cx,
+        )];
         Self {
             store,
             md: None,

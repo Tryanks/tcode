@@ -45,10 +45,10 @@ use self::components::assistant::MdState;
 use self::model::{
     ListSync, Segment, TurnListItem, TurnRenderArgs, activity_run_duration_ms, auto_expanded,
     displayed_error_text, divergent_served_model, format_compact_span, format_span, index_turns,
-    list_sync, live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
-    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
-    work_log_auto_expands, work_log_capsule_label, work_log_counts, work_log_outcome,
-    work_log_row_entries,
+    latest_message_ids, list_sync, live_activity_segment, live_edit_rows, manual_override_key,
+    plain_text_as_markdown, segment_entries, start_hub_projects, timeline_overdraw, user_content,
+    user_visible_text, work_log_auto_expands, work_log_capsule_label, work_log_counts,
+    work_log_outcome, work_log_row_entries,
 };
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
@@ -107,7 +107,7 @@ impl ChatView {
                 cx.notify();
             }),
         ];
-        let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), cx));
+        let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
 
         let mut this = Self {
             workspace_store,
@@ -1547,33 +1547,7 @@ impl Render for ChatView {
         let (last_user_id, last_assistant_id) = self
             .workspace_store
             .read(cx)
-            .with_active_timeline(|timeline| {
-                (
-                    timeline
-                        .entries
-                        .iter()
-                        .rev()
-                        .find(|entry| {
-                            matches!(
-                                entry.content,
-                                EntryContent::Item(ItemContent::UserMessage { .. })
-                                    | EntryContent::Steer { .. }
-                            )
-                        })
-                        .map(|entry| entry.id.clone()),
-                    timeline
-                        .entries
-                        .iter()
-                        .rev()
-                        .find(|entry| {
-                            matches!(
-                                entry.content,
-                                EntryContent::Item(ItemContent::AssistantMessage { .. })
-                            )
-                        })
-                        .map(|entry| entry.id.clone()),
-                )
-            })
+            .with_active_timeline(|timeline| latest_message_ids(&timeline.entries))
             .unwrap_or_default();
 
         let item_count = self.turn_items.len();
@@ -1655,7 +1629,9 @@ impl Render for ChatView {
             let drawer = self.terminal_drawer.clone();
             let drawer_resize = self.terminal_drawer.clone();
             let width = f32::from(window.bounds().size.width);
-            drawer.update(cx, |drawer, cx| drawer.resize(width, terminal_height, cx));
+            if !drawer.read(cx).is_size(width, terminal_height) {
+                drawer.update(cx, |drawer, cx| drawer.resize(width, terminal_height, cx));
+            }
             gpui_base::v_resizable("chat-terminal-panels")
                 .on_resize(move |state, _, cx| {
                     let height = state.read(cx).sizes().get(1).copied();

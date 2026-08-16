@@ -27,7 +27,7 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
 
@@ -114,7 +114,7 @@ impl CommandPalette {
             cx.new(|cx| InputState::new(window, cx).placeholder(crate::tr!("palette.placeholder")));
 
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            observe_store_topics(&store, &[TopicKind::Index, TopicKind::Settings], cx),
             cx.subscribe_in(
                 &query,
                 window,
