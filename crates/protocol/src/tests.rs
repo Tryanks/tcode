@@ -129,7 +129,7 @@ fn round_trips_top_level_wire_types() {
             working: true,
             pending_approval: false,
             pending_user_input: true,
-            supports_steering: true,
+            steering_supported: true,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: vec![agent::OptionSelection {
                 id: "reasoningEffort".into(),

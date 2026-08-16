@@ -488,7 +488,7 @@ impl AppState {
         let Some((source, turn_in_flight)) = source else {
             return;
         };
-        if !source.provider.supports_fork() {
+        if !source.provider.caps().supports_fork {
             self.report_error(
                 RuntimeError::External("This provider does not support conversation forks.".into()),
                 cx,

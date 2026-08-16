@@ -282,13 +282,10 @@ impl ActiveSession {
         }
         // ACP agents take option changes live (`session/set_mode` /
         // `set_model` / `set_config_option`), so nothing ever needs a restart.
-        if self.meta.provider == ProviderKind::Acp {
+        if self.meta.provider.caps().options_apply_live {
             return false;
         }
-        let ignore_effort = matches!(
-            self.meta.provider,
-            ProviderKind::Codex | ProviderKind::OpenCode
-        );
+        let ignore_effort = self.meta.provider.caps().per_turn_effort;
         normalized_selections(&self.meta.option_selections, ignore_effort)
             != normalized_selections(&self.live_option_selections, ignore_effort)
     }
@@ -309,10 +306,7 @@ impl ActiveSession {
     /// Per-turn overrides derived from the session's persisted state: Codex and
     /// OpenCode reasoning effort, plus the Build/Plan interaction mode.
     pub(super) fn turn_options(&self) -> TurnOptions {
-        let effort = if matches!(
-            self.meta.provider,
-            ProviderKind::Codex | ProviderKind::OpenCode
-        ) {
+        let effort = if self.meta.provider.caps().per_turn_effort {
             effort_selection(&self.meta.option_selections)
         } else {
             None
@@ -352,8 +346,8 @@ impl ActiveSession {
     /// mechanism (Claude: a stream-json user message; Codex: `turn/steer`) and
     /// is actually live. When false, the composer's steer gesture degrades to
     /// queueing (and says so).
-    pub(crate) fn supports_steering(&self) -> bool {
-        matches!(self.runtime, Runtime::Live(_)) && self.meta.provider.supports_steering()
+    pub(crate) fn can_steer(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_)) && self.meta.provider.caps().supports_steering
     }
 
     /// Whether a turn is currently running, i.e. Enter queues rather than sends.
@@ -378,7 +372,7 @@ impl ActiveSession {
             SendRouting::Send
         } else if !steer {
             SendRouting::Queue
-        } else if self.supports_steering() {
+        } else if self.can_steer() {
             SendRouting::Steer
         } else {
             SendRouting::QueueUnsupported

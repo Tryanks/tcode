@@ -72,7 +72,7 @@ pub(crate) struct ComposerState {
     pub native_approval_modes_enabled: bool,
     pub approval_pending_restart: bool,
     pub queue: Option<ComposerQueue>,
-    pub supports_steering: bool,
+    pub steering_supported: bool,
     pub preparing_worktree: bool,
     pub plan_ready_markdown: Option<String>,
     pub checkout: Option<ComposerCheckoutState>,
@@ -102,16 +102,20 @@ pub(crate) fn composer_state(
 ) -> ComposerState {
     let provider = status.map(|status| status.provider);
     let native_approval_modes_enabled = status.is_none_or(|status| {
-        status.provider != agent::ProviderKind::Pi
+        !status
+            .provider
+            .caps()
+            .downgrade_approval_without_native_approvals
             || status
                 .requested_profile_id
                 .as_deref()
                 .and_then(|id| settings.resolved_profile(id))
-                .map(|profile| profile.settings.pi_native_approvals)
+                .map(|profile| profile.settings.pi.native_approvals)
                 .unwrap_or_else(|| {
                     settings
                         .provider(agent::ProviderKind::Pi)
-                        .pi_native_approvals
+                        .pi
+                        .native_approvals
                 })
     });
     let raw_approval_mode = status
@@ -242,10 +246,10 @@ pub(crate) fn composer_state(
         approval_pending_restart: status.is_some_and(|status| status.approval_pending_restart),
         queue: status.map(|status| ComposerQueue {
             messages: status.queued_messages.clone(),
-            can_steer: status.supports_steering,
+            can_steer: status.steering_supported,
             agent: status.provider.display_name(),
         }),
-        supports_steering: status.is_some_and(|status| status.supports_steering),
+        steering_supported: status.is_some_and(|status| status.steering_supported),
         preparing_worktree: status.is_some_and(|status| status.preparing_worktree),
         plan_ready_markdown: timeline
             .and_then(Timeline::plan_ready)
@@ -347,7 +351,7 @@ mod tests {
             working: false,
             pending_approval: false,
             pending_user_input: false,
-            supports_steering: true,
+            steering_supported: true,
             provider_option_descriptors: Vec::new(),
             provider_option_selections: Vec::new(),
             provider_commands: Vec::new(),
@@ -418,7 +422,7 @@ mod tests {
             text: "follow up".into(),
             fire_at_unix_secs: None,
         }];
-        status.supports_steering = false;
+        status.steering_supported = false;
 
         let state = composer_state(
             Some(&status),

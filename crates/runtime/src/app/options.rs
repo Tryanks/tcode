@@ -117,8 +117,7 @@ impl AppState {
         }
         // ACP agents apply every option change live; pi applies its thinking
         // level live. Route those choices back instead of waiting for a restart.
-        if (active.meta.provider == ProviderKind::Acp
-            || (active.meta.provider == ProviderKind::Pi && id == "reasoningEffort"))
+        if active.meta.provider.caps().live_option_push.supports(id)
             && let Runtime::Live(commands) = &active.runtime
             && let Some(selection) = active.meta.option_selections.iter().find(|s| s.id == id)
         {
@@ -445,7 +444,7 @@ impl AppState {
             // Claude applies the switch live: keep `live_approval_mode` in sync so
             // no restart is scheduled. Codex can't, so leave it stale — the next
             // `send_turn` sees the mismatch and restarts from the resume cursor.
-            if active.meta.provider == ProviderKind::ClaudeCode {
+            if active.meta.provider.caps().live_approval_mode_switch {
                 active.live_approval_mode = Some(mode);
             }
         }

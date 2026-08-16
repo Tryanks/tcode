@@ -36,25 +36,129 @@ pub enum ProviderKind {
     Acp,
 }
 
-impl ProviderKind {
-    /// Whether the provider accepts [`SessionCommand::Steer`] — a message
-    /// injected into a turn that is already running. Queueing works everywhere
-    /// (the app holds the message until the turn ends); steering does not.
-    ///
-    /// ACP has no steering method at all (`session/prompt` is one request per
-    /// turn; only `session/cancel` interrupts), so ACP sessions must fall back
-    /// to queueing.
-    pub fn supports_steering(&self) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caps {
+    pub supports_steering: bool,
+    pub supports_fork: bool,
+    pub native_rewind: bool,
+    pub per_turn_effort: bool,
+    pub options_apply_live: bool,
+    pub live_approval_mode_switch: bool,
+    pub live_option_push: LiveOptionPush,
+    pub preview_mcp: bool,
+    pub launch_args: bool,
+    pub downgrade_approval_without_native_approvals: bool,
+    pub option_descriptors: OptionDescriptors,
+    pub home_path: bool,
+    pub trust_project_extensions: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveOptionPush {
+    All,
+    Only(&'static [&'static str]),
+    None,
+}
+
+impl LiveOptionPush {
+    pub fn supports(self, option_id: &str) -> bool {
         match self {
-            ProviderKind::ClaudeCode | ProviderKind::Codex | ProviderKind::Pi => true,
-            ProviderKind::OpenCode | ProviderKind::Acp => false,
+            Self::All => true,
+            Self::Only(option_ids) => option_ids.contains(&option_id),
+            Self::None => false,
         }
     }
+}
 
-    /// Whether the provider can duplicate a resumed native session into a new
-    /// provider-owned session rather than continuing the original in place.
-    pub fn supports_fork(&self) -> bool {
-        matches!(self, ProviderKind::ClaudeCode | ProviderKind::Codex)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionDescriptors {
+    Wire,
+    Catalog,
+}
+
+impl ProviderKind {
+    /// Provider behavior consumed by runtime and UI policy.
+    ///
+    /// This is deliberately one exhaustive table so adding a provider forces a
+    /// review of every capability fact in one place.
+    pub fn caps(&self) -> Caps {
+        match self {
+            ProviderKind::ClaudeCode => Caps {
+                supports_steering: true,
+                supports_fork: true,
+                native_rewind: true,
+                per_turn_effort: false,
+                options_apply_live: false,
+                live_approval_mode_switch: true,
+                live_option_push: LiveOptionPush::None,
+                preview_mcp: true,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: true,
+                trust_project_extensions: false,
+            },
+            ProviderKind::Codex => Caps {
+                supports_steering: true,
+                supports_fork: true,
+                native_rewind: false,
+                per_turn_effort: true,
+                options_apply_live: false,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::None,
+                preview_mcp: true,
+                launch_args: false,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: true,
+                trust_project_extensions: false,
+            },
+            ProviderKind::Acp => Caps {
+                supports_steering: false,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: false,
+                options_apply_live: true,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::All,
+                preview_mcp: true,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Wire,
+                home_path: true,
+                trust_project_extensions: false,
+            },
+            ProviderKind::Pi => Caps {
+                supports_steering: true,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: false,
+                options_apply_live: false,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                preview_mcp: false,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: true,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: true,
+                trust_project_extensions: true,
+            },
+            ProviderKind::OpenCode => Caps {
+                supports_steering: false,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: true,
+                options_apply_live: false,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::None,
+                preview_mcp: true,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: false,
+                trust_project_extensions: false,
+            },
+        }
     }
 
     pub fn display_name(&self) -> &'static str {
@@ -65,6 +169,105 @@ impl ProviderKind {
             ProviderKind::OpenCode => "OpenCode",
             ProviderKind::Acp => "ACP agent",
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_caps_tests {
+    use super::*;
+
+    #[test]
+    fn provider_caps_truth_table() {
+        assert_eq!(
+            ProviderKind::ClaudeCode.caps(),
+            Caps {
+                supports_steering: true,
+                supports_fork: true,
+                native_rewind: true,
+                per_turn_effort: false,
+                options_apply_live: false,
+                live_approval_mode_switch: true,
+                live_option_push: LiveOptionPush::None,
+                preview_mcp: true,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: true,
+                trust_project_extensions: false,
+            }
+        );
+        assert_eq!(
+            ProviderKind::Codex.caps(),
+            Caps {
+                supports_steering: true,
+                supports_fork: true,
+                native_rewind: false,
+                per_turn_effort: true,
+                options_apply_live: false,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::None,
+                preview_mcp: true,
+                launch_args: false,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: true,
+                trust_project_extensions: false,
+            }
+        );
+        assert_eq!(
+            ProviderKind::Acp.caps(),
+            Caps {
+                supports_steering: false,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: false,
+                options_apply_live: true,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::All,
+                preview_mcp: true,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Wire,
+                home_path: true,
+                trust_project_extensions: false,
+            }
+        );
+        assert_eq!(
+            ProviderKind::Pi.caps(),
+            Caps {
+                supports_steering: true,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: false,
+                options_apply_live: false,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                preview_mcp: false,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: true,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: true,
+                trust_project_extensions: true,
+            }
+        );
+        assert_eq!(
+            ProviderKind::OpenCode.caps(),
+            Caps {
+                supports_steering: false,
+                supports_fork: false,
+                native_rewind: false,
+                per_turn_effort: true,
+                options_apply_live: false,
+                live_approval_mode_switch: false,
+                live_option_push: LiveOptionPush::None,
+                preview_mcp: true,
+                launch_args: true,
+                downgrade_approval_without_native_approvals: false,
+                option_descriptors: OptionDescriptors::Catalog,
+                home_path: false,
+                trust_project_extensions: false,
+            }
+        );
     }
 }
 
@@ -674,7 +877,7 @@ pub enum SessionCommand {
     /// queued message is held and sent as an ordinary [`Self::SendTurn`] once
     /// the current turn completes.
     ///
-    /// Only providers whose [`ProviderKind::supports_steering`] is true accept
+    /// Only providers whose [`ProviderKind::caps`] reports steering accept
     /// this; the others log and ignore it (the UI must not offer it there).
     Steer {
         /// Stable id correlating the persisted request with provider acceptance.

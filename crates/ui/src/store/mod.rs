@@ -920,7 +920,7 @@ impl WorkspaceStore {
         else {
             return ForkAvailability::Available;
         };
-        if !meta.provider.supports_fork() {
+        if !meta.provider.caps().supports_fork {
             ForkAvailability::Unsupported
         } else if meta.resume_cursor.is_none() {
             ForkAvailability::Empty
@@ -1521,7 +1521,7 @@ impl WorkspaceStore {
             })
             .unwrap_or(false);
         Some((
-            status.provider == agent::ProviderKind::ClaudeCode && has_checkpoint,
+            status.provider.caps().native_rewind && has_checkpoint,
             status.turn_running
                 || !status.queued_messages.is_empty()
                 || status.native_rewind_pending,

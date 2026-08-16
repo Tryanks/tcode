@@ -1400,7 +1400,7 @@ impl SessionsSidebar {
             show_unread: render_state.show_unread,
             direct_children: render_state.direct_children,
             active_direct_children: render_state.active_direct_children,
-            menu_can_fork: meta.provider.supports_fork(),
+            menu_can_fork: meta.provider.caps().supports_fork,
         }
     }
 

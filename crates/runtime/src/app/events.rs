@@ -126,7 +126,10 @@ impl AppState {
                             .retain(|s| s.id != selection.id);
                         active.meta.option_selections.push(selection.clone());
                     }
-                    if active.meta.provider == ProviderKind::Acp {
+                    if matches!(
+                        active.meta.provider.caps().option_descriptors,
+                        OptionDescriptors::Wire
+                    ) {
                         let plan_mode =
                             descriptors.iter().find_map(|descriptor| match descriptor {
                                 OptionDescriptor::Select { id, options, .. }

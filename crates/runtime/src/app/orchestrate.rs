@@ -384,7 +384,7 @@ impl AppState {
                     // redirect (and never, if the turn hangs).
                     let can_steer = self
                         .resident(&thread_id)
-                        .is_some_and(|child| child.turn_in_flight && child.supports_steering());
+                        .is_some_and(|child| child.turn_in_flight && child.can_steer());
                     if can_steer {
                         let request_id = self.record_steer_request(&thread_id, &message, &[], cx);
                         let sent = self.resident_mut(&thread_id).is_some_and(|child| {
@@ -880,7 +880,7 @@ impl AppState {
     ) {
         let can_steer = self
             .resident(parent_id)
-            .is_some_and(|parent| parent.turn_in_flight && parent.supports_steering());
+            .is_some_and(|parent| parent.turn_in_flight && parent.can_steer());
         if can_steer {
             // A steered callback is already part of this turn, so persist it just
             // like a user-triggered steer before handing it to the provider.

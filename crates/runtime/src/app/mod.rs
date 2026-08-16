@@ -10,9 +10,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanResolution,
-    ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TurnOptions, TurnStatus, list_models,
+    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors, OptionSelection,
+    PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};

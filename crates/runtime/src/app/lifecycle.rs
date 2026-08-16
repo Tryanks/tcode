@@ -8,7 +8,7 @@ impl AppState {
         let Some(active) = self.residents.active.as_ref() else {
             return;
         };
-        if active.meta.provider != ProviderKind::ClaudeCode
+        if !active.meta.provider.caps().native_rewind
             || active.turn_in_flight
             || active.delivery_in_flight.is_some()
             || active.background_task_count > 0
@@ -109,10 +109,10 @@ impl AppState {
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
-        let preview_registration = if meta.provider == ProviderKind::Pi {
-            None
-        } else {
+        let preview_registration = if meta.provider.caps().preview_mcp {
             self.preview_registration_for(&meta)
+        } else {
+            None
         };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let computer_use_registration = self.mcp.computer_use_registration.clone();
